@@ -195,6 +195,7 @@ extern "C" {
 #define BOARD_LED_H4_PIN           GPIO_PIN_9
 
 /*----------------- 继电器控制 -------------------*/
+#define BOARD_HAS_K1K2              0U
 #define BOARD_K1_PORT              GPIOD
 #define BOARD_K1_PIN               GPIO_PIN_14
 #define BOARD_K2_PORT              GPIOD
@@ -367,11 +368,19 @@ extern "C" {
 #define K2_Pin       BOARD_K2_PIN
 #define K1K2_GPIO_Port BOARD_K1_PORT
 
+#if (BOARD_HAS_K1K2 == 1U)
 #define K1_OFF()     (K1K2_GPIO_Port->BSRR = ((uint32_t)K1_Pin << 16))
 #define K1_ON()      (K1K2_GPIO_Port->BSRR = K1_Pin)
 
 #define K2_OFF()     (K1K2_GPIO_Port->BSRR = ((uint32_t)K2_Pin << 16))
 #define K2_ON()      (K1K2_GPIO_Port->BSRR = K2_Pin)
+#else
+/* 新板不带 K1/K2，保留旧接口但不执行硬件动作。 */
+#define K1_OFF()     ((void)0)
+#define K1_ON()      ((void)0)
+#define K2_OFF()     ((void)0)
+#define K2_ON()      ((void)0)
+#endif
 
 /*============================================================================
  * 函数声明
@@ -412,10 +421,17 @@ void Board_Hardware_Init(void);
 #define BOARD_BEEP_OFF()  HAL_GPIO_WritePin(BOARD_BEEP_PORT, BOARD_BEEP_PIN, GPIO_PIN_RESET)
 
 /* 继电器操作 */
+#if (BOARD_HAS_K1K2 == 1U)
 #define BOARD_K1_ON()   HAL_GPIO_WritePin(BOARD_K1_PORT, BOARD_K1_PIN, GPIO_PIN_RESET)
 #define BOARD_K1_OFF()  HAL_GPIO_WritePin(BOARD_K1_PORT, BOARD_K1_PIN, GPIO_PIN_SET)
 #define BOARD_K2_ON()   HAL_GPIO_WritePin(BOARD_K2_PORT, BOARD_K2_PIN, GPIO_PIN_RESET)
 #define BOARD_K2_OFF()  HAL_GPIO_WritePin(BOARD_K2_PORT, BOARD_K2_PIN, GPIO_PIN_SET)
+#else
+#define BOARD_K1_ON()   ((void)0)
+#define BOARD_K1_OFF()  ((void)0)
+#define BOARD_K2_ON()   ((void)0)
+#define BOARD_K2_OFF()  ((void)0)
+#endif
 
 /* GPIO输入读取 */
 #define BOARD_GPIO_READ(port, pin)  HAL_GPIO_ReadPin(port, pin)

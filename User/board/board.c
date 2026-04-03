@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file board.c
  * @brief 硬件配置实现文件 - 实现所有硬件接口的初始化
  *        使用board.h中的宏定义，修改引脚只需改board.h
@@ -124,12 +124,15 @@ void Board_GPIOConfiguration(void)
     HAL_GPIO_Init(BOARD_R200_K8_PORT, &GPIO_InitStruct);
 
     /* 继电器控制 - 输出 */
+    /* 新板没有 K1/K2 时，跳过这组 GPIO 初始化。 */
+#if (BOARD_HAS_K1K2 == 1U)
     GPIO_InitStruct.Pin = BOARD_K1_PIN | BOARD_K2_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(BOARD_K1_PORT, &GPIO_InitStruct);
     HAL_GPIO_WritePin(BOARD_K1_PORT, BOARD_K1_PIN | BOARD_K2_PIN, GPIO_PIN_SET);  /* 默认关闭 */
+#endif
 
     /* 外部中断输入 - EXTI */
     GPIO_InitStruct.Pin = BOARD_EXTI1_PIN;
