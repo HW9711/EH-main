@@ -60,6 +60,23 @@ extern UART_HandleTypeDef huart10;
 #define HANDLESCAN_MODEL_MINOR_OFFSET         1U
 
 /*
+ * EEPROM 中刀具信息区定义。
+ * 第三页起始地址为 0x0040，本次先按旧工程联动需求，只解析：
+ * 1. 前两个字节的刀具类型编码；
+ * 2. 直径、长度、角度三个参数。
+ * 说明：
+ * 1. 参数按大端 16 位读取；
+ * 2. AT24CS32 内部使用 0.1 精度存储，例如 12.5mm 会存成十进制 125，即 0x00 0x7D。
+ */
+#define HANDLESCAN_TOOL_INFO_ADDR             0x0040U
+#define HANDLESCAN_TOOL_INFO_SIZE             16U
+#define HANDLESCAN_TOOL_MAJOR_OFFSET          0U
+#define HANDLESCAN_TOOL_MINOR_OFFSET          1U
+#define HANDLESCAN_TOOL_DIAMETER_OFFSET       2U
+#define HANDLESCAN_TOOL_LENGTH_OFFSET         4U
+#define HANDLESCAN_TOOL_ANGLE_OFFSET          6U
+
+/*
  * A 通道相关报警码定义。
  * 1. 13：运行中插拔报警，沿用旧逻辑；
  * 2. 0x22：认证阶段失败报警，包含页读取失败、页和校验失败、SN 读取失败以及认证码不匹配；
@@ -72,12 +89,12 @@ extern UART_HandleTypeDef huart10;
 /*
  * 串口调试步骤码定义。
  * `HANDLESCAN_TRACE_ENABLE` 是当前 handlescan 驱动的总报文开关：
- * 1. 设为 `1U` 时，输出 `HS`、`HSDBG`、`HSNAME` 全部调试报文；
- * 2. 设为 `0U` 时，三个报文函数都会被静默处理，业务状态机保持不变；
- * 3. 这样可以在调试版和正式版之间通过改一个宏快速切换，而不需要修改流程代码。
- * 这些步骤码用于输出 HS、HSDBG、HSNAME 报文，便于现场快速判断当前流程卡在什么阶段。
+ * 1. 设为 `1U` 时，输出 `HS`、`HSDBG`、`HSNAME` 基础调试报文；
+ * 2. 设为 `0U` 时，基础调试报文都会被静默处理，业务状态机保持不变；
+ * 3. 刀具扩展报文单独受 `HANDLESCAN_TOOL_TRACE_ENABLE` 控制，方便现场按需开启。
  */
-#define HANDLESCAN_TRACE_ENABLE              1U
+#define HANDLESCAN_TRACE_ENABLE               1U
+#define HANDLESCAN_TOOL_TRACE_ENABLE          1U
 
 #define HANDLESCAN_DBG_STEP_INSERT_PASS       0x02U
 #define HANDLESCAN_DBG_STEP_REMOVE_PASS       0x03U
@@ -134,22 +151,31 @@ typedef struct
 
 /*
  * 当前已支持的手柄类型映射表。
- * 如果后续新增手柄，只需追加新的 `{主类型, 子类型, Handle_Type_xx, "名称"}` 表项即可。
+ * 手柄信息来自 EEPROM 第 2 页，类型码固定以 `0x6B` 开头。
  */
-static const HandlescanHandleTypeConfig s_handle_type_config_table[] =
+static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
 {
     {0x6B, 0x01, TMBB_ONLINE, "TMBB"},
     {0x6B, 0x02, TMBA_ONLINE,  "TMBA"},
     {0x6B, 0x03, EMBA_ONLINE, "EMBA"},
     {0x6B, 0x04, EMBB_ONLINE,  "EMBB"},
     {0x6B, 0x05, PXBA_ONLINE,  "PXBA"},
-    {0x6B, 0x06, PXBB_ONLINE,  "PXBB"},
-    {0x6B, 0x07, MX_YIM_ONLINE,  "MXYTM"},
-    {0x6B, 0x08, MX_YIP_ONLINE,  "MXYTP"},
-    {0x6B, 0x09, PX_YIM_ONLINE,  "PXYTM"},
-    {0x6B, 0x0A, PX_YIP_ONLINE,  "PXYTP"},
-	{0x6B, 0x0B, JMB_ONLINE,  "JMB"},
-	{0x6B, 0x0C, MX_YIM16_ONLINE,  "MXYTM16"}
+    {0x6B, 0x06, PXBB_ONLINE,  "PXBB"}
+};
+
+/*
+ * 当前已支持的刀具类型映射表。
+ * 刀具信息来自 EEPROM 第 3 页，类型码固定以 `0x7C` 开头。
+ * 后续如果新增刀具型号，只需追加新的 `{主类型, 子类型, Handle_Type_xx, "名称"}` 表项即可。
+ */
+static const HandlescanHandleTypeConfig s_tool_type_config_table[] =
+{
+    {0x7C, 0x01, MX_YIM_ONLINE,   "MXYTM"},
+    {0x7C, 0x02, MX_YIP_ONLINE,   "MXYTP"},
+    {0x7C, 0x03, PX_YIM_ONLINE,   "PXYTM"},
+    {0x7C, 0x04, PX_YIP_ONLINE,   "PXYTP"},
+    {0x7C, 0x05, JMB_ONLINE,      "JMB"},
+    {0x7C, 0x06, MX_YIM16_ONLINE, "MXYTM16"}
 };
 
 /* A 通道运行时状态变量。 */
@@ -158,6 +184,7 @@ static HandlescanDebounce s_handleA_debounce = {0U, 0U};
 static uint8_t s_a_verify_start_wait_ticks = 0U;
 static uint8_t s_a_last_alarm = 0U;
 static uint8_t s_a_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
+static uint8_t s_a_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 
 /* B 通道运行时状态变量。 */
 static HandlescanStage s_b_stage = HANDLESCAN_STAGE_IDLE;
@@ -165,6 +192,7 @@ static HandlescanDebounce s_handleB_debounce = {0U, 0U};
 static uint8_t s_b_verify_start_wait_ticks = 0U;
 static uint8_t s_b_last_alarm = 0U;
 static uint8_t s_b_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
+static uint8_t s_b_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 
 /*
  * 输出基础 HS 调试报文。
@@ -248,23 +276,50 @@ static void Handlescan_DebugTraceI2cDetail(uint8_t channel)
 }
 
 /*
- * 根据 EEPROM 第二页前两个字节查找手柄配置。
- * 找到时返回对应表项，找不到时返回 `NULL`，由调用方按未知型号处理。
+ * 在给定的映射表中查找类型配置。
+ * 这样手柄映射和刀具映射可以共用同一套查表逻辑，只是输入的配置表不同。
  */
-static const HandlescanHandleTypeConfig *Handlescan_FindHandleTypeConfig(uint8_t first_byte, uint8_t second_byte)
+static const HandlescanHandleTypeConfig *Handlescan_FindTypeConfig(const HandlescanHandleTypeConfig *config_table,
+                                                                   uint32_t config_count,
+                                                                   uint8_t first_byte,
+                                                                   uint8_t second_byte)
 {
     uint32_t index;
 
-    for (index = 0U; index < (uint32_t)(sizeof(s_handle_type_config_table) / sizeof(s_handle_type_config_table[0])); ++index)
+    for (index = 0U; index < config_count; ++index)
     {
-        if ((s_handle_type_config_table[index].first_byte == first_byte) &&
-            (s_handle_type_config_table[index].second_byte == second_byte))
+        if ((config_table[index].first_byte == first_byte) &&
+            (config_table[index].second_byte == second_byte))
         {
-            return &s_handle_type_config_table[index];
+            return &config_table[index];
         }
     }
 
     return NULL;
+}
+
+/*
+ * 根据 EEPROM 第 2 页前两个字节查找手柄配置。
+ * 找到时返回对应表项，找不到时返回 `NULL`，由调用方按未知手柄处理。
+ */
+static const HandlescanHandleTypeConfig *Handlescan_FindHandleTypeConfig(uint8_t first_byte, uint8_t second_byte)
+{
+    return Handlescan_FindTypeConfig(s_hand_type_config_table,
+                                     (uint32_t)(sizeof(s_hand_type_config_table) / sizeof(s_hand_type_config_table[0])),
+                                     first_byte,
+                                     second_byte);
+}
+
+/*
+ * 根据 EEPROM 第 3 页前两个字节查找刀具配置。
+ * 找到时返回对应表项，找不到时返回 `NULL`，由调用方按未知刀具处理。
+ */
+static const HandlescanHandleTypeConfig *Handlescan_FindToolTypeConfig(uint8_t first_byte, uint8_t second_byte)
+{
+    return Handlescan_FindTypeConfig(s_tool_type_config_table,
+                                     (uint32_t)(sizeof(s_tool_type_config_table) / sizeof(s_tool_type_config_table[0])),
+                                     first_byte,
+                                     second_byte);
 }
 
 /*
@@ -306,6 +361,96 @@ static void Handlescan_DebugTraceHandleName(uint8_t channel, uint8_t first_byte,
     (void)second_byte;
     (void)handle_name;
 #endif
+}
+
+/*
+ * 输出刀具名称和刀具规格扩展报文。
+ * 该报文单独受 `HANDLESCAN_TOOL_TRACE_ENABLE` 控制，方便正式版只保留基础手柄报文。
+ * 报文格式：
+ * `HSTOOL,CH=xx,ID0=xx,ID1=xx,TYPE=xxxx,DIA=xxxx,LEN=xxxx,ANG=xxxx`
+ */
+static void Handlescan_DebugTraceToolInfo(uint8_t channel,
+                                          uint8_t first_byte,
+                                          uint8_t second_byte,
+                                          const char *tool_name,
+                                          uint16_t diameter_tenth,
+                                          uint16_t length_tenth,
+                                          uint16_t angle_tenth)
+{
+#if (HANDLESCAN_TRACE_ENABLE == 1U) && (HANDLESCAN_TOOL_TRACE_ENABLE == 1U)
+    char tx_buf[128];
+    int text_len;
+
+    text_len = snprintf(tx_buf,
+                        sizeof(tx_buf),
+                        "HSTOOL,CH=%02u,ID0=%02X,ID1=%02X,TYPE=%s,DIA=%04u,LEN=%04u,ANG=%04u\r\n",
+                        (unsigned int)channel,
+                        (unsigned int)first_byte,
+                        (unsigned int)second_byte,
+                        tool_name,
+                        (unsigned int)diameter_tenth,
+                        (unsigned int)length_tenth,
+                        (unsigned int)angle_tenth);
+    if (text_len <= 0)
+    {
+        return;
+    }
+
+    if ((size_t)text_len > (sizeof(tx_buf) - 1U))
+    {
+        text_len = (int)(sizeof(tx_buf) - 1U);
+    }
+
+    HAL_UART_Transmit(&huart10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
+#else
+    (void)channel;
+    (void)first_byte;
+    (void)second_byte;
+    (void)tool_name;
+    (void)diameter_tenth;
+    (void)length_tenth;
+    (void)angle_tenth;
+#endif
+}
+
+/*
+ * 按大端格式读取 EEPROM 中的 16 位参数。
+ * EEPROM 里的刀具参数使用高字节在前、低字节在后的方式存储，因此这里统一封装成一个 helper。
+ */
+static uint16_t Handlescan_ReadUint16BE(const uint8_t *buffer, uint32_t offset)
+{
+    return (uint16_t)(((uint16_t)buffer[offset] << 8) | (uint16_t)buffer[offset + 1U]);
+}
+
+/*
+ * 把 EEPROM 第 3 页解析到当前 UI 已使用的 `paoxueSpeciValue` 数组格式。
+ * 当前 screen.c 会按 `specidisplay(长度基值 * 5, 直径, 角度)` 来显示，因此这里保持兼容：
+ * 1. `[0]` 保存长度基值，等于“0.1 精度长度值 / 5”；
+ * 2. `[1]` 保存直径的 0.1 精度原始值；
+ * 3. `[2]` 保存角度值；
+ * 4. `[3]` 保存刀具映射后的系统类型。
+ */
+static void Handlescan_UpdateToolSpecValues(uint32_t *spec_values,
+                                            uint16_t diameter_tenth,
+                                            uint16_t length_tenth,
+                                            uint16_t angle_tenth,
+                                            uint8_t mapped_tool_type)
+{
+    spec_values[0] = (uint32_t)(length_tenth / 5U);
+    spec_values[1] = (uint32_t)diameter_tenth;
+    spec_values[2] = (uint32_t)angle_tenth;
+    spec_values[3] = (uint32_t)mapped_tool_type;
+}
+
+/*
+ * 清空当前通道缓存的刀具规格值，避免手柄拔出后界面继续显示上一次刀具数据。
+ */
+static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
+{
+    spec_values[0] = 0U;
+    spec_values[1] = 0U;
+    spec_values[2] = 0U;
+    spec_values[3] = 0U;
 }
 
 /*
@@ -370,8 +515,15 @@ void HandlescanA_Fun_SSC(void)
     uint8_t read_status;                                     /* 保存信息区读取是否成功，1 成功，0 失败。 */
     uint8_t raw_type_major;                                  /* EEPROM 信息区第 1 个字节，表示手柄主类型。 */
     uint8_t raw_type_minor;                                  /* EEPROM 信息区第 2 个字节，表示手柄子类型。 */
+    uint8_t raw_tool_major;                                  /* EEPROM 刀具信息区第 1 个字节，表示刀具主类型。 */
+    uint8_t raw_tool_minor;                                  /* EEPROM 刀具信息区第 2 个字节，表示刀具子类型。 */
     uint8_t mapped_model;                                    /* 查表后的系统内部手柄型号值。 */
+    uint8_t mapped_tool_model;                               /* 查表后的系统内部刀具类型值。 */
+    uint16_t tool_diameter_tenth;                            /* 刀具直径，单位 0.1。 */
+    uint16_t tool_length_tenth;                              /* 刀具长度，单位 0.1。 */
+    uint16_t tool_angle_tenth;                               /* 刀具角度，单位 0.1。 */
     const HandlescanHandleTypeConfig *handle_type_cfg;       /* 指向命中的手柄类型配置表项。 */
+    const HandlescanHandleTypeConfig *tool_type_cfg;         /* 指向命中的刀具类型配置表项。 */
 
     /*
      * A 通道短接检测脚当前按“低电平表示插入成立”处理。
@@ -411,6 +563,7 @@ void HandlescanA_Fun_SSC(void)
             Workvalue_s.A_ChipRecognition_FLAG = 0U;         /* 清除 A 通道认证通过标志。 */
             Workvalue_s.A_ShortCircuitRecognition_FLAG = 0U; /* 清除 A 通道短接成立标志。 */
             ChannelValue_s.A.hand_model = 0U;                /* 清空 A 通道当前记忆的手柄型号。 */
+            Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 同步清空 A 通道刀具规格缓存，避免 UI 残留旧值。 */
             Workvalue_s.ScreenKey_data = 26U;                /* 通知 UI：A 手柄已拔出。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出“离线完成”报文。 */
@@ -427,6 +580,7 @@ void HandlescanA_Fun_SSC(void)
         Workvalue_s.Achanell_online_flag = 0U;               /* 保证 A 通道在线标志关闭。 */
         Workvalue_s.A_ChipRecognition_FLAG = 0U;             /* 保证 A 通道认证标志关闭。 */
         Workvalue_s.A_ShortCircuitRecognition_FLAG = 0U;     /* 保证 A 通道短接标志关闭。 */
+        Handlescan_ClearToolSpecValues(paoxueSpeciValue_A);  /* 插入未完成时也清空 A 通道刀具规格缓存。 */
         return;                                              /* 当前只是插入取消，不做 UI 和报文更新。 */
     }
 
@@ -506,8 +660,8 @@ void HandlescanA_Fun_SSC(void)
     }
 
     /*
-     * A 通道信息区读取阶段。
-     * 认证通过后，再从 0x0020 读取 16 字节信息区，并解析前两个字节得到手柄类型。
+     * A 通道信息读取阶段。
+     * 认证通过后，先从第 2 页读取手柄类型，再从第 3 页读取刀具类型和规格参数。
      */
     if (s_a_stage == HANDLESCAN_STAGE_READ_INFO)
     {
@@ -537,9 +691,45 @@ void HandlescanA_Fun_SSC(void)
             return;                                         /* 等待重新插拔。 */
         }
 
+        AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到当前这一次访问。 */
+        read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 A 通道 EEPROM 读出第 3 页刀具信息区。 */
+        if (read_status == 0U)
+        {
+            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具信息区读取失败也按数据区失败报警处理。 */
+            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
+            Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
+            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
+            return;                                         /* 本轮停止后续处理。 */
+        }
+
+        raw_tool_major = s_a_tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出刀具信息区第 1 字节作为刀具主类型。 */
+        raw_tool_minor = s_a_tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出刀具信息区第 2 字节作为刀具子类型。 */
+        tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
+        if (tool_type_cfg == NULL)
+        {
+            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具类型查表失败时，同样按数据无效处理。 */
+            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
+            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
+            return;                                         /* 等待重新插拔。 */
+        }
+
+        tool_diameter_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
+        tool_length_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* 解析刀具长度，单位 0.1。 */
+        tool_angle_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* 解析刀具角度，单位 0.1。 */
+
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
+        mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
         Workvalue_s.hand_model = mapped_model;              /* 更新当前全局工作手柄型号。 */
         ChannelValue_s.A.hand_model = mapped_model;         /* 把 A 通道记忆的手柄型号同步更新。 */
+        Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
+                                        tool_diameter_tenth,
+                                        tool_length_tenth,
+                                        tool_angle_tenth,
+                                        mapped_tool_model); /* 按当前 UI 使用的数组格式更新 A 通道刀具规格缓存。 */
         Workvalue_s.Achanell_online_flag = 1U;              /* 置位 A 通道在线标志。 */
         Workvalue_s.A_ChipRecognition_FLAG = 1U;            /* 置位 A 通道认证通过标志。 */
         Workvalue_s.A_ShortCircuitRecognition_FLAG = 1U;    /* 维持 A 通道短接识别成功标志。 */
@@ -548,6 +738,13 @@ void HandlescanA_Fun_SSC(void)
         s_a_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到在线保持态。 */
         Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文。 */
         Handlescan_DebugTraceHandleName(1U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 A 通道手柄名称报文。 */
+        Handlescan_DebugTraceToolInfo(1U,
+                                      raw_tool_major,
+                                      raw_tool_minor,
+                                      tool_type_cfg->handle_name,
+                                      tool_diameter_tenth,
+                                      tool_length_tenth,
+                                      tool_angle_tenth);    /* 输出 A 通道刀具名称和规格报文。 */
         return;                                             /* A 通道本轮流程结束，后续等待拔出。 */
     }
 
@@ -573,8 +770,15 @@ void HandlescanB_Fun_SSC(void)
     uint8_t read_status;                                     /* 保存 B 通道信息区读取结果。 */
     uint8_t raw_type_major;                                  /* EEPROM 信息区第 1 个字节，表示手柄主类型。 */
     uint8_t raw_type_minor;                                  /* EEPROM 信息区第 2 个字节，表示手柄子类型。 */
+    uint8_t raw_tool_major;                                  /* EEPROM 刀具信息区第 1 个字节，表示刀具主类型。 */
+    uint8_t raw_tool_minor;                                  /* EEPROM 刀具信息区第 2 个字节，表示刀具子类型。 */
     uint8_t mapped_model;                                    /* 查表映射后的系统内部型号值。 */
+    uint8_t mapped_tool_model;                               /* 查表映射后的系统内部刀具型号值。 */
+    uint16_t tool_diameter_tenth;                            /* 刀具直径，单位 0.1。 */
+    uint16_t tool_length_tenth;                              /* 刀具长度，单位 0.1。 */
+    uint16_t tool_angle_tenth;                               /* 刀具角度，单位 0.1。 */
     const HandlescanHandleTypeConfig *handle_type_cfg;       /* 指向命中的 B 通道手柄配置表项。 */
+    const HandlescanHandleTypeConfig *tool_type_cfg;         /* 指向命中的 B 通道刀具配置表项。 */
 
     /*
      * B 通道短接检测脚同样按“低电平表示插入成立”处理。
@@ -614,6 +818,7 @@ void HandlescanB_Fun_SSC(void)
             Workvalue_s.B_ChipRecognition_FLAG = 0U;         /* 清除 B 通道认证通过标志。 */
             Workvalue_s.B_ShortCircuitRecognition_FLAG = 0U; /* 清除 B 通道短接成立标志。 */
             ChannelValue_s.B.hand_model = 0U;                /* 清空 B 通道当前记忆的手柄型号。 */
+            Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 同步清空 B 通道刀具规格缓存。 */
             Workvalue_s.ScreenKey_data = 26U;                /* 通知 UI：B 手柄已拔出。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
@@ -630,6 +835,7 @@ void HandlescanB_Fun_SSC(void)
         Workvalue_s.Bchanell_online_flag = 0U;               /* 保证 B 通道在线标志关闭。 */
         Workvalue_s.B_ChipRecognition_FLAG = 0U;             /* 保证 B 通道认证标志关闭。 */
         Workvalue_s.B_ShortCircuitRecognition_FLAG = 0U;     /* 保证 B 通道短接标志关闭。 */
+        Handlescan_ClearToolSpecValues(paoxueSpeciValue_B);  /* 插入未完成时也清空 B 通道刀具规格缓存。 */
         return;                                              /* 当前不形成有效离线事件，只做静默收尾。 */
     }
 
@@ -708,8 +914,8 @@ void HandlescanB_Fun_SSC(void)
     }
 
     /*
-     * B 通道信息区读取阶段。
-     * 从 B 通道 EEPROM 的 0x0020 起始地址读取业务信息，再映射成系统手柄型号。
+     * B 通道信息读取阶段。
+     * 从 B 通道 EEPROM 先读第 2 页手柄信息，再读第 3 页刀具信息。
      */
     if (s_b_stage == HANDLESCAN_STAGE_READ_INFO)
     {
@@ -739,9 +945,45 @@ void HandlescanB_Fun_SSC(void)
             return;                                         /* 等待重新插拔。 */
         }
 
+        AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到这一次访问。 */
+        read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 B 通道 EEPROM 读取第 3 页刀具信息区。 */
+        if (read_status == 0U)
+        {
+            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* B 通道刀具信息区读取失败时，按数据区失败处理。 */
+            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
+            Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警设置报文。 */
+            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            return;                                         /* 本轮停止后续处理。 */
+        }
+
+        raw_tool_major = s_b_tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出 B 通道刀具主类型。 */
+        raw_tool_minor = s_b_tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出 B 通道刀具子类型。 */
+        tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
+        if (tool_type_cfg == NULL)
+        {
+            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具类型查表失败时，按“数据无效”处理。 */
+            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警设置报文。 */
+            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            return;                                         /* 等待重新插拔。 */
+        }
+
+        tool_diameter_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
+        tool_length_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* 解析刀具长度，单位 0.1。 */
+        tool_angle_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* 解析刀具角度，单位 0.1。 */
+
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
+        mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
         Workvalue_s.hand_model = mapped_model;              /* 更新当前全局工作手柄型号。 */
         ChannelValue_s.B.hand_model = mapped_model;         /* 更新 B 通道记忆的手柄型号。 */
+        Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
+                                        tool_diameter_tenth,
+                                        tool_length_tenth,
+                                        tool_angle_tenth,
+                                        mapped_tool_model); /* 按当前 UI 使用的数组格式更新 B 通道刀具规格缓存。 */
         Workvalue_s.Bchanell_online_flag = 1U;              /* 置位 B 通道在线标志。 */
         Workvalue_s.B_ChipRecognition_FLAG = 1U;            /* 置位 B 通道认证通过标志。 */
         Workvalue_s.B_ShortCircuitRecognition_FLAG = 1U;    /* 维持 B 通道短接识别成功标志。 */
@@ -750,6 +992,13 @@ void HandlescanB_Fun_SSC(void)
         s_b_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到 B 通道在线保持态。 */
         Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文。 */
         Handlescan_DebugTraceHandleName(2U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 B 通道手柄名称报文。 */
+        Handlescan_DebugTraceToolInfo(2U,
+                                      raw_tool_major,
+                                      raw_tool_minor,
+                                      tool_type_cfg->handle_name,
+                                      tool_diameter_tenth,
+                                      tool_length_tenth,
+                                      tool_angle_tenth);    /* 输出 B 通道刀具名称和规格报文。 */
         return;                                             /* B 通道本轮处理结束。 */
     }
 
@@ -790,9 +1039,6 @@ void HandlescanTaskInit(void)
 	app_task_create(&HANDLESCANTaskHandle, HANDLESCANTaskFunc);
 	app_task_start(&HANDLESCANTaskHandle, APP_TASK_ALWAYS, 10);
 }
-
-
-
 
 
 
