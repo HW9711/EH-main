@@ -508,8 +508,8 @@ void HandlescanA_Fun_SSC(void)
         {
             Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL;
             Workvalue_s.beep_Alarm_flag = 1U;
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor);
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL);
+            //Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor);
+            //Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL);
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;
             return;
         }
