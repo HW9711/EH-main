@@ -1,0 +1,9 @@
+.\mainctrlf413mxos\motor.o: ..\User\Application\Motor\motor.c
+.\mainctrlf413mxos\motor.o: ../User/Application/include/motor.h
+.\mainctrlf413mxos\motor.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+.\mainctrlf413mxos\motor.o: ../User/Peripheral/include/delay.h
+.\mainctrlf413mxos\motor.o: ../User/Peripheral/include/uart1.h
+.\mainctrlf413mxos\motor.o: ../User/Peripheral/include/uart2.h
+.\mainctrlf413mxos\motor.o: ../User/Data/data.h
+.\mainctrlf413mxos\motor.o: ../User/Application/include/common.h
+.\mainctrlf413mxos\motor.o: ../User/Peripheral/include/board.h

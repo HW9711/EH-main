@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+完全对齐的嵌入式软件架构图生成脚本
+确保每层外围边框宽度一致且左右完美对齐
+"""
+
+import os
+import subprocess
+
+os.makedirs('docs/assets', exist_ok=True)
+
+GRAPHVIZ_PATH = r"D:\Soft_Install_HL\graphviz\bin"
+DOT_EXE = os.path.join(GRAPHVIZ_PATH, "dot.exe")
+
+# 使用更精确的对齐方法：
+# 1. 所有层使用相同数量的节点（6个）
+# 2. 通过不可见边强制对齐
+# 3. 使用相同的节点宽度和间距
+
+aligned_dot = '''digraph AlignedArchitecture {
+    // 精确对齐配置
+    graph [
+        rankdir=TB
+        splines=ortho
+        nodesep=0.15
+        ranksep=0.3
+        fontname="Arial, sans-serif"
+        fontsize=13
+        label="F413 嵌入式软件架构"
+        labelloc=t
+        pad=0.3
+        bgcolor="#FFFFFF"
+        newrank=true
+        compound=true
+        concentrate=false
+    ];
+    
+    // 节点样式 - 精确控制尺寸
+    node [
+        fontname="Arial, sans-serif"
+        fontsize=10
+        shape=rect
+        style="rounded,filled"
+        penwidth=1.0
+        margin=0.08
+        width=1.6
+        height=0.55
+        fillcolor="#FFFFFF"
+        color="#333333"
+        fixedsize=true
+    ];
+    
+    // 连线样式
+    edge [
+        fontname="Arial, sans-serif"
+        fontsize=8
+        arrowsize=0.6
+        penwidth=1.0
+        color="#555555"
+        arrowhead=normal
+    ];
+
+    // === 第1层：应用层 ===
+    subgraph cluster_app {
+        label="应用层 (Application)"
+        style="filled,rounded"
+        fillcolor="#E8F4FF"
+        color="#1976D2"
+        penwidth=1.5
+        
+        // 中心对齐：左右填充使内容居中
+        app_fillL [label="", style="invisible", width=1.6, height=0.01];
+        app_parser [label="userparser.c\\n系统初始化与任务创建", fillcolor="#FFFFFF", color="#1976D2"];
+        app_screen [label="screen.c\\nUI显示与按键处理", fillcolor="#FFFFFF", color="#1976D2"];
+        app_task [label="app_task.c\\n定时任务调度框架", fillcolor="#FFFFFF", color="#1976D2"];
+        app_fillR [label="", style="invisible", width=1.6, height=0.01];
+    }
+
+    // === 第2层：中间件层 ===
+    subgraph cluster_mw {
+        label="中间件 (Middleware)"
+        style="filled,rounded"
+        fillcolor="#F0F9E8"
+        color="#388E3C"
+        penwidth=1.5
+        
+        // 中心对齐：左右填充使内容居中
+        mw_fillL1 [label="", style="invisible", width=1.6, height=0.01];
+        mw_fillL2 [label="", style="invisible", width=1.6, height=0.01];
+        mw_freertos [label="FreeRTOS\\n任务管理与调度", fillcolor="#FFFFFF", color="#388E3C"];
+        mw_apptask [label="AppTask框架\\n定时任务链表", fillcolor="#FFFFFF", color="#388E3C"];
+        mw_fillR1 [label="", style="invisible", width=1.6, height=0.01];
+        mw_fillR2 [label="", style="invisible", width=1.6, height=0.01];
+    }
+
+    // === 第3层：驱动层 ===
+    subgraph cluster_drv {
+        label="驱动层 (Driver)"
+        style="filled,rounded"
+        fillcolor="#FFF3E0"
+        color="#F57C00"
+        penwidth=1.5
+        
+        drv_uart [label="UART1-7\\n串口通信 (DMA)", fillcolor="#FFFFFF", color="#F57C00"];
+        drv_gpio [label="GPIO\\n输入输出控制", fillcolor="#FFFFFF", color="#F57C00"];
+        drv_tim [label="TIM7/10/14\\n定时器驱动", fillcolor="#FFFFFF", color="#F57C00"];
+        drv_adc [label="ADC\\n模拟信号采集", fillcolor="#FFFFFF", color="#F57C00"];
+        drv_i2c [label="Software I2C\\nEEPROM存储", fillcolor="#FFFFFF", color="#F57C00"];
+        drv_1wire [label="1-Wire\\nRFID/DS2401", fillcolor="#FFFFFF", color="#F57C00"];
+    }
+
+    // === 第4层：硬件抽象层 ===
+    subgraph cluster_hal {
+        label="硬件抽象层 (HAL)"
+        style="filled,rounded"
+        fillcolor="#FCE4EC"
+        color="#C2185B"
+        penwidth=1.5
+        
+        // 中心对齐：左右填充使内容居中
+        hal_fillL1 [label="", style="invisible", width=1.6, height=0.01];
+        hal_fillL2 [label="", style="invisible", width=1.6, height=0.01];
+        hal_board [label="board.h/c\\n引脚与外设配置", fillcolor="#FFFFFF", color="#C2185B"];
+        hal_stm32 [label="STM32F4xx HAL\\n外设驱动库", fillcolor="#FFFFFF", color="#C2185B"];
+        hal_fillR1 [label="", style="invisible", width=1.6, height=0.01];
+        hal_fillR2 [label="", style="invisible", width=1.6, height=0.01];
+    }
+
+    // === 第5层：硬件层 ===
+    subgraph cluster_hw {
+        label="硬件层 (Hardware)"
+        style="filled,rounded"
+        fillcolor="#E8EAF6"
+        color="#303F9F"
+        penwidth=1.5
+        
+        // 中心对齐：左右填充使内容居中
+        hw_fillL [label="", style="invisible", width=1.6, height=0.01];
+        hw_mcu [label="STM32F4xx\\nCortex-M4 100MHz", fillcolor="#FFFFFF", color="#303F9F"];
+        hw_uart [label="UART\\n7路串口", fillcolor="#FFFFFF", color="#303F9F"];
+        hw_gpio [label="GPIO\\n多路输入输出", fillcolor="#FFFFFF", color="#303F9F"];
+        hw_eeprom [label="AT24C02\\n2Kb EEPROM", fillcolor="#FFFFFF", color="#303F9F"];
+        hw_fillR [label="", style="invisible", width=1.6, height=0.01];
+    }
+
+    // === 第6层：外部设备层 ===
+    subgraph cluster_peri {
+        label="外部设备 (Peripherals)"
+        style="filled,rounded"
+        fillcolor="#FFF8E1"
+        color="#FF8F00"
+        penwidth=1.5
+        
+        per_motor [label="无刷电机\\nA/B双通道", fillcolor="#FFFFFF", color="#FF8F00"];
+        per_lcd [label="LCD显示屏\\n4.3寸触摸", fillcolor="#FFFFFF", color="#FF8F00"];
+        per_pedal [label="脚踏板\\n油门+按键", fillcolor="#FFFFFF", color="#FF8F00"];
+        per_hand [label="手柄\\nRFID识别", fillcolor="#FFFFFF", color="#FF8F00"];
+        per_pump [label="灌注/注水泵\\n流量控制", fillcolor="#FFFFFF", color="#FF8F00"];
+        peri_fillR [label="", style="invisible", width=1.6, height=0.01];
+    }
+
+    // ===== 主要连接关系 =====
+    app_parser -> mw_freertos [color="#1976D2"];
+    app_screen -> mw_apptask [color="#1976D2"];
+    app_task -> mw_freertos [color="#1976D2"];
+    app_task -> mw_apptask [color="#1976D2"];
+
+    mw_freertos -> drv_uart [color="#388E3C"];
+    mw_freertos -> drv_gpio [color="#388E3C"];
+    mw_freertos -> drv_tim [color="#388E3C"];
+    mw_apptask -> drv_uart [color="#388E3C", style=dashed];
+    mw_apptask -> drv_gpio [color="#388E3C", style=dashed];
+
+    drv_uart -> hal_board [color="#F57C00"];
+    drv_gpio -> hal_board [color="#F57C00"];
+    drv_tim -> hal_board [color="#F57C00"];
+    drv_adc -> hal_board [color="#F57C00"];
+    drv_i2c -> hal_board [color="#F57C00"];
+    drv_1wire -> hal_board [color="#F57C00"];
+
+    hal_board -> hal_stm32 [color="#C2185B"];
+    hal_stm32 -> hw_mcu [color="#303F9F"];
+    hal_stm32 -> hw_uart [color="#303F9F"];
+    hal_stm32 -> hw_gpio [color="#303F9F"];
+    
+    hw_uart -> per_motor [color="#FF8F00"];
+    hw_uart -> per_lcd [color="#FF8F00"];
+    hw_uart -> per_pedal [color="#FF8F00"];
+    hw_uart -> per_hand [color="#FF8F00"];
+    hw_gpio -> per_pump [color="#FF8F00"];
+    hw_eeprom -> hal_stm32 [color="#303F9F", style=dashed];
+
+    // ===== 对齐约束：使用不可见边强制每层中心对齐 =====
+    // 每层的第一个和最后一个节点连接到不可见的垂直参考线
+    
+    // 应用层的对齐边（使边框左右边界对齐）
+    app_fillL -> mw_fillL1 [style="invis", weight=100];
+    app_fillR -> mw_fillR1 [style="invis", weight=100];
+    
+    // 中间件层的对齐边
+    mw_fillL1 -> drv_uart [style="invis", weight=100];
+    mw_fillR1 -> drv_1wire [style="invis", weight=100];
+    
+    // 驱动层的对齐边
+    drv_uart -> hal_fillL1 [style="invis", weight=100];
+    drv_1wire -> hal_fillR1 [style="invis", weight=100];
+    
+    // HAL层的对齐边
+    hal_fillL1 -> hw_fillL [style="invis", weight=100];
+    hal_fillR1 -> hw_fillR [style="invis", weight=100];
+    
+    // 硬件层的对齐边
+    hw_fillL -> per_motor [style="invis", weight=100];
+    hw_fillR -> peri_fillR [style="invis", weight=100];
+    
+    // ===== 层级分组 =====
+    // 确保每层在正确的位置
+    {rank=same; app_fillL app_parser app_screen app_task app_fillR}
+    {rank=same; mw_fillL1 mw_fillL2 mw_freertos mw_apptask mw_fillR1 mw_fillR2}
+    {rank=same; drv_uart drv_gpio drv_tim drv_adc drv_i2c drv_1wire}
+    {rank=same; hal_fillL1 hal_fillL2 hal_board hal_stm32 hal_fillR1 hal_fillR2}
+    {rank=same; hw_fillL hw_mcu hw_uart hw_gpio hw_eeprom hw_fillR}
+    {rank=same; per_motor per_lcd per_pedal per_hand per_pump peri_fillR}
+    
+    // ===== 跨层对齐组 =====
+    // 使每层的左边界对齐
+    edge [style="invis", weight=100];
+    app_fillL -> mw_fillL1 -> drv_uart -> hal_fillL1 -> hw_fillL -> per_motor;
+    
+    // 使每层的右边界对齐
+    app_fillR -> mw_fillR1 -> drv_1wire -> hal_fillR1 -> hw_fillR -> peri_fillR;
+}'''
+
+dot_file = 'docs/aligned_architecture.dot'
+with open(dot_file, 'w', encoding='utf-8') as f:
+    f.write(aligned_dot)
+
+print(f"精确对齐 DOT 文件已生成: {dot_file}")
+
+# 生成 PNG
+try:
+    png_file = 'docs/aligned_architecture.png'
+    result = subprocess.run([
+        DOT_EXE, '-Tpng', '-Gdpi=200',
+        '-o', png_file,
+        dot_file
+    ], capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print(f"精确对齐 PNG 图片已生成: {png_file}")
+    else:
+        print(f"Graphviz 错误: {result.stderr}")
+        
+except Exception as e:
+    print(f"生成 PNG 时出错: {e}")
+
+# 生成 SVG
+try:
+    svg_file = 'docs/aligned_architecture.svg'
+    result = subprocess.run([
+        DOT_EXE, '-Tsvg',
+        '-o', svg_file,
+        dot_file
+    ], capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print(f"精确对齐 SVG 矢量图已生成: {svg_file}")
+        
+except Exception as e:
+    print(f"生成 SVG 时出错: {e}")
+
+print("\n=== 精确对齐生成完成 ===")
+print("特点: 每层外围边框宽度一致且左右完美对齐")
+print("方法: 使用不可见边强制对齐边框边界")
+print("技术: 跨层对齐组 + 权重约束")

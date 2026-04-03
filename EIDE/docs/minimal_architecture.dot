@@ -1,0 +1,165 @@
+digraph EmbeddedSoftwareArchitecture {
+    // 极简风格配置
+    graph [
+        rankdir=TB
+        nodesep=0.3
+        ranksep=0.5
+        fontname="Arial, sans-serif"
+        fontsize=12
+        label="F413 嵌入式软件架构"
+        labelloc=t
+        pad=0.4
+        bgcolor="#FFFFFF"
+        concentrate=true
+        splines=ortho
+    ];
+    
+    // 极简节点样式
+    node [
+        fontname="Arial, sans-serif"
+        fontsize=10
+        shape=box
+        style="solid,filled"
+        penwidth=1.0
+        margin=0.1
+        fillcolor="#F5F5F5"
+        color="#333333"
+    ];
+    
+    // 极简连线样式
+    edge [
+        fontname="Arial, sans-serif"
+        fontsize=8
+        arrowsize=0.6
+        penwidth=1.0
+        color="#666666"
+        arrowhead=normal
+    ];
+
+    // ===== 应用层 (Application) =====
+    subgraph cluster_app {
+        label="应用层"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        app_parser [label="userparser.c\n系统初始化与任务创建"];
+        app_screen [label="screen.c\nUI显示与按键处理"];
+        app_task [label="app_task.c\n定时任务调度框架"];
+    }
+
+    // ===== 中间件层 (Middleware) =====
+    subgraph cluster_mw {
+        label="中间件"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        mw_freertos [label="FreeRTOS\n任务管理与调度"];
+        mw_apptask [label="AppTask框架\n定时任务链表"];
+    }
+
+    // ===== 驱动层 (Driver) =====
+    subgraph cluster_drv {
+        label="驱动层"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        drv_uart [label="UART1-7\n串口通信 (DMA)"];
+        drv_gpio [label="GPIO\n输入输出控制"];
+        drv_tim [label="TIM7/10/14\n定时器驱动"];
+        drv_adc [label="ADC\n模拟信号采集"];
+        drv_i2c [label="Software I2C\nEEPROM存储"];
+        drv_1wire [label="1-Wire\nRFID/DS2401"];
+    }
+
+    // ===== 硬件抽象层 (HAL) =====
+    subgraph cluster_hal {
+        label="硬件抽象层"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        hal_board [label="board.h/c\n引脚与外设配置"];
+        hal_stm32 [label="STM32F4xx HAL\n外设驱动库"];
+    }
+
+    // ===== 硬件层 (Hardware) =====
+    subgraph cluster_hw {
+        label="硬件层"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        hw_mcu [label="STM32F4xx\nCortex-M4 100MHz"];
+        hw_uart [label="UART\n7路串口"];
+        hw_gpio [label="GPIO\n多路输入输出"];
+        hw_eeprom [label="AT24C02\n2Kb EEPROM"];
+    }
+
+    // ===== 外部设备层 (Peripherals) =====
+    subgraph cluster_peri {
+        label="外部设备"
+        style="solid"
+        color="#333333"
+        penwidth=1.5
+        fillcolor="#F9F9F9"
+        
+        per_motor [label="无刷电机\nA/B双通道"];
+        per_lcd [label="LCD显示屏\n4.3寸触摸"];
+        per_pedal [label="脚踏板\n油门+按键"];
+        per_hand [label="手柄\nRFID识别"];
+        per_pump [label="灌注/注水泵\n流量控制"];
+    }
+
+    // ===== 连接关系 =====
+    
+    // 应用层 -> 中间件
+    app_parser -> mw_freertos;
+    app_screen -> mw_apptask;
+    app_task -> mw_freertos;
+    app_task -> mw_apptask;
+
+    // 中间件 -> 驱动层
+    mw_freertos -> drv_uart;
+    mw_freertos -> drv_gpio;
+    mw_freertos -> drv_tim;
+    mw_apptask -> drv_uart;
+    mw_apptask -> drv_gpio;
+
+    // 驱动层 -> HAL
+    drv_uart -> hal_board;
+    drv_gpio -> hal_board;
+    drv_tim -> hal_board;
+    drv_adc -> hal_board;
+    drv_i2c -> hal_board;
+    drv_1wire -> hal_board;
+
+    // HAL -> 硬件
+    hal_board -> hal_stm32;
+    hal_stm32 -> hw_mcu;
+    hal_stm32 -> hw_uart;
+    hal_stm32 -> hw_gpio;
+    
+    // 硬件 -> 外设
+    hw_uart -> per_motor;
+    hw_uart -> per_lcd;
+    hw_uart -> per_pedal;
+    hw_uart -> per_hand;
+    hw_gpio -> per_pump;
+    hw_eeprom -> hal_stm32;
+
+    // ===== 层级对齐 =====
+    {rank=same; app_parser app_screen app_task}
+    {rank=same; mw_freertos mw_apptask}
+    {rank=same; drv_uart drv_gpio drv_tim drv_adc drv_i2c drv_1wire}
+    {rank=same; hal_board hal_stm32}
+    {rank=same; hw_mcu hw_uart hw_gpio hw_eeprom}
+    {rank=same; per_motor per_lcd per_pedal per_hand per_pump}
+}

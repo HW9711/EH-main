@@ -1,0 +1,317 @@
+version: "4.1"
+name: MainCtrlF413MXOs
+type: ARM
+deviceName: null
+packDir: null
+srcDirs: []
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders:
+    - name: Application
+      files: []
+      folders:
+        - name: MDK-ARM
+          files:
+            - path: ../MDK-ARM/startup_stm32f413xx.s
+          folders: []
+        - name: User
+          files:
+            - path: ../Src/main.c
+            - path: ../Src/gpio.c
+            - path: ../Src/freertos.c
+            - path: ../Src/dma.c
+            - path: ../Src/iwdg.c
+            - path: ../Src/tim.c
+            - path: ../Src/usart.c
+            - path: ../Src/stm32f4xx_it.c
+            - path: ../Src/stm32f4xx_hal_msp.c
+            - path: ../Src/stm32f4xx_hal_timebase_tim.c
+          folders: []
+    - name: Drivers
+      files: []
+      folders:
+        - name: STM32F4xx_HAL_Driver
+          files:
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ramfunc.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma_ex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_iwdg.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
+            - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c
+          folders: []
+        - name: CMSIS
+          files:
+            - path: ../Src/system_stm32f4xx.c
+          folders: []
+    - name: User
+      files: []
+      folders:
+        - name: Application
+          files:
+            - path: ../User/Application/Beep/beep.c
+            - path: ../User/Application/Common/common.c
+            - path: ../User/Application/ConnectScan/connectscan.c
+            - path: ../User/Application/DirCurrent/dircurrent.c
+            - path: ../User/Application/DriveCtrl/drivectrl.c
+            - path: ../User/Application/Encryption/encryption.c
+            - path: ../User/Application/FootPedal/footpedal.c
+            - path: ../User/Application/Handle/handledata.c
+            - path: ../User/Application/Handle/handlekey.c
+            - path: ../User/Application/Handle/handlescan.c
+            - path: ../User/Application/Motor/motor.c
+            - path: ../User/Application/MotorUartData/motoruartdata.c
+            - path: ../User/Application/Pedal/pedal.c
+            - path: ../User/Application/Pump/pump.c
+            - path: ../User/Application/RadioFreq/radiofreq.c
+            - path: ../User/Application/Screen/screen.c
+            - path: ../User/Application/ScreenKey/param.c
+            - path: ../User/Application/ScreenKey/screenkey.c
+            - path: ../User/Application/SplitType/splittype.c
+            - path: ../User/Application/Src/userparser.c
+            - path: ../User/Application/Warn/warn.c
+            - path: ../User/Application/Led/sysrunled.c
+            - path: ../User/Application/Led/led.c
+            - path: ../User/Application/SerialPortPro/Serialportpro.c
+            - path: ../User/Application/DataHand/datahand.c
+          folders: []
+        - name: Data
+          files:
+            - path: ../User/Data/data.c
+          folders: []
+        - name: Peripheral
+          files:
+            - path: ../User/Peripheral/bus/iic.c
+            - path: ../User/Peripheral/bus/i2c.c
+            - path: ../User/Peripheral/bus/OneWireI.c
+            - path: ../User/Peripheral/bus/OneWireII.c
+            - path: ../User/Peripheral/delay/delay.c
+            - path: ../User/Peripheral/EEPROM/eeprom.c
+            - path: ../User/Peripheral/flash/flash.c
+            - path: ../User/Peripheral/iwdg/iwdg.c
+            - path: ../User/Peripheral/lcd/lcd.c
+            - path: ../User/Peripheral/uart/uart1.c
+            - path: ../User/Peripheral/uart/uart2.c
+            - path: ../User/Peripheral/uart/uart3.c
+            - path: ../User/Peripheral/uart/uart4.c
+            - path: ../User/Peripheral/uart/uart5.c
+            - path: ../User/Peripheral/uart/uart6.c
+            - path: ../User/Peripheral/uart/uart7.c
+            - path: ../User/Peripheral/EEPROM/at24cs32.c
+            - path: ../User/Peripheral/EEPROM/at24cs32_crc_verify.c
+          folders: []
+        - name: UI
+          files:
+            - path: ../User/UI/src/UI_FootPedalCalibration.c
+            - path: ../User/UI/src/UI_Main.c
+            - path: ../User/UI/src/UI_ModelConfiguration.c
+            - path: ../User/UI/src/UI_Password.c
+            - path: ../User/UI/src/UI_Start.c
+          folders: []
+        - name: ColaOs
+          files:
+            - path: ../User/Cola_os/src/cola_os.c
+          folders: []
+        - name: RTOS
+          files:
+            - path: ../Src/app_task.c
+          folders: []
+        - name: Doc
+          files:
+            - path: ../User/Doc/Note.h
+          folders: []
+        - name: board
+          files:
+            - path: ../User/board/board.c
+          folders: []
+    - name: ::CMSIS
+      files: []
+      folders: []
+    - name: Middlewares
+      files: []
+      folders:
+        - name: FreeRTOS
+          files:
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/croutine.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/list.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/queue.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/tasks.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/timers.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/port.c
+          folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: 488ba30c328d78b2882178cb42ef6bee
+targets:
+  MainCtrlF413MXOs:
+    cppPreprocessAttrs:
+      defineList:
+        - USE_HAL_DRIVER
+        - STM32F413xx
+      incList:
+        - ../Inc
+        - ../Drivers/STM32F4xx_HAL_Driver/Inc
+        - ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+        - ../Drivers/CMSIS/Device/ST/STM32F4xx/Include
+        - ../Drivers/CMSIS/Include
+        - ../User/Application/include
+        - ../User/Data
+        - ../User/Peripheral/include
+        - ../User/UI/include
+        - ../User/Cola_os/inc
+        - ../Middlewares/Third_Party/FreeRTOS/Source/include
+        - ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
+        - ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F
+        - .cmsis/include
+        - ../MDK-ARM/RTE/_MainCtrlF413MXOs
+        - ../User/board
+      libList: []
+    excludeList:
+      - <virtual_root>/User/app
+      - <virtual_root>/User/Peripheral/board.c
+      - <virtual_root>/User/board/board_hardware.c
+    settings:
+      debugger: cortex-debug
+    toolchain: AC5
+    toolchainConfigMap:
+      AC5:
+        archExtensions: ""
+        cpuType: Cortex-M4
+        floatingPointHardware: single
+        options:
+          version: 4
+          afterBuildTasks: []
+          asm-compiler:
+            defines: []
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: --diag_suppress=1 --diag_suppress=1295
+            C_FLAGS: --diag_suppress=1 --diag_suppress=1295
+            c99-mode: true
+            one-elf-section-per-function: true
+            optimization: level-0
+            warnings: all-warnings
+          global:
+            output-debug-info: enable
+            use-microLIB: false
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            output-format: elf
+            ro-base: ""
+            rw-base: ""
+            xo-base: ""
+        scatterFilePath: ""
+        storageLayout:
+          RAM:
+            - id: 1
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 3
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 1
+              isChecked: true
+              mem:
+                size: "0x50000"
+                startAddr: "0x20000000"
+              noInit: false
+              tag: IRAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: IRAM
+          ROM:
+            - id: 1
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 3
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 1
+              isChecked: true
+              isStartup: true
+              mem:
+                size: "0x100000"
+                startAddr: "0x8000000"
+              tag: IROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: IROM
+        useCustomScatterFile: false
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: STM32F413VG
+          vendor: ST
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+      STLink:
+        address: "0x8000000"
+        bin: ""
+        elFile: None
+        optionBytes: .eide/mainctrlf413mxos.st.option.bytes.ini
+        otherCmds: ""
+        proType: SWD
+        resetMode: default
+        runAfterProgram: true
+        speed: 4000
+    uploader: STLink

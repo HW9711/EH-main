@@ -1,0 +1,10 @@
+.\mainctrlf413mxos\ui_modelconfiguration.o: ..\User\UI\src\UI_ModelConfiguration.c
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/UI/include/UI_ModelConfiguration.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Peripheral/include/lcd.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Data/data.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Peripheral/include/flash.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Peripheral/include/delay.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Application/include/pedal.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Peripheral/include/iwdg.h
+.\mainctrlf413mxos\ui_modelconfiguration.o: ../User/Application/include/screenkey.h
