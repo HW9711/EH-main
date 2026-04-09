@@ -1,0 +1,205 @@
+<mxfile host="65bd71144e">
+    <diagram id="f413-arch" name="F413软件架构图">
+        <mxGraphModel dx="1168" dy="1558" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="2000" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="F413 主控固件软件架构图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9d2ff;strokeColor=#6a5acd;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="390" y="20" width="620" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-title" value="软件职责链路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6E0FF;strokeColor=#8e7cc3;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="20" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-title" value="接口与支撑" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCE5CD;strokeColor=#d79b00;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="1140" y="20" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-area" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E6E0FF;strokeColor=#8E7CC3;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="120" width="220" height="1710" as="geometry"/>
+                </mxCell>
+                <mxCell id="center-area" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFF66;strokeColor=#999999;" parent="1" vertex="1">
+                    <mxGeometry x="260" y="120" width="820" height="1710" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-area" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FCE5CD;strokeColor=#999999;" parent="1" vertex="1">
+                    <mxGeometry x="1100" y="120" width="240" height="1710" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-1" value="系统启动&#xa;上电初始化、参数恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="220" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-2" value="输入采集&#xa;手柄、脚踏、屏幕" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="470" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-3" value="任务调度&#xa;周期任务统一执行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="740" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-4" value="业务控制&#xa;模式、联动、状态机" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="1020" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-5" value="安全与告警&#xa;在线判定、故障保护" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="1290" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-6" value="配置与追溯&#xa;掉电保存、设备识别" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="1560" width="140" height="84" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-link-1" style="endArrow=block;html=1;strokeColor=#000000;rounded=1;curved=0;strokeWidth=5;" parent="1" source="left-1" target="left-2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-link-2" style="endArrow=block;html=1;strokeColor=#000000;rounded=0;strokeWidth=5;" parent="1" source="left-2" target="left-3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-link-3" style="endArrow=block;html=1;strokeColor=#000000;rounded=0;strokeWidth=5;" parent="1" source="left-3" target="left-4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-link-4" style="endArrow=block;html=1;strokeColor=#000000;rounded=0;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;" parent="1" source="left-4" target="left-5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="left-link-5" style="endArrow=block;html=1;strokeColor=#000000;rounded=0;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;" parent="1" source="left-5" target="left-6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="8" value="" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;shape=flexArrow;strokeColor=default;fillColor=#000000;" edge="1" parent="1" source="sec1-box" target="sec2-box">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec1-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="150" width="740" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec1-header" value="应用表现层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9ead3;strokeColor=#93c47d;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="165" width="300" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec1-a" value="userparser.c&#xa;系统初始化、任务创建、参数恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="330" y="235" width="680" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec1-b" value="screen.c&#xa;UI 显示、菜单切换、报警提示、参数下发" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="330" y="300" width="680" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="410" width="740" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-header" value="输入解析与业务状态层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6fa8dc;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="425" width="340" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-a" value="Handlescan / HandleKeyScan&#xa;A/B 通道手柄在线检测、型号映射、按键扫描" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="330" y="500" width="330" height="78" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-b" value="FootPedal / FootKey / FootThrottle&#xa;脚踏连接检测、按键解析、油门量采集" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="500" width="330" height="78" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-c" value="核心状态对象&#xa;Workvalue / SysInterface / ChannelValue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#6d9eeb;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="605" width="380" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-edge-1" style="endArrow=block;html=1;strokeColor=#6d9eeb;rounded=0;" parent="1" source="sec2-a" target="sec2-c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec2-edge-2" style="endArrow=block;html=1;strokeColor=#6d9eeb;rounded=0;" parent="1" source="sec2-b" target="sec2-c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec3-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;glass=0;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="720" width="740" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec3-header" value="任务调度层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9d2e9;strokeColor=#8e7cc3;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="540" y="735" width="260" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec3-a" value="FreeRTOS&#xa;系统任务管理、时基与上下文切换" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="340" y="810" width="290" height="62" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec3-b" value="AppTaskScheduler / app_task&#xa;1ms 调度基座，统一管理周期任务链表" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="660" y="810" width="340" height="62" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec3-c" value="典型周期任务&#xa;HandlescanTask、ScreenKeyTask、MotorUartDataTask、DriveCtrl_Motor123Task、PUMPBTask" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3f3f3;strokeColor=#999999;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="340" y="885" width="660" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6d8764;strokeColor=#3A5431;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="980" width="740" height="290" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-header" value="驱动与协议层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce5cd;strokeColor=#d79b00;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="530" y="995" width="280" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-a" value="串口通信&#xa;UART1-7、DMA、设备协议封装" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="330" y="1070" width="200" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-b" value="基础 IO&#xa;GPIO、LED、蜂鸣器、继电器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="550" y="1070" width="200" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-c" value="采样与定时&#xa;ADC、TIM6/7/10/14" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="1070" width="230" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec4-d" value="存储与识别协议&#xa;Soft I2C / EEPROM / 1-Wire / DS2401" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="430" y="1165" width="480" height="72" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec5-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bac8d3;strokeColor=#23445d;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="1300" width="740" height="320" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec5-header" value="硬件抽象与外设对象层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ead1dc;strokeColor=#c27ba0;fontSize=18;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="485" y="1315" width="370" height="46" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec5-a" value="board.h / board.c&#xa;引脚定义、板级配置、硬件抽象" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="340" y="1390" width="320" height="62" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec5-b" value="STM32F4xx HAL / CubeMX 初始化&#xa;外设初始化、时钟、底层驱动入口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="690" y="1390" width="320" height="62" as="geometry"/>
+                </mxCell>
+                <mxCell id="sec5-c" value="受控对象&#xa;无刷电机 A/B、脚踏板、手柄、LCD 屏、泵、EEPROM" style="ellipse;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=16;" parent="1" vertex="1">
+                    <mxGeometry x="430" y="1490" width="480" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="result-box" value="软件架构结论&#xa;以 FreeRTOS + AppTask 为调度骨架，围绕手柄/脚踏/屏幕输入形成业务状态，&#xa;再通过串口、GPIO、ADC、I2C 等驱动层控制电机、泵和显示，实现医疗设备主控协同。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9d2ff;strokeColor=#8e7cc3;fontSize=17;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="1656" width="740" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="3" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=0;strokeColor=#000000;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=block;" edge="1" parent="1" source="right-1" target="right-2">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-1" value="文档与配置入口：&lt;br&gt;板级定义 / 启动参数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#cc0000;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="230" width="180" height="96" as="geometry"/>
+                </mxCell>
+                <mxCell id="4" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=0;strokeColor=#000000;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=block;" edge="1" parent="1" source="right-2" target="right-3">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-2" value="人机交互接口&#xa;LCD 串口屏&#xa;触摸/按键事件回传" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#d79b00;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="520" width="180" height="96" as="geometry"/>
+                </mxCell>
+                <mxCell id="5" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=0;strokeColor=#000000;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=block;" edge="1" parent="1" source="right-3" target="right-4">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-3" value="设备通信接口&#xa;电机 UART&#xa;脚踏 UART&#xa;调试/扩展串口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#d79b00;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="800" width="180" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="6" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=0;strokeColor=#000000;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=block;" edge="1" parent="1" source="right-4" target="right-5">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-4" value="存储与认证支撑&#xa;AT24Cxx EEPROM&#xa;CRC 校验 / 设备识别" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#6aa84f;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1120" width="180" height="96" as="geometry"/>
+                </mxCell>
+                <mxCell id="7" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;rounded=0;strokeColor=#000000;strokeWidth=5;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;endArrow=block;" edge="1" parent="1" source="right-5" target="right-6">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-5" value="安全机制&#xa;告警码、运行互锁&#xa;在线离线判定" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#c27ba0;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1410" width="180" height="96" as="geometry"/>
+                </mxCell>
+                <mxCell id="right-6" value="外设对象&#xa;手柄 / 脚踏 / 电机 / 泵&#xa;形成完整闭环控制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4CCCC;strokeColor=#8e7cc3;fontSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1670" width="180" height="96" as="geometry"/>
+                </mxCell>
+                <mxCell id="12" value="" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;shape=flexArrow;strokeColor=default;fillColor=#000000;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="sec2-box" target="sec3-box">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="690" y="400" as="sourcePoint"/>
+                        <mxPoint x="690" y="430" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="13" value="" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;shape=flexArrow;strokeColor=default;fillColor=#000000;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="sec3-box" target="sec4-box">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="700" y="410" as="sourcePoint"/>
+                        <mxPoint x="700" y="440" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="14" value="" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;shape=flexArrow;strokeColor=default;fillColor=#000000;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="sec4-box" target="sec5-box">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="680" y="960" as="sourcePoint"/>
+                        <mxPoint x="680" y="990" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="15" value="" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;shape=flexArrow;strokeColor=default;fillColor=#000000;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="sec5-box" target="result-box">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="680" y="1280" as="sourcePoint"/>
+                        <mxPoint x="680" y="1310" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
