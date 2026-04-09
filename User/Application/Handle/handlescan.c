@@ -105,7 +105,7 @@ extern UART_HandleTypeDef huart10;
 #define HANDLESCAN_DBG_STEP_OFFLINE           0x09U
 #define HANDLESCAN_DBG_STEP_ALARM_SET         0x0AU
 #define HANDLESCAN_DBG_STEP_I2C_DETAIL        0x0BU
-
+#define HANDLESCAN_DBG_STEP_TOOL_INFO         0x0CU//test
 /*
  * 手柄扫描状态机阶段定义。
  * A/B 两个通道都沿用这套阶段枚举，但各自维护独立的运行时变量，
