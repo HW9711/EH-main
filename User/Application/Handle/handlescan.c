@@ -454,6 +454,23 @@ static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
 }
 
 /*
+ * 判断当前识别出的通道是否应该同步更新 `Workvalue_s.hand_model`。
+ * 规则尽量保持保守：
+ * 1. 如果另一通道当前不在线，则允许当前通道刷新全局工作手柄型号；
+ * 2. 如果另一通道也在线，则只有当前通道正好是选中通道时才允许刷新；
+ * 3. 这样可以避免双通道同时在线时，后一次扫描把另一通道的工作型号覆盖掉。
+ */
+static uint8_t Handlescan_ShouldSyncGlobalHandModel(uint8_t channel)
+{
+    if (channel == 1U)
+    {
+        return (uint8_t)((Workvalue_s.Bchanell_online_flag == 0U) || (Workvalue_s.select_channel == 1U));
+    }
+
+    return (uint8_t)((Workvalue_s.Achanell_online_flag == 0U) || (Workvalue_s.select_channel == 2U));
+}
+
+/*
  * 把 EEPROM 认证返回码映射为系统报警码。
  * 当前策略如下：
  * 1. 认证阶段的失败统一映射为 `0x22`，包括页读取失败、页和校验失败、SN 读取失败以及 CRC 不匹配；
@@ -723,8 +740,11 @@ void HandlescanA_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        Workvalue_s.hand_model = mapped_model;              /* 更新当前全局工作手柄型号。 */
         ChannelValue_s.A.hand_model = mapped_model;         /* 把 A 通道记忆的手柄型号同步更新。 */
+        if (Handlescan_ShouldSyncGlobalHandModel(1U) != 0U)
+        {
+            Workvalue_s.hand_model = mapped_model;          /* 只在 A 通道应接管当前工作态时，同步全局工作手柄型号。 */
+        }
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
@@ -819,7 +839,7 @@ void HandlescanB_Fun_SSC(void)
             Workvalue_s.B_ShortCircuitRecognition_FLAG = 0U; /* 清除 B 通道短接成立标志。 */
             ChannelValue_s.B.hand_model = 0U;                /* 清空 B 通道当前记忆的手柄型号。 */
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 同步清空 B 通道刀具规格缓存。 */
-            Workvalue_s.ScreenKey_data = 26U;                /* 通知 UI：B 手柄已拔出。 */
+            Workvalue_s.ScreenKey_data = 27U;                /* 通知 UI：B 手柄已拔出。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
             (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
@@ -977,8 +997,11 @@ void HandlescanB_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        Workvalue_s.hand_model = mapped_model;              /* 更新当前全局工作手柄型号。 */
         ChannelValue_s.B.hand_model = mapped_model;         /* 更新 B 通道记忆的手柄型号。 */
+        if (Handlescan_ShouldSyncGlobalHandModel(2U) != 0U)
+        {
+            Workvalue_s.hand_model = mapped_model;          /* 只在 B 通道应接管当前工作态时，同步全局工作手柄型号。 */
+        }
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
@@ -1039,9 +1062,5 @@ void HandlescanTaskInit(void)
 	app_task_create(&HANDLESCANTaskHandle, HANDLESCANTaskFunc);
 	app_task_start(&HANDLESCANTaskHandle, APP_TASK_ALWAYS, 10);
 }
-
-
-
-
 
 
