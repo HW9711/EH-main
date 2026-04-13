@@ -4,7 +4,7 @@
  *        基于STM32 HAL库实现，不依赖CubeMX生成代码
  *        GPIO与时钟配置在本驱动内完成，不再依赖board.c/board.h中的I2C配置
  */
-#include "i2c.h"
+#include "bsp_i2c_bus.h"
 
 /* I2C2引脚定义：PB10(SCL,AF4) + PB3(SDA,AF9) */
 #define I2C2_SCL_PORT        GPIOB

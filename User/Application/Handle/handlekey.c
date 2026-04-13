@@ -1,14 +1,14 @@
 //handlekey.c
 
-#include "stm32f4xx_hal.h"
+#include "bsp_gpio.h"
 #include "handlekey.h"
 #include "data.h"
 #include "screen.h"
 //#include "adc.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 #include "datahand.h"
-task_t HANDLEKEYTaskHandle;
+kernel_task_t HANDLEKEYTaskHandle;
 
 //键值按下状态
 static bool sHandleKEYValue[2] = { false };
@@ -24,8 +24,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	switch (GPIO_Pin)
 	{
-		case GPIO_PIN_11 : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; //H_KEY1
-		case GPIO_PIN_10 : sHandleKEYValue[0] = (sHandleKEYValue[0] ? false : true); break; //H_KEY
+		case BOARD_RES_HANDLE_KEY1_PIN : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; //H_KEY1
+		case BOARD_RES_HANDLE_KEY0_PIN : sHandleKEYValue[0] = (sHandleKEYValue[0] ? false : true); break; //H_KEY
 		default : break;
 	}
 }
@@ -363,8 +363,8 @@ void HANDLEKEYTaskFunc(uint32_t event)
 void HandleKeyScan_Init(void)
 {
   /* definition and creation of HANDLEKEYTask */
-	app_task_create(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc);
-	app_task_start(&HANDLEKEYTaskHandle, APP_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc);
+	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);
 }
 
 

@@ -8,13 +8,13 @@
 #include "lcd.h"
 #include "datahand.h"
 #include "uart3.h"
-#include "board.h"
+#include "bsp_board.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t AUTOMODEGETDATATaskHandle;
-task_t AUTOMODEREADDATATaskHandle;
-task_t CUTTERSCANTaskHandle;
+kernel_task_t AUTOMODEGETDATATaskHandle;
+kernel_task_t AUTOMODEREADDATATaskHandle;
+kernel_task_t CUTTERSCANTaskHandle;
 
 static uint8_t ReciveOk = 0;
 static uint8_t EPCBuffold[20] = { 0 };
@@ -155,8 +155,8 @@ void AUTOMODEGETDATATaskFunc(uint32_t event)
 void SplitType_AutoModeGetData_Init(void)
 {
   /* definition and creation of AUTOMODEGETDATATask */
-	app_task_create(&AUTOMODEGETDATATaskHandle, AUTOMODEGETDATATaskFunc);
-	app_task_start(&AUTOMODEGETDATATaskHandle, APP_TASK_ALWAYS, 80);
+	Kernel_TaskCreate(&AUTOMODEGETDATATaskHandle, AUTOMODEGETDATATaskFunc);
+	Kernel_TaskStart(&AUTOMODEGETDATATaskHandle, KERNEL_TASK_ALWAYS, 80);
 }
 
 //============================================================================
@@ -1199,7 +1199,7 @@ void CUTTERSCANTaskFunc(uint32_t event)
 void SplitType_CutterScan_Init(void)
 {
   /* definition and creation of CUTTERSCANTask */
-	app_task_create(&CUTTERSCANTaskHandle, CUTTERSCANTaskFunc);
-	app_task_start(&CUTTERSCANTaskHandle, APP_TASK_ALWAYS, 100);
+	Kernel_TaskCreate(&CUTTERSCANTaskHandle, CUTTERSCANTaskFunc);
+	Kernel_TaskStart(&CUTTERSCANTaskHandle, KERNEL_TASK_ALWAYS, 100);
 }
 

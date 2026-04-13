@@ -3,7 +3,7 @@
 #define __AT24CS32_H
 
 #include "stm32f4xx_hal.h"
-#include "i2c.h"
+#include "bsp_i2c_bus.h"
 
 /*
  * AT24CS32 驱动说明

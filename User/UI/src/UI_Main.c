@@ -10,11 +10,11 @@
 #include "screen.h"
 #include "motor.h"
 #include "led.h"
-#include "board.h"
+#include "bsp_board.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t UIMAINTaskHandle;
+kernel_task_t UIMAINTaskHandle;
 
 //显示接口参数结构
 static UIInterface UIInterfaceData = { 0 };
@@ -563,8 +563,8 @@ void UIMAINTaskFunc(uint32_t event)
 void UIMain_RefreshTaskInit(void)
 {
   /* definition and creation of UIMAINTask */
-	app_task_create(&UIMAINTaskHandle, UIMAINTaskFunc);
-	app_task_start(&UIMAINTaskHandle, APP_TASK_ALWAYS, 50);
+	Kernel_TaskCreate(&UIMAINTaskHandle, UIMAINTaskFunc);
+	Kernel_TaskStart(&UIMAINTaskHandle, KERNEL_TASK_ALWAYS, 50);
 }
 
 

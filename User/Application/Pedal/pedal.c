@@ -6,16 +6,14 @@
 #include "delay.h"
 #include "data.h"
 #include "screen.h"
-#include "app_task.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "kernel_scheduler.h"
+#include "kernel_osal.h"
 
-task_t PEDALRECVTaskHandle;
+kernel_task_t PEDALRECVTaskHandle;
 
 static void PedalTaskDelayMs(uint32_t delay_ms)
 {
-	TickType_t lastWakeTime = xTaskGetTickCount();
-	vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(delay_ms));
+	Kernel_DelayUntilMs(delay_ms);
 }
 
 static uint8_t Pedal_StorageHDataCMD[8] = {0xFE, 0xEF, 0xD0, 0xB4,0xB8, 0xDF, 0x6C, 0x8B};
@@ -381,8 +379,8 @@ void PEDALRECVTaskFunc(uint32_t event)
 void PedalRecvTask_Init(void)
 {
   /* definition and creation of PEDALRECVTask */
-	app_task_create(&PEDALRECVTaskHandle, PEDALRECVTaskFunc);
-	app_task_start(&PEDALRECVTaskHandle, APP_TASK_ALWAYS, 3);
+	Kernel_TaskCreate(&PEDALRECVTaskHandle, PEDALRECVTaskFunc);
+	Kernel_TaskStart(&PEDALRECVTaskHandle, KERNEL_TASK_ALWAYS, 3);
 }
 
 

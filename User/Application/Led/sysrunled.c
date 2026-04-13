@@ -1,11 +1,11 @@
 //sysrunled.c
 
-#include "stm32f4xx_hal.h"
+#include "bsp_gpio.h"
 #include "sysrunled.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t LEDTaskHandle;
+kernel_task_t LEDTaskHandle;
 
 /* USER CODE BEGIN Header_LEDTaskFunc */
 /**
@@ -18,15 +18,15 @@ void LEDTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN LEDTaskFunc */
   /* Infinite loop */
-  HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_10);
+  Bsp_GpioToggle(BOARD_RES_STATE_LED_PORT, BOARD_RES_STATE_LED_PIN);
   /* USER CODE END LEDTaskFunc */
 }
 
 void LEDTaskInit(void)
 {
   /* definition and creation of LEDTask */
-  app_task_create(&LEDTaskHandle, LEDTaskFunc);
-  app_task_start(&LEDTaskHandle, APP_TASK_ALWAYS, 200);
+  Kernel_TaskCreate(&LEDTaskHandle, LEDTaskFunc);
+  Kernel_TaskStart(&LEDTaskHandle, KERNEL_TASK_ALWAYS, 200);
 }
 
 

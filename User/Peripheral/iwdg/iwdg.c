@@ -3,11 +3,11 @@
 #include "stm32f4xx_hal.h"
 #include "iwdg.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
 extern IWDG_HandleTypeDef hiwdg;
 
-task_t IWDGTaskHandle;
+kernel_task_t IWDGTaskHandle;
 
 void Iwdg_Init(void)
 {
@@ -38,6 +38,6 @@ void IwdgTaskFunc(uint32_t event)
 void IwdgTaskInit(void)
 {
   /* definition and creation of IWDGTask */
-  app_task_create(&IWDGTaskHandle, IwdgTaskFunc);
-  app_task_start(&IWDGTaskHandle, APP_TASK_ALWAYS, 300);
+  Kernel_TaskCreate(&IWDGTaskHandle, IwdgTaskFunc);
+  Kernel_TaskStart(&IWDGTaskHandle, KERNEL_TASK_ALWAYS, 300);
 }

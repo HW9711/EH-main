@@ -11,10 +11,10 @@
 #include "param.h"
 #include "pump.h"
 #include "datahand.h"
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t FOOTPEDALTaskHandle;
-task_t FootThrottleHandle;
+kernel_task_t FOOTPEDALTaskHandle;
+kernel_task_t FootThrottleHandle;
 
 //脚踏
 typedef struct PedalKeyTag
@@ -1485,8 +1485,8 @@ void FootThrottleTask(uint32_t event)
 void FootThrottleTask_Init(void)
 {
   /* definition and creation of FOOTPEDALTask */
-	app_task_create(&FootThrottleHandle, FootThrottleTask);
-	app_task_start(&FootThrottleHandle, APP_TASK_ALWAYS, 10);
+	Kernel_TaskCreate(&FootThrottleHandle, FootThrottleTask);
+	Kernel_TaskStart(&FootThrottleHandle, KERNEL_TASK_ALWAYS, 10);
 }
 
 void FootPedal_ConnectScan(void)
@@ -1733,8 +1733,8 @@ void FOOTPEDALTaskFunc(uint32_t event)
 void FootPedalTask_Init(void)
 {
   /* definition and creation of FOOTPEDALTask */
-	app_task_create(&FOOTPEDALTaskHandle, FOOTPEDALTaskFunc);
-	app_task_start(&FOOTPEDALTaskHandle, APP_TASK_ALWAYS, 25);
+	Kernel_TaskCreate(&FOOTPEDALTaskHandle, FOOTPEDALTaskFunc);
+	Kernel_TaskStart(&FOOTPEDALTaskHandle, KERNEL_TASK_ALWAYS, 25);
 }
 
 

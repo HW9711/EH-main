@@ -11,14 +11,14 @@
 #include "delay.h"
 //#include "adc.h"
 #include "pump.h"
-#include "board.h"
+#include "bsp_board.h"
 #include "drivectrl.h"
 #include "handlekey.h"
  
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t WARNERRSCANTaskHandle;
-task_t WARNSTATUSSCANTaskHandle;
+kernel_task_t WARNERRSCANTaskHandle;
+kernel_task_t WARNSTATUSSCANTaskHandle;
 
 static uint16_t KEY_ADC_time = 0;
 static uint8_t KEY_ADC_F = 0;
@@ -126,8 +126,8 @@ void WARNERRSCANTaskFunc(uint32_t event)
 void Warn_RunErrScanTask_Init(void)
 {
   /* definition and creation of WARNERRSCANTask */
-	app_task_create(&WARNERRSCANTaskHandle, WARNERRSCANTaskFunc);
-	app_task_start(&WARNERRSCANTaskHandle, APP_TASK_ALWAYS, 100);
+	Kernel_TaskCreate(&WARNERRSCANTaskHandle, WARNERRSCANTaskFunc);
+	Kernel_TaskStart(&WARNERRSCANTaskHandle, KERNEL_TASK_ALWAYS, 100);
 }
 
 //============================================================================
@@ -966,8 +966,8 @@ void WARNSTATUSSCANTaskFunc(uint32_t event)
 void Warn_StatusScanTask_Init(void)
 {
   /* definition and creation of WARNSTATUSSCANTask */
-	app_task_create(&WARNSTATUSSCANTaskHandle, WARNSTATUSSCANTaskFunc);
-	app_task_start(&WARNSTATUSSCANTaskHandle, APP_TASK_ALWAYS, 15);
+	Kernel_TaskCreate(&WARNSTATUSSCANTaskHandle, WARNSTATUSSCANTaskFunc);
+	Kernel_TaskStart(&WARNSTATUSSCANTaskHandle, KERNEL_TASK_ALWAYS, 15);
 }
 
 

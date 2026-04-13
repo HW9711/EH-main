@@ -1,8 +1,9 @@
 ﻿// handlescan.c
 
-#include "stm32f4xx_hal.h"
 #include "handlescan.h"
-#include "board.h"
+#include "bsp_board.h"
+#include "bsp_gpio.h"
+#include "bsp_uart.h"
 #include "data.h"
 #include "common.h"
 #include "OneWireI.h"
@@ -11,14 +12,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "screen.h"
-#include "app_task.h"
+#include "kernel_scheduler.h"
 #include "datahand.h"
 #include "at24cs32.h"
 #include "at24cs32_crc_verify.h"
 
-task_t HANDLESCANTaskHandle;
-
-extern UART_HandleTypeDef huart10;
+kernel_task_t HANDLESCANTaskHandle;
 
 /*
  * A 、B通道短接检测脚定义。
@@ -28,10 +27,10 @@ extern UART_HandleTypeDef huart10;
  * 3. 当前现场验证使用“低电平表示插入成立，高电平表示拔出候选”。
  * 后续所有插拔状态机都基于这个输入脚做边沿和去抖判断，因此如果硬件接线变更，只需要修改这里的宏。
  */
-#define HANDLESCAN_A_SHORT_GPIO               GPIOD
-#define HANDLESCAN_A_SHORT_PIN                GPIO_PIN_1
-#define HANDLESCAN_B_SHORT_GPIO               GPIOD
-#define HANDLESCAN_B_SHORT_PIN                GPIO_PIN_0
+#define HANDLESCAN_A_SHORT_GPIO               BOARD_RES_HANDLESCAN_A_SHORT_PORT
+#define HANDLESCAN_A_SHORT_PIN                BOARD_RES_HANDLESCAN_A_SHORT_PIN
+#define HANDLESCAN_B_SHORT_GPIO               BOARD_RES_HANDLESCAN_B_SHORT_PORT
+#define HANDLESCAN_B_SHORT_PIN                BOARD_RES_HANDLESCAN_B_SHORT_PIN
 
 /*
  * 手柄扫描任务的调度周期和状态机时间参数。
@@ -105,7 +104,6 @@ extern UART_HandleTypeDef huart10;
 #define HANDLESCAN_DBG_STEP_OFFLINE           0x09U
 #define HANDLESCAN_DBG_STEP_ALARM_SET         0x0AU
 #define HANDLESCAN_DBG_STEP_I2C_DETAIL        0x0BU
-#define HANDLESCAN_DBG_STEP_TOOL_INFO         0x0CU//test
 /*
  * 手柄扫描状态机阶段定义。
  * A/B 两个通道都沿用这套阶段枚举，但各自维护独立的运行时变量，
@@ -224,7 +222,7 @@ static void Handlescan_DebugTrace(uint8_t channel, uint8_t step, uint8_t value)
         text_len = (int)(sizeof(tx_buf) - 1U);
     }
 
-    HAL_UART_Transmit(&huart10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
+    Bsp_UartTransmit(BSP_UART_PORT_10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
 #else
     (void)channel;
     (void)step;
@@ -269,7 +267,7 @@ static void Handlescan_DebugTraceI2cDetail(uint8_t channel)
         text_len = (int)(sizeof(tx_buf) - 1U);
     }
 
-    HAL_UART_Transmit(&huart10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
+    Bsp_UartTransmit(BSP_UART_PORT_10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
 #else
     (void)channel;
 #endif
@@ -354,7 +352,7 @@ static void Handlescan_DebugTraceHandleName(uint8_t channel, uint8_t first_byte,
         text_len = (int)(sizeof(tx_buf) - 1U);
     }
 
-    HAL_UART_Transmit(&huart10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
+    Bsp_UartTransmit(BSP_UART_PORT_10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
 #else
     (void)channel;
     (void)first_byte;
@@ -401,7 +399,7 @@ static void Handlescan_DebugTraceToolInfo(uint8_t channel,
         text_len = (int)(sizeof(tx_buf) - 1U);
     }
 
-    HAL_UART_Transmit(&huart10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
+    Bsp_UartTransmit(BSP_UART_PORT_10, (uint8_t *)tx_buf, (uint16_t)text_len, 1000U);
 #else
     (void)channel;
     (void)first_byte;
@@ -546,7 +544,7 @@ void HandlescanA_Fun_SSC(void)
      * A 通道短接检测脚当前按“低电平表示插入成立”处理。
      * 因此这里读取到 `GPIO_PIN_RESET` 时，表示 A 通道已经检测到短接插入。
      */
-    is_inserted = (uint8_t)(HAL_GPIO_ReadPin(HANDLESCAN_A_SHORT_GPIO, HANDLESCAN_A_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 A 通道短接成立。 */
+    is_inserted = (uint8_t)(Bsp_GpioRead(HANDLESCAN_A_SHORT_GPIO, HANDLESCAN_A_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 A 通道短接成立。 */
 
     if (is_inserted == 0U)
     {
@@ -804,7 +802,7 @@ void HandlescanB_Fun_SSC(void)
      * B 通道短接检测脚同样按“低电平表示插入成立”处理。
      * 这里直接在 B 通道函数内实现，不再通过通用 helper 转发。
      */
-    is_inserted = (uint8_t)(HAL_GPIO_ReadPin(HANDLESCAN_B_SHORT_GPIO, HANDLESCAN_B_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 B 通道短接成立。 */
+    is_inserted = (uint8_t)(Bsp_GpioRead(HANDLESCAN_B_SHORT_GPIO, HANDLESCAN_B_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 B 通道短接成立。 */
 
     if (is_inserted == 0U)
     {
@@ -1059,8 +1057,6 @@ void HANDLESCANTaskFunc(uint32_t event)
 void HandlescanTaskInit(void)
 {
   /* definition and creation of HANDLESCANTask */
-	app_task_create(&HANDLESCANTaskHandle, HANDLESCANTaskFunc);
-	app_task_start(&HANDLESCANTaskHandle, APP_TASK_ALWAYS, 10);
+	Kernel_TaskCreate(&HANDLESCANTaskHandle, HANDLESCANTaskFunc);
+	Kernel_TaskStart(&HANDLESCANTaskHandle, KERNEL_TASK_ALWAYS, 10);
 }
-
-

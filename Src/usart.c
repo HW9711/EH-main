@@ -19,9 +19,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
-#include "../User/board/board.h"
 
 /* USER CODE BEGIN 0 */
+#include "bsp_board.h"
 
 /* USER CODE END 0 */
 

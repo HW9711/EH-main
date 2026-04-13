@@ -7,15 +7,15 @@
 #include "data.h"
 #include "lcd.h"
 #include "pump.h"
-#include "board.h" 
+#include "bsp_board.h" 
 #include "datahand.h"
-#include "app_task.h"
+#include "kernel_scheduler.h"
 #include "motor.h"
 
-task_t KeyBehaviorHandle;
-task_t PUMPBBehaviorHandle;
-task_t  FootKeyHandle;
-task_t  BeepHandle;
+kernel_task_t KeyBehaviorHandle;
+kernel_task_t PUMPBBehaviorHandle;
+kernel_task_t  FootKeyHandle;
+kernel_task_t  BeepHandle;
 
 static void PUMPBehavior(void);
 static void PumpScreenDebugPoint(uint16_t point, uint16_t value, uint8_t detail)
@@ -3508,8 +3508,8 @@ void BeepControlTask(uint32_t event)
 
 void  BeepControlTask_Init(void)
 {
-	app_task_create(&BeepHandle, BeepControlTask);
-	app_task_start(&BeepHandle, APP_TASK_ALWAYS, 10);
+	Kernel_TaskCreate(&BeepHandle, BeepControlTask);
+	Kernel_TaskStart(&BeepHandle, KERNEL_TASK_ALWAYS, 10);
 }
 
 //3按键按下，触发相应的功能（这里需要区分，机型）,50ms线程,有限制（比如报警状态下无效，在无手柄接入的状态下无效）,放在脚踏连接里面？？？
@@ -3636,8 +3636,8 @@ void FootKeyTask(uint32_t event)
 void FootKeyTask_Init(void)
 {
   /* definition and creation of HANDLEKEYTask */
-	app_task_create(&FootKeyHandle, FootKeyTask);
-	app_task_start(&FootKeyHandle, APP_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&FootKeyHandle, FootKeyTask);
+	Kernel_TaskStart(&FootKeyHandle, KERNEL_TASK_ALWAYS, 30);
 }
 
 
@@ -3651,8 +3651,8 @@ void KeyBehaviorTask(uint32_t event)
 void ScreenKeyTask_Init(void)
 {
   /* definition and creation of HANDLEKEYTask */
-	app_task_create(&KeyBehaviorHandle, KeyBehaviorTask);
-	app_task_start(&KeyBehaviorHandle, APP_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&KeyBehaviorHandle, KeyBehaviorTask);
+	Kernel_TaskStart(&KeyBehaviorHandle, KERNEL_TASK_ALWAYS, 30);
 }
 
 void PUMPBBehaviorTask(uint32_t event)
@@ -3665,8 +3665,8 @@ void PUMPBBehaviorTask(uint32_t event)
 void PUMPBTask_Init(void)
 {
   /* definition and creation of HANDLEKEYTask */
-	app_task_create(&PUMPBBehaviorHandle, PUMPBBehaviorTask);
-	app_task_start(&PUMPBBehaviorHandle, APP_TASK_ALWAYS, 100);
+	Kernel_TaskCreate(&PUMPBBehaviorHandle, PUMPBBehaviorTask);
+	Kernel_TaskStart(&PUMPBBehaviorHandle, KERNEL_TASK_ALWAYS, 100);
 }
 
 

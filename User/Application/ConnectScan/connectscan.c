@@ -5,9 +5,9 @@
 
 #include <stdint.h>
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t CONNECTSCANTaskHandle;
+kernel_task_t CONNECTSCANTaskHandle;
 
 //============================================================================
 // 函数名称: Connectscan_Fun()
@@ -64,8 +64,8 @@ void CONNECTSCANTaskFunc(uint32_t event)
 void ConnectscanTaskInit(void)
 {
   /* definition and creation of BEEPTask */
-  app_task_create(&CONNECTSCANTaskHandle, CONNECTSCANTaskFunc);
-  app_task_start(&CONNECTSCANTaskHandle, APP_TASK_ALWAYS, 20);
+  Kernel_TaskCreate(&CONNECTSCANTaskHandle, CONNECTSCANTaskFunc);
+  Kernel_TaskStart(&CONNECTSCANTaskHandle, KERNEL_TASK_ALWAYS, 20);
 }
 
 

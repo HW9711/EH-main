@@ -13,13 +13,13 @@
 
 #include <stdint.h>
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t MOTORCURRENTTaskHandle;
-task_t UIREFRESHDATATaskHandle;
-task_t MOTOR123TaskHandle;
+kernel_task_t MOTORCURRENTTaskHandle;
+kernel_task_t UIREFRESHDATATaskHandle;
+kernel_task_t MOTOR123TaskHandle;
 
-task_t MOTORJMITaskHandle;
+kernel_task_t MOTORJMITaskHandle;
 
 //static uint8_t STMotor_Flag = 0;//ssc屏蔽
 static uint8_t HandleAllowSwitchTime = 0;
@@ -84,8 +84,8 @@ void MOTORCURRENTTaskFunc(uint32_t event)
 void DriveCtrl_Motor1CurrentTask_Init(void)
 {
   /* definition and creation of BEEPTask */
-	app_task_create(&MOTORCURRENTTaskHandle, MOTORCURRENTTaskFunc);
-	app_task_start(&MOTORCURRENTTaskHandle, APP_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&MOTORCURRENTTaskHandle, MOTORCURRENTTaskFunc);
+	Kernel_TaskStart(&MOTORCURRENTTaskHandle, KERNEL_TASK_ALWAYS, 30);
 }
 
 //============================================================================
@@ -295,8 +295,8 @@ void UIREFRESHDATATaskFunc(uint32_t event)
 void DriveCtrl_UIRefreshDataTask_Init(void)
 {
   /* definition and creation of UIREFRESHDATATask */
-	app_task_create(&UIREFRESHDATATaskHandle, UIREFRESHDATATaskFunc);
-	app_task_start(&UIREFRESHDATATaskHandle, APP_TASK_ALWAYS, 100);
+	Kernel_TaskCreate(&UIREFRESHDATATaskHandle, UIREFRESHDATATaskFunc);
+	Kernel_TaskStart(&UIREFRESHDATATaskHandle, KERNEL_TASK_ALWAYS, 100);
 }
 
 //55Ms一次，原本
@@ -1175,8 +1175,8 @@ void MOTOR123TaskFunc(uint32_t event)
 void DriveCtrl_Motor123Task_Init(void)
 {
   /* definition and creation of MOTOR123Task */
-	app_task_create(&MOTOR123TaskHandle, MOTOR123TaskFunc);
-	app_task_start(&MOTOR123TaskHandle, APP_TASK_ALWAYS, 50);
+	Kernel_TaskCreate(&MOTOR123TaskHandle, MOTOR123TaskFunc);
+	Kernel_TaskStart(&MOTOR123TaskHandle, KERNEL_TASK_ALWAYS, 50);
 }
 
 
@@ -1227,8 +1227,8 @@ void MOTORHMITaskFunc(uint32_t event)
 void DriveCtrl_HMITask_Init(void)
 {
   /* definition and creation of MOTOR123Task */
-	app_task_create(&MOTORJMITaskHandle, MOTORHMITaskFunc);
-	app_task_start(&MOTORJMITaskHandle, APP_TASK_ALWAYS, 55);
+	Kernel_TaskCreate(&MOTORJMITaskHandle, MOTORHMITaskFunc);
+	Kernel_TaskStart(&MOTORJMITaskHandle, KERNEL_TASK_ALWAYS, 55);
 }
 
 

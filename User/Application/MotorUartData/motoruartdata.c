@@ -9,9 +9,9 @@
 #include "pump.h"
 #include <string.h>
 #include "lcd.h"
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t MOTORUARTTaskHandle;
+kernel_task_t MOTORUARTTaskHandle;
 
 //============================================================================
 //2.驱动板接收
@@ -237,8 +237,8 @@ void MOTORUARTTaskFunc(uint32_t event)
 void MotorUartData_Init(void)
 {
   /* definition and creation of MOTORUARTTask */
-	app_task_create(&MOTORUARTTaskHandle, MOTORUARTTaskFunc);
-	app_task_start(&MOTORUARTTaskHandle, APP_TASK_ALWAYS, 3);//3
+	Kernel_TaskCreate(&MOTORUARTTaskHandle, MOTORUARTTaskFunc);
+	Kernel_TaskStart(&MOTORUARTTaskHandle, KERNEL_TASK_ALWAYS, 3);//3
 }
 
 

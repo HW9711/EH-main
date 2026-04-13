@@ -4,26 +4,24 @@
 #include "delay.h"
 #include "pump.h"
 #include "data.h"
-#include "board.h"
+#include "bsp_board.h"
 #include "common.h"
 #include "uart5.h"
 #include "uart7.h"
 #include <stdint.h>
 #include "lcd.h"
-#include "app_task.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "kernel_scheduler.h"
+#include "kernel_osal.h"
 
 
 uint8_t pum_close_flag_A=0; 
 uint8_t pum_close_flag_B=0; 
-task_t PUMPTaskHandle;
-task_t PEDAL2PUMP5STaskHandle;
+kernel_task_t PUMPTaskHandle;
+kernel_task_t PEDAL2PUMP5STaskHandle;
 
 static void PumpTaskDelayMs(uint32_t delay_ms)
 {
-	TickType_t lastWakeTime = xTaskGetTickCount();
-	vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(delay_ms));
+	Kernel_DelayUntilMs(delay_ms);
 }
 
 void PumpDebugPoint(uint16_t point, uint16_t value, uint8_t detail)
@@ -200,8 +198,8 @@ void PUMPTaskFunc(uint32_t event)
 void Pump_RunTask_Init(void)
 {
   /* definition and creation of PUMPTask */
-	app_task_create(&PUMPTaskHandle, PUMPTaskFunc);
-	app_task_start(&PUMPTaskHandle, APP_TASK_ALWAYS, 50);
+	Kernel_TaskCreate(&PUMPTaskHandle, PUMPTaskFunc);
+	Kernel_TaskStart(&PUMPTaskHandle, KERNEL_TASK_ALWAYS, 50);
 }
 
 //============================================================================
@@ -645,8 +643,8 @@ void PEDAL2PUMP5STaskFunc(uint32_t event)
 void Pump_Pedal2Pump5sTask_Init(void)
 {
   /* definition and creation of PEDAL2PUMP5STask */
-	app_task_create(&PEDAL2PUMP5STaskHandle, PEDAL2PUMP5STaskFunc);
-	app_task_start(&PEDAL2PUMP5STaskHandle, APP_TASK_ALWAYS, 10);
+	Kernel_TaskCreate(&PEDAL2PUMP5STaskHandle, PEDAL2PUMP5STaskFunc);
+	Kernel_TaskStart(&PEDAL2PUMP5STaskHandle, KERNEL_TASK_ALWAYS, 10);
 }
 
 

@@ -2,7 +2,7 @@
 
 #include "stm32f4xx_hal.h"
 #include "beep.h"
-#include "board.h"
+#include "bsp_board.h"
 #include "data.h"
 
 #include "delay.h"

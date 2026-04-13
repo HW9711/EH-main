@@ -25,12 +25,13 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include "i2c.h"
+#include "bsp_i2c_bus.h"
 #include "lcd.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "userparser.h"
+#include "hw_bootstrap.h"
+#include "app_bootstrap.h"
 #include "beep.h"
 #include "data.h"
 #include "at24cs32_crc_verify.h"
@@ -115,8 +116,8 @@ int main(void)
   MX_TIM14_Init();
   MX_I2C_Init();
   /* USER CODE BEGIN 2 */
-
-  Userparser_Init();//
+  Hardware_PostInit();
+  App_Bootstrap_Init();
 
   /* USER CODE END 2 */
 

@@ -8,10 +8,10 @@
 #include "eeprom.h"
 #include "screen.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t SCREENKEYLONGTaskHandle;
-task_t SCREENKEYTaskHandle;
+kernel_task_t SCREENKEYLONGTaskHandle;
+kernel_task_t SCREENKEYTaskHandle;
 
 //============================================================================
 //1.屏”按键“
@@ -114,8 +114,8 @@ void SCREENKEYLONGTaskFunc(uint32_t event)
 void ScreenKey_LongPressTaskInit(void)
 {
   /* definition and creation of SCREENKEYLONGTask */
-	app_task_create(&SCREENKEYLONGTaskHandle, SCREENKEYLONGTaskFunc);
-	app_task_start(&SCREENKEYLONGTaskHandle, APP_TASK_ALWAYS, 150);
+	Kernel_TaskCreate(&SCREENKEYLONGTaskHandle, SCREENKEYLONGTaskFunc);
+	Kernel_TaskStart(&SCREENKEYLONGTaskHandle, KERNEL_TASK_ALWAYS, 150);
 }
 
 //============================================================================
@@ -823,8 +823,8 @@ void SCREENKEYTaskFunc(uint32_t event)
 void ScreenKey_ScanInit(void)
 {
   /* definition and creation of SCREENKEYTask */
-	app_task_create(&SCREENKEYTaskHandle, SCREENKEYTaskFunc);
-	app_task_start(&SCREENKEYTaskHandle, APP_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&SCREENKEYTaskHandle, SCREENKEYTaskFunc);
+	Kernel_TaskStart(&SCREENKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);
 }
 
 

@@ -2,7 +2,7 @@
 
 #include "stm32f4xx_hal.h"
 #include "led.h"
-#include "board.h"
+#include "bsp_board.h"
 
 void Led_HandleState(uint8_t st)
 {

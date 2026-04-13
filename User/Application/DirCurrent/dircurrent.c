@@ -4,9 +4,9 @@
 
 #include "data.h"
 
-#include "app_task.h"
+#include "kernel_scheduler.h"
 
-task_t DIRCURRENTTaskHandle;
+kernel_task_t DIRCURRENTTaskHandle;
 
 //============================================================================
 //峰岹驱动电流判断
@@ -138,8 +138,8 @@ void DIRCURRENTTaskFunc(uint32_t event)
 void DirCurrentTask_Judge_Init(void)
 {
   /* definition and creation of DIRCURRENTTask */
-	app_task_create(&DIRCURRENTTaskHandle, DIRCURRENTTaskFunc);
-	app_task_start(&DIRCURRENTTaskHandle, APP_TASK_ALWAYS, 13);
+	Kernel_TaskCreate(&DIRCURRENTTaskHandle, DIRCURRENTTaskFunc);
+	Kernel_TaskStart(&DIRCURRENTTaskHandle, KERNEL_TASK_ALWAYS, 13);
 }
 
 

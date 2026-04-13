@@ -8,14 +8,10 @@ virtualFolder:
   name: <virtual_root>
   files: []
   folders:
-    - name: Application
+    - name: Hardware
       files: []
       folders:
-        - name: MDK-ARM
-          files:
-            - path: ../MDK-ARM/startup_stm32f413xx.s
-          folders: []
-        - name: User
+        - name: CubeMX Generated
           files:
             - path: ../Src/main.c
             - path: ../Src/gpio.c
@@ -28,10 +24,23 @@ virtualFolder:
             - path: ../Src/stm32f4xx_hal_msp.c
             - path: ../Src/stm32f4xx_hal_timebase_tim.c
           folders: []
-    - name: Drivers
+        - name: Board
+          files:
+            - path: ../User/board/board.c
+          folders: []
+        - name: Bsp
+          files:
+            - path: ../User/Hardware/Bsp/hw_bootstrap.c
+            - path: ../User/Hardware/Bsp/bsp_uart.c
+          folders: []
+        - name: Startup
+          files:
+            - path: ../MDK-ARM/startup_stm32f413xx.s
+          folders: []
+    - name: Driver
       files: []
       folders:
-        - name: STM32F4xx_HAL_Driver
+        - name: Vendor HAL
           files:
             - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c
             - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c
@@ -53,14 +62,69 @@ virtualFolder:
             - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
             - path: ../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c
           folders: []
+        - name: Bus
+          files:
+            - path: ../User/Peripheral/bus/iic.c
+            - path: ../User/Peripheral/bus/i2c.c
+            - path: ../User/Peripheral/bus/OneWireI.c
+            - path: ../User/Peripheral/bus/OneWireII.c
+            - path: ../User/Peripheral/delay/delay.c
+            - path: ../User/Peripheral/uart/uart1.c
+            - path: ../User/Peripheral/uart/uart2.c
+            - path: ../User/Peripheral/uart/uart3.c
+            - path: ../User/Peripheral/uart/uart4.c
+            - path: ../User/Peripheral/uart/uart5.c
+            - path: ../User/Peripheral/uart/uart6.c
+            - path: ../User/Peripheral/uart/uart7.c
+          folders: []
+        - name: Device
+          files:
+            - path: ../User/Peripheral/EEPROM/eeprom.c
+            - path: ../User/Peripheral/EEPROM/at24cs32.c
+            - path: ../User/Peripheral/EEPROM/at24cs32_crc_verify.c
+            - path: ../User/Peripheral/flash/flash.c
+            - path: ../User/Peripheral/iwdg/iwdg.c
+            - path: ../User/Peripheral/lcd/lcd.c
+          folders: []
         - name: CMSIS
           files:
             - path: ../Src/system_stm32f4xx.c
           folders: []
-    - name: User
+    - name: Kernel
       files: []
       folders:
-        - name: Application
+        - name: RTOS Bridge
+          files:
+            - path: ../Src/app_task.c
+            - path: ../User/Kernel/Scheduler/kernel_entry.c
+            - path: ../User/Kernel/Scheduler/kernel_scheduler.c
+          folders: []
+        - name: FreeRTOS
+          files:
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/croutine.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/list.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/queue.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/tasks.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/timers.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
+            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/port.c
+          folders: []
+        - name: Legacy ColaOs
+          files:
+            - path: ../User/Cola_os/src/cola_os.c
+          folders: []
+    - name: Application
+      files: []
+      folders:
+        - name: Bootstrap
+          files:
+            - path: ../User/App/Bootstrap/app_bootstrap.c
+            - path: ../User/Application/Src/userparser.c
+          folders: []
+        - name: Modules
           files:
             - path: ../User/Application/Beep/beep.c
             - path: ../User/Application/Common/common.c
@@ -81,37 +145,15 @@ virtualFolder:
             - path: ../User/Application/ScreenKey/param.c
             - path: ../User/Application/ScreenKey/screenkey.c
             - path: ../User/Application/SplitType/splittype.c
-            - path: ../User/Application/Src/userparser.c
             - path: ../User/Application/Warn/warn.c
             - path: ../User/Application/Led/sysrunled.c
             - path: ../User/Application/Led/led.c
             - path: ../User/Application/SerialPortPro/Serialportpro.c
             - path: ../User/Application/DataHand/datahand.c
           folders: []
-        - name: Data
+        - name: State
           files:
             - path: ../User/Data/data.c
-          folders: []
-        - name: Peripheral
-          files:
-            - path: ../User/Peripheral/bus/iic.c
-            - path: ../User/Peripheral/bus/i2c.c
-            - path: ../User/Peripheral/bus/OneWireI.c
-            - path: ../User/Peripheral/bus/OneWireII.c
-            - path: ../User/Peripheral/delay/delay.c
-            - path: ../User/Peripheral/EEPROM/eeprom.c
-            - path: ../User/Peripheral/flash/flash.c
-            - path: ../User/Peripheral/iwdg/iwdg.c
-            - path: ../User/Peripheral/lcd/lcd.c
-            - path: ../User/Peripheral/uart/uart1.c
-            - path: ../User/Peripheral/uart/uart2.c
-            - path: ../User/Peripheral/uart/uart3.c
-            - path: ../User/Peripheral/uart/uart4.c
-            - path: ../User/Peripheral/uart/uart5.c
-            - path: ../User/Peripheral/uart/uart6.c
-            - path: ../User/Peripheral/uart/uart7.c
-            - path: ../User/Peripheral/EEPROM/at24cs32.c
-            - path: ../User/Peripheral/EEPROM/at24cs32_crc_verify.c
           folders: []
         - name: UI
           files:
@@ -121,41 +163,13 @@ virtualFolder:
             - path: ../User/UI/src/UI_Password.c
             - path: ../User/UI/src/UI_Start.c
           folders: []
-        - name: ColaOs
-          files:
-            - path: ../User/Cola_os/src/cola_os.c
-          folders: []
-        - name: RTOS
-          files:
-            - path: ../Src/app_task.c
-          folders: []
         - name: Doc
           files:
             - path: ../User/Doc/Note.h
           folders: []
-        - name: board
-          files:
-            - path: ../User/board/board.c
-          folders: []
     - name: ::CMSIS
       files: []
       folders: []
-    - name: Middlewares
-      files: []
-      folders:
-        - name: FreeRTOS
-          files:
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/croutine.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/list.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/queue.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/tasks.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/timers.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os2.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
-            - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/port.c
-          folders: []
 dependenceList: []
 outDir: build
 miscInfo:
@@ -172,6 +186,10 @@ targets:
         - ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
         - ../Drivers/CMSIS/Device/ST/STM32F4xx/Include
         - ../Drivers/CMSIS/Include
+        - ../User/Hardware/include
+        - ../User/Driver/include
+        - ../User/Kernel/include
+        - ../User/App/include
         - ../User/Application/include
         - ../User/Data
         - ../User/Peripheral/include
