@@ -204,7 +204,6 @@ void PedalRecv_Scan(void)
 
   uint16_t rlen = 0, i = 0;
   uint8_t dat[UART4_MAX_PACKET_SIZE] = { 0 }, dat1[UART4_MAX_PACKET_SIZE] = { 0 };
-	static uint8_t cleanr_M_value=0;
 
 
 	
@@ -314,7 +313,6 @@ void PedalRecv_Scan(void)
 						if((dat1[4] == 0xB2) && (dat1[5] == 0xee))//中
 						{
 							
-							cleanr_M_value=0;
 							SysFootPedalData.FootPedalMemoryMValue_Right = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];
 							//SysFootPedalData.FootPedalMemoryMValue_Right=SysFootPedalData.FootPedalMemoryHValue;
 						}

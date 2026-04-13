@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart2.h"
+#include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
 
@@ -14,20 +15,16 @@ static uint8_t Uart2_Flag_Last = 0;
 static uint16_t Uart2_RecvWaitTimeCnt = 0;
 static uint8_t Uart2_DMABuf[UART2_MAX_PACKET_SIZE] = { 0 };
 
-extern UART_HandleTypeDef huart2;
-
 static void Uart2_DMAConfiguration(void)
 {
 //	Delay_ms(300);
 
-  HAL_UART_Receive_DMA(&huart2, Uart2_DMABuf, UART2_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_2, Uart2_DMABuf, UART2_MAX_PACKET_SIZE);
 }
 
 void Uart2_Configuration(uint16_t baud)
 {
-  huart2.Init.BaudRate = baud;
-
-  if (HAL_UART_Init(&huart2) != HAL_OK)
+  if (Bsp_UartInit(BSP_UART_PORT_2, baud) != HAL_OK)
   {
     Error_Handler();
   }
@@ -36,9 +33,9 @@ void Uart2_Configuration(uint16_t baud)
 static void Uart2_DMAReset(void)
 {
 
-  HAL_UART_DMAStop(&huart2);
+  Bsp_UartDmaStop(BSP_UART_PORT_2);
   memset(Uart2_DMABuf, 0, UART2_MAX_PACKET_SIZE);
-  HAL_UART_Receive_DMA(&huart2, Uart2_DMABuf, UART2_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_2, Uart2_DMABuf, UART2_MAX_PACKET_SIZE);
   Uart2_RecvWaitTimeCnt = 0;
   Uart2_Flag_Last = UART2_MAX_PACKET_SIZE;
 
@@ -51,7 +48,7 @@ void Uart2_Init(void)
 
 void Uart2_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  HAL_UART_Transmit(&huart2, pData, Length, 100);
+  Bsp_UartTransmit(BSP_UART_PORT_2, pData, Length, 100);
 }
 
 uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
@@ -61,7 +58,7 @@ uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
 
   //------------------------------------------------------------------
   Uart2_RecvWaitTimeCnt++;
-  RemainLen = __HAL_DMA_GET_COUNTER(huart2.hdmarx);
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_2);
 
   if (RemainLen != Uart2_Flag_Last)
   {
@@ -90,7 +87,7 @@ uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
 
 void Uart2_DeInit(void)
 {
-  HAL_UART_DeInit(&huart2);
+  Bsp_UartDeInit(BSP_UART_PORT_2);
 }
 
 

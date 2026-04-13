@@ -451,7 +451,6 @@ void FootPedal_ConnectScanSSC(void)//25ms执行一次
 		static uint8_t  fall_repeat_flag=1;//重复值
 	static uint8_t	shake_times=0;
 	static uint8_t	fall_shake_times=0;
-	static uint8_t Memory_times=0;
 	static uint8_t Memory_times_d=0;
 	static uint8_t Memory_times_s=0;
 	

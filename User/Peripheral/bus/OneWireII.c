@@ -1,14 +1,14 @@
 //OneWireII.c
 
-#include "stm32f4xx_hal.h"
 #include "OneWireII.h"
+#include "bsp_gpio.h"
 #include "delay.h"
 #include "data.h"
 
-#define ONEWIREII_H()    GPIOD->BSRR = GPIO_PIN_12
-#define ONEWIREII_L()    GPIOD->BSRR = (uint32_t)GPIO_PIN_12 << 16U
+#define ONEWIREII_H()    Bsp_GpioWrite(BOARD_RES_ONEWIRE_II_PORT, BOARD_RES_ONEWIRE_II_PIN, GPIO_PIN_SET)
+#define ONEWIREII_L()    Bsp_GpioWrite(BOARD_RES_ONEWIRE_II_PORT, BOARD_RES_ONEWIRE_II_PIN, GPIO_PIN_RESET)
 
-#define ONEWIREII_STAT   HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_12)
+#define ONEWIREII_STAT   Bsp_GpioRead(BOARD_RES_ONEWIRE_II_PORT, BOARD_RES_ONEWIRE_II_PIN)
 
 //1-Wire
 //============================================================================

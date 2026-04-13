@@ -1,16 +1,16 @@
 //iic.c
 
-#include "stm32f4xx_hal.h"
 #include "iic.h"
+#include "bsp_gpio.h"
 #include "delay.h"
 
-#define SCL_H()    GPIOC->BSRR = GPIO_PIN_4
-#define SCL_L()    GPIOC->BSRR = (uint32_t)GPIO_PIN_4 << 16U
+#define SCL_H()    Bsp_GpioWrite(BOARD_RES_SOFT_IIC_SCL_PORT, BOARD_RES_SOFT_IIC_SCL_PIN, GPIO_PIN_SET)
+#define SCL_L()    Bsp_GpioWrite(BOARD_RES_SOFT_IIC_SCL_PORT, BOARD_RES_SOFT_IIC_SCL_PIN, GPIO_PIN_RESET)
 
-#define SDA_H()    GPIOC->BSRR = GPIO_PIN_5
-#define SDA_L()    GPIOC->BSRR = (uint32_t)GPIO_PIN_5 << 16U
+#define SDA_H()    Bsp_GpioWrite(BOARD_RES_SOFT_IIC_SDA_PORT, BOARD_RES_SOFT_IIC_SDA_PIN, GPIO_PIN_SET)
+#define SDA_L()    Bsp_GpioWrite(BOARD_RES_SOFT_IIC_SDA_PORT, BOARD_RES_SOFT_IIC_SDA_PIN, GPIO_PIN_RESET)
 
-#define SDA_STAT   (GPIOC->IDR & GPIO_PIN_5)
+#define SDA_STAT   Bsp_GpioRead(BOARD_RES_SOFT_IIC_SDA_PORT, BOARD_RES_SOFT_IIC_SDA_PIN)
 
 //IIC
 //============================================================================

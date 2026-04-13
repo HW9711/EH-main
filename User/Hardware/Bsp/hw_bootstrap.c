@@ -1,6 +1,13 @@
 #include "hw_bootstrap.h"
+#include "bsp_board.h"
+#include "bsp_i2c_bus.h"
 
 void Hardware_PostInit(void)
 {
-    /* Phase 1 keeps all hardware bootstrap inside CubeMX-generated init order. */
+    MX_I2C_Init();
+}
+
+void Hardware_BoardGpioInit(void)
+{
+    Board_GPIOConfiguration();
 }

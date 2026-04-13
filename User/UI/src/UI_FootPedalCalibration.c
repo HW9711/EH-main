@@ -24,9 +24,6 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	static uint8_t r_k_v=0;
 	static uint16_t read_times=0;
 	static uint8_t write_foot_key_time=0;
-  uint8_t ReadHLValueFlag = 0;
-  uint8_t temp = 0, TimeCnt = 0;
-	uint8_t KEY1Flag = 0,KEY2Flag = 0,KEY3Flag = 0 ;
 //  LCD_Show_4byte_Number(0x3700, 0);
 //	LCD_Show_4byte_Number(0x3710, 0);
 //	LCD_Show_4byte_Number(0x3720, 0);

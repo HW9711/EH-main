@@ -25,7 +25,6 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include "bsp_i2c_bus.h"
 #include "lcd.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -109,12 +108,11 @@ int main(void)
   MX_UART7_Init();
   MX_UART8_Init();
   MX_UART10_Init();
-  /* Keep IWDG disabled to match the reference Cola_os project. */
+  /* Keep IWDG disabled to match the current reference firmware behavior. */
   /* MX_IWDG_Init(); */
   MX_TIM7_Init();
   MX_TIM10_Init();
   MX_TIM14_Init();
-  MX_I2C_Init();
   /* USER CODE BEGIN 2 */
   Hardware_PostInit();
   App_Bootstrap_Init();

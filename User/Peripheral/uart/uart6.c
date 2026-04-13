@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart6.h"
+#include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
 
@@ -14,20 +15,16 @@ static uint8_t Uart6_Flag_Last = 0;
 static uint16_t Uart6_RecvWaitTimeCnt = 0;
 static uint8_t Uart6_DMABuf[UART6_MAX_PACKET_SIZE] = { 0 };
 
-extern UART_HandleTypeDef huart6;
-
 static void Uart6_DMAConfiguration(void)
 {
 //	Delay_ms(300);
 
-  HAL_UART_Receive_DMA(&huart6, Uart6_DMABuf, UART6_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_6, Uart6_DMABuf, UART6_MAX_PACKET_SIZE);
 }
 
 void Uart6_Configuration(uint16_t baud)
 {
-  huart6.Init.BaudRate = baud;
-
-  if (HAL_UART_Init(&huart6) != HAL_OK)
+  if (Bsp_UartInit(BSP_UART_PORT_6, baud) != HAL_OK)
   {
     Error_Handler();
   }
@@ -36,9 +33,9 @@ void Uart6_Configuration(uint16_t baud)
 static void Uart6_DMAReset(void)
 {
 
-  HAL_UART_DMAStop(&huart6);
+  Bsp_UartDmaStop(BSP_UART_PORT_6);
   memset(Uart6_DMABuf, 0, UART6_MAX_PACKET_SIZE);
-  HAL_UART_Receive_DMA(&huart6, Uart6_DMABuf, UART6_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_6, Uart6_DMABuf, UART6_MAX_PACKET_SIZE);
   Uart6_RecvWaitTimeCnt = 0;
   Uart6_Flag_Last = UART6_MAX_PACKET_SIZE;
 
@@ -52,7 +49,7 @@ void Uart6_Init(void)
 
 void Uart6_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  HAL_UART_Transmit(&huart6, pData, Length, 3);
+  Bsp_UartTransmit(BSP_UART_PORT_6, pData, Length, 3);
 	
 }
 
@@ -63,7 +60,7 @@ uint16_t Uart6_DMARecvDataPeek(uint8_t *data)
 
   //------------------------------------------------------------------
   Uart6_RecvWaitTimeCnt++;
-  RemainLen = __HAL_DMA_GET_COUNTER(huart6.hdmarx);
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_6);
 
   if (RemainLen != Uart6_Flag_Last)
   {
@@ -92,7 +89,7 @@ uint16_t Uart6_DMARecvDataPeek(uint8_t *data)
 
 void Uart6_DeInit(void)
 {
-  HAL_UART_DeInit(&huart6);
+  Bsp_UartDeInit(BSP_UART_PORT_6);
 }
 
 

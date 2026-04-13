@@ -699,8 +699,6 @@ void SpeicInformUpdata(uint8_t updata_style)
 			break;
 		case 3: //手动识别，磨头（清楚规格显示），显示刀具刨刀图片
 			break;
-		
-			break;
 	}
 }
 
@@ -1664,8 +1662,6 @@ uint8_t  APump(uint8_t pump_data)
 {
 	uint8_t temp1;
 	if(pump_data>70)pump_data=70;
-	if(pump_data<0)pump_data=0;
-	
 //	if(pump_data>65&&pump_data<=70)
 //				temp1=(uint32_t )pump_data*(pump_data*0.02+2.1);//注水
 	 if(pump_data>60&&pump_data<=70)    
@@ -3453,8 +3449,6 @@ void BeepControl()
 {
 	static uint8_t times=0;
 	static uint16_t Alarmtimes=0;
-	static uint8_t negation_flag=1;
-
 	if(KeyBeep_flag&&!Workvalue_s.beep_Alarm_flag)
 	{
 		 BEEP_ON();
@@ -4062,7 +4056,6 @@ void UIGetKey( uint8_t insert_flag, uint8_t extract_flag,uint8_t key_value)
 void SscDisplayManage()
 {
 	uint8_t ui_interOperation_sign=0;//内操作
-	static	uint8_t ui_interOperation_sign_compare=0;
 	static uint8_t handChannel_compare=0;
 	if(UIStateControl_s.Handel_switch_flag)//总的切换时候
 	{
@@ -6033,7 +6026,6 @@ void Screen_TipInfo_Update(uint8_t TipID)
 //============================================================================
 void Screen_WindowSwitch_Update(int8_t Num1, uint8_t Num2)
 {
-  uint16_t Temp0 = 0;
 	switch (Num1)
   {
 	  case 0 :

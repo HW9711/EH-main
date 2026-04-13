@@ -127,7 +127,7 @@ void ScreenKey_LongPressTaskInit(void)
 //============================================================================
 void ScreenKey_ParamSet(void)
 {
-  uint8_t OnLineCnt = 0, index = 0;
+  uint8_t index = 0;
 
   if (SysRunData.MotorNum == MotorNone)  //当前无被选中的电机
   {

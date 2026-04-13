@@ -302,13 +302,10 @@ void DriveCtrl_UIRefreshDataTask_Init(void)
 //55Ms一次，原本
 void MotorControlSSC()
 {
-	static uint8_t stop_channel=0;
 	static uint8_t	stop_channel_value=0;
 	static uint8_t un_ex=0;
-	uint32_t MX_YIM_play_speed=0;
 	uint32_t handle_speeds=0;
 	uint8_t temp1=0;
-	static uint8_t stop_counts=0;
 	uint8_t zhengsuqufan=0;
 
 
@@ -346,10 +343,8 @@ void MotorControlSSC()
 		
 			if(Workvalue_s.hand_model==PX_YIP_ONLINE||Workvalue_s.hand_model==PX_YIM_ONLINE)
 				{
-					stop_channel=1;
 				}
 				else{
-				stop_channel=0;
 				}
 				
 				
@@ -372,7 +367,6 @@ void MotorControlSSC()
 				handle_speeds=Workvalue_s.MotorRealSpeed;
 			}
 			un_ex=1;
-			stop_counts=0;
 			speeddisplay(1,handle_speeds*10 );
 
 		

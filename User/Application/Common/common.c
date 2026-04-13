@@ -159,24 +159,24 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
   {
 		if(is_Irrigate_FLAG)
 		{
-				temp1=(uint32_t )(temp*0.58);//灌注
+				temp1=(uint32_t )(temp*0.58f);//灌注
 		}
 		else
 		{
 			if(temp>65&&temp<=70)
-				temp1=(uint32_t )temp*(temp*0.02+2.1);//注水
+				temp1=(uint32_t )temp*(temp*0.02f+2.1f);//注水
 			
 				else if(temp>=45&&temp<=65)    
-				temp1=(uint32_t )(temp-10)*(temp*0.02+2.1);
+				temp1=(uint32_t )(temp-10)*(temp*0.02f+2.1f);
 				
 				else if(temp>=40&&temp<45)
-				temp1=(uint32_t )(temp-5)*(temp*0.02+2.1);
+				temp1=(uint32_t )(temp-5)*(temp*0.02f+2.1f);
 				
 				else if(temp>=30&&temp<40)
-				temp1=(uint32_t )(temp-3)*(temp*0.02+2.3);
+				temp1=(uint32_t )(temp-3)*(temp*0.02f+2.3f);
 				
 				else 
-					temp1 = (uint32_t )(temp*2.5);	
+					temp1 = (uint32_t )(temp*2.5f);	
 		}
 		
 //		   

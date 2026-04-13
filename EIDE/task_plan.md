@@ -19,9 +19,9 @@
 | 7 | completed | 将 `screen`、`drivectrl`、`handlescan` 等业务任务切到 `kernel_scheduler`/`kernel_osal` 接口 |
 | 8 | completed | 建立 `board_profile`、`board_resource_map`、`bsp_gpio`、`bsp_uart`、`bsp_i2c_bus` 稳定壳层 |
 | 9 | in_progress | 持续收敛应用层、驱动层中的 GPIO/UART/Board 初始化直连 |
-| 10 | pending | 统一 `uart1~uart7` 包装实现 |
-| 11 | pending | 收敛 `OneWire`、`iic`、`i2c` 等底层总线实现 |
-| 12 | pending | 将 `Board_GPIOConfiguration()` 收口进 `hw_bootstrap` 内部 |
+| 10 | in_progress | `uart1~uart7` 已切到 `bsp_uart` 壳层，后续再决定是否继续物理合并 |
+| 11 | in_progress | `OneWire/iic` 已切到 `bsp_gpio` 资源映射；`i2c` 后续继续收口层次 |
+| 12 | completed | 已将应用层的 `Board_GPIOConfiguration()` 调用收口进 `hw_bootstrap` |
 
 ## 下一步顺序
 
@@ -35,3 +35,11 @@
 - `handlescan.c` 编码敏感。只做最小修改。保持中文注释清晰可读。
 - 仓库已有用户历史改动。不得覆盖无关内容。
 - 当前验证以增量编译为主。后续需补完整链接闭环记录。
+## Additional External Module Track
+
+- Phase X1: review `D:\EH_main\soft\soft_SSC` module set and classify layer ownership
+  - status: completed
+- Phase X2: map overlap with current project modules and identify symbol/conflict risk
+  - status: completed
+- Phase X3: prepare merge strategy for selective integration into current architecture
+  - status: pending

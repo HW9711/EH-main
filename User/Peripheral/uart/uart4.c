@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart4.h"
+#include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
 
@@ -14,20 +15,16 @@ static uint8_t Uart4_Flag_Last = 0;
 static uint16_t Uart4_RecvWaitTimeCnt = 0;
 static uint8_t Uart4_DMABuf[UART4_MAX_PACKET_SIZE] = { 0 };
 
-extern UART_HandleTypeDef huart4;
-
 static void Uart4_DMAConfiguration(void)
 {
 //	Delay_ms(300);
 
-  HAL_UART_Receive_DMA(&huart4, Uart4_DMABuf, UART4_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_4, Uart4_DMABuf, UART4_MAX_PACKET_SIZE);
 }
 
 void Uart4_Configuration(uint16_t baud)
 {
-  huart4.Init.BaudRate = baud;
-
-  if (HAL_UART_Init(&huart4) != HAL_OK)
+  if (Bsp_UartInit(BSP_UART_PORT_4, baud) != HAL_OK)
   {
     Error_Handler();
   }
@@ -36,9 +33,9 @@ void Uart4_Configuration(uint16_t baud)
 static void Uart4_DMAReset(void)
 {
 
-  HAL_UART_DMAStop(&huart4);
+  Bsp_UartDmaStop(BSP_UART_PORT_4);
   memset(Uart4_DMABuf, 0, UART4_MAX_PACKET_SIZE);
-  HAL_UART_Receive_DMA(&huart4, Uart4_DMABuf, UART4_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_4, Uart4_DMABuf, UART4_MAX_PACKET_SIZE);
   Uart4_RecvWaitTimeCnt = 0;
   Uart4_Flag_Last = UART4_MAX_PACKET_SIZE;
 
@@ -51,7 +48,7 @@ void Uart4_Init(void)
 
 void Uart4_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  HAL_UART_Transmit(&huart4, pData, Length, 100);
+  Bsp_UartTransmit(BSP_UART_PORT_4, pData, Length, 100);
 	
 }
 
@@ -62,7 +59,7 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
 
   //------------------------------------------------------------------
   Uart4_RecvWaitTimeCnt++;
-  RemainLen = __HAL_DMA_GET_COUNTER(huart4.hdmarx);
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_4);
 
   if (RemainLen != Uart4_Flag_Last)
   {
@@ -91,7 +88,7 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
 
 void Uart4_DeInit(void)
 {
-  HAL_UART_DeInit(&huart4);
+  Bsp_UartDeInit(BSP_UART_PORT_4);
 }
 
 

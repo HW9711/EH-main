@@ -41,6 +41,9 @@ extern IWDG_HandleTypeDef hiwdg;
 void MX_IWDG_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+void Iwdg_Init(void);
+void Iwdg_Reset(void);
+void IwdgTaskInit(void);
 
 /* USER CODE END Prototypes */
 

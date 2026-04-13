@@ -76,7 +76,6 @@ uint16_t PumpStartUp[25] =
 //============================================================================
 void Pump_SetSpeed_B(uint32_t s)
 {
-	uint8_t sendResult;
 	//ssc  加上标志位
 	if(s)
 	{
@@ -100,10 +99,10 @@ void Pump_SetSpeed_B(uint32_t s)
 		dat[5] = 0xAA;
 		//PumpDebugPoint((s > 0U) ? 301U : 302U, (uint16_t)s, dat[3]);
 
-		sendResult = Uart7_SendPacket(dat, 6);
+		Uart7_SendPacket(dat, 6);
 		//PumpDebugPoint(sendResult ? 311U : 312U, (uint16_t)s, dat[3]);
 		PumpTaskDelayMs(10);
-		sendResult = Uart7_SendPacket(dat, 6);
+		Uart7_SendPacket(dat, 6);
 		//PumpDebugPoint(sendResult ? 321U : 322U, (uint16_t)s, dat[3]);
 	
   //2.有流量

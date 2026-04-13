@@ -19,7 +19,6 @@ kernel_task_t CUTTERSCANTaskHandle;
 static uint8_t ReciveOk = 0;
 static uint8_t EPCBuffold[20] = { 0 };
 static uint8_t DJoldVLHZ = 0;
-static uint8_t ssc_shoudong_uiflag=0;
 static uint8_t ssc_shoudong_rfidflag=0;
 uint8_t  SplitType_AutoModeDataRead_Task(uint8_t beep_flag);
 
@@ -29,7 +28,6 @@ void SplitType_AutoModeGetData_Task(void)         //Check_Connect(void)
 	static uint8_t switch_sign=0;
 	static uint8_t	mutual_exclusion_flag=1;
   static uint8_t EPC_Send_time = 0;
-  static uint8_t InterfaceSwitchNo2Last = 0;
 	static uint8_t  error_times=0;
   uint8_t NO_MASK3_READ_USER[16] = {0xBB, 0x00, 0x39, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x08, 0x4d, 0x7E}; //无掩码读取USER
 
@@ -171,7 +169,7 @@ uint8_t SplitType_AutoModeDataRead_Task(uint8_t beep_flag)
 	
   uint16_t crc = 0;
   uint8_t rlen = 0;
-  uint8_t EPCresult = 0, index = 0;
+  uint8_t EPCresult = 0;
   uint8_t dat[UART3_MAX_PACKET_SIZE] = { 0 }, buf[20] = { 0 };
 
   //读取串口数据
@@ -185,8 +183,6 @@ uint8_t SplitType_AutoModeDataRead_Task(uint8_t beep_flag)
 	  crc = Common_Crc16(buf, 14);	 //刀具数据CRC计算
 	  if (crc == ((buf[14] << 8) + buf[15]))
 	  {
-	    index = SysInterface.InterfaceSwitchNo2 - 1;
-
 	    Common_CopyData(buf, paoxueSpeciValue_F, 16);
 
 			//最新接收数据的CRC与上一次的CRC进行对比判断
@@ -224,6 +220,8 @@ uint8_t SplitType_AutoModeDataRead_Task(uint8_t beep_flag)
 			return 1;
 	  }
   }
+
+  return 0;
 }
 
 /* USER CODE BEGIN Header_AUTOMODEREADDATATaskFunc */
@@ -599,7 +597,6 @@ void SplitType_ConnectUpdata_Task(void)         //Check_Connect(void)
 
  	    if (DJoldVLHZ == 1)
 	    {
-				ssc_shoudong_uiflag=0;
 		    SysSetParam[index1].MaxMotorSpeed = SysHandleData.EPCBuffAA[index][8] * 500;
 		    SysSetParam[index1].StartMotorSpeed = SysHandleData.EPCBuffAA[index][9] * 500;
 
@@ -680,7 +677,6 @@ void SplitType_ConnectUpdata_Task(void)         //Check_Connect(void)
 
  	    if (DJoldVLHZ == 1)
 	    {
-					ssc_shoudong_uiflag=0;
 	      SysSetParam[index1].MaxMotorSpeed = SysHandleData.EPCBuffAA[index][8] * 500;
 		    SysSetParam[index1].StartMotorSpeed = SysHandleData.EPCBuffAA[index][9] * 500;
 
@@ -900,8 +896,6 @@ void SplitType_ConnectUpdata_Task(void)         //Check_Connect(void)
 void SplitType_ManualUIUpdata_Task(void)         //Check_Connect(void)
 {
   uint8_t index = 0;
-	ssc_shoudong_uiflag=1;
-
   if(SysRunData.DJManualRefreshFlag != 1)
 	  return ;
 

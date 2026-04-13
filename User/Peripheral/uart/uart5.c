@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart5.h"
+#include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
 //#include "data.h"
@@ -16,20 +17,16 @@ static uint8_t Uart5_Flag_Last = 0;
 static uint16_t Uart5_RecvWaitTimeCnt = 0;
 static uint8_t Uart5_DMABuf[UART5_MAX_PACKET_SIZE] = { 0 };
 
-extern UART_HandleTypeDef huart5;
-
 static void Uart5_DMAConfiguration(void)
 {
 //	Delay_ms(300);
 
-  HAL_UART_Receive_DMA(&huart5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
 }
 
 void Uart5_Configuration(uint16_t baud)
 {
-  huart5.Init.BaudRate = baud;
-
-  if (HAL_UART_Init(&huart5) != HAL_OK)
+  if (Bsp_UartInit(BSP_UART_PORT_5, baud) != HAL_OK)
   {
     Error_Handler();
   }
@@ -38,9 +35,9 @@ void Uart5_Configuration(uint16_t baud)
 static void Uart5_DMAReset(void)
 {
 
-  HAL_UART_DMAStop(&huart5);
+  Bsp_UartDmaStop(BSP_UART_PORT_5);
   memset(Uart5_DMABuf, 0, UART5_MAX_PACKET_SIZE);
-  HAL_UART_Receive_DMA(&huart5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
   Uart5_RecvWaitTimeCnt = 0;
   Uart5_Flag_Last = UART5_MAX_PACKET_SIZE;
 
@@ -53,7 +50,7 @@ void Uart5_Init(void)
 
 void Uart5_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  HAL_UART_Transmit(&huart5, pData, Length, 100);
+  Bsp_UartTransmit(BSP_UART_PORT_5, pData, Length, 100);
 }
 
 uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
@@ -63,7 +60,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 
   //------------------------------------------------------------------
   Uart5_RecvWaitTimeCnt++;
-  RemainLen = __HAL_DMA_GET_COUNTER(huart5.hdmarx);
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_5);
 
   if (RemainLen != Uart5_Flag_Last)
   {
@@ -92,7 +89,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 
 void Uart5_DeInit(void)
 {
-  HAL_UART_DeInit(&huart5);
+  Bsp_UartDeInit(BSP_UART_PORT_5);
 }
 
 #if 0

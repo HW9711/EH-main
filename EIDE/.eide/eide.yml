@@ -112,10 +112,6 @@ virtualFolder:
             - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
             - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/port.c
           folders: []
-        - name: Legacy ColaOs
-          files:
-            - path: ../User/Cola_os/src/cola_os.c
-          folders: []
     - name: Application
       files: []
       folders:
@@ -194,7 +190,6 @@ targets:
         - ../User/Data
         - ../User/Peripheral/include
         - ../User/UI/include
-        - ../User/Cola_os/inc
         - ../Middlewares/Third_Party/FreeRTOS/Source/include
         - ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
         - ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F

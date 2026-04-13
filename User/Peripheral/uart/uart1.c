@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart1.h"
+#include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
 
@@ -14,20 +15,16 @@ static uint8_t Uart1_Flag_Last = 0;
 static uint16_t Uart1_RecvWaitTimeCnt = 0;
 static uint8_t Uart1_DMABuf[UART1_MAX_PACKET_SIZE] = { 0 };
 
-extern UART_HandleTypeDef huart1;
-
 static void Uart1_DMAConfiguration(void)
 {
 //	Delay_ms(300);
 
-  HAL_UART_Receive_DMA(&huart1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
 }
 
 void Uart1_Configuration(uint16_t baud)
 {
-  huart1.Init.BaudRate = baud;
-
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+  if (Bsp_UartInit(BSP_UART_PORT_1, baud) != HAL_OK)
   {
 	  Error_Handler();
   }
@@ -36,9 +33,9 @@ void Uart1_Configuration(uint16_t baud)
 static void Uart1_DMAReset(void)
 {
 
-  HAL_UART_DMAStop(&huart1);
+  Bsp_UartDmaStop(BSP_UART_PORT_1);
   memset(Uart1_DMABuf, 0, UART1_MAX_PACKET_SIZE);
-  HAL_UART_Receive_DMA(&huart1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
+  Bsp_UartReceiveDma(BSP_UART_PORT_1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
   Uart1_RecvWaitTimeCnt = 0;
   Uart1_Flag_Last = UART1_MAX_PACKET_SIZE;
 
@@ -51,7 +48,7 @@ void Uart1_Init(void)
 
 void Uart1_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  HAL_UART_Transmit(&huart1, pData, Length, 100);
+  Bsp_UartTransmit(BSP_UART_PORT_1, pData, Length, 100);
 //	HAL_Delay(20);
 }
 
@@ -69,7 +66,7 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
   // 增加接收等待计数器，用于超时判断
   Uart1_RecvWaitTimeCnt++;
   // 获取DMA当前剩余计数器的值
-  RemainLen = __HAL_DMA_GET_COUNTER(huart1.hdmarx);
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_1);
 
   // 判断剩余数据长度是否发生变化
   if (RemainLen != Uart1_Flag_Last)
@@ -107,7 +104,7 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
 
 void Uart1_DeInit(void)
 {
-  HAL_UART_DeInit(&huart1);
+  Bsp_UartDeInit(BSP_UART_PORT_1);
 }
 
 

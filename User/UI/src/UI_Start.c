@@ -22,7 +22,7 @@
 //============================================================================
 void UI_Start_Fun(void)
 {
-  uint8_t TimeCnt = 0, AllowNextStep = 0, retWhile = 1;
+  uint8_t TimeCnt = 0;
   uint16_t DelayTime = 2000;
 
   while (DelayTime--)

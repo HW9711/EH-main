@@ -23,7 +23,6 @@ kernel_task_t MOTORUARTTaskHandle;
 //============================================================================
 void BrushedMotorUartData_ReceiveData(void)
 {
-	uint16_t CRC_Check_Vaule=0;
   uint8_t rlen = 0, i = 0;
   uint8_t dat[UART2_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
 

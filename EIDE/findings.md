@@ -57,3 +57,41 @@
 2. 收敛 `OneWire / iic / i2c`
 3. 将 `Board_GPIOConfiguration()` 收口进 `hw_bootstrap`
 4. 再进入运行态模型统一与大模块拆分
+
+## 2026-04-13 新发现
+
+- `uart1~uart7.c` 原实现高度模板化，主要差异只有：
+  - 端口号
+  - DMA 缓冲区大小
+  - 发送超时
+  - `uart7` 的异常恢复路径
+- 当前最稳妥重构方式不是一次性合并 7 个模块，而是先把底层硬件访问统一收口到 `bsp_uart`，保留原对外接口。
+- `build/MainCtrlF413MXOs` 目录存在对象缓存锁定问题，`unify_builder --rebuild` 在该目录下会因删除 `.d/.o` 失败而中断；但切换到新输出目录后，工程可完整编译并成功链接。
+- `userparser.c` 原本是应用层直调 `Board_GPIOConfiguration()` 的最后热点之一，现已改为经 `hw_bootstrap` 转调，应用层与板级 GPIO 初始化边界进一步清晰。
+- `OneWireI/II` 与 `soft IIC` 的主要硬件耦合点集中在 GPIO 拉高/拉低/读引脚；这类点适合优先抽成 `bsp_gpio + 语义资源映射`，无需先重写协议时序逻辑。
+- `i2c.c` 当前仍承担 HAL I2C 实例与 MSP 初始化职责，更像“硬件总线实现”而不是纯设备驱动；后续若继续收口，宜将其逐步迁入硬件层或再包一层更明确的 `bsp_i2c_hal`。
+## 2026-04-13 soft_SSC External Module Findings
+
+- Source path: `D:\EH_main\soft\soft_SSC`
+- File set is a small business-module bundle, not a standalone reusable BSP/driver package.
+- Main files:
+  - `Pubinterface.[ch]`: shared message definitions, key ids, channel/pump state structs, behavior dispatch helpers
+  - `sscKEYBH.[ch]`: key behavior queue + dispatcher
+  - `sscUIDP.[ch]`: LCD UI adapter and display task
+  - `sscRFID.[ch]`: RFID/UART3 polling + parser + queue trigger
+  - `sscDrive.[ch]`: motor frame packing + UART1 send task
+  - `sscPUMPA.[ch]`, `sscPUMPB.[ch]`: pump setpoint queue + conversion + pump output task
+  - `sscBEEP.[ch]`: beep queue + beep task
+- Strong coupling to current project:
+  - includes `screen.h`, `data.h`, `datahand.h`, `lcd.h`, `pump.h`, `uart1.h`, `uart3.h`, `Motor.h`, `board.h`
+  - directly reads/writes `Workvalue_s`
+  - directly calls `LCD_Show_Picture`, `Pump_SetSpeed_A/B`, `Uart1_SendPacket`, `Uart3_SendPacket`
+  - directly uses `app_task` and FreeRTOS queues
+- Conclusion:
+  - these files overlap heavily with existing project application modules
+  - they should be treated as an external application-layer feature set to be merged selectively
+  - they should not be copied into Driver/Hardware as-is
+- Integration risk hotspots:
+  - duplicate symbol names already exist in current project: `BeepControlTask_Init`, `ScreenKeyTask_Init`, `SplitType_AutoModeGetData_Init`
+  - logic overlap with current `screen.c`, `screenkey.c`, `splittype.c`, `pump.c`, `drivectrl.c`
+  - queue/task model still uses `app_task` directly, not current kernel wrapper

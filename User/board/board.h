@@ -389,24 +389,6 @@ extern "C" {
 /* GPIO初始化 */
 void Board_GPIOConfiguration(void);
 
-/* UART初始化 - 包含所有串口 */
-void Board_UART_Init(void);
-
-/* ADC初始化 */
-void Board_ADC_Init(void);
-
-/* I2C初始化 */
-void Board_I2C_Init(void);
-
-/* 1-Wire初始化 */
-void Board_OneWire_Init(void);
-
-/* 定时器初始化 */
-void Board_TIM_Init(void);
-
-/* 统一初始化函数 - 调用所有硬件初始化 */
-void Board_Hardware_Init(void);
-
 /*============================================================================
  * 便捷操作宏
  *============================================================================*/

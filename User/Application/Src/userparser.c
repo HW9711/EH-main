@@ -8,6 +8,7 @@
 #include "delay.h"
 #include "eeprom.h"
 #include "bsp_board.h"
+#include "hw_bootstrap.h"
 #include "uart1.h"
 #include "uart2.h"
 #include "uart3.h"
@@ -108,7 +109,7 @@ void Userparser_Init(void)
   Iwdg_Reset();
 
   //1.GPIO
-  Board_GPIOConfiguration();
+  Hardware_BoardGpioInit();
 
   //2.IIC、1-@Wire
   EEPROM_AT24CXX_Init();
