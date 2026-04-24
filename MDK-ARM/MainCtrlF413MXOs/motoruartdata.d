@@ -29,6 +29,8 @@
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\motoruartdata.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
@@ -40,5 +42,6 @@
 .\mainctrlf413mxos\motoruartdata.o: ../User/Application/include/pump.h
 .\mainctrlf413mxos\motoruartdata.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h
 .\mainctrlf413mxos\motoruartdata.o: ../User/Peripheral/include/lcd.h
-.\mainctrlf413mxos\motoruartdata.o: ..\User\Cola_os\inc\cola_os.h
+.\mainctrlf413mxos\motoruartdata.o: ../User/Kernel/include/kernel_scheduler.h
 .\mainctrlf413mxos\motoruartdata.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
+.\mainctrlf413mxos\motoruartdata.o: ../Inc/app_task.h

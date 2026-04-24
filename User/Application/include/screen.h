@@ -454,7 +454,7 @@ typedef struct
 	volatile  uint8_t   HMI_Injection_stop_flag;//停止
 }
 Workvalue;
-extern Workvalue Workvalue_s;
+/* 历史屏幕工作态全局实例已下线，运行态数据统一由 Pubinterface 暴露。 */
 
 typedef struct 
 {
@@ -494,7 +494,7 @@ typedef struct
 	Memorycontent B;
 }
 ChannelValue;
- extern ChannelValue ChannelValue_s;
+/* 历史通道记忆全局实例已下线，通道记忆数据统一由 Pubinterface/数据层维护。 */
 
 typedef struct 
 {
@@ -717,5 +717,3 @@ void Screen_WindowSwitch_Update(int8_t Num1, uint8_t Num2);
 
 
 #endif  //__SCREEN_H
-
-

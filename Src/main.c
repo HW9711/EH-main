@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -31,9 +31,9 @@
 /* USER CODE BEGIN Includes */
 #include "hw_bootstrap.h"
 #include "app_bootstrap.h"
-#include "beep.h"
 #include "data.h"
 #include "at24cs32_crc_verify.h"
+#include "tracealyzer_recorder.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -114,6 +114,9 @@ int main(void)
   MX_TIM10_Init();
   MX_TIM14_Init();
   /* USER CODE BEGIN 2 */
+  /* 初始化 Tracealyzer 记录器，尽量覆盖启动阶段的任务和同步对象创建事件。 */
+  Tracealyzer_RecorderInit();
+
   Hardware_PostInit();
   App_Bootstrap_Init();
 
@@ -131,10 +134,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-    //uart8发送测试信息
-    // const char *testStr = "Hello, UART8!\r\n";
-    // HAL_UART_Transmit(&huart8, (uint8_t *)testStr, strlen(testStr), HAL_MAX_DELAY);
-    // HAL_Delay(1000);
+    
     /* USER CODE BEGIN 3 */
 
     /* USER CODE BEGIN 3 */
@@ -210,9 +210,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-	//10ms ������
+	//10ms 锟斤拷锟斤拷锟斤拷
   else if (htim->Instance == TIM10) {
-    Beep_RunStatus();
+    /*
+     * 蜂鸣器行为已迁移到 SscBeepControlTask_Init() 创建的调度任务。
+     * TIM10 保留节拍入口但不再直接驱动 BEEP，避免新旧蜂鸣逻辑同时抢占IO。
+     */
   }
 	//1s
   else if (htim->Instance == TIM14) {

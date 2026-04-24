@@ -5,7 +5,7 @@
 #include "common.h"
 #include "delay.h"
 #include "data.h"
-#include "screen.h"
+#include "Pubinterface.h"
 #include "kernel_scheduler.h"
 #include "kernel_osal.h"
 
@@ -230,18 +230,14 @@ void PedalRecv_Scan(void)
 					
 					if ((dat1[4] == 0x01) && (dat1[5] == 0x01)) 
 					{
-					  //SysFootPedalData.FootPedalType = 0;   //单踏板
-						//Workvalue_s.Foot_model=2;//ssc
-						Workvalue_s.Foot_type=1;
+						SysFootPedalData.FootPedalType = 0;   // 单踏板：校准页与报警页统一从 SysFootPedalData 读取类型，不再依赖旧屏幕数据仓库。
 					}
           else if(((dat1[4] == 0x01) && (dat1[5] == 0x0A)) || ((dat1[4] == 0x01) && (dat1[5] == 0x0B))) 
           {
-					 // SysFootPedalData.FootPedalType = 1;		//双踏板		
-					//	Workvalue_s.Foot_model=1; 
-						Workvalue_s.Foot_type=2;
+						SysFootPedalData.FootPedalType = 1;		// 双踏板：保留原有左右 AD 值解析规则，仅替换脚踏类型数据源。
 					}
 					
-					if (Workvalue_s.Foot_type==2)
+					if (SysFootPedalData.FootPedalType == 1)
 					{
 						
 							 if ((dat1[4] == 0x01) && (dat1[5] == 0x0A))//左边值
@@ -267,7 +263,7 @@ void PedalRecv_Scan(void)
 		    //主控板发送命令给脚踏板，脚踏板回复的读取已存储
 		    else if ((dat1[2] == 0xD0) && (dat1[3] == 0xB4))  
 		    {
-					if (Workvalue_s.Foot_type == 2)
+					if (SysFootPedalData.FootPedalType == 1)
 					{
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
 						{
@@ -298,7 +294,7 @@ void PedalRecv_Scan(void)
 						}	
 						
 					}						
-          else if(Workvalue_s.Foot_type==1)
+          else if(SysFootPedalData.FootPedalType == 0)
           {
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
 						{
@@ -368,7 +364,7 @@ void PEDALRECVTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN PEDALRECVTaskFunc */
   /* Infinite loop */
-	if(Workvalue_s.HMI_Control_flag)
+	if(WorkMessage.hmiactive_work)
 		return;
 		PedalRecv_Scan();
   /* USER CODE END PEDALRECVTaskFunc */
@@ -380,9 +376,6 @@ void PedalRecvTask_Init(void)
 	Kernel_TaskCreate(&PEDALRECVTaskHandle, PEDALRECVTaskFunc);
 	Kernel_TaskStart(&PEDALRECVTaskHandle, KERNEL_TASK_ALWAYS, 3);
 }
-
-
-
 
 
 

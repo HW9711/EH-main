@@ -5,9 +5,13 @@
 #include "data.h"
 #include "screen.h"
 //#include "adc.h"
+#include "soft_uart.h"
 
 #include "kernel_scheduler.h"
 #include "datahand.h"
+#include "Pubinterface.h"
+#include "sscBEEP.h"
+#include "sscKEYBH.h"
 kernel_task_t HANDLEKEYTaskHandle;
 
 //键值按下状态
@@ -22,6 +26,8 @@ static bool sHandleKEYValue[2] = { false };
 //============================================================================
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+	SimUart_HandleExti(GPIO_Pin);
+
 	switch (GPIO_Pin)
 	{
 		case BOARD_RES_HANDLE_KEY1_PIN : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; //H_KEY1
@@ -42,6 +48,35 @@ bool HandleKey_GetKeyValue(uint8_t keynum)
 	return 0; //sHandleKEYValue[keynum];
 }
 
+/*
+ * 手柄按键迁移到 V1.8 新接口后，不再直接写旧的运行/报警全局标志。
+ * 这里保留原有按键去抖和长按窗口，只把输出改成 WorkMessage、ControlSignalMessage
+ * 以及 SendKeyBehMessage()/SendAlarmMessage()，确保后续 sscKEYBH 统一分发。
+ */
+static void HandleKey_SetAlarm(uint8_t alarm_value)
+{
+	WorkMessage.alarm_flag = true;
+	WorkMessage.alarm_value = alarm_value;
+	SendAlarmMessage(alarm_value);
+}
+
+static void HandleKey_ClearAlarm(uint8_t alarm_value)
+{
+	if (WorkMessage.alarm_value == alarm_value)
+	{
+		WorkMessage.alarm_value = 0U;
+		WorkMessage.alarm_flag = false;
+		SendAlarmMessage(0U);
+	}
+}
+
+static void HandleKey_SetMotorRun(bool enable)
+{
+	ControlSignalMessage.handle_control_flag = enable;
+	WorkMessage.runflag_work = enable;
+	SendKeyBehMessage(HANDLEKey, enable ? HANDLEKey_motor_start : HANDLEKey_motor_stop);
+}
+
 
 //
 void HandleKey_Scan0SSC()
@@ -51,10 +86,10 @@ void HandleKey_Scan0SSC()
 	static uint8_t start_flags=0;
 	static uint8_t activation_flag=0;
 	
-	if(Workvalue_s.select_channel!=1||Workvalue_s.hand_model!=PXBA_ONLINE){
+	if(WorkMessage.channel_work!=CHANNEL_A||WorkMessage.hand_model!=PXBA_ONLINES){
 		return;
 	}
-if(Workvalue_s.Alarm_value==11||Workvalue_s.Alarm_value==12){return;}
+if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
 		if(KEY0_STATUS() == 0)
 			{
 					key0_up_down=0;
@@ -64,35 +99,30 @@ if(Workvalue_s.Alarm_value==11||Workvalue_s.Alarm_value==12){return;}
 				if(start_flags)
 					{
 						start_flags=0;
-						if(Workvalue_s.set_Way==footcontrol)
+						if(WorkMessage.drivetype_work==JTWORK)
 						{
 							//报警，请选择脚控启动
-							Workvalue_s.Alarm_value=6;//脚踏值错误
-							Workvalue_s.beep_Alarm_flag=1;//报警
-							Workvalue_s.Handle_MOTORWorking_flag=0;
-							Workvalue_s.MOTORWorking_flag=0;
+							HandleKey_SetAlarm(6U);
+							HandleKey_SetMotorRun(false);
 							return;
 						}
 						
-						if(Workvalue_s.set_Way==handelcontrol)
+						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								if(Workvalue_s.Alarm_value==8)
+								if(WorkMessage.alarm_value==8)
 								{
 									activation_flag=0;
-									Workvalue_s.Handle_MOTORWorking_flag=0;
-									Workvalue_s.MOTORWorking_flag=0;
+									HandleKey_SetMotorRun(false);
 								}
 								else{
 									if(activation_flag==0){
 										activation_flag=1;
-										Workvalue_s.Handle_MOTORWorking_flag=1;
-										Workvalue_s.MOTORWorking_flag=1;
+										HandleKey_SetMotorRun(true);
 									}
 									else
 									{
 										activation_flag=0;
-										Workvalue_s.Handle_MOTORWorking_flag=0;
-										Workvalue_s.MOTORWorking_flag=0;
+										HandleKey_SetMotorRun(false);
 									}
 								} 
 					}
@@ -107,18 +137,16 @@ if(Workvalue_s.Alarm_value==11||Workvalue_s.Alarm_value==12){return;}
 				
 				if(key0_up_down>55)
 				{
-					if(Workvalue_s.Alarm_value==6)
+					if(WorkMessage.alarm_value==6)
 					{
-							Workvalue_s.Alarm_value=0;
-						Workvalue_s.beep_Alarm_flag=0;//报警
+						HandleKey_ClearAlarm(6U);
 						key0_up_down=0;
 					}
-					else if(Workvalue_s.Alarm_value==8)
+					else if(WorkMessage.alarm_value==8)
 					{
-						if(Workvalue_s.set_Way==handelcontrol)
+						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								Workvalue_s.Alarm_value=0;
-						Workvalue_s.beep_Alarm_flag=0;//报警
+						HandleKey_ClearAlarm(8U);
 						key0_up_down=0;
 						}
 					}
@@ -136,9 +164,9 @@ void HandleKey_Scan1SSC()
   static uint8_t key0_up_down = 0;//按键按松开标志
 	static uint8_t start_flags=0;
 	static uint8_t activation_flag=0;
-	if(Workvalue_s.select_channel!=2||Workvalue_s.hand_model!=PXBA_ONLINE){
+	if(WorkMessage.channel_work!=CHANNEL_B||WorkMessage.hand_model!=PXBA_ONLINES){
 		return;}
-			if(Workvalue_s.Alarm_value==11||Workvalue_s.Alarm_value==12){return;}
+			if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
 			if(KEY1_STATUS() == 0)
 			{
 				key0_up_down=0;
@@ -148,36 +176,31 @@ void HandleKey_Scan1SSC()
 				if(start_flags)
 					{
 						start_flags=0;
-						if(Workvalue_s.set_Way==footcontrol)
+						if(WorkMessage.drivetype_work==JTWORK)
 						{
 							//报警，请选择脚控启动
-							Workvalue_s.Alarm_value=7;//脚踏值错误
-							Workvalue_s.beep_Alarm_flag=1;//报警
-							Workvalue_s.Handle_MOTORWorking_flag=0;
-							Workvalue_s.MOTORWorking_flag=0;
+							HandleKey_SetAlarm(7U);
+							HandleKey_SetMotorRun(false);
 					
 							return;
 						}
 				
-						if(Workvalue_s.set_Way==handelcontrol)
+						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								if(Workvalue_s.Alarm_value==9)
+								if(WorkMessage.alarm_value==9)
 								{
 									activation_flag=0;
-									Workvalue_s.Handle_MOTORWorking_flag=0;
-									Workvalue_s.MOTORWorking_flag=0;
+									HandleKey_SetMotorRun(false);
 								}
 								else{
 									if(activation_flag==0){
 										activation_flag=1;
-										Workvalue_s.Handle_MOTORWorking_flag=1;
-										Workvalue_s.MOTORWorking_flag=1;
+										HandleKey_SetMotorRun(true);
 									}
 									else
 									{
 										activation_flag=0;
-										Workvalue_s.Handle_MOTORWorking_flag=0;
-										Workvalue_s.MOTORWorking_flag=0;
+										HandleKey_SetMotorRun(false);
 									}
 						}
 					}
@@ -192,19 +215,17 @@ void HandleKey_Scan1SSC()
 				
 				if(key0_up_down>55)
 				{
-					if(Workvalue_s.Alarm_value==7)
+					if(WorkMessage.alarm_value==7)
 					{
-							Workvalue_s.Alarm_value=0;
-						Workvalue_s.beep_Alarm_flag=0;//报警
+						HandleKey_ClearAlarm(7U);
 						key0_up_down=0;
 						activation_flag=0;
 					}
-					else if(Workvalue_s.Alarm_value==9)
+					else if(WorkMessage.alarm_value==9)
 					{
-						if(Workvalue_s.set_Way==handelcontrol)
+						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								Workvalue_s.Alarm_value=0;
-						Workvalue_s.beep_Alarm_flag=0;//报警
+						HandleKey_ClearAlarm(9U);
 						key0_up_down=0;
 							activation_flag=0;
 						}
@@ -345,7 +366,7 @@ void HANDLEKEYTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN HANDLEKEYTaskFunc */
   /* Infinite loop */
-	if(Workvalue_s.HMI_Control_flag)
+	if(WorkMessage.hmiactive_work)
 		return;
   HandleKey_Scan0SSC();
 	//HandleKey_Scan0SSC();
@@ -366,7 +387,3 @@ void HandleKeyScan_Init(void)
 	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc);
 	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);
 }
-
-
-
-

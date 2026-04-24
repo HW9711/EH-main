@@ -1,4 +1,8 @@
 .\mainctrlf413mxos\handlekey.o: ..\User\Application\Handle\handlekey.c
+.\mainctrlf413mxos\handlekey.o: ../User/Hardware/include/bsp_gpio.h
+.\mainctrlf413mxos\handlekey.o: ../User/Hardware/include/board_resource_map.h
+.\mainctrlf413mxos\handlekey.o: ../User/Hardware/include/board_profile.h
+.\mainctrlf413mxos\handlekey.o: ../User/board/board.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h
 .\mainctrlf413mxos\handlekey.o: ../Inc/stm32f4xx_hal_conf.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h
@@ -25,6 +29,8 @@
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\handlekey.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
@@ -35,5 +41,8 @@
 .\mainctrlf413mxos\handlekey.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
 .\mainctrlf413mxos\handlekey.o: ../User/Data/data.h
 .\mainctrlf413mxos\handlekey.o: ../User/Application/include/screen.h
-.\mainctrlf413mxos\handlekey.o: ..\User\Cola_os\inc\cola_os.h
+.\mainctrlf413mxos\handlekey.o: ../User/Peripheral/include/soft_uart.h
+.\mainctrlf413mxos\handlekey.o: ../Inc/main.h
+.\mainctrlf413mxos\handlekey.o: ../User/Kernel/include/kernel_scheduler.h
+.\mainctrlf413mxos\handlekey.o: ../Inc/app_task.h
 .\mainctrlf413mxos\handlekey.o: ../User/Application/include/datahand.h

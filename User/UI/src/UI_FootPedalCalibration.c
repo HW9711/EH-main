@@ -8,7 +8,6 @@
 #include "flash.h"
 #include "iwdg.h"
 #include "screenkey.h"
-#include "screen.h"
 
 //============================================================================
 // 函数名称: UI_FootPedalCalibration_Fun()
@@ -69,11 +68,11 @@ uint8_t UI_FootPedalCalibration_Fun(void)
       {
         SysRunData.BeepTimeMS = 100;
 		    SysRunData.KeyValue = KEY_NONE;
-			  if (Workvalue_s.Foot_type == 2)
+			  if (SysFootPedalData.FootPedalType == 1)
 				{
 					 Pedal_StorageLValue_Left();
 				}
-        else if(Workvalue_s.Foot_type == 1)
+        else
         {
 					 Pedal_StorageLValue();				
 				}
@@ -85,7 +84,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    {
 		    SysRunData.BeepTimeMS = 100;
 		    SysRunData.KeyValue = KEY_NONE;
-				if (Workvalue_s.Foot_type == 2)
+				if (SysFootPedalData.FootPedalType == 1)
 				{
 					Pedal_StorageHValue_Left();
 				}
@@ -101,7 +100,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    {
 		    SysRunData.BeepTimeMS = 100;
 		    SysRunData.KeyValue = KEY_NONE;
-						if (Workvalue_s.Foot_type == 2){
+						if (SysFootPedalData.FootPedalType == 1){
 							Pedal_StorageMValue_Left();
 						}
 						else
@@ -146,7 +145,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    break;			
 		default : break;
 	  }
-		if(Workvalue_s.Foot_type==2)
+		if(SysFootPedalData.FootPedalType == 1)
 		{
 //				//刷新UI
 			read_times++;
@@ -243,7 +242,6 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 		}
   }
 }
-
 
 
 

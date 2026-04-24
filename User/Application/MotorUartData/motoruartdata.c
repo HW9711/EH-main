@@ -3,15 +3,78 @@
 #include "motoruartdata.h"
 #include "common.h"
 #include "data.h"
-#include "screen.h"
 #include "uart1.h"
 #include "uart2.h"
 #include "pump.h"
 #include <string.h>
 #include "lcd.h"
 #include "kernel_scheduler.h"
+#include "Pubinterface.h"
+#include "sscKEYBH.h"
+#include "sscBEEP.h"
 
 kernel_task_t MOTORUARTTaskHandle;
+
+/*
+ * 外部 HMI 串口仍沿用原 6 字节命令帧，只把命令结果投递到新的公共接口。
+ * 这样可以保留串口解析时序，同时避免继续写旧屏幕按键数据仓库。
+ */
+static void MotorUart_PostHmiKey(uint8_t hmi_key)
+{
+	SendKeyBehMessage(HMIkey, hmi_key);
+}
+
+static void MotorUart_SetHmiActive(uint8_t active)
+{
+	WorkMessage.hmiactive_work = (active != 0U);
+	ControlSignalMessage.HMI_enable_flag = (active != 0U);
+	if(active == 0U)
+	{
+		WorkMessage.runflag_work = false;
+		ControlSignalMessage.HMI_control_flag = false;
+	}
+}
+
+static void MotorUart_SetHmiRun(uint8_t run)
+{
+	if(WorkMessage.alarm_flag)
+	{
+		return;
+	}
+	if(!WorkMessage.hmiactive_work)
+	{
+		return;
+	}
+	WorkMessage.runflag_work = (run != 0U);
+	ControlSignalMessage.HMI_control_flag = (run != 0U);
+}
+
+static void MotorUart_SetAlarm(uint8_t alarm_value)
+{
+	WorkMessage.alarm_value = alarm_value;
+	WorkMessage.alarm_flag = (alarm_value != 0U);
+	SendAlarmMessage(alarm_value);
+}
+
+static void MotorUart_ClearAlarm(void)
+{
+	WorkMessage.alarm_value = 0U;
+	WorkMessage.alarm_flag = false;
+	SendAlarmMessage(0U);
+}
+
+static void MotorUart_StopAllWork(void)
+{
+	WorkMessage.runflag_work = false;
+	ControlSignalMessage.handle_control_flag = false;
+	ControlSignalMessage.HMI_control_flag = false;
+	ControlSignalMessage.jtL_control_flag = false;
+	ControlSignalMessage.jtR_control_flag = false;
+	pumpMessageA.run_flag = false;
+	pumpMessageA.speed_work = 0U;
+	pumpMessageB.run_flag = false;
+	pumpMessageB.speed_work = 0U;
+}
 
 //============================================================================
 //2.驱动板接收
@@ -38,91 +101,76 @@ void BrushedMotorUartData_ReceiveData(void)
 	  {
 			if(dat[i+4]==0xee&&dat[5]==0xff)
 			{
-				KeyBeep_flag=1;
+				SendKeyBeepMessage(1U);
 				Common_CopyData(&dat[i], dat1, 6);    //截取6个数据
 				switch(dat1[3])
 				{
 					case 1:
-						Workvalue_s.HMI_Control_flag=1;//使能HMI控制
+						MotorUart_SetHmiActive(1U);
 					LCD_Show_Picture(0x1450,540);
 					
 						break;
 					case 2:
 						LCD_Disappear_Picture(0x1450);
-						Workvalue_s.HMI_Control_flag=0;
-						Workvalue_s.HMI_Working_flag=0;
-						if(Workvalue_s.Irrigate_start_flag)
+						if(pumpMessageB.run_flag)
 						{
-							Workvalue_s.ScreenKey_data=11;//失去之前停掉，灌注
-							Workvalue_s.HMI_Injection_stop_flag=1;
+							MotorUart_PostHmiKey(HMIkey_BPUMP_control);
 						}
 						
-						if(Workvalue_s.beep_Alarm_flag)
-						{
-							Workvalue_s.beep_Alarm_flag=0;
-							Workvalue_s.Alarm_value=0;
-								Workvalue_s.HMI_Working_flag=0;
-						}
+						MotorUart_SetHmiActive(0U);
+						MotorUart_PostHmiKey(HMIkey_HMI_EXIT);
+						MotorUart_ClearAlarm();
 						break;
 					case 3:
-							if(Workvalue_s.beep_Alarm_flag)
+							if(WorkMessage.alarm_flag)
 								return;
-						if(Workvalue_s.HMI_Control_flag)
-						Workvalue_s.HMI_Working_flag=1;
+						MotorUart_SetHmiRun(1U);
 						break;
 					case 4:
-							if(Workvalue_s.HMI_Control_flag)
-						Workvalue_s.HMI_Working_flag=0;
+						MotorUart_SetHmiRun(0U);
 						break;
 					case 5:
-							if(Workvalue_s.HMI_Control_flag)
-						Workvalue_s.ScreenKey_data=1;//速度1
+							if(WorkMessage.hmiactive_work)
+						MotorUart_PostHmiKey(HMIkey_SPEED_Add);
 						break;
 					case 6:
-							if(Workvalue_s.HMI_Control_flag)
-						Workvalue_s.ScreenKey_data=3;//速度+
+							if(WorkMessage.hmiactive_work)
+						MotorUart_PostHmiKey(HMIkey_SPEED_Sub);
 						break;
 					case 7:
-					if(Workvalue_s.HMI_Control_flag){
-						if(Workvalue_s.select_channel==1)
+					if(WorkMessage.hmiactive_work){
+						if(WorkMessage.channel_work==CHANNEL_A)
 						{
-							Workvalue_s.ScreenKey_data=25;//切换手柄
+							MotorUart_PostHmiKey(HMIkey_HANDLE_B);
 						}
 						else
 						{
-							Workvalue_s.ScreenKey_data=24;//切换手柄
+							MotorUart_PostHmiKey(HMIkey_HANDLE_A);
 						}
 					}
 					break;
 					  case 8:
-								if(Workvalue_s.HMI_Control_flag)
-							Workvalue_s.ScreenKey_data=11;//灌注开关
+								if(WorkMessage.hmiactive_work)
+							MotorUart_PostHmiKey(HMIkey_BPUMP_control);
 							break;
 						case 9:
-							if(Workvalue_s.HMI_Control_flag)
-							Workvalue_s.ScreenKey_data=12;//注水开关
+							if(WorkMessage.hmiactive_work)
+							MotorUart_PostHmiKey(HMIkey_APUMP_control);
 							break;
 							case 10:
-								if(Workvalue_s.HMI_Control_flag){
-									Workvalue_s.FastGear_flag=1;
-									Workvalue_s.ScreenKey_data=7;//注水档位
+								if(WorkMessage.hmiactive_work){
+									MotorUart_PostHmiKey(HMIkey_APUMP_Add);
 								}
 							break;
 						case 11:
-								if(Workvalue_s.HMI_Control_flag){
-										Workvalue_s.FastGear_flag=1;
-									Workvalue_s.ScreenKey_data=5;//灌注档位
+								if(WorkMessage.hmiactive_work){
+									MotorUart_PostHmiKey(HMIkey_BPUMP_Add);
 							}
 							break;
 					
 					case 12:
-							if(Workvalue_s.HMI_Control_flag){
-						if(Workvalue_s.beep_Alarm_flag)
-						{
-							Workvalue_s.beep_Alarm_flag=0;
-							Workvalue_s.Alarm_value=0;
-								Workvalue_s.HMI_Working_flag=0;
-						}
+							if(WorkMessage.hmiactive_work){
+						MotorUart_ClearAlarm();
 						break;
 					}
 				}
@@ -165,19 +213,16 @@ void BrushlessMotorUartData_ReceiveData(void)
 					else
 					{
 					SysRunData.StuckFlag3 = Error;	
-						if(Workvalue_s.select_channel==1){
-							Workvalue_s.Alarm_value=8;
+						if(WorkMessage.channel_work==CHANNEL_A){
+							MotorUart_SetAlarm(8U);
 						}
-						else if(Workvalue_s.select_channel==2)
+						else if(WorkMessage.channel_work==CHANNEL_B)
 						{
-							Workvalue_s.Alarm_value=9;
+							MotorUart_SetAlarm(9U);
 						}
-						Workvalue_s.beep_Alarm_flag=1;
 						Pump_SetSpeed_A(0);//泵停止运行
 						//Pump_SetSpeed_B(0);//泵停止运行
-						Workvalue_s.Handle_MOTORWorking_flag=0;
-						Workvalue_s.MOTORWorking_flag=0;
-						Workvalue_s.Foot_start_flag=0;
+						MotorUart_StopAllWork();
 					}	
 				switch (dat1[1])
 				{
@@ -239,18 +284,6 @@ void MotorUartData_Init(void)
 	Kernel_TaskCreate(&MOTORUARTTaskHandle, MOTORUARTTaskFunc);
 	Kernel_TaskStart(&MOTORUARTTaskHandle, KERNEL_TASK_ALWAYS, 3);//3
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

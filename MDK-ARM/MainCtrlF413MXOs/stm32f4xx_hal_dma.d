@@ -25,6 +25,8 @@
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\stm32f4xx_hal_dma.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h

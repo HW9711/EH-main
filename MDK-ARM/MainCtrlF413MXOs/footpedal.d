@@ -28,6 +28,8 @@
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
@@ -36,10 +38,12 @@
 .\mainctrlf413mxos\footpedal.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
 .\mainctrlf413mxos\footpedal.o: ../User/Application/include/pedal.h
 .\mainctrlf413mxos\footpedal.o: ../User/Application/include/motor.h
-.\mainctrlf413mxos\footpedal.o: ../User/Peripheral/include/iwdg.h
+.\mainctrlf413mxos\footpedal.o: ../Inc/iwdg.h
+.\mainctrlf413mxos\footpedal.o: ../Inc/main.h
 .\mainctrlf413mxos\footpedal.o: ../User/Peripheral/include/delay.h
 .\mainctrlf413mxos\footpedal.o: ../User/Application/include/param.h
 .\mainctrlf413mxos\footpedal.o: ../User/Application/include/pump.h
 .\mainctrlf413mxos\footpedal.o: ../User/Application/include/datahand.h
-.\mainctrlf413mxos\footpedal.o: ..\User\Cola_os\inc\cola_os.h
+.\mainctrlf413mxos\footpedal.o: ../User/Kernel/include/kernel_scheduler.h
 .\mainctrlf413mxos\footpedal.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
+.\mainctrlf413mxos\footpedal.o: ../Inc/app_task.h

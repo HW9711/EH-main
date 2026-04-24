@@ -7,11 +7,158 @@
 #include "common.h"
 #include "eeprom.h"
 #include "screen.h"
+#include "Pubinterface.h"
+#include "sscKEYBH.h"
 
 #include "kernel_scheduler.h"
 
 kernel_task_t SCREENKEYLONGTaskHandle;
 kernel_task_t SCREENKEYTaskHandle;
+
+/*
+ * 屏幕串口协议仍沿用旧的页面地址和按键编号，但业务出口改为 V1.8 新接口事件。
+ * 这里集中维护旧 `ScreenKey_data` 数字到 `SCREENKey_*` 枚举的映射：
+ * 1. 解析层继续按原 HMI 帧格式识别按键，避免改动串口协议；
+ * 2. 行为层统一交给 sscKEYBH 分发，逐步替代旧屏幕模块的按键仓库职责；
+ * 3. 无新接口等价项的旧码暂时静默，后续迁 UI/RFID 时再补专用事件。
+ */
+static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
+{
+  uint8_t screen_key = 0U;
+
+  switch (legacy_key)
+  {
+    case 1U:
+    case 2U:
+      screen_key = SCREENKey_SPEED_Add;
+      break;
+
+    case 3U:
+    case 4U:
+      screen_key = SCREENKey_SPEED_Sub;
+      break;
+
+    case 5U:
+      screen_key = SCREENKey_BPUMP_Add;
+      break;
+
+    case 6U:
+      screen_key = SCREENKey_BPUMP_Sub;
+      break;
+
+    case 7U:
+      screen_key = SCREENKey_APUMP_Add;
+      break;
+
+    case 8U:
+      screen_key = SCREENKey_APUMP_Sub;
+      break;
+
+    case 9U:
+      screen_key = SCREENKey_FREQ_Add;
+      break;
+
+    case 10U:
+      screen_key = SCREENKey_FREQ_Sub;
+      break;
+
+    case 11U:
+      screen_key = SCREENKey_BPUMP_control;
+      break;
+
+    case 12U:
+      screen_key = SCREENKey_APUMP_control;
+      break;
+
+    case 13U:
+      screen_key = SCREENKey_Dir_Forward;
+      break;
+
+    case 14U:
+      screen_key = SCREENKey_Dir_Reverse;
+      break;
+
+    case 15U:
+      screen_key = SCREENKey_Dir_OSC;
+      break;
+
+    case 16U:
+      screen_key = SCREENKey_JTActi;
+      break;
+
+    case 17U:
+      screen_key = SCREENKey_HandleActi;
+      break;
+
+    case 18U:
+      screen_key = SCREENKey_TouchActi;
+      break;
+
+    case 20U:
+      screen_key = SCREENKey_GrindH;
+      break;
+
+    case 21U:
+      screen_key = SCREENKey_PlanerH;
+      break;
+
+    case 22U:
+      screen_key = SCREENKey_OpenPos_ClockWise;
+      break;
+
+    case 23U:
+      screen_key = SCREENKey_OpenPos_AntiClockWise;
+      break;
+
+    case 24U:
+      screen_key = SCREENKey_HANDLE_A;
+      break;
+
+    case 25U:
+      screen_key = SCREENKey_HANDLE_B;
+      break;
+
+    case 26U:
+      screen_key = SCREENKey_UNPLUG_A;
+      break;
+
+    case 27U:
+      screen_key = SCREENKey_UNPLUG_B;
+      break;
+
+    case 28U:
+      screen_key = SCREENKey_PLUG_A;
+      break;
+
+    case 29U:
+      screen_key = SCREENKey_PLUG_B;
+      break;
+
+    case 40U:
+      screen_key = SCREENKey_TouchEXIT;
+      break;
+
+    case 41U:
+      screen_key = SCREENKey_TouchStart;
+      break;
+
+    case 42U:
+      screen_key = SCREENKey_TouchEXIT;
+      break;
+
+    case 43U:
+      screen_key = SCREENKey_HMI_EXIT;
+      break;
+
+    default:
+      break;
+  }
+
+  if (screen_key != 0U)
+  {
+    SendKeyBehMessage(SCREENKey, screen_key);
+  }
+}
 
 //============================================================================
 //1.屏”按键“
@@ -571,7 +718,6 @@ void ScreenKey_ParamSet(void)
 void ScreenKey_Scan(void)
 {
   static uint8_t ScrLOGOKeyCnt = 0;
-	 uint8_t jujuevalue=0;
   uint8_t rlen = 0, slen = 0, i = 0, len = 0;
   uint8_t dat[UART6_MAX_PACKET_SIZE] = { 0 }, dat1[16] = { 0 };
 
@@ -617,8 +763,8 @@ void ScreenKey_Scan(void)
 						{
 			         switch (dat1[8])
 							 {
-								 	case 0x01 : Workvalue_s.ScreenKey_data=24 ;  break;//1号手柄
-									case 0x02 :Workvalue_s.ScreenKey_data=25 ;  break;//2号手柄	
+								 	case 0x01 : ScreenKey_PostLegacyAction(24U);  break;//1号手柄
+									case 0x02 : ScreenKey_PostLegacyAction(25U);  break;//2号手柄	
 //									case 0x01 :SysRunData.KeyValue = KEY_HANDLEONE;  break;//1号手柄
 //									case 0x02 :SysRunData.KeyValue = KEY_HANDLETWO;  break;//2号手柄										
 							    default : break;								 
@@ -628,11 +774,11 @@ void ScreenKey_Scan(void)
 						{
 			         switch (dat1[8])
 							 {
-									case 0x01 : Workvalue_s.ScreenKey_data=21; break;	//刨刀
-									case 0x02 : Workvalue_s.ScreenKey_data=20; break;  //磨头
-									case 0x03 : Workvalue_s.ScreenKey_data=22;  break;	//开口左
-									case 0x04 : Workvalue_s.ScreenKey_data=23;  break;	//开口右
-								 	case 0x05 : Workvalue_s.ScreenKey_data=36;  break;	//自动识别按钮开关
+									case 0x01 : ScreenKey_PostLegacyAction(21U); break;	//刨刀
+									case 0x02 : ScreenKey_PostLegacyAction(20U); break;  //磨头
+									case 0x03 : ScreenKey_PostLegacyAction(22U); break;	//开口左
+									case 0x04 : ScreenKey_PostLegacyAction(23U); break;	//开口右
+								 	case 0x05 : ScreenKey_PostLegacyAction(36U); break;	//自动识别按钮开关
 								 default : break;
 							 }
 						}break;						
@@ -641,9 +787,9 @@ void ScreenKey_Scan(void)
 						
 								switch (dat1[8])
 								{
-									case 0x01 : Workvalue_s.ScreenKey_data=7; break;  //
-									case 0x02 : Workvalue_s.ScreenKey_data=8; break;       //
-									case 0x03 : Workvalue_s.ScreenKey_data=12; break;    //
+									case 0x01 : ScreenKey_PostLegacyAction(7U); break;  //
+									case 0x02 : ScreenKey_PostLegacyAction(8U); break;       //
+									case 0x03 : ScreenKey_PostLegacyAction(12U); break;    //
 //								case 0x04 : SysRunData.KeyValue = KEY_OPENLEFT; break;      //4开口位置 左调整
 //								case 0x05 : SysRunData.KeyValue = KEY_OPENRIGHT; break;     //5开口位置 右调整
 									default : break;
@@ -654,9 +800,9 @@ void ScreenKey_Scan(void)
 								{ 
 									switch (dat1[8])
 									{
-										case 0x01 : Workvalue_s.ScreenKey_data=13; break;    //
-										case 0x02 : Workvalue_s.ScreenKey_data=15; break;    //
-										case 0x03 : Workvalue_s.ScreenKey_data=14; break;    //
+										case 0x01 : ScreenKey_PostLegacyAction(13U); break;    //
+										case 0x02 : ScreenKey_PostLegacyAction(15U); break;    //
+										case 0x03 : ScreenKey_PostLegacyAction(14U); break;    //
 										default : break;
 									}
 							}break;	
@@ -664,11 +810,11 @@ void ScreenKey_Scan(void)
 									{ 
 										switch (dat1[8])
 										{
-											case 0x01 : Workvalue_s.ScreenKey_data=16; break;    //
-											case 0x02 : Workvalue_s.ScreenKey_data=17; break;    //
-											case 0x03 : Workvalue_s.ScreenKey_data=18; break;    //
-											case 0x04 : Workvalue_s.ScreenKey_data=40;break;
-											case 0x05 : Workvalue_s.ScreenKey_data=43;jujuevalue=1;break;
+											case 0x01 : ScreenKey_PostLegacyAction(16U); break;    //
+											case 0x02 : ScreenKey_PostLegacyAction(17U); break;    //
+											case 0x03 : ScreenKey_PostLegacyAction(18U); break;    //
+											case 0x04 : ScreenKey_PostLegacyAction(40U); break;
+											case 0x05 : ScreenKey_PostLegacyAction(43U); break;
 											default : break;
 										}
 								}break;	
@@ -676,8 +822,8 @@ void ScreenKey_Scan(void)
 								{ 
 									switch (dat1[8])
 									{
-										case 0x01 : Workvalue_s.ScreenKey_data=10; break;      //
-										case 0x02 : Workvalue_s.ScreenKey_data=9;	 break;      //
+										case 0x01 : ScreenKey_PostLegacyAction(10U); break;      //
+										case 0x02 : ScreenKey_PostLegacyAction(9U);	 break;      //
 									
 										default : break;
 									}
@@ -686,9 +832,9 @@ void ScreenKey_Scan(void)
 								{ 
 									switch (dat1[8])
 									{
-										case 0x01 : Workvalue_s.ScreenKey_data=5; break;      //
-										case 0x02 : Workvalue_s.ScreenKey_data=6;	 break;      //
-										case 0x03 : Workvalue_s.ScreenKey_data=11;	 break;      //
+										case 0x01 : ScreenKey_PostLegacyAction(5U); break;      //
+										case 0x02 : ScreenKey_PostLegacyAction(6U);	 break;      //
+										case 0x03 : ScreenKey_PostLegacyAction(11U);	 break;      //
 										default : break;
 									}
 								}break;	
@@ -746,12 +892,12 @@ void ScreenKey_Scan(void)
 		    {
 		      switch (dat1[5])
 		      {
-		        case 0x10 : Workvalue_s.ScreenKey_data=2; break;  //速度减    按压一次
-		       // case 0x20 : Workvalue_s.ScreenKey_data=2; break; //速度减--  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSREDUCE;
+		        case 0x10 : ScreenKey_PostLegacyAction(2U); break;  //速度减    按压一次
+		       // case 0x20 : legacy_key=2; break; //速度减--  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSREDUCE;
 			      //case 0x30 : SysRunData.KeyLongPressValue = KEY_NONE; break;  //速度减--  持续按压松开  SysRunData.KeyValue = KEY_SPEEDENDLONGPRESSREDUCE;
 
-			      case 0x50 : Workvalue_s.ScreenKey_data=4; break;  //速度加    按压一次
-			    //  case 0x60 : Workvalue_s.ScreenKey_data=4; break; //速度加++  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSPLUS;
+			      case 0x50 : ScreenKey_PostLegacyAction(4U); break;  //速度加    按压一次
+			    //  case 0x60 : legacy_key=4; break; //速度加++  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSPLUS;
 			    //  case 0x70 : SysRunData.KeyLongPressValue = KEY_NONE; break;  //速度加++  持续按压松开  SysRunData.KeyValue = KEY_SPEEDENDLONGPRESSPLUS;
 			      default : break;
 		      }
@@ -762,12 +908,12 @@ void ScreenKey_Scan(void)
 		    {
 		      switch (dat1[5])
 		      {
-		        case 0x10 : Workvalue_s.ScreenKey_data=1; break;  //速度减    按压一次
-		       //case 0x20 : Workvalue_s.ScreenKey_data=1; break; //速度减--  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSREDUCE;
+		        case 0x10 : ScreenKey_PostLegacyAction(1U); break;  //速度减    按压一次
+		       //case 0x20 : legacy_key=1; break; //速度减--  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSREDUCE;
 			     // case 0x30 : SysRunData.KeyLongPressValue = KEY_NONE; break;  //速度减--  持续按压松开  SysRunData.KeyValue = KEY_SPEEDENDLONGPRESSREDUCE;
 
-			      case 0x50 : Workvalue_s.ScreenKey_data=3; break;  //速度加    按压一次
-			    //  case 0x60 :Workvalue_s.ScreenKey_data=3; break; //速度加++  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSPLUS;
+			      case 0x50 : ScreenKey_PostLegacyAction(3U); break;  //速度加    按压一次
+			    //  case 0x60 :legacy_key=3; break; //速度加++  持续按压  SysRunData.KeyValue = KEY_SPEEDLONGPRESSPLUS;
 			      //case 0x70 : SysRunData.KeyLongPressValue = KEY_NONE; break;  //速度加++  持续按压松开  SysRunData.KeyValue = KEY_SPEEDENDLONGPRESSPLUS;
 			      default : break;
 		      }
@@ -776,8 +922,8 @@ void ScreenKey_Scan(void)
 			case 0x55:
 				 switch (dat1[5])
 					{
-						 case 0x10 : Workvalue_s.ScreenKey_data=41; break;  //速度减    按压一次
-						case 0x30 : Workvalue_s.ScreenKey_data=42; break;  //速度减    按压一次
+						 case 0x10 : ScreenKey_PostLegacyAction(41U); break;  //触控启动
+						case 0x30 : ScreenKey_PostLegacyAction(42U); break;  //触控停止
 					}
 					break;
 							
@@ -794,11 +940,6 @@ void ScreenKey_Scan(void)
 	    slen -= len;
 	  }
   }
-	if(Workvalue_s.HMI_Control_flag)
-	if(!jujuevalue)
-	{
-		Workvalue_s.ScreenKey_data=0;
-	}
 }
 
 //============================================================================
@@ -826,5 +967,3 @@ void ScreenKey_ScanInit(void)
 	Kernel_TaskCreate(&SCREENKEYTaskHandle, SCREENKEYTaskFunc);
 	Kernel_TaskStart(&SCREENKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);
 }
-
-

@@ -25,6 +25,8 @@
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
@@ -32,6 +34,7 @@
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
 .\mainctrlf413mxos\beep.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
 .\mainctrlf413mxos\beep.o: ../User/Application/include/beep.h
-.\mainctrlf413mxos\beep.o: ../User/Peripheral/include/board.h
+.\mainctrlf413mxos\beep.o: ../User/Hardware/include/bsp_board.h
+.\mainctrlf413mxos\beep.o: ../User/board/board.h
 .\mainctrlf413mxos\beep.o: ../User/Data/data.h
 .\mainctrlf413mxos\beep.o: ../User/Peripheral/include/delay.h

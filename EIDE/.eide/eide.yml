@@ -69,6 +69,7 @@ virtualFolder:
             - path: ../User/Peripheral/bus/OneWireI.c
             - path: ../User/Peripheral/bus/OneWireII.c
             - path: ../User/Peripheral/delay/delay.c
+            - path: ../User/Peripheral/uart/soft_uart.c
             - path: ../User/Peripheral/uart/uart1.c
             - path: ../User/Peripheral/uart/uart2.c
             - path: ../User/Peripheral/uart/uart3.c
@@ -122,13 +123,9 @@ virtualFolder:
           folders: []
         - name: Modules
           files:
-            - path: ../User/Application/Beep/beep.c
             - path: ../User/Application/Common/common.c
-            - path: ../User/Application/ConnectScan/connectscan.c
-            - path: ../User/Application/DirCurrent/dircurrent.c
-            - path: ../User/Application/DriveCtrl/drivectrl.c
-            - path: ../User/Application/Encryption/encryption.c
-            - path: ../User/Application/FootPedal/footpedal.c
+            - path: ../User/Application/DriveCtrl/drivectrl_adapter.c
+            - path: ../User/Application/FootPedal/footpedal_ui_adapter.c
             - path: ../User/Application/Handle/handledata.c
             - path: ../User/Application/Handle/handlekey.c
             - path: ../User/Application/Handle/handlescan.c
@@ -136,16 +133,22 @@ virtualFolder:
             - path: ../User/Application/MotorUartData/motoruartdata.c
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
-            - path: ../User/Application/RadioFreq/radiofreq.c
-            - path: ../User/Application/Screen/screen.c
+            - path: ../User/Application/Screen/screen_adapter.c
             - path: ../User/Application/ScreenKey/param.c
             - path: ../User/Application/ScreenKey/screenkey.c
-            - path: ../User/Application/SplitType/splittype.c
             - path: ../User/Application/Warn/warn.c
             - path: ../User/Application/Led/sysrunled.c
             - path: ../User/Application/Led/led.c
-            - path: ../User/Application/SerialPortPro/Serialportpro.c
             - path: ../User/Application/DataHand/datahand.c
+            - path: ../User/Application/Pubinterface/Pubinterface.c
+            - path: ../User/Application/Beep/sscBEEP.c
+            - path: ../User/Application/Beep/sscDrive.c
+            - path: ../User/Application/Beep/sscFOOT.c
+            - path: ../User/Application/Beep/sscKEYBH.c
+            - path: ../User/Application/Beep/sscPUMPA.c
+            - path: ../User/Application/Beep/sscPUMPB.c
+            - path: ../User/Application/Beep/sscRFID.c
+            - path: ../User/Application/Beep/sscUIDP.c
           folders: []
         - name: State
           files:
@@ -162,6 +165,38 @@ virtualFolder:
         - name: Doc
           files:
             - path: ../User/Doc/Note.h
+          folders: []
+        - name: Tracealyzer
+          files:
+            - path: ../User/Tracealyzer/tracealyzer_recorder.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcAssert.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcCounter.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcDependency.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcDiagnostics.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcEntryTable.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcError.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcEvent.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcEventBuffer.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcExtension.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcHardwarePort.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcHeap.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcInternalEventBuffer.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcInterval.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcISR.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcKernelPort.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcMultiCoreEventBuffer.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcObject.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcPrint.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcRunnable.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcStackMonitor.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcStateMachine.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcStaticBuffer.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcStreamingRecorder.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcString.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcTask.c
+            - path: ../User/Tracealyzer/TraceRecorder/trcTimestamp.c
+            - path: ../User/Tracealyzer/TraceRecorder/streamports/SEGGER_RTT.c
+            - path: ../User/Tracealyzer/TraceRecorder/streamports/trcStreamPort.c
           folders: []
     - name: ::CMSIS
       files: []
@@ -193,6 +228,11 @@ targets:
         - ../Middlewares/Third_Party/FreeRTOS/Source/include
         - ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
         - ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F
+        - ../User/Tracealyzer/include
+        - ../User/Tracealyzer/TraceRecorder/include
+        - ../User/Tracealyzer/TraceRecorder/config
+        - ../User/Tracealyzer/TraceRecorder/streamports/include
+        - ../User/Tracealyzer/TraceRecorder/streamports/config
         - .cmsis/include
         - ../MDK-ARM/RTE/_MainCtrlF413MXOs
         - ../User/board
@@ -316,7 +356,7 @@ targets:
           vendor: ST
         otherCmds: ""
         proType: 1
-        speed: 8000
+        speed: 4000
       STLink:
         address: "0x8000000"
         bin: ""
@@ -327,4 +367,4 @@ targets:
         resetMode: default
         runAfterProgram: true
         speed: 4000
-    uploader: STLink
+    uploader: JLink

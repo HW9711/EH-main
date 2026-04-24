@@ -25,6 +25,8 @@
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\ui_main.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
@@ -40,6 +42,8 @@
 .\mainctrlf413mxos\ui_main.o: ../User/Application/include/screen.h
 .\mainctrlf413mxos\ui_main.o: ../User/Application/include/motor.h
 .\mainctrlf413mxos\ui_main.o: ../User/Application/include/led.h
-.\mainctrlf413mxos\ui_main.o: ../User/Peripheral/include/board.h
-.\mainctrlf413mxos\ui_main.o: ..\User\Cola_os\inc\cola_os.h
+.\mainctrlf413mxos\ui_main.o: ../User/Hardware/include/bsp_board.h
+.\mainctrlf413mxos\ui_main.o: ../User/board/board.h
+.\mainctrlf413mxos\ui_main.o: ../User/Kernel/include/kernel_scheduler.h
 .\mainctrlf413mxos\ui_main.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
+.\mainctrlf413mxos\ui_main.o: ../Inc/app_task.h

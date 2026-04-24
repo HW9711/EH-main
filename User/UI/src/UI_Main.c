@@ -6,7 +6,7 @@
 #include "common.h"
 #include "lcd.h"
 #include "handledata.h"
-#include "footpedal.h"
+#include "footpedal_ui_adapter.h"
 #include "screen.h"
 #include "motor.h"
 #include "led.h"
@@ -566,7 +566,6 @@ void UIMain_RefreshTaskInit(void)
 	Kernel_TaskCreate(&UIMAINTaskHandle, UIMAINTaskFunc);
 	Kernel_TaskStart(&UIMAINTaskHandle, KERNEL_TASK_ALWAYS, 50);
 }
-
 
 
 

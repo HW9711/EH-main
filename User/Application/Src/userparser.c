@@ -22,25 +22,44 @@
 #include "screen.h"
 #include "motor.h"
 #include "UI_Start.h"
-#include "radiofreq.h"
 #include "common.h"
-#include "beep.h"
 
-#include "Connectscan.h"
 #include "handlescan.h"
 #include "drivectrl.h"
-#include "footpedal.h"
 #include "warn.h"
 #include "pedal.h"
 #include "motoruartdata.h"
-#include "dircurrent.h"
 #include "screenkey.h"
 #include "pump.h"
-#include "splittype.h"
 #include "UI_Main.h"
+#include "soft_uart.h"
 #include "handlekey.h"
+#include "Pubinterface.h"
+#include "sscBEEP.h"
+#include "sscDRIVE.h"
+#include "sscFOOT.h"
+#include "sscKEYBH.h"
+#include "sscPUMPA.h"
+#include "sscPUMPB.h"
+#include "sscRFID.h"
+#include "sscUIDP.h"
 
 #include "iic.h"
+
+/*
+ * V1.8 新接口数据容器初始化。
+ * 当前阶段先把 WorkMessage、通道识别、通道记忆、泵状态和控制信号统一清零，
+ * 保证后续逐步切换 handlescan、脚踏、按键、泵和 UI 时不会读到随机状态。
+ * 任务启动顺序仍保持当前工程原有架构，避免在旧模块尚未完全下线前改变硬件时序。
+ */
+static void Userparser_PubinterfaceInit(void)
+{
+  ChannelrecognizeMessageInit();
+  WorkMessageInit();
+  ChannelMemoryMessageInit();
+  pumpMessageInit();
+  ChannelFlagMessageInit();
+}
 
 //============================================================================
 //手柄模式 读取Flash
@@ -143,29 +162,28 @@ void Userparser_Init(void)
 	Delay_ms(500);
 	Common_Memset(0, SysHandleData.Ds2431BuffBB[0], 14);
   Common_Memset(0, SysHandleData.Ds2431BuffBB[1], 14);
-	RadioFreq_Init();  //150ms射频初始化...串口3
+  Userparser_PubinterfaceInit();
+	SscRadioFreq_Init();  //150ms射频初始化...串口3
   Iwdg_Reset();
 	
-	Workvalue_s.FootThrottletask_flag=0;
 	//ssc任务初始化开始
 	IwdgTaskInit();
 	LEDTaskInit(); 
-	BeepControlTask_Init();
+	SscBeepControlTask_Init();
+	SscKeyBehaviorTask_Init();
 	HandlescanTaskInit();//手柄扫描
 
-	PedalRecvTask_Init();  //3ms 脚踏数据接收
-	FootPedalTask_Init(); //脚踏扫描链接
-	ScreenKeyTask_Init();//显示屏按键逻辑初始化
-	FootKeyTask_Init();//脚踏按键任务
+	SscFootControlTask_Init(); //脚踏解析和行为事件统一进入新接口
 	ScreenKey_ScanInit();  //22ms  屏幕按键
-	FootThrottleTask_Init();
-	DriveCtrl_Motor123Task_Init();
+	SscDriveMotorTask_Init();
 	HandleKeyScan_Init();//手柄按键扫描
 	
 	MotorUartData_Init(); 
-	SplitType_AutoModeGetData_Init();  //200ms 请求分体式手柄的刀具信息（自动设别刀具模式）
-	DriveCtrl_HMITask_Init();
-	PUMPBTask_Init();
+	SscSplitTypeAutoModeGetData_Init();  //200ms 请求分体式手柄的刀具信息（自动设别刀具模式）
+	SscPumpATask_Init();
+	SscPumpBTask_Init();
+	SscUIDisplayTask_Init();
+	SimUartTask_Init();
 
 //ssc任务初始化结束
 
@@ -182,10 +200,7 @@ void Userparser_Init(void)
 
 //  DriveCtrl_Motor1CurrentTask_Init();  //53ms 驱动板电流状态获取
 //  DriveCtrl_UIRefreshDataTask_Init();  //100ms 获取实时转速 200ms更新UI
-//  DriveCtrl_Motor123Task_Init();  //55ms 电机控制
 
-//  FootPedalTask_Init();  //25ms 脚踏连接扫描 100ms防抖
-//  PedalRecvTask_Init();  //3ms 脚踏数据接收
 
 //  Warn_RunErrScanTask_Init();  //100ms 运行错误状态
 //  Warn_StatusScanTask_Init();  //15ms 错误报警
@@ -200,7 +215,6 @@ void Userparser_Init(void)
 //////  Pump_RunTask_Init();   //50ms  泵缓启动判断
 //  Pump_Pedal2Pump5sTask_Init();  //10ms 快速踩两脚判断 运行5s、排空
 
-//  SplitType_AutoModeGetData_Init();  //200ms 请求分体式手柄的刀具信息（自动设别刀具模式）
 //  SplitType_AutoModeDataRead_Init();  //50ms 扫描分体式手柄刀具信息的接收缓存
 //  SplitType_CutterScan_Init();  //100ms ①刷新刀具连接信息 ②1.2s判断刀具的断开信息 ③更新手动模式下刀具信息
 
@@ -209,12 +223,5 @@ void Userparser_Init(void)
 //  HandleKeyScan_Init();  //15ms 手柄按键扫描
 	LCD_Show_Which_Map(4);
 	PoweronInit();
-//	Workvalue_s.set_speed=60000;
 
 }
-
-
-
-
-
-

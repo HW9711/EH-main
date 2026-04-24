@@ -1,4 +1,10 @@
 .\mainctrlf413mxos\onewireii.o: ..\User\Peripheral\bus\OneWireII.c
+.\mainctrlf413mxos\onewireii.o: ../User/Peripheral/include/OneWireII.h
+.\mainctrlf413mxos\onewireii.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+.\mainctrlf413mxos\onewireii.o: ../User/Hardware/include/bsp_gpio.h
+.\mainctrlf413mxos\onewireii.o: ../User/Hardware/include/board_resource_map.h
+.\mainctrlf413mxos\onewireii.o: ../User/Hardware/include/board_profile.h
+.\mainctrlf413mxos\onewireii.o: ../User/board/board.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h
 .\mainctrlf413mxos\onewireii.o: ../Inc/stm32f4xx_hal_conf.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h
@@ -6,7 +12,6 @@
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f4xx.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f413xx.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Include/core_cm4.h
-.\mainctrlf413mxos\onewireii.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Include/cmsis_version.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Include/cmsis_compiler.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/CMSIS/Include/cmsis_armcc.h
@@ -25,12 +30,13 @@
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
 .\mainctrlf413mxos\onewireii.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
-.\mainctrlf413mxos\onewireii.o: ../User/Peripheral/include/OneWireII.h
 .\mainctrlf413mxos\onewireii.o: ../User/Peripheral/include/delay.h
 .\mainctrlf413mxos\onewireii.o: ../User/Data/data.h

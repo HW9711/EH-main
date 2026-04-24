@@ -1,0 +1,64 @@
+/*
+ * Trace Recorder for Tracealyzer v4.8.1
+ * Copyright 2023 Percepio AB
+ * www.percepio.com
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Stream port configuration for this project.
+ * We support both the legacy local ring-buffer transport and the new
+ * J-Link RTT streaming transport selected in tracealyzer_recorder.h.
+ */
+
+#ifndef TRC_STREAM_PORT_CONFIG_H
+#define TRC_STREAM_PORT_CONFIG_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "tracealyzer_recorder.h"
+
+/* Shared flags */
+#define TRC_STREAM_PORT_RINGBUFFER_MODE_STOP_WHEN_FULL       (0U)
+#define TRC_STREAM_PORT_RINGBUFFER_MODE_OVERWRITE_WHEN_FULL  (1U)
+
+#if (TRACEALYZER_TRANSPORT_MODE == TRACEALYZER_TRANSPORT_MODE_RINGBUFFER)
+
+/*
+ * Ring-buffer transport: keep only the most recent events in MCU RAM and let
+ * the debugger read them back later using the snapshot workflow.
+ */
+#define TRC_CFG_STREAM_PORT_BUFFER_SIZE TRACEALYZER_RING_BUFFER_SIZE_BYTES
+#define TRC_CFG_STREAM_PORT_RINGBUFFER_MODE TRC_STREAM_PORT_RINGBUFFER_MODE_OVERWRITE_WHEN_FULL
+
+#elif (TRACEALYZER_TRANSPORT_MODE == TRACEALYZER_TRANSPORT_MODE_JLINK_RTT)
+
+/*
+ * J-Link RTT transport: stream data to the PC continuously. This mode is the
+ * one that can cover long recordings without being limited by MCU RAM size.
+ */
+#define TRC_CFG_STREAM_PORT_USE_INTERNAL_BUFFER 0
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_SIZE 5120
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_WRITE_MODE TRC_INTERNAL_EVENT_BUFFER_OPTION_WRITE_MODE_DIRECT
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_TRANSFER_MODE TRC_INTERNAL_EVENT_BUFFER_OPTION_TRANSFER_MODE_ALL
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_CHUNK_SIZE 1024
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_CHUNK_TRANSFER_AGAIN_SIZE_LIMIT 256
+#define TRC_CFG_STREAM_PORT_INTERNAL_BUFFER_CHUNK_TRANSFER_AGAIN_COUNT_LIMIT 5
+
+#define TRC_CFG_STREAM_PORT_RTT_UP_BUFFER_SIZE TRACEALYZER_RTT_UP_BUFFER_SIZE_BYTES
+#define TRC_CFG_STREAM_PORT_RTT_DOWN_BUFFER_SIZE TRACEALYZER_RTT_DOWN_BUFFER_SIZE_BYTES
+#define TRC_CFG_STREAM_PORT_RTT_UP_BUFFER_INDEX TRACEALYZER_RTT_UP_BUFFER_INDEX
+#define TRC_CFG_STREAM_PORT_RTT_DOWN_BUFFER_INDEX TRACEALYZER_RTT_DOWN_BUFFER_INDEX
+#define TRC_CFG_STREAM_PORT_RTT_MODE SEGGER_RTT_MODE_NO_BLOCK_SKIP
+#define TRC_CFG_STREAM_PORT_RTT_NO_LOCK_WRITE 0
+
+#else
+#error "Unsupported TRACEALYZER_TRANSPORT_MODE"
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

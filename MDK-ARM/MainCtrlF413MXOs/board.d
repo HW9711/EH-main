@@ -1,4 +1,4 @@
-.\mainctrlf413mxos\board.o: ..\User\Peripheral\board\board.c
+.\mainctrlf413mxos\board.o: ..\User\board\board.c
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h
 .\mainctrlf413mxos\board.o: ../Inc/stm32f4xx_hal_conf.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h
@@ -25,10 +25,12 @@
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
+.\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
+.\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_iwdg.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
 .\mainctrlf413mxos\board.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
-.\mainctrlf413mxos\board.o: ../User/Peripheral/include/board.h
+.\mainctrlf413mxos\board.o: ..\User\board\board.h

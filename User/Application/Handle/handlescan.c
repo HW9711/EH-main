@@ -14,6 +14,9 @@
 #include "screen.h"
 #include "kernel_scheduler.h"
 #include "datahand.h"
+#include "Pubinterface.h"
+#include "sscBEEP.h"
+#include "sscKEYBH.h"
 #include "at24cs32.h"
 #include "at24cs32_crc_verify.h"
 
@@ -92,7 +95,7 @@ kernel_task_t HANDLESCANTaskHandle;
  * 2. 设为 `0U` 时，基础调试报文都会被静默处理，业务状态机保持不变；
  * 3. 刀具扩展报文单独受 `HANDLESCAN_TOOL_TRACE_ENABLE` 控制，方便现场按需开启。
  */
-#define HANDLESCAN_TRACE_ENABLE               1U
+#define HANDLESCAN_TRACE_ENABLE               0U
 #define HANDLESCAN_TOOL_TRACE_ENABLE          1U
 
 #define HANDLESCAN_DBG_STEP_INSERT_PASS       0x02U
@@ -153,12 +156,12 @@ typedef struct
  */
 static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
 {
-    {0x6B, 0x01, TMBB_ONLINE, "TMBB"},
-    {0x6B, 0x02, TMBA_ONLINE,  "TMBA"},
-    {0x6B, 0x03, EMBA_ONLINE, "EMBA"},
-    {0x6B, 0x04, EMBB_ONLINE,  "EMBB"},
-    {0x6B, 0x05, PXBA_ONLINE,  "PXBA"},
-    {0x6B, 0x06, PXBB_ONLINE,  "PXBB"}
+    {0x6B, 0x01, TMBB_ONLINES, "TMBB"},
+    {0x6B, 0x02, TMBA_ONLINES,  "TMBA"},
+    {0x6B, 0x03, EMBA_ONLINES, "EMBA"},
+    {0x6B, 0x04, EMBB_ONLINES,  "EMBB"},
+    {0x6B, 0x05, PXBA_ONLINES,  "PXBA"},
+    {0x6B, 0x06, PXBB_ONLINES,  "PXBB"}
 };
 
 /*
@@ -168,12 +171,12 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
  */
 static const HandlescanHandleTypeConfig s_tool_type_config_table[] =
 {
-    {0x7C, 0x01, MX_YIM_ONLINE,   "MXYTM"},
-    {0x7C, 0x02, MX_YIP_ONLINE,   "MXYTP"},
-    {0x7C, 0x03, PX_YIM_ONLINE,   "PXYTM"},
-    {0x7C, 0x04, PX_YIP_ONLINE,   "PXYTP"},
-    {0x7C, 0x05, JMB_ONLINE,      "JMB"},
-    {0x7C, 0x06, MX_YIM16_ONLINE, "MXYTM16"}
+    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},
+    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},
+    {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},
+    {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},
+    {0x7C, 0x05, JMB_ONLINES,      "JMB"},
+    {0x7C, 0x06, MX_YIM16_ONLINES, "MXYTM16"}
 };
 
 /* A 通道运行时状态变量。 */
@@ -422,7 +425,7 @@ static uint16_t Handlescan_ReadUint16BE(const uint8_t *buffer, uint32_t offset)
 
 /*
  * 把 EEPROM 第 3 页解析到当前 UI 已使用的 `paoxueSpeciValue` 数组格式。
- * 当前 screen.c 会按 `specidisplay(长度基值 * 5, 直径, 角度)` 来显示，因此这里保持兼容：
+ * 当前 UI 适配层会按 `specidisplay(长度基值 * 5, 直径, 角度)` 来显示，因此这里保持兼容：
  * 1. `[0]` 保存长度基值，等于“0.1 精度长度值 / 5”；
  * 2. `[1]` 保存直径的 0.1 精度原始值；
  * 3. `[2]` 保存角度值；
@@ -452,7 +455,94 @@ static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
 }
 
 /*
- * 判断当前识别出的通道是否应该同步更新 `Workvalue_s.hand_model`。
+ * 新接口只保留 A/B 在线、识别结果和当前工作态三层数据：
+ * 1. `ChannelrecognizeMessageA/B` 保存本通道最新识别出的手柄与刀具信息；
+ * 2. `MemoryMsgA/B` 保存当前通道的记忆化手柄型号；
+ * 3. `WorkMessage` 保存系统当前正在工作的通道和型号。
+ * 下面这些 helper 统一负责新接口写入，避免在状态机主体中反复展开字段赋值。
+ */
+static uint8_t Handlescan_TenthToUint8(uint16_t value_tenth)
+{
+    uint16_t value = (uint16_t)(value_tenth / 10U);
+    if (value > 0xFFU)
+    {
+        value = 0xFFU;
+    }
+
+    return (uint8_t)value;
+}
+
+static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
+{
+    if (message == NULL)
+    {
+        return;
+    }
+
+    message->handle_type = 0U;
+    message->tool_type = 0U;
+    message->diameter = 0U;
+    message->length = 0U;
+    message->draw = 0U;
+}
+
+static void Handlescan_ClearActiveWorkIfNoOnlineHandle(void)
+{
+    if ((WorkMessage.Channel_Aonline == false) && (WorkMessage.Channel_Bonline == false))
+    {
+        WorkMessage.hand_model = 0U;
+        WorkMessage.tool_type = 0U;
+        WorkMessage.channel_work = 0U;
+    }
+}
+
+static void Handlescan_ClearChannelState(uint8_t channel)
+{
+    if (channel == CHANNEL_A)
+    {
+        WorkMessage.Channel_Aonline = false;
+        MemoryMsgA.hand_model = 0U;
+        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageA);
+    }
+    else
+    {
+        WorkMessage.Channel_Bonline = false;
+        MemoryMsgB.hand_model = 0U;
+        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageB);
+    }
+
+    Handlescan_ClearActiveWorkIfNoOnlineHandle();
+}
+
+static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message,
+                                              uint8_t mapped_model,
+                                              uint8_t mapped_tool_model,
+                                              uint16_t diameter_tenth,
+                                              uint16_t length_tenth,
+                                              uint16_t angle_tenth)
+{
+    if (message == NULL)
+    {
+        return;
+    }
+
+    message->handle_type = mapped_model;
+    message->tool_type = mapped_tool_model;
+    message->diameter = Handlescan_TenthToUint8(diameter_tenth);
+    message->length = (uint16_t)(length_tenth / 10U);
+    message->draw = Handlescan_TenthToUint8(angle_tenth);
+}
+
+static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
+{
+    WorkMessage.alarm_flag = true;
+    WorkMessage.alarm_value = alarm_value;
+    SendAlarmMessage(alarm_value);
+    Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, alarm_value);
+}
+
+/*
+ * 判断当前识别出的通道是否应该同步更新 `WorkMessage.hand_model`。
  * 规则尽量保持保守：
  * 1. 如果另一通道当前不在线，则允许当前通道刷新全局工作手柄型号；
  * 2. 如果另一通道也在线，则只有当前通道正好是选中通道时才允许刷新；
@@ -460,12 +550,12 @@ static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
  */
 static uint8_t Handlescan_ShouldSyncGlobalHandModel(uint8_t channel)
 {
-    if (channel == 1U)
+    if (channel == CHANNEL_A)
     {
-        return (uint8_t)((Workvalue_s.Bchanell_online_flag == 0U) || (Workvalue_s.select_channel == 1U));
+        return (uint8_t)((WorkMessage.Channel_Bonline == false) || (WorkMessage.channel_work == CHANNEL_A));
     }
 
-    return (uint8_t)((Workvalue_s.Achanell_online_flag == 0U) || (Workvalue_s.select_channel == 2U));
+    return (uint8_t)((WorkMessage.Channel_Aonline == false) || (WorkMessage.channel_work == CHANNEL_B));
 }
 
 /*
@@ -502,12 +592,10 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(AT24CS32_CRC_Status verify_stat
  */
 static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
 {
-    if (Workvalue_s.MOTORWorking_flag == start_flag)
+    if (WorkMessage.runflag_work == true)
     {
-        Workvalue_s.Alarm_value = HANDLESCAN_ALARM_RUNNING_PLUG;
-        Workvalue_s.beep_Alarm_flag = 1U;
+        Handlescan_RaiseAlarm(channel, HANDLESCAN_ALARM_RUNNING_PLUG);
         K1_OFF();
-        Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, Workvalue_s.Alarm_value);
         return 1U;
     }
 
@@ -574,12 +662,9 @@ void HandlescanA_Fun_SSC(void)
             s_handleA_debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉计数器。 */
             s_a_stage = HANDLESCAN_STAGE_IDLE;               /* A 通道状态机回到空闲态。 */
             s_a_last_alarm = 0U;                             /* 清掉 A 通道最近一次报警缓存。 */
-            Workvalue_s.Achanell_online_flag = 0U;           /* 清除 A 通道在线标志。 */
-            Workvalue_s.A_ChipRecognition_FLAG = 0U;         /* 清除 A 通道认证通过标志。 */
-            Workvalue_s.A_ShortCircuitRecognition_FLAG = 0U; /* 清除 A 通道短接成立标志。 */
-            ChannelValue_s.A.hand_model = 0U;                /* 清空 A 通道当前记忆的手柄型号。 */
+            Handlescan_ClearChannelState(CHANNEL_A);         /* 清空 A 通道新的在线与识别状态容器。 */
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 同步清空 A 通道刀具规格缓存，避免 UI 残留旧值。 */
-            Workvalue_s.ScreenKey_data = 26U;                /* 通知 UI：A 手柄已拔出。 */
+            SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_A); /* 通知新按键行为模块：A 手柄已拔出。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出“离线完成”报文。 */
             (void)Handlescan_HandleRunningPlugAlarm(1U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
@@ -592,9 +677,7 @@ void HandlescanA_Fun_SSC(void)
          */
         s_handleA_debounce.out_debounce_ticks = 0U;          /* 静默复位时也要把拔出去抖计数清零。 */
         s_a_stage = HANDLESCAN_STAGE_IDLE;                   /* 回到空闲态，等待下一次真实插入。 */
-        Workvalue_s.Achanell_online_flag = 0U;               /* 保证 A 通道在线标志关闭。 */
-        Workvalue_s.A_ChipRecognition_FLAG = 0U;             /* 保证 A 通道认证标志关闭。 */
-        Workvalue_s.A_ShortCircuitRecognition_FLAG = 0U;     /* 保证 A 通道短接标志关闭。 */
+        Handlescan_ClearChannelState(CHANNEL_A);             /* 保证 A 通道新接口状态保持关闭。 */
         Handlescan_ClearToolSpecValues(paoxueSpeciValue_A);  /* 插入未完成时也清空 A 通道刀具规格缓存。 */
         return;                                              /* 当前只是插入取消，不做 UI 和报文更新。 */
     }
@@ -626,7 +709,6 @@ void HandlescanA_Fun_SSC(void)
         s_handleA_debounce.in_debounce_ticks = 0U;           /* 插入去抖达标后，清掉计数器。 */
         s_a_verify_start_wait_ticks = 0U;                    /* 开始认证前等待前，先把等待计数清零。 */
         s_a_stage = HANDLESCAN_STAGE_WAIT_VERIFY;            /* 状态机切到“认证前等待”阶段。 */
-        Workvalue_s.A_ShortCircuitRecognition_FLAG = 1U;     /* 置位 A 通道短接识别成功标志。 */
         Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INSERT_PASS, HANDLESCAN_INSERT_DEBOUNCE_TICKS); /* 输出“插入稳定”报文。 */
         return;                                              /* 本轮插入确认完成，等待下一轮进入认证。 */
     }
@@ -662,10 +744,8 @@ void HandlescanA_Fun_SSC(void)
             s_a_last_alarm = Handlescan_MapVerifyStatusToAlarm(verify_status); /* 把认证失败码映射为系统报警码。 */
             if (s_a_last_alarm != 0U)
             {
-                Workvalue_s.Alarm_value = s_a_last_alarm;    /* 写入当前系统报警值。 */
-                Workvalue_s.beep_Alarm_flag = 1U;            /* 打开蜂鸣提示标志。 */
+                Handlescan_RaiseAlarm(CHANNEL_A, s_a_last_alarm); /* 写入新的统一报警状态并触发蜂鸣事件。 */
                 Handlescan_DebugTraceI2cDetail(1U);          /* 输出最近一次底层 I2C 访问细节。 */
-                Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, s_a_last_alarm); /* 输出报警已设置报文。 */
             }
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;        /* 认证失败后切到失败保持态。 */
             return;                                          /* 本轮不再继续读信息区。 */
@@ -684,11 +764,9 @@ void HandlescanA_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_INFO_ADDR, s_a_info_buf, HANDLESCAN_INFO_SIZE); /* 从 A 通道 EEPROM 读出 16 字节信息区。 */
         if (read_status == 0U)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 信息区读取失败时，写入数据区失败报警。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 信息区读取失败时，写入新接口报警状态。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态，等待重新插拔。 */
             return;                                         /* 本轮停止后续处理。 */
         }
@@ -698,10 +776,8 @@ void HandlescanA_Fun_SSC(void)
         handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找型号配置表。 */
         if (handle_type_cfg == NULL)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 查表失败时，同样按数据无效报警处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 查表失败时，同样按数据无效报警处理。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出“手柄类型无法识别”报文。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
             return;                                         /* 等待重新插拔。 */
         }
@@ -710,11 +786,9 @@ void HandlescanA_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 A 通道 EEPROM 读出第 3 页刀具信息区。 */
         if (read_status == 0U)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具信息区读取失败也按数据区失败报警处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具信息区读取失败也按数据区失败报警处理。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
             return;                                         /* 本轮停止后续处理。 */
         }
@@ -724,10 +798,8 @@ void HandlescanA_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具类型查表失败时，同样按数据无效处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具类型查表失败时，同样按数据无效处理。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
             s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
             return;                                         /* 等待重新插拔。 */
         }
@@ -738,20 +810,26 @@ void HandlescanA_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        ChannelValue_s.A.hand_model = mapped_model;         /* 把 A 通道记忆的手柄型号同步更新。 */
+        MemoryMsgA.hand_model = mapped_model;               /* 把 A 通道记忆的手柄型号同步更新到新接口。 */
+        Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageA,
+                                          mapped_model,
+                                          mapped_tool_model,
+                                          tool_diameter_tenth,
+                                          tool_length_tenth,
+                                          tool_angle_tenth); /* 同步更新 A 通道识别结果。 */
         if (Handlescan_ShouldSyncGlobalHandModel(1U) != 0U)
         {
-            Workvalue_s.hand_model = mapped_model;          /* 只在 A 通道应接管当前工作态时，同步全局工作手柄型号。 */
+            WorkMessage.hand_model = mapped_model;          /* 只在 A 通道应接管当前工作态时，同步全局工作手柄型号。 */
+            WorkMessage.tool_type = mapped_tool_model;      /* 当前工作通道切到 A 时，同步刀具类型。 */
+            WorkMessage.channel_work = CHANNEL_A;           /* 当前工作通道切到 A。 */
         }
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 A 通道刀具规格缓存。 */
-        Workvalue_s.Achanell_online_flag = 1U;              /* 置位 A 通道在线标志。 */
-        Workvalue_s.A_ChipRecognition_FLAG = 1U;            /* 置位 A 通道认证通过标志。 */
-        Workvalue_s.A_ShortCircuitRecognition_FLAG = 1U;    /* 维持 A 通道短接识别成功标志。 */
-        Workvalue_s.ScreenKey_data = 24U;                   /* 通知 UI：A 通道手柄上线。 */
+        WorkMessage.Channel_Aonline = true;                 /* 置位 A 通道在线标志。 */
+        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知新接口事件链：A 通道手柄上线。 */
         s_a_last_alarm = 0U;                                /* 上线成功后清掉最近一次报警缓存。 */
         s_a_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到在线保持态。 */
         Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文。 */
@@ -832,12 +910,9 @@ void HandlescanB_Fun_SSC(void)
             s_handleB_debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉 B 通道计数器。 */
             s_b_stage = HANDLESCAN_STAGE_IDLE;               /* B 通道状态机回到空闲态。 */
             s_b_last_alarm = 0U;                             /* 清掉 B 通道最近一次报警缓存。 */
-            Workvalue_s.Bchanell_online_flag = 0U;           /* 清除 B 通道在线标志。 */
-            Workvalue_s.B_ChipRecognition_FLAG = 0U;         /* 清除 B 通道认证通过标志。 */
-            Workvalue_s.B_ShortCircuitRecognition_FLAG = 0U; /* 清除 B 通道短接成立标志。 */
-            ChannelValue_s.B.hand_model = 0U;                /* 清空 B 通道当前记忆的手柄型号。 */
+            Handlescan_ClearChannelState(CHANNEL_B);         /* 清空 B 通道新的在线与识别状态容器。 */
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 同步清空 B 通道刀具规格缓存。 */
-            Workvalue_s.ScreenKey_data = 27U;                /* 通知 UI：B 手柄已拔出。 */
+            SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_B); /* 通知新按键行为模块：B 手柄已拔出。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
             (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
@@ -850,9 +925,7 @@ void HandlescanB_Fun_SSC(void)
          */
         s_handleB_debounce.out_debounce_ticks = 0U;          /* 静默复位时，也把 B 通道拔出去抖计数清零。 */
         s_b_stage = HANDLESCAN_STAGE_IDLE;                   /* 回到空闲态。 */
-        Workvalue_s.Bchanell_online_flag = 0U;               /* 保证 B 通道在线标志关闭。 */
-        Workvalue_s.B_ChipRecognition_FLAG = 0U;             /* 保证 B 通道认证标志关闭。 */
-        Workvalue_s.B_ShortCircuitRecognition_FLAG = 0U;     /* 保证 B 通道短接标志关闭。 */
+        Handlescan_ClearChannelState(CHANNEL_B);             /* 保证 B 通道新接口状态保持关闭。 */
         Handlescan_ClearToolSpecValues(paoxueSpeciValue_B);  /* 插入未完成时也清空 B 通道刀具规格缓存。 */
         return;                                              /* 当前不形成有效离线事件，只做静默收尾。 */
     }
@@ -883,7 +956,6 @@ void HandlescanB_Fun_SSC(void)
         s_handleB_debounce.in_debounce_ticks = 0U;           /* 插入去抖达标后，清掉 B 通道计数器。 */
         s_b_verify_start_wait_ticks = 0U;                    /* 开始认证前等待前，先把等待计数清零。 */
         s_b_stage = HANDLESCAN_STAGE_WAIT_VERIFY;            /* 切到“B 通道认证前等待”阶段。 */
-        Workvalue_s.B_ShortCircuitRecognition_FLAG = 1U;     /* 置位 B 通道短接识别成功标志。 */
         Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INSERT_PASS, HANDLESCAN_INSERT_DEBOUNCE_TICKS); /* 输出 B 通道“插入稳定”报文。 */
         return;                                              /* 本轮到此结束。 */
     }
@@ -919,10 +991,8 @@ void HandlescanB_Fun_SSC(void)
             s_b_last_alarm = Handlescan_MapVerifyStatusToAlarm(verify_status); /* 把 B 通道认证失败码映射为报警码。 */
             if (s_b_last_alarm != 0U)
             {
-                Workvalue_s.Alarm_value = s_b_last_alarm;    /* 写入当前系统报警值。 */
-                Workvalue_s.beep_Alarm_flag = 1U;            /* 打开蜂鸣提示标志。 */
+                Handlescan_RaiseAlarm(CHANNEL_B, s_b_last_alarm); /* 写入新的统一报警状态并触发蜂鸣事件。 */
                 Handlescan_DebugTraceI2cDetail(2U);          /* 输出本轮 B 通道失败的 I2C 细节。 */
-                Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, s_b_last_alarm); /* 输出报警设置报文。 */
             }
             s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;        /* B 通道切到失败保持态。 */
             return;                                          /* 停止后续信息区读取。 */
@@ -941,11 +1011,9 @@ void HandlescanB_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_INFO_ADDR, s_b_info_buf, HANDLESCAN_INFO_SIZE); /* 从 B 通道 EEPROM 读取 16 字节信息区。 */
         if (read_status == 0U)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* B 通道信息区读取失败时，写入数据区失败报警。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* B 通道信息区读取失败时，写入新接口报警状态。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出 B 通道信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警已设置报文。 */
             s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
             return;                                         /* 本轮停止后续处理。 */
         }
@@ -955,10 +1023,8 @@ void HandlescanB_Fun_SSC(void)
         handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找配置表。 */
         if (handle_type_cfg == NULL)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 查表失败时，按“型号无效”处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* 查表失败时，按“型号无效”处理。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出 B 通道“手柄类型无法识别”报文。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警设置报文。 */
             s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
             return;                                         /* 等待重新插拔。 */
         }
@@ -967,11 +1033,9 @@ void HandlescanB_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 B 通道 EEPROM 读取第 3 页刀具信息区。 */
         if (read_status == 0U)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* B 通道刀具信息区读取失败时，按数据区失败处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* B 通道刀具信息区读取失败时，按数据区失败处理。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警设置报文。 */
             s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
             return;                                         /* 本轮停止后续处理。 */
         }
@@ -981,10 +1045,8 @@ void HandlescanB_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Workvalue_s.Alarm_value = HANDLESCAN_ALARM_A_DATA_FAIL; /* 刀具类型查表失败时，按“数据无效”处理。 */
-            Workvalue_s.beep_Alarm_flag = 1U;               /* 打开蜂鸣提示标志。 */
+            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具类型查表失败时，按“数据无效”处理。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ALARM_SET, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出报警设置报文。 */
             s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
             return;                                         /* 等待重新插拔。 */
         }
@@ -995,20 +1057,26 @@ void HandlescanB_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        ChannelValue_s.B.hand_model = mapped_model;         /* 更新 B 通道记忆的手柄型号。 */
+        MemoryMsgB.hand_model = mapped_model;               /* 更新 B 通道记忆的手柄型号到新接口。 */
+        Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageB,
+                                          mapped_model,
+                                          mapped_tool_model,
+                                          tool_diameter_tenth,
+                                          tool_length_tenth,
+                                          tool_angle_tenth); /* 同步更新 B 通道识别结果。 */
         if (Handlescan_ShouldSyncGlobalHandModel(2U) != 0U)
         {
-            Workvalue_s.hand_model = mapped_model;          /* 只在 B 通道应接管当前工作态时，同步全局工作手柄型号。 */
+            WorkMessage.hand_model = mapped_model;          /* 只在 B 通道应接管当前工作态时，同步全局工作手柄型号。 */
+            WorkMessage.tool_type = mapped_tool_model;      /* 当前工作通道切到 B 时，同步刀具类型。 */
+            WorkMessage.channel_work = CHANNEL_B;           /* 当前工作通道切到 B。 */
         }
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 B 通道刀具规格缓存。 */
-        Workvalue_s.Bchanell_online_flag = 1U;              /* 置位 B 通道在线标志。 */
-        Workvalue_s.B_ChipRecognition_FLAG = 1U;            /* 置位 B 通道认证通过标志。 */
-        Workvalue_s.B_ShortCircuitRecognition_FLAG = 1U;    /* 维持 B 通道短接识别成功标志。 */
-        Workvalue_s.ScreenKey_data = 25U;                   /* 通知 UI：B 通道手柄上线。 */
+        WorkMessage.Channel_Bonline = true;                 /* 置位 B 通道在线标志。 */
+        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知新接口事件链：B 通道手柄上线。 */
         s_b_last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
         s_b_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到 B 通道在线保持态。 */
         Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文。 */
