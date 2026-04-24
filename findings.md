@@ -1,164 +1,178 @@
-# 工程阅读与重构发现
+# V1.8 迁移发现记录
 
-## 工程现状
+## 2026-04-23 Session 3 Findings
 
-- 实际运行主线为 `main.c -> Userparser_Init() -> MX_FREERTOS_Init()`。
-- `FreeRTOS` 当前主要承担宿主角色。业务周期调度核心在 `Src/app_task.c` 的 1ms 软件调度器。
-- 工程存在明显历史迁移痕迹：`Cola_os` 旧框架、CubeMX 生成层、自定义 `board.c` 板级层、手写总线层长期并存。
-- 当前最核心架构问题不是单个文件过大，而是两套运行态并存：
-  - 旧体系：`SysRunData / SysSetParam / ...`
-  - 新体系：`Workvalue_s / ChannelValue_s / ...`
-- `screen.c`、`drivectrl.c`、`motoruartdata.c`、`screenkey.c` 等模块存在新旧状态交叉读写。
+- `SendAlarmMessage()` 和 `SendKeyBeepMessage()` 依赖 `SscBeepControlTask_Init()` 初始化队列；如果仍启动旧 `BeepControlTask_Init()`，新接口报警和按键蜂鸣不会进入新蜂鸣队列。
+- `pumpMessage_t.speed_work/speed_Max/speed_Min/speed_step_value` 必须是 `uint16_t`，否则 V1.8 里 `300ml` 灌注速度会被截断。
+- `sscPUMPA/sscPUMPB` 原始 V1.8 代码只消费内部队列，不直接消费 `pumpMessageA/B`；迁移后必须让输出任务按公共泵消息结构输出，否则 `PUMPActive()` 改写的新接口不会真正驱动 UART5/UART7。
+- `drivectrl.c`、`footpedal.c`、`pedal.c` 虽然任务入口已经下线，但仍提供 `warn`、`UI_FootPedalCalibration`、`UI_Main` 引用的辅助函数；删除这三个旧文件前，需要先迁移这些辅助函数或提供新的 UI/报警适配实现。
+- `beep.c`、`radiofreq.c`、`splittype.c` 已无必要参与当前构建；对应职责已迁到 `sscBEEP.c` 和 `sscRFID.c`。
 
-## 本轮已落地结果
+## 2026-04-24 Session 4 Findings
 
-- `main.c` 已通过 `Hardware_PostInit()` 与 `App_Bootstrap_Init()` 接入稳定层。
-- `freertos.c` 已通过 `Kernel_Scheduler_Start()` 接入统一调度入口。
-- `.eide/eide.yml` 已重组为 `Hardware / Driver / Kernel / Application` 四层视图。
-- `User` 层已清空对以下旧直连的直接依赖：
-  - `board.h`
-  - `app_task.h`
-  - `FreeRTOS.h`
-  - `task.h`
-  - `vTaskDelayUntil`
-  - `xTaskGetTickCount`
-- `screen.c`、`drivectrl.c`、`handlescan.c` 已迁到 `kernel_scheduler.h` 包装接口。
-- 已新增稳定硬件接口：
-  - `board_profile.h`
-  - `board_resource_map.h`
-  - `bsp_gpio.h`
-  - `bsp_uart.h`
-  - `bsp_uart.c`
-  - `bsp_i2c_bus.h`
-- 已将 `sysrunled.c`、`handlekey.h`、`handlekey.c`、`handlescan.c` 的部分 GPIO/UART 访问切到 `Bsp` 壳层。
+- `warn.c` 对 `drivectrl.c` 的有效外部依赖只有 `DriveCtrl_PumpFlag_A()` 和 `DriveCtrl_PumpFlag_B()`，旧电机运行任务入口已经未由 `Userparser_Init()` 启动。
+- `drivectrl_adapter.c` 可以承接报警停泵职责：同步清公共泵消息状态，并直接下发 0 速，满足报警路径的即时停泵边界。
+- `drivectrl.c` 移出构建后，`unify_builder --rebuild` 可链接通过，说明旧电机任务和旧 `Workvalue_s` 驱动路径已不再是当前构建必需项。
+- `screen.c` 对当前构建的有效价值主要是 UI 绘图函数和少量全局刀具规格缓存；旧按键分发、蜂鸣、PUMPB 和数据仓库职责已经被 `Pubinterface/ssc*` 替代。
+- `screen_adapter.c` 承接外部仍使用的 UI 绘图入口后，旧 `screen.c` 可以删除并保持链接通过。
+- 当前构建仍有历史类型声明保留在 `screen.h` 中用于兼容头文件结构，但旧全局实例不再导出，业务运行态已不再通过旧全局实例访问。
 
-## 已确认风险点
+## 2026-04-23 初始复核
 
-- `handlescan.c` 对编码和中文注释极敏感。后续仍需最小改动策略。
-- `User/Peripheral/uart/uart1~uart7.c` 仍直接依赖 `huartX` 与 HAL UART API。
-- `User/Peripheral/bus/iic.c`、`OneWireI.c`、`OneWireII.c`、`i2c.c` 仍存在 GPIO 或 RCC 级直连。
-- `userparser.c` 仍直接调用 `Board_GPIOConfiguration()`，应用层与板级初始化尚未完全解耦。
+- 当前作用域内存在两级规则文件：
+  - `EIDE/AGENTS.md`
+  - 上层 `..\Agents.md`
+- 两级规则一致强调：
+  - 源码改动必须用稳定编码。
+  - 中文注释要工程化、可维护。
+  - `handlescan.c` 的改动要最小化。
+- `planning-with-files` 已启用，且旧 `task_plan.md/findings.md/progress.md` 内容已编码损坏，不适合继续作为本轮工作记忆，因此已准备重建。
+- `git status --short` 显示当前非源码脏文件主要为：
+  - `.eide/eide.yml`
+  - `.omx/metrics.json`
+  - `.omx/state/*`
+  - `.omx/logs/*`
+- 当前工程中本轮核心旧文件位于：
+  - `..\User\Application\Screen\screen.c`
+  - `..\User\Application\include\screen.h`
+  - `..\User\Application\Handle\handlescan.c`
+  - `..\User\Application\Handle\handlekey.c`
+  - `..\User\Application\FootPedal\footpedal.c`
+  - `..\User\Application\DriveCtrl\drivectrl.c`
+  - `..\User\Application\Pump\pump.c`
+  - `..\User\Application\RadioFreq\radiofreq.c`
+  - `..\User\Application\SplitType\splittype.c`
+  - `..\User\Application\MotorUartData\motoruartdata.c`
+  - `..\User\Application\Src\userparser.c`
+  - `..\User\Peripheral\uart\soft_uart.c`
+  - `..\User\Peripheral\include\soft_uart.h`
+- `V1.8` 参考工程中已确认存在：
+  - `User\Application\Pubinterface\Pubinterface.c`
+  - `User\Application\include\Pubinterface.h`
+  - `User\Application\include\sscBEEP.h`
+  - `User\Application\include\sscDRIVE.h`
+  - `User\Application\include\sscFOOT.h`
+  - `User\Application\include\sscKEYBH.h`
+  - `User\Application\include\sscPUMPA.h`
+  - `User\Application\include\sscPUMPB.h`
+  - `User\Application\include\sscRFID.h`
+  - `User\Application\include\sscUIDP.h`
+- `V1.8` 的 `ssc*.c` 实际集中在 `User\Application\Beep\` 目录，不符合目录名直觉，后续必须按文件内容而非目录名迁移。
 
-## 已验证事实
+## 待确认问题
 
-- `handlescan.c` 曾因注释起始符缺失引发编译错误，已用最小修复补回，编译恢复。
-- 已完成增量编译验证的文件：
-  - `screen.c`
-  - `drivectrl.c`
-  - `handlescan.c`
-  - `bsp_uart.c`
-  - `sysrunled.c`
-  - `handlekey.c`
-- 当前工具链路径已固定为 `C:\Keil_v5\ARM\ARMCC`。
+1. 当前 `.eide/eide.yml` 的未提交改动是否就是上一次记录残留，还是用户刚手动调整过。
+2. 当前工程是否已有部分 `V1.8` 新接口残片，避免重复导入或命名冲突。
+3. `screen.c` 内哪些函数仍需作为 UI 辅助逻辑保留，哪些能完全由 `sscUIDP` 接管。
 
-## 后续最高价值切入口
+## 2026-04-23 第一轮差异扫描
 
-1. 统一 `uart1~uart7`
-2. 收敛 `OneWire / iic / i2c`
-3. 将 `Board_GPIOConfiguration()` 收口进 `hw_bootstrap`
-4. 再进入运行态模型统一与大模块拆分
+- 当前工程 `Userparser_Init()` 仍按旧路径启动以下任务和初始化：
+  - `RadioFreq_Init()`
+  - `BeepControlTask_Init()`
+  - `HandlescanTaskInit()`
+  - `FootPedalTask_Init()`
+  - `ScreenKeyTask_Init()`
+  - `HandleKeyScan_Init()`
+  - `SplitType_AutoModeGetData_Init()`
+  - `PUMPBTask_Init()`
+  - `SimUartTask_Init()`
+- `handlekey.c` 的 `HAL_GPIO_EXTI_Callback()` 仍直接调用 `SimUart_HandleExti(GPIO_Pin)`，这是必须保留的模拟串口入口。
+- 当前工程的老接口污染面很大：
+  - `screen.c` 定义 `Workvalue_s` 与 `ChannelValue_s`
+  - `screenkey.c`、`footpedal.c`、`handlekey.c`、`splittype.c`、`UI_*` 等多模块直接读写 `Workvalue_s`
+- `V1.8` 参考工程中的新模块仍自带旧调度模型：
+  - 广泛使用 `xQueueCreate/xQueueSend/xQueueReceive`
+  - 初始化函数仍调用 `app_task_create/app_task_start`
+- `V1.8` 中目标迁入模块与当前工程旧模块存在明确重名冲突：
+  - `BeepControlTask_Init`
+  - `ScreenKeyTask_Init`
+  - `PUMPBTask_Init`
+  - `RadioFreq_Init`
+  - `SplitType_AutoModeGetData_Init`
+  - `HandleKeyScan_Init`
+- `V1.8` 新模块并没有完全替代旧系统：
+  - `sscRFID.c` 同名导出 `RadioFreq_Init()` 和 `SplitType_AutoModeGetData_Init()`
+  - `handlekey.c` 仍保留大量旧逻辑的注释残片
+  - `Pump/pump.c`、`MotorUartData/motoruartdata.c` 等旧文件在 `V1.8` 也仍存在
+- 当前 `.eide/eide.yml` 的未提交差异不是本轮迁移内容，而是 Tracealyzer 重新加入、下载器切到 `JLink`、下载速度变更；迁移时必须避免误覆盖这些用户现有改动。
 
-## 2026-04-13 新发现
+## 当前判断
 
-- `uart1~uart7.c` 原实现高度模板化，主要差异只有：
-  - 端口号
-  - DMA 缓冲区大小
-  - 发送超时
-  - `uart7` 的异常恢复路径
-- 当前最稳妥重构方式不是一次性合并 7 个模块，而是先把底层硬件访问统一收口到 `bsp_uart`，保留原对外接口。
-- `build/MainCtrlF413MXOs` 目录存在对象缓存锁定问题，`unify_builder --rebuild` 在该目录下会因删除 `.d/.o` 失败而中断；但切换到新输出目录后，工程可完整编译并成功链接。
-- `userparser.c` 原本是应用层直调 `Board_GPIOConfiguration()` 的最后热点之一，现已改为经 `hw_bootstrap` 转调，应用层与板级 GPIO 初始化边界进一步清晰。
-- `OneWireI/II` 与 `soft IIC` 的主要硬件耦合点集中在 GPIO 拉高/拉低/读引脚；这类点适合优先抽成 `bsp_gpio + 语义资源映射`，无需先重写协议时序逻辑。
-- `i2c.c` 当前仍承担 HAL I2C 实例与 MSP 初始化职责，更像“硬件总线实现”而不是纯设备驱动；后续若继续收口，宜将其逐步迁入硬件层或再包一层更明确的 `bsp_i2c_hal`。
-## 2026-04-13 soft_SSC External Module Findings
+1. 不能简单把 `V1.8` 文件整包覆盖到当前工程。
+2. 更安全的路线是：
+   - 先引入 `Pubinterface` 数据模型。
+   - 再把 `ssc*` 模块中的业务逻辑迁入当前目录结构并替换任务创建接口。
+   - 最后逐步切断旧模块对 `Workvalue_s/ChannelValue_s` 的依赖。
 
-- Source path: `D:\EH_main\soft\soft_SSC`
-- File set is a small business-module bundle, not a standalone reusable BSP/driver package.
-- Main files:
-  - `Pubinterface.[ch]`: shared message definitions, key ids, channel/pump state structs, behavior dispatch helpers
-  - `sscKEYBH.[ch]`: key behavior queue + dispatcher
-  - `sscUIDP.[ch]`: LCD UI adapter and display task
-  - `sscRFID.[ch]`: RFID/UART3 polling + parser + queue trigger
-  - `sscDrive.[ch]`: motor frame packing + UART1 send task
-  - `sscPUMPA.[ch]`, `sscPUMPB.[ch]`: pump setpoint queue + conversion + pump output task
-  - `sscBEEP.[ch]`: beep queue + beep task
-- Strong coupling to current project:
-  - includes `screen.h`, `data.h`, `datahand.h`, `lcd.h`, `pump.h`, `uart1.h`, `uart3.h`, `Motor.h`, `board.h`
-  - directly reads/writes `Workvalue_s`
-  - directly calls `LCD_Show_Picture`, `Pump_SetSpeed_A/B`, `Uart1_SendPacket`, `Uart3_SendPacket`
-  - directly uses `app_task` and FreeRTOS queues
-- Conclusion:
-  - these files overlap heavily with existing project application modules
-  - they should be treated as an external application-layer feature set to be merged selectively
-  - they should not be copied into Driver/Hardware as-is
-- Integration risk hotspots:
-  - duplicate symbol names already exist in current project: `BeepControlTask_Init`, `ScreenKeyTask_Init`, `SplitType_AutoModeGetData_Init`
-  - logic overlap with current `screen.c`, `screenkey.c`, `splittype.c`, `pump.c`, `drivectrl.c`
-  - queue/task model still uses `app_task` directly, not current kernel wrapper
+## 2026-04-23 新模块骨架落地
 
-## 2026-04-16 工程基线复核
+- 已把以下 `V1.8` 文件复制到当前仓：
+  - `User/Application/Pubinterface/Pubinterface.c`
+  - `User/Application/include/Pubinterface.h`
+  - `User/Application/include/sscBEEP.h`
+  - `User/Application/include/sscDRIVE.h`
+  - `User/Application/include/sscFOOT.h`
+  - `User/Application/include/sscKEYBH.h`
+  - `User/Application/include/sscPUMPA.h`
+  - `User/Application/include/sscPUMPB.h`
+  - `User/Application/include/sscRFID.h`
+  - `User/Application/include/sscUIDP.h`
+  - `User/Application/Beep/sscBEEP.c`
+  - `User/Application/Beep/sscDrive.c`
+  - `User/Application/Beep/sscFOOT.c`
+  - `User/Application/Beep/sscKEYBH.c`
+  - `User/Application/Beep/sscPUMPA.c`
+  - `User/Application/Beep/sscPUMPB.c`
+  - `User/Application/Beep/sscRFID.c`
+  - `User/Application/Beep/sscUIDP.c`
+- 所有新 `ssc*` 任务入口已从 `app_task_create/app_task_start` 切到当前工程的 `Kernel_TaskCreate/Kernel_TaskStart`。
+- `Pubinterface.c` 已修正 `pumpMessageInit()` 重复清零 `pumpMessageA` 的已知 bug，第二次清零改为 `pumpMessageB`。
+- 当前新模块仍未接入构建列表，也未替换掉旧 `screen.c/radiofreq.c/splittype.c` 的同名出口，因此此时还只是“可继续集成的骨架”，不是可编译最终态。
 
-- `EIDE/` 目录是当前 Git 根目录，但它通过 `.eide/eide.yml` 中的大量 `../Src`、`../User`、`../Drivers` 相对路径管理上一层的真实 STM32 工程源码树；后续变更需要同时注意“版本库根”和“源码物理根”不在同一层。
-- 顶层源码组织已经比较清晰：
-  - `Src/Inc`：CubeMX 生成入口与 HAL 启动文件
-  - `Drivers`：CMSIS + STM32 HAL
-  - `Middlewares`：FreeRTOS
-  - `User`：业务、外设、UI、数据模型、板级抽象与新分层壳层
-  - `MDK-ARM`：Keil 工程与构建产物
-  - `EIDE`：EIDE 工程、OMX 状态、调研记录与辅助脚本
-- 现行启动链已核实为：
-  - `main.c`
-  - `Hardware_PostInit()`
-  - `App_Bootstrap_Init()`
-  - `MX_FREERTOS_Init()`
-  - `Kernel_Scheduler_Start()`
-  - `AppTaskScheduler_Init()`
-  - FreeRTOS 任务 `AppTaskScheduler`
-- `AppTaskScheduler` 是当前业务周期调度核心：它由 FreeRTOS 创建为单个宿主任务，以 1ms Tick 周期扫描任务链表；大量应用任务通过 `Kernel_TaskCreate/Start/Stop` 间接挂载到这套软调度器上。
-- `User` 目录同时保留两类结构：
-  - 历史业务目录：`Application`、`Peripheral`、`UI`、`Data`、`board`
-  - 新分层入口目录：`Hardware`、`Driver`、`Kernel`、`App`
-- 当前代码规模最集中的业务模块为：
-  - `User/Application/Screen/screen.c`：181209 字节
-  - `User/Application/Handle/handlescan.c`：57244 字节
-  - `User/Application/FootPedal/footpedal.c`：53096 字节
-  - `User/Application/DriveCtrl/drivectrl.c`：43241 字节
-  - `User/Application/SplitType/splittype.c`：39161 字节
-  - `User/Application/ScreenKey/param.c`：35470 字节
-- `soft_uart` 已不是简单单通道 bit-bang：
-  - 对外提供两路 `SimUart` 通道
-  - RX 由 `TIM11` 中断采样驱动
-  - 起始位捕获挂在 `HAL_GPIO_EXTI_Callback()`
-  - 数据落地走 FreeRTOS 静态队列
-  - 另有一个 100ms 周期后台任务负责把 ISR 环形缓冲搬运到队列
-- `AT24CS32` 驱动已经体现出“新风格”演进：具备分块读写、页校验、最近一次调试快照、`HAL_BUSY/HAL_TIMEOUT` 判定与 I2C 软恢复流程，明显比大量历史业务模块更工程化。
-- `i2c.c` 当前承担的是“硬件总线实现”职责而不是普通设备驱动职责：
-  - 直接声明 `hi2c2/hi2c3`
-  - 自行完成 `HAL_I2C_MspInit/DeInit`
-  - 暴露 `MX_I2C_Init()` 与 I2C2/I2C3 的一组 HAL 包装接口
-- `iic.c`、`OneWireI.c`、`OneWireII.c` 当前已经完成第一步 GPIO 收口，底层宏都改成通过 `Bsp_GpioRead/Write + board_resource_map` 访问语义资源。
-- 运行态“双状态模型并存”在当前代码中仍是事实而非历史结论：
-  - `SysRunData / SysSetParam / SysInterface / SysHandleData / SysFootPedalData` 定义在 `User/Data`
-  - `Workvalue_s / ChannelValue_s` 定义在 `User/Application/Screen/screen.c`
-  - `motoruartdata.c`、`splittype.c`、`footpedal.c`、`handlekey.c`、`handlescan.c`、`drivectrl.c` 等仍直接读写 `Workvalue_s`
-- 串口配置存在一处值得后续重点盯住的配置漂移风险：
-  - `.ioc` 中 `USART1/USART2/UART5/UART7` 仍记录为 `9600`
-  - `User/board/board.h` 的 `BOARD_UART_LIST` 也保留了这组 `9600/115200` 混合值
-  - 但 `Src/usart.c` 当前生成代码里 1/2/3/4/5/6/7/8/10 口默认初始化全部是 `115200`
-  - `uart1~uart7.c` 虽然都保留了 `UartX_Configuration(uint16_t baud)`，但本轮检索未发现明确调用点
-- `MainCtrlF413MXOs.ioc` 还原出的硬件画像为：
-  - MCU：`STM32F413VGT6`
-  - 时钟：HSE 8MHz，系统 100MHz
-  - RTOS：FreeRTOS（CubeMX 侧仅保留 `defaultTask` 宿主）
-  - 定时器：`TIM7`、`TIM10`、`TIM14`
-  - 硬件 I2C：`I2C2`、`I2C3`
-  - 硬件串口：`USART1/2/3/6`、`UART4/5/7`，另源码侧存在 `UART8/10`
-  - DMA：多路 UART RX 循环接收
-- `eeprom布局说明.txt` 为 UTF-8 正常文件，记录了 32 字节分页布局与页尾校验规则：
-  - Page1：加密区 / CRC
-  - Page2：手柄适配信息
-  - Page3：刀具信息
-  - Page4：初始参数
-  - Page6-7：多档位参数
-  - Page8：使用记录
-  - Page11：出厂信息
+## 2026-04-23 可编译接入与首批接口迁移
+
+- 新 `ssc*` 初始化入口已统一加 `Ssc` 前缀，避免旧模块尚未移除时发生链接重名：
+  - `SscBeepControlTask_Init()`
+  - `SscDriveMotorTask_Init()`
+  - `SscFootControlTask_Init()`
+  - `SscKeyBehaviorTask_Init()`
+  - `SscPumpATask_Init()`
+  - `SscPumpBTask_Init()`
+  - `SscRadioFreq_Init()`
+  - `SscSplitTypeAutoModeGetData_Init()`
+  - `SscUIDisplayTask_Init()`
+- `Pubinterface.h/.c` 已补齐 `WorkMessageInit()`、`ChannelMemoryMessageInit()`，并为历史声明 `ChannelMessageInit()`、`ChannelFlagMessageInit()` 提供统一清零实现。
+- `.eide/eide.yml` 与 Keil `.uvprojx` 已接入：
+  - `User/Application/Pubinterface/Pubinterface.c`
+  - `User/Application/Beep/sscBEEP.c`
+  - `User/Application/Beep/sscDrive.c`
+  - `User/Application/Beep/sscFOOT.c`
+  - `User/Application/Beep/sscKEYBH.c`
+  - `User/Application/Beep/sscPUMPA.c`
+  - `User/Application/Beep/sscPUMPB.c`
+  - `User/Application/Beep/sscRFID.c`
+  - `User/Application/Beep/sscUIDP.c`
+- `Userparser_Init()` 已在旧任务启动前初始化新接口数据，并启动 `SscKeyBehaviorTask_Init()` 用于接收新插拔/手柄按键事件。
+- `handlescan.c` 已完成首批新接口迁移：
+  - 不再写 `Workvalue_s/ChannelValue_s`。
+  - 通道在线写入 `WorkMessage.Channel_Aonline/Channel_Bonline`。
+  - 手柄型号写入 `MemoryMsgA/B.hand_model` 与 `ChannelrecognizeMessageA/B.handle_type`。
+  - 报警写入 `WorkMessage.alarm_flag/alarm_value`，并通过 `SendAlarmMessage()` 触发新蜂鸣事件。
+  - 插拔事件通过 `SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A/B/UNPLUG_A/B)` 发给 `sscKEYBH`。
+  - 原状态机、I2C2/I2C3 认证、去抖、调试报文和 `paoxueSpeciValue_A/B` 临时 UI 规格缓存仍保留。
+- `handlekey.c` 已完成首批新接口迁移：
+  - `HAL_GPIO_EXTI_Callback()` 中 `SimUart_HandleExti(GPIO_Pin)` 保持不变。
+  - SSC 扫描函数不再写 `Workvalue_s`，改为使用 `WorkMessage`、`ControlSignalMessage`、`SendKeyBehMessage(HANDLEKey, ...)` 和 `SendAlarmMessage()`。
+- 全工程剩余 `Workvalue_s/ChannelValue_s` 依赖仍很多，静态计数约为 `1399` 行命中，主要集中在 `screen.c`、`footpedal.c`、`drivectrl.c`、`pump.c`、`radiofreq.c`、`splittype.c`、`motoruartdata.c`、`screenkey.c` 和 UI 旧路径。
+- 当前构建命令已验证通过：
+  - `& 'C:\Users\Dell\.vscode\extensions\cl.eide-3.26.7\res\tools\win32\unify_builder\unify_builder.exe' -p build\MainCtrlF413MXOs\builder.params --rebuild`
+  - 输出 `build/MainCtrlF413MXOs/MainCtrlF413MXOs.hex`
+  - 输出 `build/MainCtrlF413MXOs/MainCtrlF413MXOs.s19`
+
+# 2026-04-24 Session 5 Findings
+
+- `ConnectScan`、`DirCurrent`、`Encryption`、`SerialPortPro` 在当前运行入口中没有被调用；map 中对应对象主要被链接器裁剪，不参与最终有效业务路径。
+- `RadioFreq`、`SplitType` 旧目录已经为空；当前仍出现的 `SscRadioFreq_Init()`、`SscSplitTypeAutoModeGetData_Init()` 是 `sscRFID.c` 内的新接口，不是旧目录依赖。
+- 清理后 `Application` 下剩余模块均仍有源码文件或头文件引用；更激进地删除 `Warn`、旧 UI 刷新、`screen_adapter` 等会牵动显示/告警兼容层，应另起一轮按行为验证处理。
+- `unify_builder --rebuild` 成功，说明 EIDE 当前构建链已接受本次模块清理；Keil `.uvprojx` 与 EIDE `.yml` 均已同步去掉被删模块。
