@@ -1,0 +1,6 @@
+tool: AC5
+fileName: 'MainCtrlF413MXOs.map'
+elfName: 'MainCtrlF413MXOs.axf'
+compilerName: 'ARM Compiler'
+compilerFullName: 'Component: ARM Compiler 5.06 update 6 (build 750)'
+compilerPath: 'C:\Keil_v5\ARM\ARMCC\bin\armcc.exe'

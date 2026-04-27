@@ -1,0 +1,89 @@
+>>> cc
+
+".\..\Middlewares\Third_Party\FreeRTOS\Source\tasks.c", line 1132: Warning:  #174-D: expression has no effect
+  		traceTASK_CREATE( pxNewTCB );
+  		^
+".\..\Middlewares\Third_Party\FreeRTOS\Source\tasks.c", line 1214: Warning:  #174-D: expression has no effect
+  				traceTASK_DELETE( pxTCB );
+  				^
+".\..\Middlewares\Third_Party\FreeRTOS\Source\tasks.c", line 1226: Warning:  #174-D: expression has no effect
+  				traceTASK_DELETE( pxTCB );
+  				^
+.\..\Middlewares\Third_Party\FreeRTOS\Source\tasks.c: 3 warnings, 0 errors
+".\..\User\Application\Beep\sscFOOT.c", line 43: Warning:  #550-D: variable "jtb_adcvalue"  was set but never used
+  static uint16_t jtb_adcvalue = 0;
+                  ^
+".\..\User\Application\Beep\sscFOOT.c", line 44: Warning:  #550-D: variable "jtd_adcvalue_l"  was set but never used
+  static uint16_t jtd_adcvalue_l = 0;
+                  ^
+".\..\User\Application\Beep\sscFOOT.c", line 45: Warning:  #550-D: variable "jtd_adcvalue_r"  was set but never used
+  static uint16_t jtd_adcvalue_r = 0;
+                  ^
+.\..\User\Application\Beep\sscFOOT.c: 3 warnings, 0 errors
+".\..\User\Application\Beep\sscRFID.c", line 49: Warning:  #177-D: variable "hop_return"  was declared but never referenced
+  static unsigned char hop_return[]={0xBB ,0x01 ,0xAD ,0x00 ,0x01 ,0x00 ,0xAF ,0x7E};//跳屏返回�?
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 50: Warning:  #177-D: variable "stop_hop_ch"  was declared but never referenced
+  static unsigned char stop_hop_ch[]={0XBB ,0X00 ,0XAD ,0X00, 0X01, 0x00 ,0xAE ,0x7E};//停止跳屏
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 52: Warning:  #177-D: variable "pa_gain20"  was declared but never referenced
+  static unsigned char  pa_gain20[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X0A, 0X28, 0Xea, 0X7E};//发射功率
+                        ^
+".\..\User\Application\Beep\sscRFID.c", line 53: Warning:  #177-D: variable "pa_gain10"  was declared but never referenced
+  static unsigned char  pa_gain10[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X03, 0Xe8, 0Xa3, 0X7E};//发射功率
+                        ^
+".\..\User\Application\Beep\sscRFID.c", line 54: Warning:  #177-D: variable "pa_gain3"  was declared but never referenced
+  static unsigned char  pa_gain3[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X01, 0X2C, 0XE5, 0X7E}; //发射功率
+                        ^
+".\..\User\Application\Beep\sscRFID.c", line 56: Warning:  #177-D: variable "pa_gain5"  was declared but never referenced
+  static unsigned char  pa_gain5[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X01, 0XF4, 0XAD, 0X7E}; //
+                        ^
+".\..\User\Application\Beep\sscRFID.c", line 57: Warning:  #177-D: variable "region_set_europe"  was declared but never referenced
+  static unsigned char region_set_europe[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x03 ,0x0B ,0x7E};//欧洲频段865.1-867.9M
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 58: Warning:  #177-D: variable "region_set_us"  was declared but never referenced
+  static unsigned char region_set_us[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x02 ,0x0A ,0x7E};//美国频段902.25-927.75M
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 60: Warning:  #177-D: variable "region_set_CHAINS"  was declared but never referenced
+  static unsigned char region_set_CHAINS[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x04 ,0x0C ,0x7E};//中国2-840.125-844.875M
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 61: Warning:  #177-D: variable "region_set_K"  was declared but never referenced
+  static unsigned char region_set_K[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x06 ,0x0E ,0x7E};//韩国-917.1-923.3M
+                       ^
+".\..\User\Application\Beep\sscRFID.c", line 64: Warning:  #177-D: variable "CUTTERSCANTaskHandle"  was declared but never referenced
+  static kernel_task_t CUTTERSCANTaskHandle;
+                       ^
+.\..\User\Application\Beep\sscRFID.c: 11 warnings, 0 errors
+".\..\User\Application\Pubinterface\Pubinterface.c", line 695: Warning:  #177-D: variable "PumpA_Start_flag"  was declared but never referenced
+      static bool PumpA_Start_flag=0;
+                  ^
+".\..\User\Application\Pubinterface\Pubinterface.c", line 696: Warning:  #177-D: variable "PumpB_Start_flag"  was declared but never referenced
+  	static bool PumpB_Start_flag=0;
+  	            ^
+.\..\User\Application\Pubinterface\Pubinterface.c: 2 warnings, 0 errors
+".\..\User\Tracealyzer\TraceRecorder\trcError.c", line 171: Warning:  #111-D: statement is unreachable
+  		break;
+  		^
+".\..\User\Tracealyzer\TraceRecorder\trcError.c", line 178: Warning:  #111-D: statement is unreachable
+  		break;
+  		^
+".\..\User\Tracealyzer\TraceRecorder\trcError.c", line 194: Warning:  #111-D: statement is unreachable
+  		break;
+  		^
+.\..\User\Tracealyzer\TraceRecorder\trcError.c: 3 warnings, 0 errors
+".\..\User\Tracealyzer\TraceRecorder\trcDependency.c", line 40: Warning:  #111-D: statement is unreachable
+  		break;
+  		^
+.\..\User\Tracealyzer\TraceRecorder\trcDependency.c: 1 warning, 0 errors
+".\..\User\Tracealyzer\TraceRecorder\trcEventBuffer.c", line 392: Warning:  #111-D: statement is unreachable
+  			break;
+  			^
+.\..\User\Tracealyzer\TraceRecorder\trcEventBuffer.c: 1 warning, 0 errors
+".\..\User\Tracealyzer\TraceRecorder\trcTask.c", line 55: Warning:  #174-D: expression has no effect
+  	xTraceStackMonitorRemove(pvTask);
+  	^
+.\..\User\Tracealyzer\TraceRecorder\trcTask.c: 1 warning, 0 errors
+
+>>> ld
+
+Program Size: Code=72806 RO-data=882 RW-data=2284 ZI-data=51652  

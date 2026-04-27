@@ -1,0 +1,108 @@
+[2026-04-23 17:17:52]	[done]
+	build successfully !
+
+[2026-04-23 17:25:45]	[done]
+	build successfully !
+
+[2026-04-23 17:28:08]	[done]
+	build successfully !
+
+[2026-04-23 17:41:11]	[done]
+	build successfully !
+
+[2026-04-23 17:48:16]	[done]
+	build successfully !
+
+[2026-04-23 17:52:47]	[done]
+	build successfully !
+
+[2026-04-23 17:55:52]	[done]
+	build successfully !
+
+[2026-04-23 17:56:47]	link failed !, exit code: 1
+   at unify_builder.Program.Main(String[] args_)
+---
+Error: L6218E: Undefined symbol DriveCtrl_PumpFlag_A (referred from warn.o).
+Error: L6218E: Undefined symbol DriveCtrl_PumpFlag_B (referred from warn.o).
+Error: L6218E: Undefined symbol PedalRecv_Scan (referred from warn.o).
+Error: L6218E: Undefined symbol Pedal_ReadHValue (referred from warn.o).
+Error: L6218E: Undefined symbol Pedal_ReadLValue (referred from warn.o).
+Error: L6218E: Undefined symbol Pedal_ReadHValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_ReadLValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_ReadMValue (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_ReadMValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageHValue (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageHValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageLValue (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageLValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageMValue (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol Pedal_StorageMValue_Left (referred from UI_FootPedalCalibration.o).
+Error: L6218E: Undefined symbol FootPedal_SelectWin (referred from UI_Main.o).
+Not enough information to list image symbols.
+Finished: 1 information, 0 warning and 16 error messages.
+
+
+[2026-04-23 17:58:35]	[done]
+	build successfully !
+
+[2026-04-23 18:02:34]	[done]
+	build successfully !
+
+[2026-04-23 18:44:58]	[done]
+	build successfully !
+
+[2026-04-23 18:51:13]	compilation failed at : "d:\EH_main\soft\F413EXOsSSCH_RTOSV1.5-EH_mainReconstructV1\F413EXOsSSCH_RTOSV1.5-EH_mainReconstruct\User\Application\Pedal\pedal.c", exit code: 1
+command: 
+  "C:\Keil_v5\ARM\ARMCC\bin\armcc.exe" -c --apcs=interwork -I../Inc -I../Drivers/STM32F4xx_HAL_Driver/Inc -I../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F4xx/Include -I../Drivers/CMSIS/Include -I../User/Hardware/include -I../User/Driver/include -I../User/Kernel/include -I../User/App/include -I../User/Application/include -I../User/Data -I../User/Peripheral/include -I../User/UI/include -I../Middlewares/Third_Party/FreeRTOS/Source/include -I../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 -I../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F -I../User/Tracealyzer/include -I../User/Tracealyzer/TraceRecorder/include -I../User/Tracealyzer/TraceRecorder/config -I../User/Tracealyzer/TraceRecorder/streamports/include -I../User/Tracealyzer/TraceRecorder/streamports/config -I.cmsis/include -I../MDK-ARM/RTE/_MainCtrlF413MXOs -I../User/board -D"USE_HAL_DRIVER" -D"STM32F413xx" --cpu Cortex-M4.fp --li --c99 -O0 --split_sections --diag_suppress=1 --diag_suppress=1295 -g -o .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pedal\pedal.o --no_depend_system_headers --depend .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pedal\pedal.d .\..\User\Application\Pedal\pedal.c
+   at unify_builder.Program.compileByMulThread(Int32 thrNum, CmdInfo[] cmds_, List`1 errLogs)
+   at unify_builder.Program.Main(String[] args_)
+---
+".\..\User\Application\Pedal\pedal.c", line 266: Error:  #20: identifier "Workvalue_s" is undefined
+  					if (Workvalue_s.Foot_type == 2)
+  					    ^
+.\..\User\Application\Pedal\pedal.c: 0 warnings, 1 error
+
+[2026-04-23 18:51:49]	[done]
+	build successfully !
+
+[2026-04-23 18:53:27]	[done]
+	build successfully !
+
+[2026-04-23 18:56:09]	[done]
+	build successfully !
+
+[2026-04-24 10:48:09]	compilation failed at : "d:\EH_main\soft\F413EXOsSSCH_RTOSV1.5-EH_mainReconstructV1\F413EXOsSSCH_RTOSV1.5-EH_mainReconstruct\User\Application\DriveCtrl\drivectrl_adapter.c", exit code: 1
+command: 
+  "C:\Keil_v5\ARM\ARMCC\bin\armcc.exe" -c --apcs=interwork -I../Inc -I../Drivers/STM32F4xx_HAL_Driver/Inc -I../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F4xx/Include -I../Drivers/CMSIS/Include -I../User/Hardware/include -I../User/Driver/include -I../User/Kernel/include -I../User/App/include -I../User/Application/include -I../User/Data -I../User/Peripheral/include -I../User/UI/include -I../Middlewares/Third_Party/FreeRTOS/Source/include -I../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 -I../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F -I../User/Tracealyzer/include -I../User/Tracealyzer/TraceRecorder/include -I../User/Tracealyzer/TraceRecorder/config -I../User/Tracealyzer/TraceRecorder/streamports/include -I../User/Tracealyzer/TraceRecorder/streamports/config -I.cmsis/include -I../MDK-ARM/RTE/_MainCtrlF413MXOs -I../User/board -D"USE_HAL_DRIVER" -D"STM32F413xx" --cpu Cortex-M4.fp --li --c99 -O0 --split_sections --diag_suppress=1 --diag_suppress=1295 -g -o .\build\MainCtrlF413MXOs\.obj\__\User\Application\DriveCtrl\drivectrl_adapter.o --no_depend_system_headers --depend .\build\MainCtrlF413MXOs\.obj\__\User\Application\DriveCtrl\drivectrl_adapter.d .\..\User\Application\DriveCtrl\drivectrl_adapter.c
+   at unify_builder.Program.compileByMulThread(Int32 thrNum, CmdInfo[] cmds_, List`1 errLogs)
+   at unify_builder.Program.Main(String[] args_)
+---
+".\..\User\Application\DriveCtrl\drivectrl_adapter.c", line 13: Error:  #20: identifier "NULL" is undefined
+      if (pump_msg != NULL)
+                      ^
+".\..\User\Application\DriveCtrl\drivectrl_adapter.c", line 21: Error:  #20: identifier "NULL" is undefined
+      if (set_speed != NULL)
+                       ^
+.\..\User\Application\DriveCtrl\drivectrl_adapter.c: 0 warnings, 2 errors
+
+[2026-04-24 10:48:36]	[done]
+	build successfully !
+
+[2026-04-24 10:54:18]	[done]
+	build successfully !
+
+[2026-04-24 10:55:43]	[done]
+	build successfully !
+
+[2026-04-24 10:57:53]	[done]
+	build successfully !
+
+[2026-04-24 11:17:29]	[done]
+	build successfully !
+
+[2026-04-24 11:33:15]	[done]
+	build successfully !
+
+[2026-04-24 13:19:52]	[done]
+	build successfully !
+

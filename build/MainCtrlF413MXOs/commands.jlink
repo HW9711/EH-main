@@ -1,0 +1,6 @@
+r
+halt
+loadfile "d:\EH_main\soft\F413EXOsSSCH_RTOSV1.5-EH_mainReconstructV1\F413EXOsSSCH_RTOSV1.5-EH_mainReconstruct\EIDE\build\MainCtrlF413MXOs\MainCtrlF413MXOs.hex"
+r
+go
+exit
