@@ -6,6 +6,7 @@
 #include "task.h"
 #include "tim.h"
 #include "bsp_uart.h"
+#include "Pubinterface.h"
 
 #include <stdbool.h>
 
@@ -19,6 +20,25 @@
 #define SOFT_UART_TIMER_IRQn           TIM1_TRG_COM_TIM11_IRQn
 #define SOFT_UART_IRQ_PRIORITY         5U
 #define SOFT_UART_DIAG_LED             0
+
+#define CS1237_FRAME_LENGTH            21U
+#define CS1237_HEADER_0                0xAAU
+#define CS1237_HEADER_1                0x55U
+#define CS1237_TAIL_0                  0x55U
+#define CS1237_TAIL_1                  0xAAU
+#define CS1237_PROTOCOL_VER            0x02U
+#define CS1237_MSG_TYPE_REPORT         0x01U
+#define CS1237_PAYLOAD_LENGTH          0x0CU
+#define CS1237_CRC_OFFSET              17U
+#define CS1237_CRC_LENGTH              15U
+/* CS1237 下位机霍尔设备类型码：只有这些预设组合才认为泵设备在线。
+ * 设备码由 PA1~PA4 按位组合得到；对应孔位有磁铁时，霍尔输入会从 1 被拉成 0。
+ * 当前泵体四个孔均可安装磁铁，因此“四孔都有磁铁”的合法在线码应为 0000/0x00。 */
+#define CS1237_DEVICE_CODE_0000        0x00U   /* PA1~PA4 均检测到磁铁，四个霍尔位全为低电平，是当前四孔全装磁铁泵的合法在线码。 */
+#define CS1237_DEVICE_CODE_1110        0x0EU   /* 保留历史合法组合；bit0 为 0 表示 PA4 对应孔位检测到磁铁。 */
+#define CS1237_DEVICE_CODE_1100        0x0CU   /* 保留历史合法组合；bit1~bit0 为 0 表示 PA3、PA4 对应孔位检测到磁铁。 */
+#define CS1237_DEVICE_CODE_1000        0x08U   /* 保留历史合法组合；bit2~bit0 为 0 表示 PA2、PA3、PA4 对应孔位检测到磁铁。 */
+#define CS1237_DEVICE_CODE_1001        0x09U   /* 保留历史合法组合；bit2~bit1 为 0 表示 PA2、PA3 对应孔位检测到磁铁。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -67,6 +87,13 @@ typedef struct {
     volatile uint8_t current_byte;
 } SoftUartReceiverState;
 
+/* 每路协议帧解析状态。
+ * 任务层按字节寻找 AA55 帧头，拼满固定长度后再校验字段和 CRC。 */
+typedef struct {
+    uint8_t frame[CS1237_FRAME_LENGTH];
+    uint8_t length;
+} Cs1237FrameParser;
+
 static SoftUartChannelContext s_channels[SIM_UART_COUNT] = {
     {
         .tx_port = GPIOE,
@@ -97,6 +124,7 @@ static uint8_t s_task_created = 0U;
 static uint8_t s_dwt_ready = 0U;
 static uint8_t s_tim7_ready = 0U;
 static uint8_t s_timer_initialized = 0U;
+static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
 
 /* 私有函数声明区：
  * 这些函数按“时基/硬件控制 -> 缓冲区 -> 状态机 -> 对外接口”的顺序组织。 */
@@ -119,6 +147,13 @@ static void SoftUart_WriteTx(const SoftUartChannelContext *channel, GPIO_PinStat
 static GPIO_PinState SoftUart_ReadRx(const SoftUartChannelContext *channel);
 static bool SoftUart_TestForwardChannelSelected(sim_uart_channel_t channel);
 static void SoftUart_TestForwardFrame(sim_uart_channel_t channel, const uint8_t *data, uint16_t length);
+static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length);
+static uint16_t Cs1237_ReadU16Le(const uint8_t *data);
+static uint32_t Cs1237_ReadU32Le(const uint8_t *data);
+static bool Cs1237_FrameValid(const uint8_t *frame);
+static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame);
+static void Cs1237_ParserResync(Cs1237FrameParser *parser);
+static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data);
 static void delay_us(uint32_t us);
 
 static bool SoftUart_ChannelValid(sim_uart_channel_t channel)
@@ -543,8 +578,195 @@ static void SoftUart_ProcessSample(void)
     }
 }
 
+static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length)
+{
+    uint16_t crc = 0xFFFFU;
+
+    for (uint16_t i = 0U; i < length; i++)
+    {
+        crc ^= data[i];
+        for (uint8_t bit = 0U; bit < 8U; bit++)
+        {
+            if ((crc & 0x0001U) != 0U)
+            {
+                crc = (uint16_t)((crc >> 1U) ^ 0xA001U);
+            }
+            else
+            {
+                crc >>= 1U;
+            }
+        }
+    }
+
+    return crc;
+}
+
+static uint16_t Cs1237_ReadU16Le(const uint8_t *data)
+{
+    return (uint16_t)data[0] | (uint16_t)((uint16_t)data[1] << 8U);
+}
+
+static uint32_t Cs1237_ReadU32Le(const uint8_t *data)
+{
+    return (uint32_t)data[0] |
+           ((uint32_t)data[1] << 8U) |
+           ((uint32_t)data[2] << 16U) |
+           ((uint32_t)data[3] << 24U);
+}
+
+static bool Cs1237_FrameValid(const uint8_t *frame)
+{
+    uint16_t frame_crc;
+    uint16_t calc_crc;
+
+    if ((frame[0] != CS1237_HEADER_0) || (frame[1] != CS1237_HEADER_1))
+    {
+        return false;
+    }
+
+    if ((frame[2] != CS1237_PROTOCOL_VER) ||
+        (frame[3] != CS1237_MSG_TYPE_REPORT) ||
+        (frame[4] != CS1237_PAYLOAD_LENGTH))
+    {
+        return false;
+    }
+
+    if ((frame[19] != CS1237_TAIL_0) || (frame[20] != CS1237_TAIL_1))
+    {
+        return false;
+    }
+
+    frame_crc = Cs1237_ReadU16Le(&frame[CS1237_CRC_OFFSET]);
+    calc_crc = Cs1237_CalcCrc16Modbus(&frame[2], CS1237_CRC_LENGTH);
+
+    return frame_crc == calc_crc;
+}
+
+static bool Cs1237_DeviceCodeValid(uint8_t device_code)
+{
+    /* 只接受协议文档中预设的 5 种霍尔状态组合。 */
+    switch (device_code)
+    {
+        case CS1237_DEVICE_CODE_0000:
+        case CS1237_DEVICE_CODE_1110:
+        case CS1237_DEVICE_CODE_1100:
+        case CS1237_DEVICE_CODE_1000:
+        case CS1237_DEVICE_CODE_1001:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame)
+{
+    pumpMessage_t *pump_message;
+    int32_t raw_cs1237 = (int32_t)Cs1237_ReadU32Le(&frame[6]);
+    uint32_t weight_x10 = Cs1237_ReadU32Le(&frame[10]);
+    uint16_t threshold_g = Cs1237_ReadU16Le(&frame[14]);
+    uint8_t device_code = frame[16];
+
+    if (channel == SIM_UART_1)
+    {
+        pump_message = &pumpMessageA;
+    }
+    else if (channel == SIM_UART_2)
+    {
+        pump_message = &pumpMessageB;
+    }
+    else
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    pump_message->pressure_value = raw_cs1237;
+    pump_message->weight_x10 = weight_x10;
+    pump_message->pressure_threshold = threshold_g;
+    pump_message->type = device_code;
+    pump_message->seq = frame[5];
+    pump_message->online_flag = Cs1237_DeviceCodeValid(device_code);
+    pump_message->losses_times = pump_message->online_flag ? 0U : (uint8_t)(pump_message->losses_times + 1U);
+    taskEXIT_CRITICAL();
+}
+
+static void Cs1237_ParserResync(Cs1237FrameParser *parser)
+{
+    uint8_t new_length = 0U;
+
+    for (uint8_t start = 1U; (start + 1U) < parser->length; start++)
+    {
+        if ((parser->frame[start] == CS1237_HEADER_0) &&
+            (parser->frame[start + 1U] == CS1237_HEADER_1))
+        {
+            new_length = (uint8_t)(parser->length - start);
+            for (uint8_t i = 0U; i < new_length; i++)
+            {
+                parser->frame[i] = parser->frame[start + i];
+            }
+            parser->length = new_length;
+            return;
+        }
+    }
+
+    if (parser->frame[parser->length - 1U] == CS1237_HEADER_0)
+    {
+        parser->frame[0] = CS1237_HEADER_0;
+        parser->length = 1U;
+        return;
+    }
+
+    parser->length = 0U;
+}
+
+static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
+{
+    Cs1237FrameParser *parser;
+
+    if (!SoftUart_ChannelValid(channel))
+    {
+        return;
+    }
+
+    parser = &s_cs1237_parsers[(uint32_t)channel];
+
+    if (parser->length == 0U)
+    {
+        if (data == CS1237_HEADER_0)
+        {
+            parser->frame[0] = data;
+            parser->length = 1U;
+        }
+        return;
+    }
+
+    if ((parser->length == 1U) && (data != CS1237_HEADER_1))
+    {
+        parser->length = (data == CS1237_HEADER_0) ? 1U : 0U;
+        parser->frame[0] = CS1237_HEADER_0;
+        return;
+    }
+
+    parser->frame[parser->length++] = data;
+    if (parser->length < CS1237_FRAME_LENGTH)
+    {
+        return;
+    }
+
+    if (Cs1237_FrameValid(parser->frame))
+    {
+        Cs1237_UpdatePumpMessage(channel, parser->frame);
+        parser->length = 0U;
+    }
+    else
+    {
+        /* 当前 21 字节候选帧无效时，从缓冲内部继续寻找下一处 AA55，避免粘包错位后长期丢帧。 */
+        Cs1237_ParserResync(parser);
+    }
+}
+
 /* 100ms 周期任务。
- * 职责仅为“搬运字节到队列”，不参与任何位级时序处理。 */
+ * 职责为“搬运字节到队列”和“任务层解析完整协议帧”，不参与任何位级时序处理。 */
 /**
  * @brief 模拟UART任务函数，处理UART数据传输
  * @param event 任务事件参数（此函数中未使用）
@@ -568,6 +790,8 @@ static void SimUartTaskFunc(uint32_t event)
 
         while (SoftUart_RingPopTask(channel, &byte))
         {
+            Cs1237_ParseByte(channel, byte);
+
             if (xQueueSend(ctx->queue_handle, &byte, 0U) != pdPASS)
             {
                 ctx->queue_overflow_count++;
@@ -631,6 +855,7 @@ void SimUart_InitAll(void)
         ctx->overlap_drop_count = 0U;
         ctx->framing_error_count = 0U;
         ctx->exti_suppressed = 0U;
+        s_cs1237_parsers[i].length = 0U;
 
         /* 创建静态队列，用于存储接收到的数据 */
         ctx->queue_handle = xQueueCreateStatic(SOFT_UART_QUEUE_DEPTH,

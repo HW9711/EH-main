@@ -502,12 +502,16 @@ static void Handlescan_ClearChannelState(uint8_t channel)
     {
         WorkMessage.Channel_Aonline = false;
         MemoryMsgA.hand_model = 0U;
+        MemoryMsgA.hand_type_raw_major = 0U;                 /* A 通道拔出后清掉 EEPROM 原始手柄类型高字节，避免心跳误上传旧的 0x6B。 */
+        MemoryMsgA.hand_type_raw_minor = 0U;                 /* A 通道拔出后清掉 EEPROM 原始手柄类型低字节，避免心跳误上传旧的子型号。 */
         Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageA);
     }
     else
     {
         WorkMessage.Channel_Bonline = false;
         MemoryMsgB.hand_model = 0U;
+        MemoryMsgB.hand_type_raw_major = 0U;                 /* B 通道拔出后清掉 EEPROM 原始手柄类型高字节，避免心跳误上传旧的 0x6B。 */
+        MemoryMsgB.hand_type_raw_minor = 0U;                 /* B 通道拔出后清掉 EEPROM 原始手柄类型低字节，避免心跳误上传旧的子型号。 */
         Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageB);
     }
 
@@ -811,6 +815,8 @@ void HandlescanA_Fun_SSC(void)
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
         MemoryMsgA.hand_model = mapped_model;               /* 把 A 通道记忆的手柄型号同步更新到新接口。 */
+        MemoryMsgA.hand_type_raw_major = raw_type_major;    /* 保存 A 通道 EEPROM 原始手柄类型高字节，供 UART2 心跳直接上传。 */
+        MemoryMsgA.hand_type_raw_minor = raw_type_minor;    /* 保存 A 通道 EEPROM 原始手柄类型低字节，供 UART2 心跳直接上传。 */
         Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageA,
                                           mapped_model,
                                           mapped_tool_model,
@@ -1058,6 +1064,8 @@ void HandlescanB_Fun_SSC(void)
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
         MemoryMsgB.hand_model = mapped_model;               /* 更新 B 通道记忆的手柄型号到新接口。 */
+        MemoryMsgB.hand_type_raw_major = raw_type_major;    /* 保存 B 通道 EEPROM 原始手柄类型高字节，供 UART2 心跳直接上传。 */
+        MemoryMsgB.hand_type_raw_minor = raw_type_minor;    /* 保存 B 通道 EEPROM 原始手柄类型低字节，供 UART2 心跳直接上传。 */
         Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageB,
                                           mapped_model,
                                           mapped_tool_model,

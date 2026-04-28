@@ -3,7 +3,6 @@
 #include "motor.h"
 #include "delay.h"
 #include "uart1.h"
-#include "uart2.h"
 #include "data.h"
 #include "common.h"
 #include "board.h"
@@ -43,7 +42,11 @@ void BrushedMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq)
 	dat[2] = Freq;
 	dat[3] = MotorNum;
 
-	Uart2_SendPacket(dat, 11);
+	/*
+	 * UART2 已切换为外部通信协议专用口。
+	 * 有刷电机运行链路当前由 sscDrive.c 统一走 UART1，本旧接口保留参数组帧但不再占用 UART2。
+	 */
+	(void)dat;
 }
 
 //============================================================================
@@ -72,7 +75,11 @@ void BrushedMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint16_t Spe
 	dat[6] = (Speed & 0x00FF);
 	dat[7] = ((Current & 0xFF00) >> 8);
 	dat[8] = (Current & 0x00FF);
-	Uart2_SendPacket(dat, 11);
+	/*
+	 * UART2 已切换为外部通信协议专用口。
+	 * 有刷电机运行链路当前由 sscDrive.c 统一走 UART1，本旧接口保留参数组帧但不再占用 UART2。
+	 */
+	(void)dat;
 }
 
 

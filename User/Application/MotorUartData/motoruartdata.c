@@ -4,63 +4,23 @@
 #include "common.h"
 #include "data.h"
 #include "uart1.h"
-#include "uart2.h"
 #include "pump.h"
 #include <string.h>
-#include "lcd.h"
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
-#include "sscKEYBH.h"
 #include "sscBEEP.h"
 
 kernel_task_t MOTORUARTTaskHandle;
 
 /*
- * 外部 HMI 串口仍沿用原 6 字节命令帧，只把命令结果投递到新的公共接口。
- * 这样可以保留串口解析时序，同时避免继续写旧屏幕按键数据仓库。
+ * UART2 已由 ExternalComm 独立任务接管。
+ * 本模块只保留 UART1 驱动板接收解析，避免旧 6 字节 HMI 短帧再次读取 UART2 DMA 缓冲。
  */
-static void MotorUart_PostHmiKey(uint8_t hmi_key)
-{
-	SendKeyBehMessage(HMIkey, hmi_key);
-}
-
-static void MotorUart_SetHmiActive(uint8_t active)
-{
-	WorkMessage.hmiactive_work = (active != 0U);
-	ControlSignalMessage.HMI_enable_flag = (active != 0U);
-	if(active == 0U)
-	{
-		WorkMessage.runflag_work = false;
-		ControlSignalMessage.HMI_control_flag = false;
-	}
-}
-
-static void MotorUart_SetHmiRun(uint8_t run)
-{
-	if(WorkMessage.alarm_flag)
-	{
-		return;
-	}
-	if(!WorkMessage.hmiactive_work)
-	{
-		return;
-	}
-	WorkMessage.runflag_work = (run != 0U);
-	ControlSignalMessage.HMI_control_flag = (run != 0U);
-}
-
 static void MotorUart_SetAlarm(uint8_t alarm_value)
 {
 	WorkMessage.alarm_value = alarm_value;
 	WorkMessage.alarm_flag = (alarm_value != 0U);
 	SendAlarmMessage(alarm_value);
-}
-
-static void MotorUart_ClearAlarm(void)
-{
-	WorkMessage.alarm_value = 0U;
-	WorkMessage.alarm_flag = false;
-	SendAlarmMessage(0U);
 }
 
 static void MotorUart_StopAllWork(void)
@@ -74,111 +34,6 @@ static void MotorUart_StopAllWork(void)
 	pumpMessageA.speed_work = 0U;
 	pumpMessageB.run_flag = false;
 	pumpMessageB.speed_work = 0U;
-}
-
-//============================================================================
-//2.驱动板接收
-//============================================================================
-
-//============================================================================
-//接收串口数据任务，收到的数据放入缓冲区
-// 外部控制
-//============================================================================
-void BrushedMotorUartData_ReceiveData(void)
-{
-  uint8_t rlen = 0, i = 0;
-  uint8_t dat[UART2_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
-
-	
-  //读取串口数据
-  rlen = Uart2_DMARecvDataPeek(dat);
-  if (rlen < 6)   //不够一个数据包大小
-	  return;
-
-  for (i = 0; i < (rlen-5); i++)    //
-  {
-	  if (dat[i] == 0xAA) 
-	  {
-			if(dat[i+4]==0xee&&dat[5]==0xff)
-			{
-				SendKeyBeepMessage(1U);
-				Common_CopyData(&dat[i], dat1, 6);    //截取6个数据
-				switch(dat1[3])
-				{
-					case 1:
-						MotorUart_SetHmiActive(1U);
-					LCD_Show_Picture(0x1450,540);
-					
-						break;
-					case 2:
-						LCD_Disappear_Picture(0x1450);
-						if(pumpMessageB.run_flag)
-						{
-							MotorUart_PostHmiKey(HMIkey_BPUMP_control);
-						}
-						
-						MotorUart_SetHmiActive(0U);
-						MotorUart_PostHmiKey(HMIkey_HMI_EXIT);
-						MotorUart_ClearAlarm();
-						break;
-					case 3:
-							if(WorkMessage.alarm_flag)
-								return;
-						MotorUart_SetHmiRun(1U);
-						break;
-					case 4:
-						MotorUart_SetHmiRun(0U);
-						break;
-					case 5:
-							if(WorkMessage.hmiactive_work)
-						MotorUart_PostHmiKey(HMIkey_SPEED_Add);
-						break;
-					case 6:
-							if(WorkMessage.hmiactive_work)
-						MotorUart_PostHmiKey(HMIkey_SPEED_Sub);
-						break;
-					case 7:
-					if(WorkMessage.hmiactive_work){
-						if(WorkMessage.channel_work==CHANNEL_A)
-						{
-							MotorUart_PostHmiKey(HMIkey_HANDLE_B);
-						}
-						else
-						{
-							MotorUart_PostHmiKey(HMIkey_HANDLE_A);
-						}
-					}
-					break;
-					  case 8:
-								if(WorkMessage.hmiactive_work)
-							MotorUart_PostHmiKey(HMIkey_BPUMP_control);
-							break;
-						case 9:
-							if(WorkMessage.hmiactive_work)
-							MotorUart_PostHmiKey(HMIkey_APUMP_control);
-							break;
-							case 10:
-								if(WorkMessage.hmiactive_work){
-									MotorUart_PostHmiKey(HMIkey_APUMP_Add);
-								}
-							break;
-						case 11:
-								if(WorkMessage.hmiactive_work){
-									MotorUart_PostHmiKey(HMIkey_BPUMP_Add);
-							}
-							break;
-					
-					case 12:
-							if(WorkMessage.hmiactive_work){
-						MotorUart_ClearAlarm();
-						break;
-					}
-				}
-			}
-			memset(dat1, 0, sizeof(dat1));//
-			return;
-		}
-	}
 }
 
 //============================================================================
@@ -272,9 +127,11 @@ void BrushlessMotorUartData_ReceiveData(void)
 void MOTORUARTTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN MOTORUARTTaskFunc */
-  /* Infinite loop */
-  BrushedMotorUartData_ReceiveData();
-	BrushlessMotorUartData_ReceiveData();
+  /*
+   * UART2 已由 ExternalComm 独立任务接管，用于新的外部通信协议。
+   * 本任务只保留 UART1 驱动板接收，避免两个任务同时读取 UART2 DMA 缓冲。
+   */
+  BrushlessMotorUartData_ReceiveData();
   /* USER CODE END MOTORUARTTaskFunc */
 }
 

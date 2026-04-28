@@ -971,6 +971,16 @@
               <FilePath>..\User\Application\MotorUartData\motoruartdata.c</FilePath>
             </File>
             <File>
+              <FileName>external_comm_protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\ExternalComm\external_comm_protocol.c</FilePath>
+            </File>
+            <File>
+              <FileName>external_comm_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\ExternalComm\external_comm_task.c</FilePath>
+            </File>
+            <File>
               <FileName>pedal.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\Pedal\pedal.c</FilePath>

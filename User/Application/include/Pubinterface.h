@@ -186,7 +186,7 @@ typedef struct
   volatile uint16_t  speed_set_work;//设置速度
   volatile uint16_t  freq_work;//工作频率
   volatile uint16_t  dir_work;///工作方向
-  volatile uint16_t  current_work;
+  volatile uint16_t  current_work;//工作电流
   volatile uint32_t  tool_reduction_ratio;//减速比 高16位表示增速16位表示减速
 }
 WorkMessage_t;
@@ -219,6 +219,8 @@ extern ControlSignalMessage_t ControlSignalMessage;//控制信号量
 typedef struct {
 
   volatile uint8_t   hand_model;//手柄类型
+  volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，来自Page2第0字节，外部通信心跳在线时直接上传
+  volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
   volatile uint8_t  tool_type;//刨还是磨
   volatile uint8_t   drive_type;//驱动方式(脚控，手控，外控，触控)
   volatile uint16_t  zz_speed;//正传速度
@@ -284,15 +286,17 @@ typedef struct
   volatile bool     timingDrainage_flag;//定时排空，优先级在run_flag运行后，遇到run_flag=true则切为false
   volatile uint8_t  step_value;//步进值
   volatile uint8_t  associated_channel;//关联通道，如果
-  volatile uint16_t  type;//泵类型
+  volatile uint16_t  type;//泵类型设备码
   volatile uint8_t  direction;//方向
   volatile uint16_t speed_work;//泵速度，灌注最大到300ml，必须使用16位避免截断
   volatile uint16_t speed_Max;
   volatile uint16_t speed_Min;
   volatile uint16_t speed_step_value;//调节步进值一次多少ml，快速档位先不管，后续在判断最大值最小值之间分为6档进行分配
   volatile uint8_t  losses_times;//识别丢失次数
-  volatile uint8_t  pressure_value;//压力值
-  volatile uint8_t  pressure_threshold;//压力阀值，由压力模块提供
+  volatile int32_t  pressure_value;//压力传感器原始值，对应下位机 RawCs1237
+  volatile uint16_t pressure_threshold;//压力阀值，由压力模块提供
+  volatile uint32_t weight_x10;//重量值，单位 0.1g，对应下位机 WeightX10
+  volatile uint8_t  seq;//压力模块上报帧序号
 
 }
 pumpMessage_t;

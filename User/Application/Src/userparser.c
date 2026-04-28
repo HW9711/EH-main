@@ -29,6 +29,7 @@
 #include "warn.h"
 #include "pedal.h"
 #include "motoruartdata.h"
+#include "external_comm_task.h"
 #include "screenkey.h"
 #include "pump.h"
 #include "UI_Main.h"
@@ -179,6 +180,7 @@ void Userparser_Init(void)
 	HandleKeyScan_Init();//手柄按键扫描
 	
 	MotorUartData_Init(); 
+	ExternalComm_Init();  //UART2 外部通信协议任务，独立接收下行帧并周期上传心跳。
 	SscSplitTypeAutoModeGetData_Init();  //200ms 请求分体式手柄的刀具信息（自动设别刀具模式）
 	SscPumpATask_Init();
 	SscPumpBTask_Init();
