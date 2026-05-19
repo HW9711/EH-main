@@ -95,3 +95,16 @@
   - duplicate symbol names already exist in current project: `BeepControlTask_Init`, `ScreenKeyTask_Init`, `SplitType_AutoModeGetData_Init`
   - logic overlap with current `screen.c`, `screenkey.c`, `splittype.c`, `pump.c`, `drivectrl.c`
   - queue/task model still uses `app_task` directly, not current kernel wrapper
+
+## 2026-05-15 APP Task Independent Thread Refactor Findings
+
+- Current scheduler entry is `Kernel_Scheduler_Start() -> AppTaskScheduler_Init()`.
+- Current `Src/app_task.c` creates one FreeRTOS task named `AppTask` with `xTaskCreate()`, then scans a linked list every 1 ms.
+- Business modules already call `Kernel_TaskCreate/Kernel_TaskStart`; preserving `app_task_create/start/stop` and `Kernel_Task*` signatures avoids rewriting all module call sites.
+- The behavior-preserving migration pattern from the prior EH_test checkout is applicable here: create one static FreeRTOS thread per registered soft task, but guard callback execution with one shared runtime mutex so existing callbacks remain serialized instead of becoming fully concurrent.
+- Final implementation keeps that pattern:
+  - no dynamic `AppTask` scheduler task remains
+  - registered soft tasks are created with `xTaskCreateStatic()` using memory embedded in `task_t`
+  - `AppTaskRuntimeGate()` is the single serialized callback entry, preserving old one-callback-at-a-time behavior
+  - `AppTaskScheduler_Init()` is retained as the public scheduler-init hook but now initializes only the shared static mutex
+- Static allocation increased ZI RAM as expected but remains acceptable after full link: `131.1KB/320.0KB` RAM used.

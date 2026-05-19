@@ -985,15 +985,20 @@
               <FileType>1</FileType>
               <FilePath>..\User\Application\Pedal\pedal.c</FilePath>
             </File>
-            <File>
-              <FileName>pump.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\Pump\pump.c</FilePath>
-            </File>
-            <File>
-              <FileName>screen_adapter.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\Screen\screen_adapter.c</FilePath>
+              <File>
+                <FileName>pump.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\User\Application\Pump\pump.c</FilePath>
+              </File>
+              <File>
+                <FileName>pump_pressure_control.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\User\Application\Pump\pump_pressure_control.c</FilePath>
+              </File>
+              <File>
+                <FileName>screen_adapter.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\User\Application\Screen\screen_adapter.c</FilePath>
             </File>
             <File>
               <FileName>param.c</FileName>

@@ -11,6 +11,7 @@
 #include "motor.h"
 #include "led.h"
 #include "bsp_board.h"
+#include "Pubinterface.h"
 
 #include "kernel_scheduler.h"
 
@@ -529,7 +530,7 @@ void UIMain_Refresh(void)
 	  {
 	    if ((SysFootPedalData.FootPedalADValue  > (SysFootPedalData.FootPedalMemoryLValue + FootPedalValueOffset)) || (SysRunData.HandleKeyValue[SysInterface.InterfaceSwitchNo2 - 1] == Press))  //踩脚踏运行  SysRunData.KEYHandleNo2OnOff
 	    {
-		    SysRunData.WarnID = 1;
+		    WorkAlarm_Set(WORK_ALARM_HANDLE_NOT_CONNECTED);
 
         //390ms电机运行过程中，手柄进行插拔、或切换，急停电机并报警
 		    Motor_ErrorEmergencyStop_Ctrl();

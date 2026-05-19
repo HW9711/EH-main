@@ -107,3 +107,22 @@
   - direct LCD/UART/Pump calls
   - direct `app_task` + FreeRTOS queue usage
 - Ready for next step: produce integration plan and migration order for selective merge into current project
+
+## 2026-05-15 APP Task Independent Thread Refactor
+
+- Started behavior-preserving refactor from single `AppTask` software scheduler to independent static FreeRTOS threads.
+- Read existing `Src/app_task.c`, `Inc/app_task.h`, `kernel_scheduler` wrapper, and prior similar EH_test rollout summary.
+- Decision: keep public APIs unchanged, allocate task TCB/stack statically inside each `task_t`, and serialize callback bodies with a shared runtime mutex to preserve old one-callback-at-a-time semantics.
+- Added `Tools/firmware-tests/app_task_independent_threads.test.mjs` to lock the new architecture:
+  - each registered soft task must own `StaticTask_t`, `StackType_t[]`, and `TaskHandle_t`
+  - `Src/app_task.c` must use `xTaskCreateStatic`, `xSemaphoreCreateMutexStatic`, `AppTaskWorker`, and `AppTaskRuntimeGate`
+  - old dynamic `xTaskCreate(AppTaskScheduler...)` entry must stay removed
+- Refactored `Src/app_task.c`:
+  - `app_task_create_named()` now creates one static FreeRTOS worker per `task_t`
+  - `AppTaskScheduler_Init()` now only creates the shared static runtime mutex
+  - callback execution remains serialized by `AppTaskRuntimeGate()` to avoid changing legacy global-state access behavior
+  - Tracealyzer soft-task lifecycle markers are preserved around the new callback gate
+- Verification completed:
+  - `Get-ChildItem -Path Tools\firmware-tests -Filter *.test.mjs | ForEach-Object { node $_.FullName }` passed
+  - EIDE `unify_builder --rebuild` passed
+  - linked image memory: RAM `131.1KB/320.0KB`, ROM `86.4KB/1024.0KB`

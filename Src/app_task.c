@@ -1,6 +1,7 @@
 #include "app_task.h"
 
 #include "FreeRTOS.h"
+#include "semphr.h"
 #include "task.h"
 #include "tracealyzer_recorder.h"
 #include "trcRecorder.h"
@@ -8,15 +9,16 @@
 // 定义应用程序任务相关的枚举常量，用于配置任务参数
 enum
 {
-    APP_TASK_STACK_DEPTH = 1024,  // 定义应用程序任务栈深度为1024字节
     APP_TASK_PRIORITY = tskIDLE_PRIORITY + 3,  // 定义应用程序任务优先级，比空闲任务优先级高3级
-    APP_TASK_TICK_MS = 1,  // 定义应用程序任务的时间片 tick 为1毫秒
+    APP_TASK_IDLE_SLEEP_MS = 1,  // 软任务未启动时的轻量级轮询周期，保持 start 后快速响应
 };
 
 static task_t *app_task_list = NULL;
-static TaskHandle_t app_task_scheduler_handle = NULL;
+static SemaphoreHandle_t sAppTaskRuntimeMutex = NULL;
+static StaticSemaphore_t sAppTaskRuntimeMutexBuffer;
+static volatile bool sTracealyzerStreamStartAttempted = false;
 static TraceStringHandle_t sSoftTaskTraceChannel = 0;
-volatile int32_t g_appTaskSchedulerCreateResult = (int32_t)pdFAIL;
+volatile int32_t g_appTaskSchedulerCreateResult = (int32_t)pdPASS;
 
 #define TRACEALYZER_STREAM_START_DELAY_MS 1500U
 
@@ -281,49 +283,104 @@ static void AppTaskTrace_RecordOneShotStop(task_t *task)
     AppTaskTrace_RecordHandle(task, task->traceOneShotStopHandle);
 }
 
-static void AppTaskScheduler(void *argument)
+static TickType_t AppTask_MsToTicks(uint32_t time_ms)
 {
-    task_t *current;
-    TickType_t lastWakeTime = xTaskGetTickCount();
-    (void)argument;
+    TickType_t ticks = pdMS_TO_TICKS(time_ms);
 
+    if (ticks == 0U)
+    {
+        ticks = 1U;
+    }
+
+    return ticks;
+}
+
+static void AppTaskTrace_StartStreamingOnce(void)
+{
 #if (TRACEALYZER_SNAPSHOT_ENABLE == 1U) && (TRACEALYZER_TRANSPORT_MODE == TRACEALYZER_TRANSPORT_MODE_JLINK_RTT)
+    bool shouldStartStreaming = false;
+
     /*
-     * 当前 PC 侧会话虽然能连上 RTT，但没有稳定地下发 Start 命令到 down buffer。
-     * 因此这里在一个已经确认会运行的普通调度任务里，延时后主动直启 Streaming。
-     * 这样可以避开 main() 早期阻塞，也避免单独新建启动任务带来的调度和栈不确定性。
+     * 原来只有一个 AppTask 调度线程，Streaming 延时启动只会执行一次。
+     * 拆成多个独立软任务线程后，必须用临界区抢占一次性标志，避免多个线程同时延时和重复启动 RTT Streaming。
      */
-    vTaskDelay(pdMS_TO_TICKS(TRACEALYZER_STREAM_START_DELAY_MS));
-    Tracealyzer_RecorderTryStartStreaming();
+    taskENTER_CRITICAL();
+    if (!sTracealyzerStreamStartAttempted)
+    {
+        sTracealyzerStreamStartAttempted = true;
+        shouldStartStreaming = true;
+    }
+    taskEXIT_CRITICAL();
+
+    if (shouldStartStreaming)
+    {
+        vTaskDelay(pdMS_TO_TICKS(TRACEALYZER_STREAM_START_DELAY_MS));
+        Tracealyzer_RecorderTryStartStreaming();
+    }
 #endif
+}
+
+static void AppTaskRuntimeGate(task_t *task)
+{
+    if ((task == NULL) || (task->func == NULL))
+    {
+        return;
+    }
+
+    /*
+     * 旧架构下所有软任务回调都在同一个 AppTask 线程里串行执行。
+     * 现在虽然每个软任务都有独立 FreeRTOS 线程，但真正进入业务回调前仍统一抢同一个静态互斥锁，
+     * 这样泵、脚踏、屏幕、外部通信等旧业务不会因为拆线程而突然并发访问全局状态。
+     */
+    if ((sAppTaskRuntimeMutex == NULL) ||
+        (xSemaphoreTake(sAppTaskRuntimeMutex, portMAX_DELAY) != pdTRUE))
+    {
+        return;
+    }
+
+    AppTaskTrace_RecordBoundary(task, true);
+    task->func(0U);
+    AppTaskTrace_RecordBoundary(task, false);
+
+    if (task->oneShot)
+    {
+        taskENTER_CRITICAL();
+        task->start = false;
+        task->timerTick = 0U;
+        taskEXIT_CRITICAL();
+        AppTaskTrace_RecordOneShotStop(task);
+    }
+
+    (void)xSemaphoreGive(sAppTaskRuntimeMutex);
+}
+
+static void AppTaskWorker(void *argument)
+{
+    task_t *self = (task_t *)argument;
+    TickType_t lastWakeTime = xTaskGetTickCount();
+
+    configASSERT(self != NULL);
+    AppTaskTrace_StartStreamingOnce();
 
     for (;;)
     {
-        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(APP_TASK_TICK_MS));
-
-        current = app_task_list;
-        while (current != NULL)
+        if ((self == NULL) || (!self->start) || (self->func == NULL) || (self->period == 0U))
         {
-            if (current->start && (current->func != NULL) && (current->period > 0U))
+            if (self != NULL)
             {
-                current->timerTick += APP_TASK_TICK_MS;
-                if (current->timerTick >= current->period)
-                {
-                    current->timerTick = 0U;
-                    /* 统一在软调度入口记录任务起止边界，便于在 Tracealyzer 中观察 AppTask 内部切换。 */
-                    AppTaskTrace_RecordBoundary(current, true);
-                    current->func(0U);
-                    AppTaskTrace_RecordBoundary(current, false);
-                    if (current->oneShot)
-                    {
-                        current->start = false;
-                        /* 单次软任务由调度器自动停机时补一条生命周期事件，
-                         * 便于在 Tracealyzer 中区分“业务主动 Stop”和“一次性任务执行完毕”。 */
-                        AppTaskTrace_RecordOneShotStop(current);
-                    }
-                }
+                self->timerTick = 0U;
             }
-            current = current->next;
+            lastWakeTime = xTaskGetTickCount();
+            vTaskDelay(AppTask_MsToTicks(APP_TASK_IDLE_SLEEP_MS));
+            continue;
+        }
+
+        vTaskDelayUntil(&lastWakeTime, AppTask_MsToTicks(self->period));
+
+        if (self->start && (self->func != NULL) && (self->period > 0U))
+        {
+            self->timerTick = 0U;
+            AppTaskRuntimeGate(self);
         }
     }
 }
@@ -331,6 +388,7 @@ static void AppTaskScheduler(void *argument)
 int app_task_create_named(task_t *task, const char *name, cbFunc func)
 {
     task_t *current;
+    const char *threadName = name;
 
     if ((task == NULL) || (func == NULL))
     {
@@ -343,7 +401,9 @@ int app_task_create_named(task_t *task, const char *name, cbFunc func)
     task->timerTick = 0U;
     task->oneShot = true;
     task->start = false;
+    task->threadCreated = false;
     task->name = name;
+    task->threadHandle = NULL;
     task->traceBeginHandle = 0U;
     task->traceEndHandle = 0U;
     task->traceCreateHandle = 0U;
@@ -378,6 +438,30 @@ int app_task_create_named(task_t *task, const char *name, cbFunc func)
     }
 
     taskEXIT_CRITICAL();
+
+    /*
+     * 每个旧软任务在注册时立即创建一个静态 FreeRTOS 线程。
+     * TCB 和栈都来自 task_t 自身，避免继续消耗 FreeRTOS heap，也方便调试器按任务名单独观察。
+     */
+    if (threadName == NULL)
+    {
+        threadName = "SoftTask";
+    }
+
+    task->threadHandle = xTaskCreateStatic(AppTaskWorker,
+                                           threadName,
+                                           APP_TASK_THREAD_STACK_DEPTH,
+                                           task,
+                                           APP_TASK_PRIORITY,
+                                           task->threadStack,
+                                           &task->threadTcb);
+    task->threadCreated = (task->threadHandle != NULL);
+    if (!task->threadCreated)
+    {
+        g_appTaskSchedulerCreateResult = (int32_t)pdFAIL;
+        return false;
+    }
+
     AppTaskTrace_RegisterTaskName(task);
     AppTaskTrace_RecordCreate(task);
     return true;
@@ -424,26 +508,21 @@ int app_task_stop(task_t *task)
 
 void AppTaskScheduler_Init(void)
 {
-    BaseType_t result;
-
-    if (app_task_scheduler_handle != NULL)
+    if (sAppTaskRuntimeMutex != NULL)
     {
         return;
     }
 
-    result = xTaskCreate(AppTaskScheduler,
-                         "AppTask",
-                         APP_TASK_STACK_DEPTH,
-                         NULL,
-                         APP_TASK_PRIORITY,
-                         &app_task_scheduler_handle);
-
     /*
-     * 记录任务创建结果，便于在 configASSERT 卡死时仍能从调试器看到
-     * 是否是堆不足或调度任务未创建导致 Streaming 后续无事件输出。
+     * 独立软任务线程已经在 app_task_create_named() 中静态创建。
+     * 这里仅创建一个同样静态分配的运行互斥门，用来保持旧 AppTask 单线程串行业务语义。
      */
-    g_appTaskSchedulerCreateResult = (int32_t)result;
-    configASSERT(result == pdPASS);
+    sAppTaskRuntimeMutex = xSemaphoreCreateMutexStatic(&sAppTaskRuntimeMutexBuffer);
+    if (sAppTaskRuntimeMutex == NULL)
+    {
+        g_appTaskSchedulerCreateResult = (int32_t)pdFAIL;
+    }
+    configASSERT(sAppTaskRuntimeMutex != NULL);
 }
 
 int32_t AppTaskScheduler_CreateResult(void)

@@ -43,3 +43,14 @@
   - status: completed
 - Phase X3: prepare merge strategy for selective integration into current architecture
   - status: pending
+
+## 2026-05-15 APP Task Independent Thread Refactor
+
+- Phase A1: map current `Src/app_task.c` soft scheduler and active `Kernel_TaskCreate/Start` callers
+  - status: completed
+- Phase A2: add regression tests that require static per-soft-task FreeRTOS threads and preserved public API
+  - status: completed
+- Phase A3: refactor `app_task` internals to `xTaskCreateStatic` per registered soft task while preserving serialized callback execution
+  - status: completed
+- Phase A4: run firmware static tests and EIDE rebuild
+  - status: completed

@@ -44,8 +44,6 @@
 .\mainctrlf413mxos\pump.o: ../User/Peripheral/include/lcd.h
 .\mainctrlf413mxos\pump.o: ../User/Kernel/include/kernel_scheduler.h
 .\mainctrlf413mxos\pump.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
-.\mainctrlf413mxos\pump.o: ../Inc/app_task.h
-.\mainctrlf413mxos\pump.o: ../User/Kernel/include/kernel_osal.h
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h
 .\mainctrlf413mxos\pump.o: ../Inc/FreeRTOSConfig.h
 .\mainctrlf413mxos\pump.o: ../User/Tracealyzer/include/tracealyzer_recorder.h
@@ -94,5 +92,8 @@
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/deprecated_definitions.h
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/portmacro.h
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/mpu_wrappers.h
+.\mainctrlf413mxos\pump.o: ../Inc/app_task.h
+.\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/queue.h
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h
 .\mainctrlf413mxos\pump.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h
+.\mainctrlf413mxos\pump.o: ../User/Kernel/include/kernel_osal.h

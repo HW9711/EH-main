@@ -65,6 +65,7 @@
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pedal\pedal.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pubinterface\Pubinterface.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pump\pump.o
+.\build\MainCtrlF413MXOs\.obj\__\User\Application\Pump\pump_pressure_control.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Screen\screen_adapter.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\ScreenKey\param.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\ScreenKey\screenkey.o

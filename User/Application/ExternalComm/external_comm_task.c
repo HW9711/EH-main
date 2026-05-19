@@ -3,6 +3,7 @@
 #include "external_comm_protocol.h"
 
 #include "at24cs32.h"
+#include "bsp_uart.h"
 #include "data.h"
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
@@ -12,7 +13,15 @@
 #include <string.h>
 
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
-#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   1000U   /* 心跳 1000ms 主动上传一次，可按现场需求单独改宏。 */
+#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 1000ms 主动上传一次，可按现场需求单独改宏。 */
+#define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
+#define EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE 1U /* UART5 A 泵固定识别开关：1 表示临时固定为注水泵，0 表示使用真实识别结果。 */
+#define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
+#define EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE    INJECTWATER /* 固定识别打开时，UART5 A 泵类型固定成注水泵，PUMPA 任务按注水方向和流量公式输出。 */
+#define EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED 30U  /* 固定注水泵且上位机未设置 A 泵速度时，给 UART5 注水泵补一个可转动的默认测试速度。 */
+#define EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE 1U /* B 泵固定识别开关：1 表示临时固定为注水泵，便于无 CS1237 霍尔识别时测试 B 通道。 */
+#define EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE    INJECTWATER /* B 泵固定识别打开时，业务类型固定成注水泵，PUMPB 任务按注水方向和流量公式输出。 */
+#define EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED 30U  /* B 泵固定注水泵且上位机未设置 B 泵速度时，补一个可转动的默认测试速度。 */
 
 #define EXTERNAL_COMM_STATUS_ONLINE         0x01U   /* 心跳状态值：设备在线。 */
 #define EXTERNAL_COMM_STATUS_OFFLINE        0xFFU   /* 心跳状态值：设备掉线、未选中或无效。 */
@@ -21,7 +30,8 @@
 #define EXTERNAL_COMM_STATUS_STANDBY        0x01U   /* 心跳运行字段：当前手柄待机。 */
 #define EXTERNAL_COMM_STATUS_RUNNING        0x02U   /* 心跳运行字段：当前手柄运行中。 */
 #define EXTERNAL_COMM_STATUS_UNPLUGGED      0x03U   /* 心跳运行字段：当前选中通道未接入手柄。 */
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 21U    /* 新版心跳 InforArea 最大长度：A/B 手柄各上传2字节EEPROM原始类型，且运行速度/电流、A/B泵信息全部存在。 */
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 43U    /* 新版心跳 InforArea 最大长度：A/B 手柄类型、运行速度/电流、A/B 泵速度以及两路 CS1237 压力扩展字段全部存在。 */
+#define EXTERNAL_COMM_RUNNING_INFO_ALARM    0x05U   /* 主机运行内容上传的信息码：0x05 表示报警信息，InforArea[0] 放 WorkMessage.alarm_value。 */
 
 #define EXTERNAL_COMM_REASON_BAD_LENGTH     0x01U   /* 失败原因：InforArea 长度不符合命令要求。 */
 #define EXTERNAL_COMM_REASON_BAD_AREA       0x02U   /* 失败原因：AreaCode 不在当前命令允许范围内。 */
@@ -40,11 +50,15 @@
 #define EXTERNAL_COMM_DOWN_READ_NAV_PAGE    0x08U   /* 下行命令：读取导航 EEPROM 单页数据。 */
 #define EXTERNAL_COMM_DOWN_READ_NAV_ALL     0x09U   /* 下行命令：读取导航整区数据，V1 禁用。 */
 #define EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE   0x0AU   /* 下行命令：写入导航 EEPROM 单页数据。 */
-#define EXTERNAL_COMM_DOWN_ACK              0xBBU   /* 下行命令：外部设备应答，本机 V1 不处理。 */
+#define EXTERNAL_COMM_DOWN_HOST_EXIT        0xBBU   /* 下行命令：上位机主动退出外部控制，释放互斥控制权。 */
 #define EXTERNAL_COMM_DOWN_PERMISSION       0xFAU   /* 下行命令：功能升级或权限开放。 */
 
 static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄，由调度器保存任务状态。 */
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
+static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
+static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
+static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
+static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 手柄运行触发的注水泵冷却跟随请求，手柄停止或急停时清零。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
 static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用发送缓存，任务内串行使用。 */
@@ -118,6 +132,42 @@ static void ExternalComm_SendFailAck(uint8_t ack_code, uint8_t value_code, uint8
     info[1] = reason;
     /* 失败也统一走 0xDD 应答帧。 */
     ExternalComm_SendAck(ack_code, info, sizeof(info));
+}
+
+static void ExternalComm_SendAlarmInfoIfChanged(void)
+{
+    /* alarm_value 是协议 InforArea[0]，0 表示无报警，非 0 表示固件当前 WorkMessage 报警码。 */
+    uint8_t alarm_value;
+
+    /* 全局报警标志为 false 时强制上传 0，用于通知上位机关闭已弹出的故障窗口。 */
+    if (WorkMessage.alarm_flag == false)
+    {
+        /* 无报警时协议报警码固定为 0x00。 */
+        alarm_value = 0U;
+    }
+    else
+    {
+        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机看到同一故障来源。 */
+        alarm_value = WorkMessage.alarm_value;
+    }
+
+    /* 状态未变化时不重复刷报警帧，避免串口日志被同一个报警码持续淹没。 */
+    if ((s_alarm_report_ready != 0U) && (s_last_alarm_value == alarm_value))
+    {
+        /* 已经同步过同一个报警值，本周期无需发送。 */
+        return;
+    }
+
+    /* 记录已完成首次同步，后续只在报警码变化时再发。 */
+    s_alarm_report_ready = 1U;
+    /* 保存本次上传值，下一周期用来判断是否变化。 */
+    s_last_alarm_value = alarm_value;
+    /* 按协议上传主机运行内容：FunCode=0x03、AreaCode=0xFF、InforCode=0x05、InforArea=报警码。 */
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_HOST_RUNNING,
+                           EXTERNAL_COMM_AREA_NONE,
+                           EXTERNAL_COMM_RUNNING_INFO_ALARM,
+                           &alarm_value,
+                           1U);
 }
 
 static uint8_t ExternalComm_IsAuthorizedCode(const uint8_t *code, uint16_t code_len)
@@ -460,14 +510,14 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
         return 0U;
     }
 
-    /* 置位外部控制激活标志。 */
-    WorkMessage.hmiactive_work = 1U;
-    /* 驱动方式切到外部控制。 */
-    WorkMessage.drivetype_work = TOUCHWORK;
-    /* 允许外部控制链路参与电机控制。 */
-    ControlSignalMessage.HMI_enable_flag = true;
-    /* 申请成功只拿控制权，不直接启动运行。 */
-    ControlSignalMessage.HMI_control_flag = false;
+    /* 外控申请必须等待当前脚踏/屏幕/手柄控制结束，不能抢停正在运行的本机来源。 */
+    if (ControlArbitration_EnterExternalControl() == false)
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_EXTERNAL_FAILED,
+                                 EXTERNAL_COMM_DOWN_APPLY_CONTROL,
+                                 EXTERNAL_COMM_REASON_BUSY);
+        return 0U;
+    }
     /* 返回外部控制开启成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_EXTERNAL_OK, NULL, 0U);
     /* 告诉调用方认证通过。 */
@@ -489,6 +539,11 @@ static uint8_t ExternalComm_ApplyPermission(const ExternalCommFrame_t *frame)
     return 1U;
 }
 
+/* A/B 泵固定注水泵临时联调逻辑同时服务设置帧、控制帧和心跳帧，提前声明用于后面的入口调用。 */
+static void ExternalComm_ApplyFixedPumpIdentity(void);
+/* 当前选中手柄在线状态在心跳和启动前置检查中复用，提前声明避免启动逻辑只看通道号。 */
+static uint8_t ExternalComm_SelectedHandleOnline(void);
+
 static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
 {
     /* value 保存外部设备下发的速度、频率或泵速度。 */
@@ -496,8 +551,21 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
     /* 成功应答载荷固定为 AreaCode + 2 字节值。 */
     uint8_t info[3];
 
-    /* 设置运行值必须依附当前 A/B 通道，否则不知道该写哪套通道状态。 */
-    if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
+    if (ControlArbitration_IsExternalActive() == false)
+    {
+        /* 未取得外部控制权时不能写运行值，脚踏/屏幕/手柄占用期间也必须等待。 */
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_RUN_SET_FAILED,
+                                 frame->area_code,
+                                 EXTERNAL_COMM_REASON_BUSY);
+        return;
+    }
+
+    /*
+     * 只有“当前手柄转速”和“当前手柄往复频率”依赖 WorkMessage.channel_work。
+     * A/B 泵速度写入 pumpMessageA/B.speed_work，属于独立泵状态，不能因为未选中手柄通道而拒绝。
+     */
+    if (((frame->area_code == 0x01U) || (frame->area_code == 0x02U)) &&
+        ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B)))
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_RUN_SET_FAILED,
                                  frame->area_code,
@@ -562,10 +630,14 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             ExternalComm_SaveCurrentFreq(value);
             break;
         case 0x03U:
-            /* 设置 A 泵速度，不切换泵启停状态。 */
+            /* 临时联调打开时，设置 A 泵速度会同步补齐 UART5 注水泵在线状态和业务类型。 */
+            ExternalComm_ApplyFixedPumpIdentity();
+            /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
             pumpMessageA.speed_work = value;
             break;
         case 0x04U:
+            /* 临时联调打开时，设置 B 泵速度会同步补齐 B 泵在线状态和注水泵业务类型。 */
+            ExternalComm_ApplyFixedPumpIdentity();
             /* 设置 B 泵速度，不切换泵启停状态。 */
             pumpMessageB.speed_work = value;
             break;
@@ -588,6 +660,15 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
     uint8_t info[2];
     /* value 保存 InforArea 第 1 字节切换值。 */
     uint8_t value;
+
+    if (ControlArbitration_IsExternalActive() == false)
+    {
+        /* 上位机没有拿到控制权时不允许切换通道/方向/模式，避免抢占当前控制来源。 */
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_RUN_SET_FAILED,
+                                 frame->area_code,
+                                 EXTERNAL_COMM_REASON_BUSY);
+        return;
+    }
 
     /* 运行中或报警中禁止切换通道/方向/模式，避免运行链路跳变。 */
     if (WorkMessage.runflag_work || WorkMessage.alarm_flag)
@@ -697,22 +778,89 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_RUN_SET_OK, info, sizeof(info));
 }
 
-static uint8_t ExternalComm_EnsureActiveForRun(uint8_t allow_stop)
+static uint8_t ExternalComm_EnsureActiveForRun(uint8_t allow_emergency_stop)
 {
+    /* 急停是安全例外，报警中也必须允许执行全停和控制权释放。 */
+    if (allow_emergency_stop != 0U)
+    {
+        return 1U;
+    }
+
     /* 报警状态下禁止外部启动或继续动作，停止类命令也让上层走急停分支。 */
     if (WorkMessage.alarm_flag)
     {
         return 0U;
     }
 
-    /* 非停止类命令必须先申请外部控制，防止外部设备未授权直接启动。 */
-    if ((allow_stop == 0U) && (WorkMessage.hmiactive_work == 0U))
+    /* 非急停命令必须由外控持有者发起，脚踏/屏幕/手柄占用时上位机只能等待。 */
+    if (ControlArbitration_IsExternalActive() == false)
     {
         return 0U;
     }
 
     /* 当前允许执行控制命令。 */
     return 1U;
+}
+
+static void ExternalComm_RefreshUart5PumpRunState(void)
+{
+    /*
+	 * A 泵现在有两个运行来源：
+	 * 1. 上位机独立启动 A 泵，用于单独调试注水泵；
+	 * 2. 手柄运行时，如果 A 泵是注水泵，则跟随手柄运行给手柄降温。
+	 * 本函数只维护请求并集，不直接发送 UART5 泵帧；压力限速和 0 速硬停统一在 PUMPAehaviors() 内输出。
+	 */
+    uint8_t manual_request = s_uart5_pump_manual_run_request; /* 保存上位机独立控制请求，避免后续表达式重复读全局变量。 */
+    uint8_t follow_request = 0U;                              /* 保存手柄冷却跟随请求，只有注水泵类型才允许置 1。 */
+
+    if ((s_uart5_inject_pump_follow_run_request != 0U) &&
+        (pumpMessageA.type == INJECTWATER))
+    {
+        follow_request = 1U; /* 当前 A 泵确认为注水泵，手柄运行时才允许它进入冷却跟随运行。 */
+    }
+
+	if ((manual_request != 0U) || (follow_request != 0U))
+	{
+#if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
+		if ((pumpMessageA.type == INJECTWATER) && (pumpMessageA.speed_work == 0U))
+		{
+            pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED; /* 固定注水泵调试时补默认速度，避免已启动但输出仍为 0。 */
+        }
+#endif
+        pumpMessageA.run_flag = true;         /* 任一来源请求运行时，A 泵最终运行标志置位。 */
+        pumpMessageA.timingDrainage_flag = false; /* 上位机启动和手柄跟随都不是排空模式，必须清掉排空计时。 */
+    }
+    else
+    {
+        pumpMessageA.run_flag = false;        /* 两个来源都不请求运行时，才真正停止 A 泵。 */
+        pumpMessageA.timingDrainage_flag = false; /* 停止时同步取消排空状态，保证下一周期发送停泵帧。 */
+    }
+}
+
+static void ExternalComm_SetUart5PumpManualRun(uint8_t enable)
+{
+    s_uart5_pump_manual_run_request = (enable != 0U) ? 1U : 0U; /* 只改上位机独立运行请求，不直接覆盖手柄冷却跟随请求。 */
+    ExternalComm_RefreshUart5PumpRunState();                    /* 按“独立请求 OR 跟随请求”重新计算 A 泵最终 run_flag。 */
+}
+
+static void ExternalComm_ClearUart5PumpRunRequests(void)
+{
+    s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
+    s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
+}
+
+static void ExternalComm_ApplyHostExit(void)
+{
+    uint8_t info[1];
+
+    /* 退出外控时先清除外部通信层自己的 A 泵锁存请求，避免后续刷新又把泵拉起。 */
+    ExternalComm_ClearUart5PumpRunRequests();
+    /* 释放公共仲裁锁，并停止外控遗留的电机、脚踏标志和 A/B 泵输出。 */
+    ControlArbitration_ReleaseExternalControl();
+    /* ACK 回显 0xBB，Tools 可据此把“已取得外部控制权”状态清掉。 */
+    info[0] = EXTERNAL_COMM_DOWN_HOST_EXIT;
+    /* 退出动作本身按控制成功返回，表示 MCU 已经释放外部控制权。 */
+    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info));
 }
 
 static void ExternalComm_StopAllWork(void)
@@ -725,10 +873,16 @@ static void ExternalComm_StopAllWork(void)
     ControlSignalMessage.handle_control_flag = false;
     /* 清除外部控制启动标志。 */
     ControlSignalMessage.HMI_control_flag = false;
+    /* 急停后清除外控激活显示，系统回到无控制来源状态。 */
+    WorkMessage.hmiactive_work = 0U;
+    /* 急停后清除触控占用显示，避免屏幕触控残留继续挡住其它来源。 */
+    WorkMessage.touchactive_work = 0U;
     /* 清除左脚踏控制标志。 */
     ControlSignalMessage.jtL_control_flag = false;
     /* 清除右脚踏控制标志。 */
     ControlSignalMessage.jtR_control_flag = false;
+    /* 急停属于最高优先级停机，需要同时清除 A 泵的独立控制请求和手柄跟随请求。 */
+    ExternalComm_ClearUart5PumpRunRequests();
     /* 停止 A 泵运行。 */
     pumpMessageA.run_flag = false;
     /* 取消 A 泵排空计时。 */
@@ -741,6 +895,65 @@ static void ExternalComm_StopAllWork(void)
     pumpMessageB.timingDrainage_flag = false;
     /* 清零 B 泵速度输出。 */
     pumpMessageB.speed_work = 0U;
+    /* 急停是安全例外，允许强制释放当前任意控制来源。 */
+    ControlArbitration_ForceRelease();
+}
+
+static void ExternalComm_ApplyFixedPumpIdentity(void)
+{
+#if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
+    /* 固定识别打开时，固定 UART5 对应的 A 泵在线状态，避免单独测泵或手柄联调被 CS1237 霍尔设备码卡住。 */
+    pumpMessageA.online_flag = true;
+    /* 固定识别打开时固定 A 泵为注水泵，PUMPAehaviors() 后续按注水泵方向和公式换算 UART5 驱动数据。 */
+    pumpMessageA.type = EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE;
+    /* 如果上位机还没有单独下发 A 泵速度，则补默认速度，避免手柄跟随或单独启动时 UART5 输出仍为 0。 */
+    if (pumpMessageA.speed_work == 0U)
+    {
+        /* 默认速度只在 0 时写入；已经通过 AreaCode=03 设置过速度时，不覆盖用户下发值。 */
+        pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED;
+    }
+    /* 清零识别丢失计数，让心跳和后续控制都看到 A 泵处于稳定识别状态。 */
+    pumpMessageA.losses_times = 0U;
+#endif
+
+#if (EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE == 1U)
+    /* 固定识别打开时，固定 B 泵在线状态，便于没有接入 B 路 CS1237 霍尔识别时测试 B 泵通道。 */
+    pumpMessageB.online_flag = true;
+    /* 固定识别打开时固定 B 泵为注水泵，PUMPBBehaviors() 后续按注水泵方向和公式换算输出。 */
+    pumpMessageB.type = EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE;
+    /* 如果上位机还没有单独下发 B 泵速度，则补默认速度，避免已启动但输出仍为 0。 */
+    if (pumpMessageB.speed_work == 0U)
+    {
+        /* 默认速度只在 0 时写入；已经通过 AreaCode=04 设置过速度时，不覆盖用户下发值。 */
+        pumpMessageB.speed_work = EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED;
+    }
+    /* 清零识别丢失计数，让心跳和后续控制都看到 B 泵处于稳定识别状态。 */
+    pumpMessageB.losses_times = 0U;
+#endif
+}
+
+static void ExternalComm_SetUart5InjectPumpFollow(uint8_t enable)
+{
+#if (EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE == 1U)
+    /* 跟随手柄开关打开时，先按固定识别开关补齐 A 泵身份；固定识别关闭时该函数不改真实识别结果。 */
+    ExternalComm_ApplyFixedPumpIdentity();
+
+    /* 只有注水泵需要跟随手柄；抽水泵和灌注泵即使在线，也不参与当前手柄启停联动。 */
+    if (pumpMessageA.type != INJECTWATER)
+    {
+        s_uart5_inject_pump_follow_run_request = 0U; /* 当前不是注水泵时清掉跟随请求，避免后续类型变化后误启动。 */
+        ExternalComm_RefreshUart5PumpRunState();     /* 刷新最终运行状态；若上位机独立启动仍有效，则 A 泵继续按独立请求运行。 */
+        return;
+    }
+
+    s_uart5_inject_pump_follow_run_request = (enable != 0U) ? 1U : 0U; /* 只改手柄冷却跟随请求，不直接覆盖上位机独立启动请求。 */
+    ExternalComm_RefreshUart5PumpRunState();                          /* 按两个来源的并集刷新最终运行状态。 */
+#else
+    s_uart5_inject_pump_follow_run_request = 0U; /* 跟随开关关闭时强制清掉手柄跟随请求，A 泵是否运行只看独立控制。 */
+    ExternalComm_RefreshUart5PumpRunState();     /* 刷新后不会影响仍然存在的上位机独立启动请求。 */
+    /* 跟随开关关闭时保留入参消耗，避免编译器因未使用参数产生告警。 */
+    (void)enable;
+#endif
 }
 
 static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
@@ -748,11 +961,8 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     /* 控制成功应答只回显 1 字节控制代号。 */
     uint8_t info[1];
 
-    /* A/B 泵停止、当前手柄停止、急停允许在未激活时执行，其余动作必须先申请外部控制。 */
-    if (ExternalComm_EnsureActiveForRun((frame->area_code == 0x02U) ||
-                                        (frame->area_code == 0x04U) ||
-                                        (frame->area_code == 0x06U) ||
-                                        (frame->area_code == 0xFFU)) == 0U)
+    /* 只有急停允许跨来源强制全停，其它启停命令都必须先取得外部控制权。 */
+    if (ExternalComm_EnsureActiveForRun(frame->area_code == 0xFFU) == 0U)
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                  frame->area_code,
@@ -764,6 +974,8 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     switch (frame->area_code)
     {
         case 0x01U:
+            /* UART5 是 A 泵输出口；临时联调打开时，先补齐 A 泵在线和注水类型，再执行启动判断。 */
+            ExternalComm_ApplyFixedPumpIdentity();
             /* A 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
             if (pumpMessageA.online_flag == false)
             {
@@ -772,18 +984,16 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
                                          EXTERNAL_COMM_REASON_DEVICE_FAIL);
                 return;
             }
-            /* 置位 A 泵运行标志。 */
-            pumpMessageA.run_flag = true;
-            /* 外部普通启动不进入排空计时模式。 */
-            pumpMessageA.timingDrainage_flag = false;
+            /* 上位机单独启动 A 泵时，只置位“独立运行请求”，不改变手柄冷却跟随请求。 */
+            ExternalComm_SetUart5PumpManualRun(1U);
             break;
         case 0x02U:
-            /* 清除 A 泵运行标志。 */
-            pumpMessageA.run_flag = false;
-            /* 同时清除 A 泵排空计时。 */
-            pumpMessageA.timingDrainage_flag = false;
+            /* 上位机单独停止 A 泵时，只清除“独立运行请求”；如果手柄仍在转动且 A 泵是注水泵，冷却跟随会继续保持。 */
+            ExternalComm_SetUart5PumpManualRun(0U);
             break;
         case 0x03U:
+            /* 临时联调打开时，先补齐 B 泵在线和注水类型，再执行启动判断。 */
+            ExternalComm_ApplyFixedPumpIdentity();
             /* B 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
             if (pumpMessageB.online_flag == false)
             {
@@ -804,8 +1014,8 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             pumpMessageB.timingDrainage_flag = false;
             break;
         case 0x05U:
-            /* 当前手柄启动必须有 A/B 当前通道。 */
-            if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
+            /* 当前手柄启动必须有选中通道且该通道已经识别在线，避免无手柄时误启动电机和联动注水泵。 */
+            if (ExternalComm_SelectedHandleOnline() == 0U)
             {
                 ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                          frame->area_code,
@@ -818,6 +1028,8 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             WorkMessage.runflag_work = true;
             /* 置位外部控制启动标志，UI/状态层可区分外部启动来源。 */
             ControlSignalMessage.HMI_control_flag = true;
+            /* 当前手柄启动成功后，按调试开关同步启动 UART5 对应的注水泵。 */
+            ExternalComm_SetUart5InjectPumpFollow(1U);
             break;
         case 0x06U:
             /* 停止当前手柄运行。 */
@@ -826,6 +1038,8 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             WorkMessage.speed_work = 0U;
             /* 清除外部控制启动标志。 */
             ControlSignalMessage.HMI_control_flag = false;
+            /* 当前手柄停止时，同步停止由手柄带动的 UART5 注水泵。 */
+            ExternalComm_SetUart5InjectPumpFollow(0U);
             break;
         case 0x07U:
             /* 开口定位左动作必须有当前通道。 */
@@ -1066,8 +1280,9 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
             /* 功能升级/权限开放命令，V1 只校验 8 字节权限码长度。 */
             (void)ExternalComm_ApplyPermission(frame);
             break;
-        case EXTERNAL_COMM_DOWN_ACK:
-            /* 外部设备对应答的应答不需要本机再回包，直接忽略。 */
+        case EXTERNAL_COMM_DOWN_HOST_EXIT:
+            /* 上位机主动退出外部控制，释放互斥控制权并停止外控输出。 */
+            ExternalComm_ApplyHostExit();
             break;
         default:
             /* 未定义 FunCode 返回控制失败，失败对象用 FunCode 标识。 */
@@ -1114,6 +1329,65 @@ static void ExternalComm_HeartbeatAppendBE16(uint8_t *info_area, uint16_t *info_
         /* 记录心跳载荷已经增加 2 字节。 */
         *info_len = (uint16_t)(*info_len + 2U);
     }
+}
+
+static void ExternalComm_HeartbeatAppendPumpPressure(uint8_t *info_area,
+                                                     uint16_t *info_len,
+                                                     const pumpMessage_t *pump_message)
+{
+    /* raw_bits 保存 int32_t 原始采样的二进制位，不做符号变换，确保上位机可恢复负数。 */
+    uint32_t raw_bits;
+    /* weight_x10 保存下位机换算后的重量，单位 0.1g，与 cs1237_uart_protocol.md 保持一致。 */
+    uint32_t weight_x10;
+    /* threshold_g 保存压力阈值，单位 g，便于上位机判断当前重量接近哪个保护阈值。 */
+    uint16_t threshold_g;
+
+    /* 泵消息为空时无法追加压力扩展字段，直接返回保持前面在线/速度字段有效。 */
+    if ((info_area == NULL) || (info_len == NULL) || (pump_message == NULL))
+    {
+        return;
+    }
+
+    /* 压力扩展固定 11 字节：RawCs1237(4LE) + WeightX10(4LE) + ThresholdG(2LE) + Seq(1)。 */
+    if ((uint16_t)(*info_len + 11U) > EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN)
+    {
+        /* 剩余空间不足时不写半截压力字段，避免上位机把残缺数据误解析成 B 泵状态。 */
+        return;
+    }
+
+    /* 将 volatile 字段先读到局部变量，保证后续多字节拆分时同一字段来自同一次读取。 */
+    raw_bits = (uint32_t)pump_message->pressure_value;
+    /* WeightX10 已在 SimUartTaskFunc 中由 CS1237 下位机帧写入，单位为 0.1g。 */
+    weight_x10 = pump_message->weight_x10;
+    /* pressure_threshold 由压力模块上报，单位为 g。 */
+    threshold_g = pump_message->pressure_threshold;
+
+    /* CS1237 下位机协议多字节字段是 little-endian，这里保持同样顺序，方便上位机按原协议解释。 */
+    info_area[*info_len] = (uint8_t)(raw_bits & 0xFFU);
+    info_area[(uint16_t)(*info_len + 1U)] = (uint8_t)((raw_bits >> 8U) & 0xFFU);
+    info_area[(uint16_t)(*info_len + 2U)] = (uint8_t)((raw_bits >> 16U) & 0xFFU);
+    info_area[(uint16_t)(*info_len + 3U)] = (uint8_t)((raw_bits >> 24U) & 0xFFU);
+    /* 记录 RawCs1237 已经追加 4 字节。 */
+    *info_len = (uint16_t)(*info_len + 4U);
+
+    /* WeightX10 同样采用 little-endian，数值除以 10 后就是上位机显示的 g。 */
+    info_area[*info_len] = (uint8_t)(weight_x10 & 0xFFU);
+    info_area[(uint16_t)(*info_len + 1U)] = (uint8_t)((weight_x10 >> 8U) & 0xFFU);
+    info_area[(uint16_t)(*info_len + 2U)] = (uint8_t)((weight_x10 >> 16U) & 0xFFU);
+    info_area[(uint16_t)(*info_len + 3U)] = (uint8_t)((weight_x10 >> 24U) & 0xFFU);
+    /* 记录 WeightX10 已经追加 4 字节。 */
+    *info_len = (uint16_t)(*info_len + 4U);
+
+    /* ThresholdG 是 16 位 little-endian，保持和 CS1237 上报帧一致。 */
+    info_area[*info_len] = (uint8_t)(threshold_g & 0xFFU);
+    info_area[(uint16_t)(*info_len + 1U)] = (uint8_t)((threshold_g >> 8U) & 0xFFU);
+    /* 记录 ThresholdG 已经追加 2 字节。 */
+    *info_len = (uint16_t)(*info_len + 2U);
+
+    /* seq 是压力模块帧序号，单字节追加，用于上位机判断压力数据是否在刷新。 */
+    info_area[*info_len] = pump_message->seq;
+    /* 记录 Seq 已经追加 1 字节。 */
+    *info_len = (uint16_t)(*info_len + 1U);
 }
 
 static uint8_t ExternalComm_FootPedalOnlineStatus(void)
@@ -1228,13 +1502,15 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
                                    info_len,
                                    pump_message->online_flag ? EXTERNAL_COMM_STATUS_ONLINE : EXTERNAL_COMM_STATUS_OFFLINE);
 
-    /* 泵在线时才继续追加泵类型和泵速度，离线时省略这两个字段。 */
+    /* 泵在线时才继续追加泵类型、泵速度和 CS1237 压力扩展字段，离线时省略这些字段。 */
     if (pump_message->online_flag)
     {
         /* 泵类型当前来自 CS1237 DeviceCode，协议线上按 1 字节设备类型码上传。 */
         ExternalComm_HeartbeatAppendU8(info_area, info_len, (uint8_t)(pump_message->type & 0xFFU));
         /* 泵速度是业务数值，按 2 字节大端上传。 */
         ExternalComm_HeartbeatAppendBE16(info_area, info_len, pump_message->speed_work);
+        /* 压力原始值和最终重量来自 SimUartTaskFunc 解析的 CS1237 21 字节下位机帧。 */
+        ExternalComm_HeartbeatAppendPumpPressure(info_area, info_len, pump_message);
     }
 }
 
@@ -1248,6 +1524,9 @@ static void ExternalComm_SendHeartbeat(void)
     uint8_t run_status;
     /* tx_len 接收心跳完整帧长度。 */
     uint16_t tx_len = 0U;
+
+    /* 临时联调打开时，心跳也显示 UART5 A 泵在线且类型为注水泵，方便串口助手确认联调前置状态。 */
+    ExternalComm_ApplyFixedPumpIdentity();
 
     /* 追加 A 手柄插孔在线状态；若在线，紧跟 A 手柄类型。 */
     ExternalComm_HeartbeatAppendHandle(heartbeat_info,
@@ -1272,8 +1551,8 @@ static void ExternalComm_SendHeartbeat(void)
     {
         /* 当前通道手柄工作速度，2 字节大端。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
-        /* 当前通道手柄工作电流，2 字节大端。 */
-        ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.current_work);
+        /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
+        ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);
     }
     /* 追加脚踏在线状态。 */
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, ExternalComm_FootPedalOnlineStatus());
@@ -1289,8 +1568,13 @@ static void ExternalComm_SendHeartbeat(void)
                                             sizeof(s_tx_buf),
                                             &tx_len) == EXTERNAL_COMM_BUILD_OK)
     {
-        /* 心跳组帧成功后从 UART2 主动上传。 */
+#if (EXTERNAL_COMM_HEARTBEAT_USE_UART10 == 1U)
+        /* 开关置 1 时，心跳帧从 UART10 主动上传，用于保留现场确认后的心跳输出口。 */
+        Bsp_UartTransmit(BSP_UART_PORT_10, s_tx_buf, tx_len, 100U);
+#else
+        /* 开关置 0 时，心跳帧回到原 UART2 发送路径，便于和旧外部通信链路对比。 */
         Uart2_SendPacket(s_tx_buf, tx_len);
+#endif
     }
 }
 
@@ -1324,6 +1608,9 @@ static void ExternalCommTaskFunc(uint32_t event)
 
     /* 每 10ms 检查一次 UART2 是否收到完整空闲包。 */
     ExternalComm_ProcessReceive();
+
+    /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
+    ExternalComm_SendAlarmInfoIfChanged();
 
     /* 累加心跳计时，任务周期由 EXTERNAL_COMM_TASK_PERIOD_MS 定义。 */
     s_heartbeat_elapsed_ms = (uint16_t)(s_heartbeat_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);

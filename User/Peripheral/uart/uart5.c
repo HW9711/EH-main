@@ -8,8 +8,6 @@
 //#include "data.h"
 
 #include <string.h>
-#include <stdio.h>
-#include <stdbool.h>
 
 #define	UART5_TimeoutComp   3
 
@@ -50,6 +48,7 @@ void Uart5_Init(void)
 
 void Uart5_SendPacket(uint8_t *pData, uint16_t Length)
 {
+  /* UART5 泵控制帧只发给步进驱动，不再镜像到 UART10 打印测试信息，避免串口输出干扰泵控制节拍。 */
   Bsp_UartTransmit(BSP_UART_PORT_5, pData, Length, 100);
 }
 
@@ -76,6 +75,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 	      rlen = (UART5_MAX_PACKET_SIZE - RemainLen);
 
 	      Common_CopyData(Uart5_DMABuf, data, rlen);
+	      /* 驱动返回帧只保留给调用方读取，不再从 UART5 层转发到 UART10 输出测试文本。 */
 
 	      Uart5_DMAReset();
 	    }

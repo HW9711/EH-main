@@ -39,17 +39,25 @@ kernel_task_t HANDLESCANTaskHandle;
  * 手柄扫描任务的调度周期和状态机时间参数。
  * 说明：
  * 1. 任务本身按 10ms 周期运行；
- * 2. 插入和拔出去抖都使用 50ms；
- * 3. 插入稳定后额外等待 100ms 再做认证，给接口和 EEPROM 留出稳定时间。
+ * 2. 插入去抖使用 50ms，拔出去抖使用 500ms，避免短接线瞬断被误判为真实拔出；
+ * 3. 插入稳定后额外等待 200ms 再做认证，给热插拔后的接口和 EEPROM 留出稳定时间；
+ * 4. 单次认证失败后先做有限快速重试，避免上电或热插拔瞬间的 I2C 抖动把正确手柄判死；
+ * 5. 多次认证仍失败后才进入最终报警保持，报警保持期间每 1000ms 慢速自恢复重试一次；
+ * 6. 最终认证失败后蜂鸣器连续报警，直到坏手柄拔出或后续自恢复认证成功。
  */
 #define HANDLESCAN_TASK_PERIOD_MS             10U
 #define HANDLESCAN_INSERT_DEBOUNCE_MS         50U
-#define HANDLESCAN_REMOVE_DEBOUNCE_MS         50U
-#define HANDLESCAN_VERIFY_START_DELAY_MS      100U
+#define HANDLESCAN_REMOVE_DEBOUNCE_MS         500U
+#define HANDLESCAN_VERIFY_START_DELAY_MS      200U
+#define HANDLESCAN_VERIFY_RETRY_DELAY_MS      200U
+#define HANDLESCAN_VERIFY_ALARM_RETRY_MS      1000U
+#define HANDLESCAN_VERIFY_RETRY_MAX           3U
 
 #define HANDLESCAN_INSERT_DEBOUNCE_TICKS      (HANDLESCAN_INSERT_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_REMOVE_DEBOUNCE_TICKS      (HANDLESCAN_REMOVE_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_START_DELAY_TICKS   (HANDLESCAN_VERIFY_START_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
+#define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
+#define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
 
 /*
  * EEPROM 中手柄信息区定义。
@@ -79,14 +87,11 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_TOOL_ANGLE_OFFSET          6U
 
 /*
- * A 通道相关报警码定义。
+ * 手柄扫描报警码定义。
  * 1. 13：运行中插拔报警，沿用旧逻辑；
- * 2. 0x22：认证阶段失败报警，包含页读取失败、页和校验失败、SN 读取失败以及认证码不匹配；
- * 3. 0x23：认证通过后，信息区读取失败或手柄类型无法识别。
+ * 2. 只有 EEPROM 最终校验失败才上报 WORK_ALARM_HANDLE_MODEL_ERROR。
  */
 #define HANDLESCAN_ALARM_RUNNING_PLUG         13U
-#define HANDLESCAN_ALARM_A_PAGE_FAIL          0x22U
-#define HANDLESCAN_ALARM_A_DATA_FAIL          0x23U
 
 /*
  * 串口调试步骤码定义。
@@ -95,7 +100,7 @@ kernel_task_t HANDLESCANTaskHandle;
  * 2. 设为 `0U` 时，基础调试报文都会被静默处理，业务状态机保持不变；
  * 3. 刀具扩展报文单独受 `HANDLESCAN_TOOL_TRACE_ENABLE` 控制，方便现场按需开启。
  */
-#define HANDLESCAN_TRACE_ENABLE               0U
+#define HANDLESCAN_TRACE_ENABLE               1U
 #define HANDLESCAN_TOOL_TRACE_ENABLE          1U
 
 #define HANDLESCAN_DBG_STEP_INSERT_PASS       0x02U
@@ -107,6 +112,8 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_DBG_STEP_OFFLINE           0x09U
 #define HANDLESCAN_DBG_STEP_ALARM_SET         0x0AU
 #define HANDLESCAN_DBG_STEP_I2C_DETAIL        0x0BU
+#define HANDLESCAN_DBG_STEP_ALARM_CLEAR       0x0DU
+#define HANDLESCAN_DBG_STEP_VERIFY_RETRY      0x0EU
 /*
  * 手柄扫描状态机阶段定义。
  * A/B 两个通道都沿用这套阶段枚举，但各自维护独立的运行时变量，
@@ -121,6 +128,7 @@ typedef enum
     HANDLESCAN_STAGE_READ_INFO,
     HANDLESCAN_STAGE_ONLINE,
     HANDLESCAN_STAGE_DEBOUNCE_OUT,
+    HANDLESCAN_STAGE_RETRY_WAIT,
     HANDLESCAN_STAGE_VERIFY_FAIL
 } HandlescanStage;
 
@@ -184,6 +192,8 @@ static HandlescanStage s_a_stage = HANDLESCAN_STAGE_IDLE;
 static HandlescanDebounce s_handleA_debounce = {0U, 0U};
 static uint8_t s_a_verify_start_wait_ticks = 0U;
 static uint8_t s_a_last_alarm = 0U;
+static uint8_t s_a_verify_retry_count = 0U;
+static uint16_t s_a_verify_retry_wait_ticks = 0U;
 static uint8_t s_a_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_a_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 
@@ -192,6 +202,8 @@ static HandlescanStage s_b_stage = HANDLESCAN_STAGE_IDLE;
 static HandlescanDebounce s_handleB_debounce = {0U, 0U};
 static uint8_t s_b_verify_start_wait_ticks = 0U;
 static uint8_t s_b_last_alarm = 0U;
+static uint8_t s_b_verify_retry_count = 0U;
+static uint16_t s_b_verify_retry_wait_ticks = 0U;
 static uint8_t s_b_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_b_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 
@@ -518,6 +530,87 @@ static void Handlescan_ClearChannelState(uint8_t channel)
     Handlescan_ClearActiveWorkIfNoOnlineHandle();
 }
 
+/*
+ * 判断报警码是否属于手柄校验链路。
+ * EEPROM 最终校验失败使用 WORK_ALARM_HANDLE_MODEL_ERROR，由 handlescan 负责在坏手柄拔出后释放。
+ */
+static uint8_t Handlescan_IsHandleVerifyAlarm(uint8_t alarm_value)
+{
+    return (uint8_t)(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR); /* 返回 1 表示这是手柄 EEPROM 校验/型号报警，返回 0 表示不是本模块可清的报警。 */
+}
+
+/*
+ * 发送一次普通提示蜂鸣。
+ * 说明：sscBEEP 的普通按键蜂鸣会清掉蜂鸣任务内部报警锁存，所以只有 WorkMessage 当前无报警时才允许发单响。
+ */
+static void Handlescan_BeepOnceIfNoAlarm(void)
+{
+    if (WorkMessage.alarm_flag == false)
+    {
+        SendKeyBeepMessage(1U);                              /* 无报警时给用户一个 100ms 单响，用于提示插入成功或拔出确认。 */
+    }
+}
+
+/*
+ * 查询另一通道是否仍处于认证失败保持态。
+ * 当前通道拔出并清报警时，如果另一通道仍有手柄型号错误报警，就把全局报警归还给另一通道。
+ */
+static uint8_t Handlescan_GetPeerActiveHandleAlarm(uint8_t channel)
+{
+    if (channel == CHANNEL_A)
+    {
+        if ((s_b_stage == HANDLESCAN_STAGE_VERIFY_FAIL) &&
+            (Handlescan_IsHandleVerifyAlarm(s_b_last_alarm) != 0U))
+        {
+            return s_b_last_alarm;                           /* A 通道准备清报警时，B 通道仍失败保持，则返回 B 通道报警码。 */
+        }
+
+        return 0U;                                           /* B 通道没有可继承的手柄认证报警。 */
+    }
+
+    if ((s_a_stage == HANDLESCAN_STAGE_VERIFY_FAIL) &&
+        (Handlescan_IsHandleVerifyAlarm(s_a_last_alarm) != 0U))
+    {
+        return s_a_last_alarm;                               /* B 通道准备清报警时，A 通道仍失败保持，则返回 A 通道报警码。 */
+    }
+
+    return 0U;                                               /* A 通道没有可继承的手柄认证报警。 */
+}
+
+/*
+ * 清除当前通道拥有的手柄认证报警。
+ * 拔出坏手柄后，如果没有另一通道接管报警，就同步清 WorkMessage 和蜂鸣锁存。
+ */
+static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
+{
+    uint8_t peer_alarm;                                      /* 保存另一通道仍在失败保持态时需要继承的报警码。 */
+
+    if (Handlescan_IsHandleVerifyAlarm(alarm_value) == 0U)
+    {
+        return;                                              /* 非手柄校验报警不是本函数负责的报警，保持原报警状态不变。 */
+    }
+
+    if ((WorkMessage.alarm_flag == false) || (WorkMessage.alarm_value != alarm_value))
+    {
+        return;                                              /* 全局报警已被其他模块改写或清除，本通道不再覆盖它。 */
+    }
+
+    peer_alarm = Handlescan_GetPeerActiveHandleAlarm(channel); /* 当前通道清报警前，先检查另一通道是否仍需保持手柄认证报警。 */
+    if (peer_alarm != 0U)
+    {
+        WorkMessage.alarm_flag = true;                       /* 另一通道仍失败时，全局报警继续保持有效。 */
+        WorkMessage.alarm_value = peer_alarm;                /* 把全局报警值切回另一通道仍保持的手柄型号错误报警。 */
+        SendAlarmMessage(peer_alarm);                        /* 重新通知蜂鸣任务当前仍存在手柄认证报警。 */
+        Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, peer_alarm); /* 输出报警继承调试码。 */
+        return;                                              /* 已由另一通道接管报警，不执行清零。 */
+    }
+
+    WorkMessage.alarm_flag = false;                          /* 没有其他手柄认证报警时，清除全局报警标志。 */
+    WorkMessage.alarm_value = 0U;                             /* 清除全局报警码，UI 和外部通信后续可读到无报警状态。 */
+    SendAlarmMessage(0U);                                     /* 通知蜂鸣任务退出报警蜂鸣模式。 */
+    Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_CLEAR, 0U); /* 输出报警清除调试码。 */
+}
+
 static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message,
                                               uint8_t mapped_model,
                                               uint8_t mapped_tool_model,
@@ -539,10 +632,75 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
 
 static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 {
-    WorkMessage.alarm_flag = true;
-    WorkMessage.alarm_value = alarm_value;
-    SendAlarmMessage(alarm_value);
+    WorkAlarm_Set(alarm_value);                              /* 所有手柄扫描报警先统一写入 WorkMessage.alarm_value。 */
+    SendAlarmMessage(alarm_value);                           /* 校验失败和运行中插拔都进入报警蜂鸣，直到对应清除路径发送 0。 */
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, alarm_value);
+}
+
+/*
+ * 清空某个通道的认证重试状态。
+ * 说明：成功上线、拔出复位或新一轮插入开始时都必须调用，避免上一次失败次数影响下一只手柄。
+ */
+static void Handlescan_ResetVerifyRetry(uint8_t *retry_count, uint16_t *retry_wait_ticks)
+{
+    if (retry_count != NULL)
+    {
+        *retry_count = 0U;                                    /* 清掉连续失败次数，下一次认证重新从第 1 次开始。 */
+    }
+
+    if (retry_wait_ticks != NULL)
+    {
+        *retry_wait_ticks = 0U;                               /* 清掉快速/慢速重试等待计数，避免复用旧等待时间。 */
+    }
+}
+
+/*
+ * 认证链路失败后的统一入口。
+ * 规则：
+ * 1. 前 HANDLESCAN_VERIFY_RETRY_MAX - 1 次失败只进入快速重试等待，不立刻报警；
+ * 2. 达到最大失败次数后才设置最终手柄认证报警；
+ * 3. 最终报警保持期间的慢速重试失败不会重复触发蜂鸣，只保持原报警。
+ */
+static void Handlescan_EnterRetryOrFail(uint8_t channel,
+                                        HandlescanStage *stage,
+                                        uint8_t *retry_count,
+                                        uint16_t *retry_wait_ticks,
+                                        uint8_t *last_alarm,
+                                        uint8_t alarm_value)
+{
+    if ((stage == NULL) || (retry_count == NULL) || (retry_wait_ticks == NULL) || (last_alarm == NULL))
+    {
+        return;                                               /* 运行时参数异常时保持当前状态，避免空指针写入。 */
+    }
+
+    if (*retry_count < HANDLESCAN_VERIFY_RETRY_MAX)
+    {
+        ++(*retry_count);                                     /* 记录本次失败，达到上限后才进入最终报警保持。 */
+    }
+
+    if (*retry_count < HANDLESCAN_VERIFY_RETRY_MAX)
+    {
+        *retry_wait_ticks = 0U;                               /* 快速重试从当前周期重新计时。 */
+        *stage = HANDLESCAN_STAGE_RETRY_WAIT;                 /* 保持插入态，稍后重新进入 VERIFY，不要求用户再次插拔。 */
+        Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_VERIFY_RETRY, *retry_count);
+        return;
+    }
+
+    if (alarm_value != 0U)
+    {
+        if ((Handlescan_IsHandleVerifyAlarm(*last_alarm) == 0U) || (WorkAlarm_Is(alarm_value) == false))
+        {
+            *last_alarm = alarm_value;                        /* 第一次达到最终失败时记录报警归属。 */
+            Handlescan_RaiseAlarm(channel, *last_alarm);      /* 最终失败才写 WorkMessage.alarm_value 并触发蜂鸣提示。 */
+        }
+        else
+        {
+            *last_alarm = alarm_value;                        /* 已经处于同类报警保持时，只刷新归属，不重复触发蜂鸣。 */
+        }
+    }
+
+    *retry_wait_ticks = 0U;                                   /* 最终报警保持里的慢速自恢复重试也从当前周期重新计时。 */
+    *stage = HANDLESCAN_STAGE_VERIFY_FAIL;                    /* 最终失败保持态：继续监视拔出，同时慢速自恢复重试。 */
 }
 
 /*
@@ -564,9 +722,7 @@ static uint8_t Handlescan_ShouldSyncGlobalHandModel(uint8_t channel)
 
 /*
  * 把 EEPROM 认证返回码映射为系统报警码。
- * 当前策略如下：
- * 1. 认证阶段的失败统一映射为 `0x22`，包括页读取失败、页和校验失败、SN 读取失败以及 CRC 不匹配；
- * 2. 只有在认证已经通过后，信息区读取失败或手柄类型无法识别时，才映射为 `0x23`。
+ * 当前策略：只有 EEPROM 最终校验失败才映射为 WORK_ALARM_HANDLE_MODEL_ERROR。
  */
 static uint8_t Handlescan_MapVerifyStatusToAlarm(AT24CS32_CRC_Status verify_status)
 {
@@ -582,7 +738,7 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(AT24CS32_CRC_Status verify_stat
         case AT24CS32_CRC_STATUS_SN_READ_FAILED:
         case AT24CS32_CRC_STATUS_CRC_MISMATCH:
         default:
-            return HANDLESCAN_ALARM_A_PAGE_FAIL;
+            return WORK_ALARM_HANDLE_MODEL_ERROR;
     }
 }
 
@@ -642,6 +798,7 @@ void HandlescanA_Fun_SSC(void)
     {
         s_handleA_debounce.in_debounce_ticks = 0U;           /* 一旦检测到拔出候选，就清掉插入去抖计数。 */
         s_a_verify_start_wait_ticks = 0U;                    /* 同时清掉认证前等待计数，避免下次误续跑。 */
+        Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
 
         /*
          * A 通道已经上线，或者已经进入认证失败保持态时，如果此时短接线被拔掉，
@@ -664,6 +821,7 @@ void HandlescanA_Fun_SSC(void)
             }
 
             s_handleA_debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉计数器。 */
+            Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* A 通道坏手柄拔出后，释放本通道手柄型号错误报警。 */
             s_a_stage = HANDLESCAN_STAGE_IDLE;               /* A 通道状态机回到空闲态。 */
             s_a_last_alarm = 0U;                             /* 清掉 A 通道最近一次报警缓存。 */
             Handlescan_ClearChannelState(CHANNEL_A);         /* 清空 A 通道新的在线与识别状态容器。 */
@@ -672,6 +830,7 @@ void HandlescanA_Fun_SSC(void)
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出“离线完成”报文。 */
             (void)Handlescan_HandleRunningPlugAlarm(1U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
+            Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 A 通道拔出确认单响。 */
             return;                                          /* A 通道离线处理完成，本轮到此结束。 */
         }
 
@@ -695,6 +854,7 @@ void HandlescanA_Fun_SSC(void)
         s_handleA_debounce.in_debounce_ticks = 0U;           /* 新一轮插入开始时，先清空插入去抖计数。 */
         s_handleA_debounce.out_debounce_ticks = 0U;          /* 同时清空拔出去抖计数，避免带入上一次状态。 */
         s_a_verify_start_wait_ticks = 0U;                    /* 清空认证前等待计数。 */
+        Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 新手柄插入从 0 次失败开始认证。 */
         s_a_stage = HANDLESCAN_STAGE_DEBOUNCE_IN;            /* 状态机切到“插入去抖”阶段。 */
     }
 
@@ -719,14 +879,14 @@ void HandlescanA_Fun_SSC(void)
 
     /*
      * 插入稳定后的认证前等待阶段。
-     * 这里保留 100ms 的稳定时间，避免手柄刚插入时立刻访问 EEPROM 导致首包失败。
+     * 这里保留 200ms 的稳定时间，避免手柄刚插入时立刻访问 EEPROM 导致首包失败。
      */
     if (s_a_stage == HANDLESCAN_STAGE_WAIT_VERIFY)
     {
         if (s_a_verify_start_wait_ticks < HANDLESCAN_VERIFY_START_DELAY_TICKS)
         {
             ++s_a_verify_start_wait_ticks;                   /* 每个扫描周期把认证前等待计数加一。 */
-            return;                                          /* 等待未满 100ms 前，不访问 EEPROM。 */
+            return;                                          /* 等待未满 200ms 前，不访问 EEPROM。 */
         }
 
         s_a_verify_start_wait_ticks = 0U;                    /* 等待完成后，把等待计数器清零。 */
@@ -734,8 +894,24 @@ void HandlescanA_Fun_SSC(void)
     }
 
     /*
+     * 快速重试等待阶段。
+     * 认证或信息读取失败后，先等待一小段时间再重新进 VERIFY，避免 I2C 刚恢复时连续撞总线。
+     */
+    if (s_a_stage == HANDLESCAN_STAGE_RETRY_WAIT)
+    {
+        if (s_a_verify_retry_wait_ticks < HANDLESCAN_VERIFY_RETRY_DELAY_TICKS)
+        {
+            ++s_a_verify_retry_wait_ticks;                   /* 每 10ms 累计一次快速重试等待时间。 */
+            return;                                          /* 未到重试间隔前，不访问 EEPROM。 */
+        }
+
+        s_a_verify_retry_wait_ticks = 0U;                    /* 快速重试等待结束，清零计数。 */
+        s_a_stage = HANDLESCAN_STAGE_VERIFY;                 /* 重新进入认证阶段，不需要重新插拔。 */
+    }
+
+    /*
      * A 通道认证阶段。
-     * 这里只调用一次 I2C2 认证接口；认证失败后停在失败态，等待重新插拔。
+     * 认证失败后先做有限重试，多次失败后才进入最终报警保持。
      */
     if (s_a_stage == HANDLESCAN_STAGE_VERIFY)
     {
@@ -745,13 +921,13 @@ void HandlescanA_Fun_SSC(void)
 
         if (verify_status != AT24CS32_CRC_STATUS_OK)
         {
-            s_a_last_alarm = Handlescan_MapVerifyStatusToAlarm(verify_status); /* 把认证失败码映射为系统报警码。 */
-            if (s_a_last_alarm != 0U)
-            {
-                Handlescan_RaiseAlarm(CHANNEL_A, s_a_last_alarm); /* 写入新的统一报警状态并触发蜂鸣事件。 */
-                Handlescan_DebugTraceI2cDetail(1U);          /* 输出最近一次底层 I2C 访问细节。 */
-            }
-            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;        /* 认证失败后切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         Handlescan_MapVerifyStatusToAlarm(verify_status)); /* 先快速重试，最终失败才报警。 */
+            Handlescan_DebugTraceI2cDetail(1U);              /* 输出最近一次底层 I2C 访问细节。 */
             return;                                          /* 本轮不再继续读信息区。 */
         }
 
@@ -768,10 +944,14 @@ void HandlescanA_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_INFO_ADDR, s_a_info_buf, HANDLESCAN_INFO_SIZE); /* 从 A 通道 EEPROM 读出 16 字节信息区。 */
         if (read_status == 0U)
         {
-            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 信息区读取失败时，写入新接口报警状态。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出信息区读取失败报文。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态，等待重新插拔。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         0U);                /* 信息区瞬时读取失败只重试，不报手柄型号错误。 */
             return;                                         /* 本轮停止后续处理。 */
         }
 
@@ -780,9 +960,13 @@ void HandlescanA_Fun_SSC(void)
         handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找型号配置表。 */
         if (handle_type_cfg == NULL)
         {
-            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 查表失败时，同样按数据无效报警处理。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出“手柄类型无法识别”报文。 */
-            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         0U);                /* 型号页读到异常值时允许后续重试，避免热插拔瞬间误判。 */
             return;                                         /* 等待重新插拔。 */
         }
 
@@ -790,10 +974,14 @@ void HandlescanA_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 A 通道 EEPROM 读出第 3 页刀具信息区。 */
         if (read_status == 0U)
         {
-            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具信息区读取失败也按数据区失败报警处理。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出刀具信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         0U);                /* 刀具页瞬时读取失败只重试，不立刻锁死。 */
             return;                                         /* 本轮停止后续处理。 */
         }
 
@@ -802,9 +990,13 @@ void HandlescanA_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Handlescan_RaiseAlarm(CHANNEL_A, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具类型查表失败时，同样按数据无效处理。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
-            s_a_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 进入失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         0U);                /* 刀具页读到异常值时允许后续重试。 */
             return;                                         /* 等待重新插拔。 */
         }
 
@@ -836,6 +1028,8 @@ void HandlescanA_Fun_SSC(void)
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 A 通道刀具规格缓存。 */
         WorkMessage.Channel_Aonline = true;                 /* 置位 A 通道在线标志。 */
         SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知新接口事件链：A 通道手柄上线。 */
+        Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
+        Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
         s_a_last_alarm = 0U;                                /* 上线成功后清掉最近一次报警缓存。 */
         s_a_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到在线保持态。 */
         Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文。 */
@@ -847,12 +1041,26 @@ void HandlescanA_Fun_SSC(void)
                                       tool_diameter_tenth,
                                       tool_length_tenth,
                                       tool_angle_tenth);    /* 输出 A 通道刀具名称和规格报文。 */
+        Handlescan_BeepOnceIfNoAlarm();                     /* A 通道认证并上线成功后，给使用者一个确认单响。 */
         return;                                             /* A 通道本轮流程结束，后续等待拔出。 */
     }
 
-    if ((s_a_stage == HANDLESCAN_STAGE_VERIFY_FAIL) || (s_a_stage == HANDLESCAN_STAGE_ONLINE))
+    if (s_a_stage == HANDLESCAN_STAGE_VERIFY_FAIL)
     {
-        return;                                             /* 在线保持态和失败保持态都保持静默，只等待状态变化。 */
+        if (s_a_verify_retry_wait_ticks < HANDLESCAN_VERIFY_ALARM_RETRY_TICKS)
+        {
+            ++s_a_verify_retry_wait_ticks;                   /* 最终报警保持时慢速计时，避免反复高频读 EEPROM。 */
+            return;                                          /* 等待 1000ms 后再尝试自恢复认证。 */
+        }
+
+        s_a_verify_retry_wait_ticks = 0U;                    /* 慢速自恢复时间到，清掉等待计数。 */
+        s_a_stage = HANDLESCAN_STAGE_VERIFY;                 /* 仍插着时重新认证一次，正确手柄可自动恢复上线。 */
+        return;
+    }
+
+    if (s_a_stage == HANDLESCAN_STAGE_ONLINE)
+    {
+        return;                                             /* 在线保持态保持静默，只等待拔出。 */
     }
 }
 
@@ -892,6 +1100,7 @@ void HandlescanB_Fun_SSC(void)
     {
         s_handleB_debounce.in_debounce_ticks = 0U;           /* 一旦检测到拔出候选，就清掉 B 通道插入去抖计数。 */
         s_b_verify_start_wait_ticks = 0U;                    /* 同时清掉 B 通道认证前等待计数。 */
+        Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
 
         /*
          * 如果 B 通道之前已经在线，或者认证失败后仍保持插入态，
@@ -914,6 +1123,7 @@ void HandlescanB_Fun_SSC(void)
             }
 
             s_handleB_debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉 B 通道计数器。 */
+            Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* B 通道坏手柄拔出后，释放本通道手柄型号错误报警。 */
             s_b_stage = HANDLESCAN_STAGE_IDLE;               /* B 通道状态机回到空闲态。 */
             s_b_last_alarm = 0U;                             /* 清掉 B 通道最近一次报警缓存。 */
             Handlescan_ClearChannelState(CHANNEL_B);         /* 清空 B 通道新的在线与识别状态容器。 */
@@ -922,6 +1132,7 @@ void HandlescanB_Fun_SSC(void)
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
             (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
+            Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 B 通道拔出确认单响。 */
             return;                                          /* B 通道离线处理结束。 */
         }
 
@@ -944,6 +1155,7 @@ void HandlescanB_Fun_SSC(void)
         s_handleB_debounce.in_debounce_ticks = 0U;           /* 新一轮 B 通道插入开始时，先清空插入去抖计数。 */
         s_handleB_debounce.out_debounce_ticks = 0U;          /* 清空 B 通道拔出去抖计数。 */
         s_b_verify_start_wait_ticks = 0U;                    /* 清空 B 通道认证前等待计数。 */
+        Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 新手柄插入从 0 次失败开始认证。 */
         s_b_stage = HANDLESCAN_STAGE_DEBOUNCE_IN;            /* 状态机切到“B 通道插入去抖”阶段。 */
     }
 
@@ -968,14 +1180,14 @@ void HandlescanB_Fun_SSC(void)
 
     /*
      * B 通道认证前等待阶段。
-     * 等待时间与 A 通道保持一致，都是 100ms。
+     * 等待时间与 A 通道保持一致，都是 200ms。
      */
     if (s_b_stage == HANDLESCAN_STAGE_WAIT_VERIFY)
     {
         if (s_b_verify_start_wait_ticks < HANDLESCAN_VERIFY_START_DELAY_TICKS)
         {
             ++s_b_verify_start_wait_ticks;                   /* 每个扫描周期把 B 通道认证前等待计数加一。 */
-            return;                                          /* 等待未满 100ms 前，不访问 B 通道 EEPROM。 */
+            return;                                          /* 等待未满 200ms 前，不访问 B 通道 EEPROM。 */
         }
 
         s_b_verify_start_wait_ticks = 0U;                    /* 等待完成后清零计数器。 */
@@ -983,8 +1195,24 @@ void HandlescanB_Fun_SSC(void)
     }
 
     /*
+     * B 通道快速重试等待阶段。
+     * 认证或信息读取失败后，先等待一小段时间再重新访问 EEPROM。
+     */
+    if (s_b_stage == HANDLESCAN_STAGE_RETRY_WAIT)
+    {
+        if (s_b_verify_retry_wait_ticks < HANDLESCAN_VERIFY_RETRY_DELAY_TICKS)
+        {
+            ++s_b_verify_retry_wait_ticks;                   /* 每 10ms 累计一次快速重试等待时间。 */
+            return;                                          /* 未到重试间隔前，不访问 EEPROM。 */
+        }
+
+        s_b_verify_retry_wait_ticks = 0U;                    /* 快速重试等待结束，清零计数。 */
+        s_b_stage = HANDLESCAN_STAGE_VERIFY;                 /* 重新进入认证阶段，不需要重新插拔。 */
+    }
+
+    /*
      * B 通道认证阶段。
-     * 认证接口切换为 I2C3，对 B 通道 EEPROM 只做一次认证。
+     * 认证接口切换为 I2C3，失败后先有限重试，多次失败后才最终报警。
      */
     if (s_b_stage == HANDLESCAN_STAGE_VERIFY)
     {
@@ -994,13 +1222,13 @@ void HandlescanB_Fun_SSC(void)
 
         if (verify_status != AT24CS32_CRC_STATUS_OK)
         {
-            s_b_last_alarm = Handlescan_MapVerifyStatusToAlarm(verify_status); /* 把 B 通道认证失败码映射为报警码。 */
-            if (s_b_last_alarm != 0U)
-            {
-                Handlescan_RaiseAlarm(CHANNEL_B, s_b_last_alarm); /* 写入新的统一报警状态并触发蜂鸣事件。 */
-                Handlescan_DebugTraceI2cDetail(2U);          /* 输出本轮 B 通道失败的 I2C 细节。 */
-            }
-            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;        /* B 通道切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         Handlescan_MapVerifyStatusToAlarm(verify_status)); /* 先快速重试，最终失败才报警。 */
+            Handlescan_DebugTraceI2cDetail(2U);              /* 输出本轮 B 通道失败的 I2C 细节。 */
             return;                                          /* 停止后续信息区读取。 */
         }
 
@@ -1017,10 +1245,14 @@ void HandlescanB_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_INFO_ADDR, s_b_info_buf, HANDLESCAN_INFO_SIZE); /* 从 B 通道 EEPROM 读取 16 字节信息区。 */
         if (read_status == 0U)
         {
-            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* B 通道信息区读取失败时，写入新接口报警状态。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出 B 通道信息区读取失败报文。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         0U);                /* 信息区瞬时读取失败只重试，不报手柄型号错误。 */
             return;                                         /* 本轮停止后续处理。 */
         }
 
@@ -1029,9 +1261,13 @@ void HandlescanB_Fun_SSC(void)
         handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找配置表。 */
         if (handle_type_cfg == NULL)
         {
-            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* 查表失败时，按“型号无效”处理。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出 B 通道“手柄类型无法识别”报文。 */
-            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         0U);                /* 型号页读到异常值时允许后续重试，避免热插拔瞬间误判。 */
             return;                                         /* 等待重新插拔。 */
         }
 
@@ -1039,10 +1275,14 @@ void HandlescanB_Fun_SSC(void)
         read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 B 通道 EEPROM 读取第 3 页刀具信息区。 */
         if (read_status == 0U)
         {
-            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* B 通道刀具信息区读取失败时，按数据区失败处理。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, HANDLESCAN_ALARM_A_DATA_FAIL); /* 输出刀具信息区读取失败报文。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出刀具信息区读取失败报文。 */
             Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         0U);                /* 刀具页瞬时读取失败只重试，不立刻锁死。 */
             return;                                         /* 本轮停止后续处理。 */
         }
 
@@ -1051,9 +1291,13 @@ void HandlescanB_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Handlescan_RaiseAlarm(CHANNEL_B, HANDLESCAN_ALARM_A_DATA_FAIL); /* 刀具类型查表失败时，按“数据无效”处理。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
-            s_b_stage = HANDLESCAN_STAGE_VERIFY_FAIL;       /* 切到失败保持态。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         0U);                /* 刀具页读到异常值时允许后续重试。 */
             return;                                         /* 等待重新插拔。 */
         }
 
@@ -1085,6 +1329,8 @@ void HandlescanB_Fun_SSC(void)
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 B 通道刀具规格缓存。 */
         WorkMessage.Channel_Bonline = true;                 /* 置位 B 通道在线标志。 */
         SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知新接口事件链：B 通道手柄上线。 */
+        Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
+        Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
         s_b_last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
         s_b_stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到 B 通道在线保持态。 */
         Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文。 */
@@ -1096,12 +1342,26 @@ void HandlescanB_Fun_SSC(void)
                                       tool_diameter_tenth,
                                       tool_length_tenth,
                                       tool_angle_tenth);    /* 输出 B 通道刀具名称和规格报文。 */
+        Handlescan_BeepOnceIfNoAlarm();                     /* B 通道认证并上线成功后，给使用者一个确认单响。 */
         return;                                             /* B 通道本轮处理结束。 */
     }
 
-    if ((s_b_stage == HANDLESCAN_STAGE_VERIFY_FAIL) || (s_b_stage == HANDLESCAN_STAGE_ONLINE))
+    if (s_b_stage == HANDLESCAN_STAGE_VERIFY_FAIL)
     {
-        return;                                             /* 在线保持态和失败保持态都保持静默，只等待拔出或重新插入。 */
+        if (s_b_verify_retry_wait_ticks < HANDLESCAN_VERIFY_ALARM_RETRY_TICKS)
+        {
+            ++s_b_verify_retry_wait_ticks;                   /* 最终报警保持时慢速计时，避免反复高频读 EEPROM。 */
+            return;                                          /* 等待 1000ms 后再尝试自恢复认证。 */
+        }
+
+        s_b_verify_retry_wait_ticks = 0U;                    /* 慢速自恢复时间到，清掉等待计数。 */
+        s_b_stage = HANDLESCAN_STAGE_VERIFY;                 /* 仍插着时重新认证一次，正确手柄可自动恢复上线。 */
+        return;
+    }
+
+    if (s_b_stage == HANDLESCAN_STAGE_ONLINE)
+    {
+        return;                                             /* 在线保持态保持静默，只等待拔出。 */
     }
 }
 

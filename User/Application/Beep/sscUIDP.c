@@ -7,6 +7,7 @@
 #include "lcd.h"
 #include "Pubinterface.h"
 
+uint8_t DisPlayData[10] = {0};
 
 QueueHandle_t UIDPMsgQueue = NULL;
 kernel_task_t UIDISPLAYBehaviorHandle;
@@ -432,34 +433,34 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value)
       //根据报警值显示图片
 	  switch(arm_value)
 	  {
-		case 1:
+		case WORK_ALARM_HANDLE_NOT_CONNECTED:
 		LCD_Show_Picture(0x1421,520);//手柄未连接，请链接手柄
 		break;
-		case 2:
+		case WORK_ALARM_MANUAL_SELECTED:
 		LCD_Show_Picture(0x1421,521);//手控已选中，请用手控
 		break;
-		case 3:
+		case WORK_ALARM_FOOT_SELECTED:
 		LCD_Show_Picture(0x1421,525);//脚控已选中，请用脚控
 		break;
-		case 4:
+		case WORK_ALARM_MOTOR_OVERLOAD:
 		LCD_Show_Picture(0x1421,527);//电机过载，请松开脚踏
 		break;
-		case 5:
+		case WORK_ALARM_FOOT_VALUE_ERROR:
 		LCD_Show_Picture(0x1421,530);//脚踏值错误，请联系售后
 		break;
-		case 6:
+		case WORK_ALARM_MOTOR_OVERLOAD_ALT:
 		LCD_Show_Picture(0x1421,531);//电机过载，请松开脚踏
 		break;
-		case 7:
+		case WORK_ALARM_UID_ERROR:
 		LCD_Show_Picture(0x1421,533);//英文UID错误
 		break;
-		case 8:
+		case WORK_ALARM_MOTOR_COMM_ERROR:
 		LCD_Show_Picture(0x1421,534);//英文电机通讯异常
 		break;
-		case 9:
+		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(0x1421,535);//英文HALL值错误
 		break;
-		case 10:
+		case WORK_ALARM_HANDLE_MODEL_ERROR:
 		LCD_Show_Picture(0x1421,536);//英文手柄型号错误
 		break;
 	  }

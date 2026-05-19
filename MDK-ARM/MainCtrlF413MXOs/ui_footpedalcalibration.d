@@ -42,4 +42,3 @@
 .\mainctrlf413mxos\ui_footpedalcalibration.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
 .\mainctrlf413mxos\ui_footpedalcalibration.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
 .\mainctrlf413mxos\ui_footpedalcalibration.o: ../User/Application/include/screenkey.h
-.\mainctrlf413mxos\ui_footpedalcalibration.o: ../User/Application/include/screen.h

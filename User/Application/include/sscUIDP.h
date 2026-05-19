@@ -3,5 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+extern uint8_t DisPlayData[10];
+
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value);
 void SscUIDisplayTask_Init(void);

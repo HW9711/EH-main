@@ -4,7 +4,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 typedef void (*cbFunc)(uint32_t event);
+
+/*
+ * APP_TASK_THREAD_STACK_DEPTH 是每个软任务迁移成独立 FreeRTOS 线程后的静态栈深度，单位为 StackType_t 字。
+ * 原来所有软任务共用一个 AppTask 线程栈；现在每个 task_t 自带一份栈，方便调试器和 Tracealyzer 分别观察。
+ * 这里保持 1024 words，优先保证旧业务回调的栈空间不因为拆线程而变小。
+ */
+#ifndef APP_TASK_THREAD_STACK_DEPTH
+#define APP_TASK_THREAD_STACK_DEPTH 1024U
+#endif
 
 typedef struct task_s
 {
@@ -12,7 +24,16 @@ typedef struct task_s
     uint32_t timerTick;
     bool oneShot;
     bool start;
+    bool threadCreated;
     const char *name;
+    /*
+     * 独立线程运行资源全部静态保存在 task_t 内部。
+     * 业务模块原来已经声明了全局 kernel_task_t/task_t 句柄，因此这里扩展结构体即可完成静态 TCB/栈分配，
+     * 不需要额外集中数组，也不会引入 FreeRTOS heap 消耗。
+     */
+    TaskHandle_t threadHandle;
+    StaticTask_t threadTcb;
+    StackType_t threadStack[APP_TASK_THREAD_STACK_DEPTH];
     /*
      * Tracealyzer 事件格式句柄缓存。
      * AppTask 是一个承载多个软任务的真实 FreeRTOS 任务，单靠系统任务名无法区分内部软任务；

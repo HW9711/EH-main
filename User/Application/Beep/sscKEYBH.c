@@ -122,12 +122,16 @@ void HANDLEKeyBehavior(uint8_t key_value)
 		SpeedActive(key_value);
 		break;
 		case HANDLEKey_motor_start: 
+		/* 队列层再次确认手柄控制权，防止绕过手柄扫描任务直接投递启动消息。 */
+		if(ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)return;
 		WorkMessage.runflag_work = true;
 		ControlSignalMessage.handle_control_flag = true;
 		break;
 		case HANDLEKey_motor_stop: 
 		WorkMessage.runflag_work = false;
 		ControlSignalMessage.handle_control_flag = false;
+		/* 手柄停止消息完成后，如果没有其它本地输出，就释放手柄控制权。 */
+		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE);
 		break;
 		case HANDLEKey_dir_Forward:
 		//设置正传
@@ -228,6 +232,11 @@ void KeyBehaviors()
         control_type=msg.control_type;
         control_key=msg.control_key;
     }
+	/* 任一控制方式被其它来源持有时，本来源按键只允许排队后丢弃，避免抢写 WorkMessage。 */
+	if(ControlArbitration_ShouldBlockLocalKey(control_type, control_key))
+	{
+		return;
+	}
 	switch(control_type)
 	{
 		case JTKey:

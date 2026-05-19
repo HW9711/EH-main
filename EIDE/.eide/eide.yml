@@ -135,6 +135,7 @@ virtualFolder:
             - path: ../User/Application/ExternalComm/external_comm_task.c
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
+            - path: ../User/Application/Pump/pump_pressure_control.c
             - path: ../User/Application/Screen/screen_adapter.c
             - path: ../User/Application/ScreenKey/param.c
             - path: ../User/Application/ScreenKey/screenkey.c
@@ -369,4 +370,4 @@ targets:
         resetMode: default
         runAfterProgram: true
         speed: 4000
-    uploader: JLink
+    uploader: STLink

@@ -92,7 +92,6 @@
 .\mainctrlf413mxos\main.o: ../User/Peripheral/include/lcd.h
 .\mainctrlf413mxos\main.o: ../User/Hardware/include/hw_bootstrap.h
 .\mainctrlf413mxos\main.o: ../User/App/include/app_bootstrap.h
-.\mainctrlf413mxos\main.o: ../User/Application/include/beep.h
 .\mainctrlf413mxos\main.o: ../User/Data/data.h
 .\mainctrlf413mxos\main.o: ../User/Peripheral/include/at24cs32_crc_verify.h
 .\mainctrlf413mxos\main.o: ../User/Peripheral/include/at24cs32.h

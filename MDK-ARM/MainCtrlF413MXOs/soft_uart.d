@@ -93,3 +93,4 @@
 .\mainctrlf413mxos\soft_uart.o: ../User/Hardware/include/bsp_uart.h
 .\mainctrlf413mxos\soft_uart.o: ../User/Hardware/include/board_profile.h
 .\mainctrlf413mxos\soft_uart.o: ../User/board/board.h
+.\mainctrlf413mxos\soft_uart.o: ../User/Application/include/Pubinterface.h

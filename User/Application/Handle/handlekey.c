@@ -55,25 +55,33 @@ bool HandleKey_GetKeyValue(uint8_t keynum)
  */
 static void HandleKey_SetAlarm(uint8_t alarm_value)
 {
-	WorkMessage.alarm_flag = true;
-	WorkMessage.alarm_value = alarm_value;
-	SendAlarmMessage(alarm_value);
+	/* 手柄按键产生的普通报警统一交给 WorkAlarm_Set，同步 WorkMessage、蜂鸣和 sscUIDP 屏幕显示。 */
+	WorkAlarm_Set(alarm_value);
 }
 
 static void HandleKey_ClearAlarm(uint8_t alarm_value)
 {
-	if (WorkMessage.alarm_value == alarm_value)
-	{
-		WorkMessage.alarm_value = 0U;
-		WorkMessage.alarm_flag = false;
-		SendAlarmMessage(0U);
-	}
+	/* 只清当前按键模块自己关心的报警码，避免误清其它模块仍存在的故障。 */
+	WorkAlarm_ClearIf(alarm_value);
 }
 
 static void HandleKey_SetMotorRun(bool enable)
 {
+	if (enable)
+	{
+		/* 手柄按键启动电机前先占用手柄控制权，若其它方式正在控制则本次按键无效。 */
+		if (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)
+		{
+			return;
+		}
+	}
 	ControlSignalMessage.handle_control_flag = enable;
 	WorkMessage.runflag_work = enable;
+	if (enable == false)
+	{
+		/* 手柄停止后释放手柄控制权，允许脚踏、屏幕或上位机重新申请。 */
+		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE);
+	}
 	SendKeyBehMessage(HANDLEKey, enable ? HANDLEKey_motor_start : HANDLEKey_motor_stop);
 }
 
@@ -102,14 +110,14 @@ if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
 						if(WorkMessage.drivetype_work==JTWORK)
 						{
 							//报警，请选择脚控启动
-							HandleKey_SetAlarm(6U);
+							HandleKey_SetAlarm(WORK_ALARM_FOOT_SELECTED);
 							HandleKey_SetMotorRun(false);
 							return;
 						}
 						
 						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								if(WorkMessage.alarm_value==8)
+								if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_COMM_ERROR)
 								{
 									activation_flag=0;
 									HandleKey_SetMotorRun(false);
@@ -137,16 +145,16 @@ if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
 				
 				if(key0_up_down>55)
 				{
-					if(WorkMessage.alarm_value==6)
+					if(WorkMessage.alarm_value==WORK_ALARM_FOOT_SELECTED)
 					{
-						HandleKey_ClearAlarm(6U);
+						HandleKey_ClearAlarm(WORK_ALARM_FOOT_SELECTED);
 						key0_up_down=0;
 					}
-					else if(WorkMessage.alarm_value==8)
+					else if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_COMM_ERROR)
 					{
 						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-						HandleKey_ClearAlarm(8U);
+						HandleKey_ClearAlarm(WORK_ALARM_MOTOR_COMM_ERROR);
 						key0_up_down=0;
 						}
 					}
@@ -179,7 +187,7 @@ void HandleKey_Scan1SSC()
 						if(WorkMessage.drivetype_work==JTWORK)
 						{
 							//报警，请选择脚控启动
-							HandleKey_SetAlarm(7U);
+							HandleKey_SetAlarm(WORK_ALARM_FOOT_SELECTED);
 							HandleKey_SetMotorRun(false);
 					
 							return;
@@ -187,7 +195,7 @@ void HandleKey_Scan1SSC()
 				
 						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-								if(WorkMessage.alarm_value==9)
+								if(WorkMessage.alarm_value==WORK_ALARM_HALL_ERROR)
 								{
 									activation_flag=0;
 									HandleKey_SetMotorRun(false);
@@ -215,17 +223,17 @@ void HandleKey_Scan1SSC()
 				
 				if(key0_up_down>55)
 				{
-					if(WorkMessage.alarm_value==7)
+					if(WorkMessage.alarm_value==WORK_ALARM_FOOT_SELECTED)
 					{
-						HandleKey_ClearAlarm(7U);
+						HandleKey_ClearAlarm(WORK_ALARM_FOOT_SELECTED);
 						key0_up_down=0;
 						activation_flag=0;
 					}
-					else if(WorkMessage.alarm_value==9)
+					else if(WorkMessage.alarm_value==WORK_ALARM_HALL_ERROR)
 					{
 						if(WorkMessage.drivetype_work==HANDLEWORK)
 						{
-						HandleKey_ClearAlarm(9U);
+						HandleKey_ClearAlarm(WORK_ALARM_HALL_ERROR);
 						key0_up_down=0;
 							activation_flag=0;
 						}
@@ -268,7 +276,7 @@ void HandleKey_Scan0(void)
 				SysRunData.HandleKeyValue[0] = 0;
 				if (SysFootPedalData.FootPedalADValue <= (SysFootPedalData.FootPedalMemoryLValue + FootPedalValueOffset))
 				{
-					SysRunData.WarnID = 12;
+					WorkAlarm_Set(WORK_ALARM_FOOT_SELECTED);
 				}
 			}      
 		}
@@ -327,7 +335,7 @@ void HandleKey_Scan1(void)
 				SysRunData.HandleKeyValue[1] = 0;
 				if (SysFootPedalData.FootPedalADValue <= (SysFootPedalData.FootPedalMemoryLValue + FootPedalValueOffset))
 				{
-					SysRunData.WarnID = 12;
+					WorkAlarm_Set(WORK_ALARM_FOOT_SELECTED);
 				}
 			}				
 		}
@@ -366,7 +374,7 @@ void HANDLEKEYTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN HANDLEKEYTaskFunc */
   /* Infinite loop */
-	if(WorkMessage.hmiactive_work)
+	if(ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 		return;
   HandleKey_Scan0SSC();
 	//HandleKey_Scan0SSC();

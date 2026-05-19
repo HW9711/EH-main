@@ -668,11 +668,13 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
 
     if (channel == SIM_UART_1)
     {
-        pump_message = &pumpMessageA;
+        /* SIM_UART_1 的 RX 是 PE4，现场固定接 B 泵压力传感器。 */
+        pump_message = &pumpMessageB;
     }
     else if (channel == SIM_UART_2)
     {
-        pump_message = &pumpMessageB;
+        /* SIM_UART_2 的 RX 是 PE6，现场固定接 A 泵压力传感器。 */
+        pump_message = &pumpMessageA;
     }
     else
     {
@@ -683,7 +685,11 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     pump_message->pressure_value = raw_cs1237;
     pump_message->weight_x10 = weight_x10;
     pump_message->pressure_threshold = threshold_g;
-    pump_message->type = device_code;
+    /*
+     * device_code 是 CS1237 压力模块上传的霍尔识别组合，只能用于在线/丢失判断。
+     * pump_message->type 是业务泵类型，由脚踏、上位机、屏幕和手柄控制路径维护；
+     * 这里如果写入霍尔码，PUMPA/PUMPB 会把它当成未知泵类型并间歇输出 0 速帧。
+     */
     pump_message->seq = frame[5];
     pump_message->online_flag = Cs1237_DeviceCodeValid(device_code);
     pump_message->losses_times = pump_message->online_flag ? 0U : (uint8_t)(pump_message->losses_times + 1U);

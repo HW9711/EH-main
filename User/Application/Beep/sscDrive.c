@@ -13,6 +13,7 @@
 #include "Pubinterface.h"
 
 #define motor_frem_length  11
+#define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -32,6 +33,32 @@ typedef struct {
 RunInformMessage_t;
 static RunInformMessage_t msg;
 
+static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
+{
+    if (freq_work > MOTOR_DRIVE_CMD_FREQ_MAX)
+    {
+        return (uint8_t)MOTOR_DRIVE_CMD_FREQ_MAX; /* EEPROM 或上位机给出的频率超过协议范围时，按驱动允许的最大值下发。 */
+    }
+
+    return (uint8_t)freq_work; /* 参考驱动接收端会再执行 `R_DATA[2] * 2`，主控这里保持原始命令值，不再提前翻倍。 */
+}
+
+static uint8_t MotorDrive_IsBrushedTool(uint8_t tool_type)
+{
+    return (uint8_t)((tool_type == PX_YIP_ONLINES) ||
+                     (tool_type == PX_YIM_ONLINES)); /* PX 一体刨/一体磨属于有刷刀具，必须用刀具类型判断，不能误用手柄型号。 */
+}
+
+static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
+{
+    if ((hand_model == PXBB_ONLINES) || (hand_model == PXBA_ONLINES))
+    {
+        return 0x02U; /* PXBA/PXBB 是带霍尔往复手柄，驱动闭环方式固定走方波霍尔。 */
+    }
+
+    return 0x01U; /* 其他手柄默认按无霍尔方式下发，保持旧工程的兼容行为。 */
+}
+
 /// 开口定位
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)//通道，方向，角度
 {
@@ -49,7 +76,7 @@ void MotorStops(void)
 }
 void MotorStart()
 {
-    msg.pro_current_l=0x64;
+    /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
          ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
     Uart1_SendPacket(motor_startcode, motor_frem_length);
@@ -72,20 +99,17 @@ void MOTORRUN(void)
               break;
              case OSCDIR: 
              msg.control_mode=0x03;
-             msg.frequency=WorkMessage.freq_work*2;//2倍值
+             msg.frequency=MotorDrive_BuildCommandFrequency(WorkMessage.freq_work);//参考驱动内部会再乘2，这里只下发协议原值
              break;
              default:
              break;
         }
         if(WorkMessage.channel_work==1)//通道1
         {
-            if(WorkMessage.hand_model!=PX_YIP_ONLINES&&WorkMessage.hand_model!=PX_YIM_ONLINES)
+            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
             {
                 msg.motor_type=0x01;
-                if(WorkMessage.hand_model==PXBB_ONLINES||WorkMessage.hand_model==PXBA_ONLINES)
-                msg.run_type=0x02;
-                else
-                msg.run_type=0x01;
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
                 
             }
             else{
@@ -95,13 +119,10 @@ void MOTORRUN(void)
         }
         else if(WorkMessage.channel_work==2)//通道2
         {
-            if(WorkMessage.hand_model!=PX_YIP_ONLINES&&WorkMessage.hand_model!=PX_YIM_ONLINES)
+            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
             {
                 msg.motor_type=0x02;
-                if(WorkMessage.hand_model==PXBB_ONLINES||WorkMessage.hand_model==PXBA_ONLINES)
-                msg.run_type=0x02;
-                else
-                msg.run_type=0x01;
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
             }
             else 
             { msg.motor_type=0x04;

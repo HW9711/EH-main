@@ -187,42 +187,6 @@ void Userparser_Init(void)
 	SscUIDisplayTask_Init();
 	SimUartTask_Init();
 
-//ssc任务初始化结束
-
-//  UI_Show_init();  //U初始化...
-
-//  //2.任务初始化
-//  IwdgTaskInit();  //300ms  看门狗 高于正常优先级
-
-//  LEDTaskInit();   //200ms  运行灯
-
-//  HandlescanTaskInit();  //10ms  手柄连接扫描 100ms防抖【耳磨、分体、一体】
-
-//  ConnectscanTaskInit();  //20ms  驱动板\脚踏 断开扫描
-
-//  DriveCtrl_Motor1CurrentTask_Init();  //53ms 驱动板电流状态获取
-//  DriveCtrl_UIRefreshDataTask_Init();  //100ms 获取实时转速 200ms更新UI
-
-
-//  Warn_RunErrScanTask_Init();  //100ms 运行错误状态
-//  Warn_StatusScanTask_Init();  //15ms 错误报警
-
-//  MotorUartData_Init();  //3ms 驱动板数据接收 6ms判断是否正接收数据中
-
-////  DirCurrentTask_Judge_Init();  //13ms 驱动电流判断
-
-//  ScreenKey_LongPressTaskInit();  //150ms 屏幕“长按”
-//  ScreenKey_ScanInit();  //22ms  屏幕按键
-
-//////  Pump_RunTask_Init();   //50ms  泵缓启动判断
-//  Pump_Pedal2Pump5sTask_Init();  //10ms 快速踩两脚判断 运行5s、排空
-
-//  SplitType_AutoModeDataRead_Init();  //50ms 扫描分体式手柄刀具信息的接收缓存
-//  SplitType_CutterScan_Init();  //100ms ①刷新刀具连接信息 ②1.2s判断刀具的断开信息 ③更新手动模式下刀具信息
-
-//  UIMain_RefreshTaskInit();  //50ms 主页显示刷新
-
-//  HandleKeyScan_Init();  //15ms 手柄按键扫描
 	LCD_Show_Which_Map(4);
 	PoweronInit();
 

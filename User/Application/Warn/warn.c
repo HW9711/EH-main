@@ -14,6 +14,7 @@
 #include "bsp_board.h"
 #include "drivectrl.h"
 #include "handlekey.h"
+#include "Pubinterface.h"
  
 #include "kernel_scheduler.h"
 
@@ -38,10 +39,10 @@ void Warn_RunErrScanTask_Fun(void)
 	  if ((SysRunData.HandleKeyValue[SysInterface.InterfaceSwitchNo2 - 1] == NO_Press) && \
 		    (SysFootPedalData.FootPedalADValue > (SysFootPedalData.FootPedalMemoryLValue + FootPedalValueOffset)) && \
 		    (SysFootPedalData.FootPedalConnectOkNo == Connect))  //脚踏运行
-	    SysRunData.WarnID = 13;	//手控运行脚踏报警
+	    WorkAlarm_Set(WORK_ALARM_MANUAL_SELECTED);	//手控运行脚踏报警
 
     if(SysRunData.StuckFlag == Error ) //手柄脚踏已连接，然后电机启动过载或卡死:电机不转动并且电流达到极限值
-	    SysRunData.WarnID = 5;
+	    WorkAlarm_Set(WORK_ALARM_MOTOR_OVERLOAD);
   }
   else //脚踏控制
   {
@@ -50,14 +51,14 @@ void Warn_RunErrScanTask_Fun(void)
 		    (SysFootPedalData.FootPedalADValue_Left > (SysFootPedalData.FootPedalMemoryLValue_Left + FootPedalValueOffset)))
 	  {
 	    if ((SysFootPedalData.FootPedalConnectOkNo == Connect) && (temp1 < 1)) //手柄均未连接，然后启动脚踏	Handle_Number
-		    SysRunData.WarnID = 1;
+		    WorkAlarm_Set(WORK_ALARM_HANDLE_NOT_CONNECTED);
 	    else if ((SysFootPedalData.FootPedalConnectOkNo == Connect) && (temp1 > 0)) //手柄脚踏都连接 Handle_Number
 	    {
 //	      if ((SysRunData.DJFlag == 0) && (SysRunData.MotorNumber == 2)) //直流有霍尔无刷 Motor_Number
 //		    SysRunData.WarnDisplayFlag = 2;  //刀具未连接，然后启动脚踏  【无法触发，因为(SysRunData.DJFlag == 0)永远不会被满足】
 
 		    if (SysRunData.StuckFlag == Error)  //手柄脚踏已连接，然后电机启动过载或卡死:电机不转动并且电流达到极限
-		      SysRunData.WarnID = 5;
+		      WorkAlarm_Set(WORK_ALARM_MOTOR_OVERLOAD);
 	    }
 
 	    if ((SysRunData.HALLErrFlag == 1) && (SysRunData.MotorNum == MotorNum2)) //霍尔错误  Handle_Status_Flag2
@@ -68,7 +69,7 @@ void Warn_RunErrScanTask_Fun(void)
 		      Warn_time = 0;
 
 		      //霍尔错误
-		      SysRunData.WarnID = 6;
+		      WorkAlarm_Set(WORK_ALARM_HALL_ERROR);
 		    }
 	    }
 	  }
@@ -76,11 +77,11 @@ void Warn_RunErrScanTask_Fun(void)
 
   if ((SysFootPedalData.FootPedalConnectOkNo == Connect) && ((SysFootPedalData.FootPedalMemoryLValue == 0) || \
 	    (SysFootPedalData.FootPedalMemoryHValue == 0) || (SysFootPedalData.FootPedalReadFlag == Error)))  //脚踏存储值读取错误
-    SysRunData.WarnID = 7;
+    WorkAlarm_Set(WORK_ALARM_FOOT_VALUE_ERROR);
 
   if (SysRunData.EncryptionCheckFlag == Error) //UID错误
   {
-	  SysRunData.WarnID = 9;
+	  WorkAlarm_Set(WORK_ALARM_UID_ERROR);
   }
 
   //2、3驱动板通信判断
@@ -98,7 +99,7 @@ void Warn_RunErrScanTask_Fun(void)
 
 	  if (SysRunData.CommunicatFlag == No_Connect)
 	  {
-	    SysRunData.WarnID = 11;
+	    WorkAlarm_Set(WORK_ALARM_MOTOR_COMM_ERROR);
 
 	    //Motor_Stop_Motor(Normal_stop, SysRunData.MotorNumber);  //Stop_Motor(Normal_stop); Motor_Number
 	  }
@@ -173,7 +174,7 @@ uint8_t Warn_KeyValueScan(void)
 		    SysRunData.StartingMethod = ManualCtrl;
 
 		    SysRunData.StuckFlag = No_Error;
-		    SysRunData.StuckFlag3 = No_Error;
+		    WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 				//停止电机.....
         //Motor_ErrorEmergencyStop_Ctrl(150);  //390ms
@@ -206,8 +207,11 @@ void Warn_StatusScanTask(void)
   uint8_t MotorStopCntTime = 0;  //电机心跳发送计时
   uint16_t HandleFlagTime = 0;  //手柄连接判断计数
 
-  if ((SysRunData.StuckFlag3 == Error) || (SysRunData.StuckFlag == Error))  //手柄脚踏已连接，然后电机启动过载或卡死:电机不转动并且电流达到极限值
-	  SysRunData.WarnID = 5;
+  if (SysRunData.StuckFlag == Error)  //旧卡死标志只桥接到新报警接口，不再写 WarnID。
+  {
+	  WorkAlarm_Set(WORK_ALARM_MOTOR_OVERLOAD);
+	  SysRunData.StuckFlag = No_Error;
+  }
 
   //无异常，返回
   if (SysRunData.WarnID == 0)
@@ -296,7 +300,7 @@ void Warn_StatusScanTask(void)
 			      SysRunData.StartingMethod = ManualCtrl;  //手控
 
 			      SysRunData.StuckFlag = No_Error;
-			      SysRunData.StuckFlag3 = No_Error;
+			      WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 			      SysFootPedalData.FootPedalADValue = 0;  //防止在电机转动时，脚踏断开，电机仍在运行
 
@@ -325,7 +329,7 @@ void Warn_StatusScanTask(void)
 			      SysRunData.StartingMethod = FootCtrl;  //脚控
 
 			      SysRunData.StuckFlag = No_Error;
-			      SysRunData.StuckFlag3 = No_Error;
+			      WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 			      SysFootPedalData.FootPedalMemoryHValue = 0;
 			      SysFootPedalData.FootPedalMemoryLValue = 0;
@@ -435,7 +439,7 @@ void Warn_StatusScanTask(void)
 			      SysRunData.StartingMethod = ManualCtrl;
 
 			      SysRunData.StuckFlag = No_Error;
-			      SysRunData.StuckFlag3 = No_Error;
+			      WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 			      SysFootPedalData.FootPedalMemoryLValue = 0;
 			      SysFootPedalData.FootPedalMemoryHValue = 0;
@@ -457,7 +461,7 @@ void Warn_StatusScanTask(void)
 			      SysRunData.StartingMethod = ManualCtrl;
 
 			      SysRunData.StuckFlag = No_Error;
-			      SysRunData.StuckFlag3 = No_Error;
+			      WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 			      SysFootPedalData.FootPedalADValue = 0;//防止在电机转动时，脚踏断开，电机仍在运行
 
@@ -482,7 +486,7 @@ void Warn_StatusScanTask(void)
 		      SysRunData.StartingMethod = FootCtrl;;
 
 		      SysRunData.StuckFlag = No_Error;
-		      SysRunData.StuckFlag3 = No_Error;
+		      WorkAlarm_ClearIf(WORK_ALARM_MOTOR_OVERLOAD);
 
 		      SysFootPedalData.FootPedalMemoryLValue = 0;
 		      SysFootPedalData.FootPedalMemoryHValue = 0;

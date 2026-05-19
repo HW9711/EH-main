@@ -17,6 +17,7 @@
 
 #define CHANNEL_A 1U
 #define CHANNEL_B 2U
+#define CHANNEL_NONE 0U
 
 #define JTkey_left_short 1U //左键短按
 #define JTKey_left_long 2U  //左键长按
@@ -33,9 +34,32 @@
 #define INJECTWATER  2U//注水
 #define POURWATER    3U//灌注
 
+#define NOWORK      0U//无控制方式
 #define JTWORK      1U//脚踏工作
 #define HANDLEWORK  2U//手控工作
 #define TOUCHWORK     3U//外部工作
+
+#define CONTROL_OWNER_NONE      0U//当前没有任何控制方式占用运行控制权
+#define CONTROL_OWNER_EXTERNAL  1U//上位机外部通信正在占用控制权
+#define CONTROL_OWNER_FOOT      2U//脚踏正在占用控制权
+#define CONTROL_OWNER_SCREEN    3U//屏幕按钮/触控正在占用控制权
+#define CONTROL_OWNER_HANDLE    4U//手柄按键正在占用控制权
+
+/*
+ * WorkMessage.alarm_value 统一报警码。
+ * 数值必须和 sscUIDP.c::UIAIARMDP() 的图片映射保持一致，蜂鸣、屏幕和上位机都读取同一份报警状态。
+ */
+#define WORK_ALARM_NONE                 0U//无报警
+#define WORK_ALARM_HANDLE_NOT_CONNECTED 1U//手柄未连接，请连接手柄
+#define WORK_ALARM_MANUAL_SELECTED      2U//手控已选中，请用手控
+#define WORK_ALARM_FOOT_SELECTED        3U//脚控已选中，请用脚控
+#define WORK_ALARM_MOTOR_OVERLOAD       4U//电机过载，请松开脚踏
+#define WORK_ALARM_FOOT_VALUE_ERROR     5U//脚踏值错误，请联系售后
+#define WORK_ALARM_MOTOR_OVERLOAD_ALT   6U//电机过载，请松开脚踏，兼容旧 UI 图片位
+#define WORK_ALARM_UID_ERROR            7U//UID 错误
+#define WORK_ALARM_MOTOR_COMM_ERROR     8U//电机通讯异常
+#define WORK_ALARM_HALL_ERROR           9U//HALL 值错误
+#define WORK_ALARM_HANDLE_MODEL_ERROR   10U//EEprom校验失败，手柄型号错误
 
 
 #define PLANER      1U//刨头
@@ -172,6 +196,9 @@
 typedef struct 
 {
   volatile bool      runflag_work;//电机运行标志位，这里考虑
+  volatile uint8_t   switchhandle_counts;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机。
+  volatile uint8_t   switchhandleA_flag;//脚踏切到 A 通道后的确认标志，未确认前不允许误启动 A 通道。
+  volatile uint8_t   switchhandleB_flag;//脚踏切到 B 通道后的确认标志，未确认前不允许误启动 B 通道。
   volatile bool      alarm_flag;
   volatile uint8_t   alarm_value;//报警码，供蜂鸣、UI 和上位机统一读取
   volatile bool      Channel_Aonline;
@@ -187,6 +214,8 @@ typedef struct
   volatile uint16_t  freq_work;//工作频率
   volatile uint16_t  dir_work;///工作方向
   volatile uint16_t  current_work;//工作电流
+  volatile uint16_t  driver_speed_feedback;//驱动板反馈实际转速，来自 0xAA 回包 byte4~5，保持驱动协议中的“实际转速/10”单位，不覆盖控制目标速度
+  volatile uint16_t  driver_current_x100;//驱动板反馈实时电流，来自 0xAA 回包 byte8~9，单位 0.01A，只用于监测上传，不能覆盖 current_work 保护电流
   volatile uint32_t  tool_reduction_ratio;//减速比 高16位表示增速16位表示减速
 }
 WorkMessage_t;
@@ -286,7 +315,7 @@ typedef struct
   volatile bool     timingDrainage_flag;//定时排空，优先级在run_flag运行后，遇到run_flag=true则切为false
   volatile uint8_t  step_value;//步进值
   volatile uint8_t  associated_channel;//关联通道，如果
-  volatile uint16_t  type;//泵类型设备码
+  volatile uint16_t  type;//业务泵类型：DRAWWATER/INJECTWATER/POURWATER，不能保存 CS1237 霍尔设备码
   volatile uint8_t  direction;//方向
   volatile uint16_t speed_work;//泵速度，灌注最大到300ml，必须使用16位避免截断
   volatile uint16_t speed_Max;
@@ -331,6 +360,20 @@ void SpeedActive(uint8_t key_value);
 void DirActive(uint8_t key_value);
 void FreqActive(uint8_t key_value);
 void HmiExitActive(uint8_t key_value);
+bool ControlArbitration_IsExternalActive(void);
+bool ControlArbitration_IsOwner(uint8_t owner);
+bool ControlArbitration_IsBusyByOther(uint8_t owner);
+bool ControlArbitration_TryEnter(uint8_t owner);
+void ControlArbitration_Exit(uint8_t owner);
+void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner);
+void ControlArbitration_ForceRelease(void);
+bool ControlArbitration_EnterExternalControl(void);
+void ControlArbitration_ReleaseExternalControl(void);
+bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key);
+void WorkAlarm_Set(uint8_t alarm_value);
+void WorkAlarm_Clear(void);
+void WorkAlarm_ClearIf(uint8_t alarm_value);
+bool WorkAlarm_Is(uint8_t alarm_value);
 void ControlTypeActive(uint8_t key_value);
 void PlanerGridH(uint8_t key_value);
  void ChannelrecognizeMessageInit(void);

@@ -68,8 +68,7 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
   }
   else
   {
-    if (Uart4_RecvWaitTimeCnt >= UART4_TimeoutComp)
-    {
+    //if (Uart4_RecvWaitTimeCnt >= UART4_TimeoutComp)
       if (RemainLen < UART4_MAX_PACKET_SIZE)
       {
         rlen = (UART4_MAX_PACKET_SIZE - RemainLen);
@@ -80,7 +79,6 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
       }
 
       Uart4_RecvWaitTimeCnt = 0;
-	  }
   }
 
   return rlen;
