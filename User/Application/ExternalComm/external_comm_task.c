@@ -4,7 +4,6 @@
 
 #include "at24cs32.h"
 #include "bsp_uart.h"
-#include "data.h"
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
 #include "sscDRIVE.h"
@@ -13,15 +12,21 @@
 #include <string.h>
 
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
-#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 1000ms 主动上传一次，可按现场需求单独改宏。 */
+#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
+#define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 1000U  /* 外控链路静默 1s 后只停电机和泵输出，保留外控授权；上位机需按 300ms 周期下发保活。 */
+#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     5000U /* 外控链路静默 30s 后才释放外控授权，避免短暂上行/ACK 抖动把上位机踢出外控。 */
 #define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
-#define EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE 1U /* UART5 A 泵固定识别开关：1 表示临时固定为注水泵，0 表示使用真实识别结果。 */
+#define EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE 1U /* UART5 A 泵固定识别开关：1 表示按交付配置识别为注水泵，0 表示使用真实识别结果。 */
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
 #define EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE    INJECTWATER /* 固定识别打开时，UART5 A 泵类型固定成注水泵，PUMPA 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED 30U  /* 固定注水泵且上位机未设置 A 泵速度时，给 UART5 注水泵补一个可转动的默认测试速度。 */
-#define EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE 1U /* B 泵固定识别开关：1 表示临时固定为注水泵，便于无 CS1237 霍尔识别时测试 B 通道。 */
+#define EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED 30U  /* 固定注水泵且上位机未设置 A 泵速度时，给 UART5 注水泵补一个可转动的默认速度。 */
+#define EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE 1U /* B 泵固定识别开关：1 表示按交付配置识别为注水泵，便于无 CS1237 霍尔识别时保持 B 通道可控。 */
 #define EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE    INJECTWATER /* B 泵固定识别打开时，业务类型固定成注水泵，PUMPB 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED 30U  /* B 泵固定注水泵且上位机未设置 B 泵速度时，补一个可转动的默认测试速度。 */
+#define EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED 30U  /* B 泵固定注水泵且上位机未设置 B 泵速度时，补一个可转动的默认速度。 */
+#define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
+#define EXTERNAL_COMM_FRAME_HEAD_SIZE    4U      /* 外部通信帧头固定 4 字节：D7 CA F8 F1。 */
+#define EXTERNAL_COMM_FRAME_LENGTH_OFFSET 5U     /* Length_H 在帧内偏移 5，Length_L 在偏移 6。 */
+#define EXTERNAL_COMM_RX_FIFO_MAX_STEPS  32U     /* 单个 10ms 周期最多处理 32 次 FIFO 状态，避免异常噪声长期占用任务。 */
 
 #define EXTERNAL_COMM_STATUS_ONLINE         0x01U   /* 心跳状态值：设备在线。 */
 #define EXTERNAL_COMM_STATUS_OFFLINE        0xFFU   /* 心跳状态值：设备掉线、未选中或无效。 */
@@ -30,7 +35,11 @@
 #define EXTERNAL_COMM_STATUS_STANDBY        0x01U   /* 心跳运行字段：当前手柄待机。 */
 #define EXTERNAL_COMM_STATUS_RUNNING        0x02U   /* 心跳运行字段：当前手柄运行中。 */
 #define EXTERNAL_COMM_STATUS_UNPLUGGED      0x03U   /* 心跳运行字段：当前选中通道未接入手柄。 */
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 43U    /* 新版心跳 InforArea 最大长度：A/B 手柄类型、运行速度/电流、A/B 泵速度以及两路 CS1237 压力扩展字段全部存在。 */
+#define EXTERNAL_COMM_HANDLE_MODE_FORWARD   0x01U   /* 心跳手柄工作模式：当前手柄正转。 */
+#define EXTERNAL_COMM_HANDLE_MODE_REVERSE   0x02U   /* 心跳手柄工作模式：当前手柄反转。 */
+#define EXTERNAL_COMM_HANDLE_MODE_OSC       0x03U   /* 心跳手柄工作模式：当前手柄往复。 */
+#define EXTERNAL_COMM_HANDLE_MODE_UNKNOWN   0xFFU   /* 心跳手柄工作模式：当前没有可识别方向。 */
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 44U    /* 新版心跳 InforArea 最大长度：43 字节旧状态 + 1 字节当前手柄工作模式。 */
 #define EXTERNAL_COMM_RUNNING_INFO_ALARM    0x05U   /* 主机运行内容上传的信息码：0x05 表示报警信息，InforArea[0] 放 WorkMessage.alarm_value。 */
 
 #define EXTERNAL_COMM_REASON_BAD_LENGTH     0x01U   /* 失败原因：InforArea 长度不符合命令要求。 */
@@ -53,16 +62,31 @@
 #define EXTERNAL_COMM_DOWN_HOST_EXIT        0xBBU   /* 下行命令：上位机主动退出外部控制，释放互斥控制权。 */
 #define EXTERNAL_COMM_DOWN_PERMISSION       0xFAU   /* 下行命令：功能升级或权限开放。 */
 
+typedef struct
+{
+    uint16_t read_index;                             /* FIFO 读指针，指向下一字节待解析数据。 */
+    uint16_t write_index;                            /* FIFO 写指针，指向下一字节写入位置。 */
+    uint8_t ready;                                   /* FIFO 初始化完成标志，避免任务启动前误读未准备好的缓存。 */
+} ExternalCommRxFifo_t;
+
 static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄，由调度器保存任务状态。 */
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
+static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外控期间每收到一帧合法下行命令都会清零。 */
+static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
 static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 手柄运行触发的注水泵冷却跟随请求，手柄停止或急停时清零。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
+static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收 FIFO 句柄，保存读写指针和初始化状态。 */
+static uint8_t s_rx_fifo_buf[EXTERNAL_COMM_RX_FIFO_SIZE]; /* FIFO 实际存储区，使用本文件静态数组，不依赖额外工程源文件。 */
+static uint8_t s_frame_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 从 FIFO 中临时取出的单帧缓存，交给现有协议解析器复用。 */
 static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用发送缓存，任务内串行使用。 */
 static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 字节含最后 2 字节页校验。 */
+static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
+
+static void ExternalComm_ResetLinkWatchdog(void);    /* 外控保活计时清零入口，申请外控和收到合法下行帧时复用。 */
 
 static uint16_t ExternalComm_ReadBE16(const uint8_t *data)
 {
@@ -518,6 +542,8 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
                                  EXTERNAL_COMM_REASON_BUSY);
         return 0U;
     }
+    /* 申请成功后从“已经持有外控锁”的时刻重新计算保活窗口，避免边界时序误释放。 */
+    ExternalComm_ResetLinkWatchdog();
     /* 返回外部控制开启成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_EXTERNAL_OK, NULL, 0U);
     /* 告诉调用方认证通过。 */
@@ -539,7 +565,7 @@ static uint8_t ExternalComm_ApplyPermission(const ExternalCommFrame_t *frame)
     return 1U;
 }
 
-/* A/B 泵固定注水泵临时联调逻辑同时服务设置帧、控制帧和心跳帧，提前声明用于后面的入口调用。 */
+/* A/B 泵固定注水泵识别逻辑同时服务设置帧、控制帧和心跳帧，提前声明用于后面的入口调用。 */
 static void ExternalComm_ApplyFixedPumpIdentity(void);
 /* 当前选中手柄在线状态在心跳和启动前置检查中复用，提前声明避免启动逻辑只看通道号。 */
 static uint8_t ExternalComm_SelectedHandleOnline(void);
@@ -630,13 +656,13 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             ExternalComm_SaveCurrentFreq(value);
             break;
         case 0x03U:
-            /* 临时联调打开时，设置 A 泵速度会同步补齐 UART5 注水泵在线状态和业务类型。 */
+            /* 固定识别打开时，设置 A 泵速度会同步补齐 UART5 注水泵在线状态和业务类型。 */
             ExternalComm_ApplyFixedPumpIdentity();
             /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
             pumpMessageA.speed_work = value;
             break;
         case 0x04U:
-            /* 临时联调打开时，设置 B 泵速度会同步补齐 B 泵在线状态和注水泵业务类型。 */
+            /* 固定识别打开时，设置 B 泵速度会同步补齐 B 泵在线状态和注水泵业务类型。 */
             ExternalComm_ApplyFixedPumpIdentity();
             /* 设置 B 泵速度，不切换泵启停状态。 */
             pumpMessageB.speed_work = value;
@@ -824,7 +850,7 @@ static void ExternalComm_RefreshUart5PumpRunState(void)
 #if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
 		if ((pumpMessageA.type == INJECTWATER) && (pumpMessageA.speed_work == 0U))
 		{
-            pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED; /* 固定注水泵调试时补默认速度，避免已启动但输出仍为 0。 */
+            pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED; /* 固定注水泵识别时补默认速度，避免已启动但输出仍为 0。 */
         }
 #endif
         pumpMessageA.run_flag = true;         /* 任一来源请求运行时，A 泵最终运行标志置位。 */
@@ -861,6 +887,96 @@ static void ExternalComm_ApplyHostExit(void)
     info[0] = EXTERNAL_COMM_DOWN_HOST_EXIT;
     /* 退出动作本身按控制成功返回，表示 MCU 已经释放外部控制权。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info));
+}
+
+static void ExternalComm_ResetLinkWatchdog(void)
+{
+    /* 每收到一帧合法上位机下行命令，都认为 RS485 外控链路仍然存在。 */
+    s_external_link_elapsed_ms = 0U;
+    /* 链路恢复后允许下一次静默重新触发停输出动作。 */
+    s_external_link_output_stopped = 0U;
+}
+
+static void ExternalComm_StopOutputForLinkSilent(void)
+{
+    /* 短超时只处理安全输出，不改变 WorkMessage.hmiactive_work，避免上位机外控状态被误释放。 */
+    WorkMessage.runflag_work = false;
+    /* 清零当前电机实际输出速度，驱动任务下一周期会按停止状态下发。 */
+    WorkMessage.speed_work = 0U;
+    /* 清除手柄按键运行标志，避免外控恢复后沿用上一次运行沿。 */
+    ControlSignalMessage.handle_control_flag = false;
+    /* 清除外控电机运行标志，但保留 HMI_enable_flag 和外控授权状态。 */
+    ControlSignalMessage.HMI_control_flag = false;
+    /* 清除外控 A 泵运行标志，避免泵任务继续认为外控在请求 A 泵输出。 */
+    ControlSignalMessage.HMIL_pump_flag = false;
+    /* 清除外控 B 泵运行标志，避免泵任务继续认为外控在请求 B 泵输出。 */
+    ControlSignalMessage.HMIR_pump_flag = false;
+    /* 清除外部通信层的 A 泵手动/跟随锁存请求，防止后续状态刷新再次拉起注水泵。 */
+    ExternalComm_ClearUart5PumpRunRequests();
+    /* 停止 A 泵运行，泵任务下一周期会发送停止帧。 */
+    pumpMessageA.run_flag = false;
+    /* 取消 A 泵排空计时，断线静默时不允许排空动作继续累计。 */
+    pumpMessageA.timingDrainage_flag = false;
+    /* 清零 A 泵排空累计时间，恢复后必须由新的上位机命令重新开始。 */
+    pumpMessageA.timingDrainage_times = 0U;
+    /* 清零 A 泵输出速度，避免运行标志恢复前仍保留旧速度。 */
+    pumpMessageA.speed_work = 0U;
+    /* 停止 B 泵运行，保持两路泵的断线停机动作一致。 */
+    pumpMessageB.run_flag = false;
+    /* 取消 B 泵排空计时，断线静默时不允许排空动作继续累计。 */
+    pumpMessageB.timingDrainage_flag = false;
+    /* 清零 B 泵排空累计时间，恢复后必须由新的上位机命令重新开始。 */
+    pumpMessageB.timingDrainage_times = 0U;
+    /* 清零 B 泵输出速度，避免运行标志恢复前仍保留旧速度。 */
+    pumpMessageB.speed_work = 0U;
+}
+
+static void ExternalComm_HandleLinkReleaseTimeout(void)
+{
+    /* 长超时确认上位机或 RS485 已长时间离线，先清外部通信层自己的泵运行请求。 */
+    ExternalComm_ClearUart5PumpRunRequests();
+    /* 释放外控仲裁锁，并由公共释放函数统一停止电机、A/B 泵和外控显示标志。 */
+    ControlArbitration_ReleaseExternalControl();
+    /* 超时处理完成后清零计时，避免释放后的空闲状态继续重复进入本函数。 */
+    s_external_link_elapsed_ms = 0U;
+    /* 外控已经释放，短超时停输出锁存也同步复位。 */
+    s_external_link_output_stopped = 0U;
+}
+
+static void ExternalComm_CheckLinkWatchdog(void)
+{
+    /* 只有外部控制权有效时才监控链路；本机脚踏/屏幕/手柄控制不受该超时影响。 */
+    if (ControlArbitration_IsExternalActive() == false)
+    {
+        /* 非外控状态下保持计时清零，下一次申请外控从完整超时时间重新开始。 */
+        s_external_link_elapsed_ms = 0U;
+        /* 非外控状态下不保留短超时停输出锁存。 */
+        s_external_link_output_stopped = 0U;
+        return;
+    }
+
+    /* 防止计数超过长释放阈值太多后溢出，达到阈值前按 10ms 任务周期累计。 */
+    if (s_external_link_elapsed_ms < EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
+    {
+        /* 外控已激活且本周期没有合法下行帧时，累计保活静默时间。 */
+        s_external_link_elapsed_ms = (uint16_t)(s_external_link_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
+    }
+
+    /* 短超时只停输出，不释放外控授权；这一步用于 RS485 真拔线后的安全停机。 */
+    if ((s_external_link_elapsed_ms >= EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS) &&
+        (s_external_link_output_stopped == 0U))
+    {
+        /* 停止电机和 A/B 泵输出，但仍允许后续合法下行帧继续使用当前外控授权。 */
+        ExternalComm_StopOutputForLinkSilent();
+        /* 锁存本次短超时动作，避免静默期间反复清状态造成调试观察困难。 */
+        s_external_link_output_stopped = 1U;
+    }
+
+    /* 长超时才认为上位机已经离线，释放外控授权让本机控制可以重新接管。 */
+    if (s_external_link_elapsed_ms >= EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
+    {
+        ExternalComm_HandleLinkReleaseTimeout();
+    }
 }
 
 static void ExternalComm_StopAllWork(void)
@@ -917,7 +1033,7 @@ static void ExternalComm_ApplyFixedPumpIdentity(void)
 #endif
 
 #if (EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE == 1U)
-    /* 固定识别打开时，固定 B 泵在线状态，便于没有接入 B 路 CS1237 霍尔识别时测试 B 泵通道。 */
+    /* 固定识别打开时，固定 B 泵在线状态，便于没有接入 B 路 CS1237 霍尔识别时保持 B 泵通道可控。 */
     pumpMessageB.online_flag = true;
     /* 固定识别打开时固定 B 泵为注水泵，PUMPBBehaviors() 后续按注水泵方向和公式换算输出。 */
     pumpMessageB.type = EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE;
@@ -974,7 +1090,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     switch (frame->area_code)
     {
         case 0x01U:
-            /* UART5 是 A 泵输出口；临时联调打开时，先补齐 A 泵在线和注水类型，再执行启动判断。 */
+            /* UART5 是 A 泵输出口；固定识别打开时，先补齐 A 泵在线和注水类型，再执行启动判断。 */
             ExternalComm_ApplyFixedPumpIdentity();
             /* A 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
             if (pumpMessageA.online_flag == false)
@@ -992,7 +1108,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             ExternalComm_SetUart5PumpManualRun(0U);
             break;
         case 0x03U:
-            /* 临时联调打开时，先补齐 B 泵在线和注水类型，再执行启动判断。 */
+            /* 固定识别打开时，先补齐 B 泵在线和注水类型，再执行启动判断。 */
             ExternalComm_ApplyFixedPumpIdentity();
             /* B 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
             if (pumpMessageB.online_flag == false)
@@ -1392,9 +1508,8 @@ static void ExternalComm_HeartbeatAppendPumpPressure(uint8_t *info_area,
 
 static uint8_t ExternalComm_FootPedalOnlineStatus(void)
 {
-    /* 脚踏老逻辑有两个连接字段，任一字段为 Connect 就认为脚踏在线。 */
-    if ((SysFootPedalData.FootPedalConnectOkNo == Connect) ||
-        (SysFootPedalData.FootPedalConnectFlag == Connect))
+    /* 脚踏在线状态以 sscFOOT 写入的新控制使能为准，不再读取旧脚踏连接字段。 */
+    if (ControlSignalMessage.jt_enable_flag == true)
     {
         /* 返回协议定义的在线值 0x01。 */
         return EXTERNAL_COMM_STATUS_ONLINE;
@@ -1464,6 +1579,36 @@ static uint8_t ExternalComm_CurrentHandleRunStatus(void)
     return EXTERNAL_COMM_STATUS_STANDBY;
 }
 
+static uint8_t ExternalComm_CurrentHandleMode(void)
+{
+    /* 未选中 A/B 或选中插孔已经离线时，方向字段没有现场意义，上报未知避免上位机误判。 */
+    if (ExternalComm_SelectedHandleOnline() == 0U)
+    {
+        return EXTERNAL_COMM_HANDLE_MODE_UNKNOWN;
+    }
+
+    /* 项目内部 ZZDIR 表示正转，协议心跳使用 0x01 明确给上位机显示。 */
+    if (WorkMessage.dir_work == ZZDIR)
+    {
+        return EXTERNAL_COMM_HANDLE_MODE_FORWARD;
+    }
+
+    /* 项目内部 FZDIR 表示反转，协议心跳使用 0x02 明确给上位机显示。 */
+    if (WorkMessage.dir_work == FZDIR)
+    {
+        return EXTERNAL_COMM_HANDLE_MODE_REVERSE;
+    }
+
+    /* 项目内部 OSCDIR 表示往复，PX 系列手柄切到往复时实时状态需要显示这个模式。 */
+    if (WorkMessage.dir_work == OSCDIR)
+    {
+        return EXTERNAL_COMM_HANDLE_MODE_OSC;
+    }
+
+    /* 其它历史值不强行解释，交给上位机显示“未知”。 */
+    return EXTERNAL_COMM_HANDLE_MODE_UNKNOWN;
+}
+
 static void ExternalComm_HeartbeatAppendHandle(uint8_t *info_area,
                                                uint16_t *info_len,
                                                uint8_t online,
@@ -1525,7 +1670,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* tx_len 接收心跳完整帧长度。 */
     uint16_t tx_len = 0U;
 
-    /* 临时联调打开时，心跳也显示 UART5 A 泵在线且类型为注水泵，方便串口助手确认联调前置状态。 */
+    /* 固定识别打开时，心跳也显示 UART5 A 泵在线且类型为注水泵，方便上位机确认当前可控状态。 */
     ExternalComm_ApplyFixedPumpIdentity();
 
     /* 追加 A 手柄插孔在线状态；若在线，紧跟 A 手柄类型。 */
@@ -1546,6 +1691,8 @@ static void ExternalComm_SendHeartbeat(void)
     run_status = ExternalComm_CurrentHandleRunStatus();
     /* 追加当前手柄运行情况。 */
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, run_status);
+    /* 追加当前手柄方向/往复模式，PXBA/PXBB 上位机会用该字段显示“手柄工作模式”。 */
+    ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, ExternalComm_CurrentHandleMode());
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
@@ -1578,27 +1725,381 @@ static void ExternalComm_SendHeartbeat(void)
     }
 }
 
-static void ExternalComm_ProcessReceive(void)
+static void ExternalComm_RxFifoInit(void)
 {
-    /* recv_len 保存 UART2 DMA 空闲包长度。 */
-    uint16_t recv_len;
-    /* frame 保存协议层解析出的字段和 InforArea。 */
-    ExternalCommFrame_t frame;
+    /* 只初始化一次 FIFO，保持读写指针从 0 开始，避免运行中误清已经缓存的半帧。 */
+    if (s_rx_fifo.ready != 0U)
+    {
+        /* 已经初始化过时直接返回，本函数可被 Init 和接收路径重复安全调用。 */
+        return;
+    }
 
-    /* 从 UART2 DMA 缓存取出一包已经静默稳定的数据。 */
-    recv_len = Uart2_DMARecvDataPeek(s_rx_buf);
-    /* 没有完整空闲包时本周期不处理。 */
-    if (recv_len == 0U)
+    /* 读写指针同时清零表示 FIFO 为空，最后 1 字节预留给满/空状态区分。 */
+    s_rx_fifo.read_index = 0U;
+    /* 写指针也从 0 开始，第一包 DMA 数据会从缓冲区头部写入。 */
+    s_rx_fifo.write_index = 0U;
+    /* 初始化完成后才允许接收路径读写 FIFO。 */
+    s_rx_fifo.ready = 1U;
+}
+
+static uint16_t ExternalComm_RxFifoFull(void)
+{
+    /* 写指针在读指针后方时，已用长度就是两者差值。 */
+    if (s_rx_fifo.write_index >= s_rx_fifo.read_index)
+    {
+        return (uint16_t)(s_rx_fifo.write_index - s_rx_fifo.read_index);
+    }
+
+    /* 写指针绕回到缓冲区前部时，已用长度由尾段和头段两部分组成。 */
+    return (uint16_t)((EXTERNAL_COMM_RX_FIFO_SIZE - s_rx_fifo.read_index) + s_rx_fifo.write_index);
+}
+
+static uint16_t ExternalComm_RxFifoFree(void)
+{
+    /* 环形 FIFO 预留 1 字节区分满/空，因此最大可用容量是总长度减 1。 */
+    return (uint16_t)((EXTERNAL_COMM_RX_FIFO_SIZE - 1U) - ExternalComm_RxFifoFull());
+}
+
+static void ExternalComm_RxFifoReset(void)
+{
+    /* 清空 FIFO 只需要把读写指针重新对齐，不需要擦除数据区内容。 */
+    s_rx_fifo.read_index = 0U;
+    /* 写指针同步清零，下一包会从头部重新开始写。 */
+    s_rx_fifo.write_index = 0U;
+}
+
+static uint16_t ExternalComm_RxFifoWrite(const uint8_t *data, uint16_t data_len)
+{
+    /* written 记录实际写入字节数，用来判断 FIFO 是否发生拥塞。 */
+    uint16_t written = 0U;
+
+    /* FIFO 未初始化、空指针或 0 长度都没有可写入内容。 */
+    if ((s_rx_fifo.ready == 0U) || (data == NULL) || (data_len == 0U))
+    {
+        return 0U;
+    }
+
+    /* 逐字节写入，确保写指针跨尾部时能正确回绕到缓冲区头部。 */
+    while ((written < data_len) && (ExternalComm_RxFifoFree() > 0U))
+    {
+        /* 当前 DMA 字节写入写指针位置。 */
+        s_rx_fifo_buf[s_rx_fifo.write_index] = data[written];
+        /* 写入计数先增加，供调用者判断是否完整接收本包。 */
+        ++written;
+        /* 写指针前进一个字节。 */
+        ++s_rx_fifo.write_index;
+        /* 写指针到达数组尾部时回绕到 0。 */
+        if (s_rx_fifo.write_index >= EXTERNAL_COMM_RX_FIFO_SIZE)
+        {
+            s_rx_fifo.write_index = 0U;
+        }
+    }
+
+    return written;
+}
+
+static uint16_t ExternalComm_RxFifoSkip(uint16_t skip_len)
+{
+    /* full 是当前可跳过的最大字节数，避免读指针越过写指针。 */
+    uint16_t full = ExternalComm_RxFifoFull();
+    /* actual_len 是本次真正跳过的字节数。 */
+    uint16_t actual_len = skip_len;
+
+    /* 请求跳过长度超过已有数据时，只跳过当前 FIFO 内全部数据。 */
+    if (actual_len > full)
+    {
+        actual_len = full;
+    }
+
+    /* 读指针前移 actual_len，超出数组尾部时按环形缓存回绕。 */
+    s_rx_fifo.read_index = (uint16_t)(s_rx_fifo.read_index + actual_len);
+    /* 可能一次跨过尾部，减去 FIFO 长度即可回到有效索引范围。 */
+    if (s_rx_fifo.read_index >= EXTERNAL_COMM_RX_FIFO_SIZE)
+    {
+        s_rx_fifo.read_index = (uint16_t)(s_rx_fifo.read_index - EXTERNAL_COMM_RX_FIFO_SIZE);
+    }
+
+    return actual_len;
+}
+
+static uint8_t ExternalComm_RxFifoPeek(uint16_t skip_count, uint8_t *data, uint16_t data_len)
+{
+    /* full 是 FIFO 当前已有数据，必须覆盖 skip_count 和目标读取长度。 */
+    uint16_t full = ExternalComm_RxFifoFull();
+    /* index 是本次窥探使用的临时读索引，不会改变真实读指针。 */
+    uint16_t index;
+    /* copied 是已经复制到目标缓冲的字节数。 */
+    uint16_t copied = 0U;
+
+    /* 空目标或目标长度为 0 时没有可复制内容。 */
+    if ((data == NULL) || (data_len == 0U))
+    {
+        return 0U;
+    }
+
+    /* FIFO 中数据不足时不能窥探，调用者应等待下一包补齐。 */
+    if (full < (uint16_t)(skip_count + data_len))
+    {
+        return 0U;
+    }
+
+    /* 从真实读指针加偏移位置开始读，支持前面已经有噪声但暂不消费的场景。 */
+    index = (uint16_t)(s_rx_fifo.read_index + skip_count);
+    /* 偏移跨越尾部时回绕。 */
+    if (index >= EXTERNAL_COMM_RX_FIFO_SIZE)
+    {
+        index = (uint16_t)(index - EXTERNAL_COMM_RX_FIFO_SIZE);
+    }
+
+    /* 逐字节复制，保证跨尾部的帧也能取成线性缓存。 */
+    while (copied < data_len)
+    {
+        /* 复制当前 FIFO 字节到目标缓存。 */
+        data[copied] = s_rx_fifo_buf[index];
+        /* 已复制长度递增。 */
+        ++copied;
+        /* 临时读索引前进。 */
+        ++index;
+        /* 到尾部后回绕，继续读取头部残留数据。 */
+        if (index >= EXTERNAL_COMM_RX_FIFO_SIZE)
+        {
+            index = 0U;
+        }
+    }
+
+    return 1U;
+}
+
+static uint8_t ExternalComm_RxFifoFind(const uint8_t *pattern,
+                                       uint16_t pattern_len,
+                                       uint16_t start_offset,
+                                       uint16_t *found_offset)
+{
+    /* full 是可搜索数据长度，搜索范围不能超过当前 FIFO 已有数据。 */
+    uint16_t full = ExternalComm_RxFifoFull();
+    /* offset 是当前候选匹配起点。 */
+    uint16_t offset;
+    /* idx 是模式串内部比较下标。 */
+    uint16_t idx;
+    /* byte 保存从 FIFO 中窥探出的单字节。 */
+    uint8_t byte;
+
+    /* 参数不完整时不能搜索。 */
+    if ((pattern == NULL) || (pattern_len == 0U) || (found_offset == NULL))
+    {
+        return 0U;
+    }
+
+    /* 已有数据不够容纳起始偏移加完整模式串时，说明还不能判定。 */
+    if (full < (uint16_t)(start_offset + pattern_len))
+    {
+        return 0U;
+    }
+
+    /* 默认输出 0，避免调用者在失败路径读到旧值。 */
+    *found_offset = 0U;
+    /* 逐个候选偏移查找帧头 D7 CA F8 F1。 */
+    for (offset = start_offset; offset <= (uint16_t)(full - pattern_len); ++offset)
+    {
+        /* 先假设当前偏移匹配，遇到任何字节不等就跳出。 */
+        for (idx = 0U; idx < pattern_len; ++idx)
+        {
+            /* 从 FIFO 当前候选位置窥探一个字节，不移动真实读指针。 */
+            if (ExternalComm_RxFifoPeek((uint16_t)(offset + idx), &byte, 1U) == 0U)
+            {
+                return 0U;
+            }
+            /* 只要有一个字节不一致，当前 offset 就不是帧头位置。 */
+            if (byte != pattern[idx])
+            {
+                break;
+            }
+        }
+
+        /* idx 走完整个模式串，说明找到了完整帧头。 */
+        if (idx == pattern_len)
+        {
+            *found_offset = offset;
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
+static void ExternalComm_WriteRxChunk(const uint8_t *data, uint16_t data_len)
+{
+    /* written 保存本次实际写入 FIFO 的字节数，用于判断是否发生接收拥塞。 */
+    uint16_t written;
+
+    /* 空指针或 0 长度没有任何可缓存数据，直接返回。 */
+    if ((data == NULL) || (data_len == 0U))
     {
         return;
     }
 
-    /* 只有帧头、长度、帧尾、CRC 全部通过时才进入业务调度。 */
-    if (ExternalCommProtocol_Parse(s_rx_buf, recv_len, &frame) == EXTERNAL_COMM_PARSE_OK)
+    /* 确保 FIFO 已初始化；如果初始化失败，本次数据不能安全保存。 */
+    ExternalComm_RxFifoInit();
+    if (s_rx_fifo.ready == 0U)
     {
-        /* 按 FunCode 分发下行命令。 */
-        ExternalComm_DispatchFrame(&frame);
+        return;
     }
+
+    /* 先尝试把整个 DMA 空闲包追加到软件 FIFO，保留粘包和半包。 */
+    written = ExternalComm_RxFifoWrite(data, data_len);
+    /* FIFO 空间足够时直接返回，后续由 ExternalComm_ProcessRxFifo() 按帧消费。 */
+    if (written == data_len)
+    {
+        return;
+    }
+
+    /*
+     * FIFO 满通常说明上位机连续高速发送或前面有异常噪声。
+     * 这里清空旧残留后只保留最新一包，优先让现场重新同步到最新帧，而不是卡在旧半帧里等待超时。
+     */
+    ExternalComm_RxFifoReset();
+    /* 清空后再次写入当前空闲包；若当前包本身仍放不下，本地 FIFO 会截断，解析层会按坏帧重新同步。 */
+    (void)ExternalComm_RxFifoWrite(data, data_len);
+}
+
+static uint8_t ExternalComm_ProcessRxFifoFrame(void)
+{
+    /* full 保存 FIFO 当前已有字节数，读取前先做长度判断，避免 peek 越界。 */
+    uint16_t full;
+    /* head_offset 保存帧头在 FIFO 中的偏移，非 0 时会先丢弃前导噪声。 */
+    uint16_t head_offset;
+    /* length_bytes 保存 Length_H/Length_L 两个字节。 */
+    uint8_t length_bytes[2];
+    /* frame_len 是协议 Length 字段声明的完整帧长。 */
+    uint16_t frame_len;
+    /* frame 保存协议层解析出的业务字段。 */
+    ExternalCommFrame_t frame;
+    /* parse_result 保存现有协议解析器的校验结果。 */
+    ExternalCommParseResult_t parse_result;
+
+    /* FIFO 尚未初始化时没有可处理数据。 */
+    if (s_rx_fifo.ready == 0U)
+    {
+        return 0U;
+    }
+
+    /* 少于帧头长度时不能判断是否有完整帧，等待下一次 DMA 空闲包补齐。 */
+    full = ExternalComm_RxFifoFull();
+    if (full < EXTERNAL_COMM_FRAME_HEAD_SIZE)
+    {
+        return 0U;
+    }
+
+    /* 在 FIFO 中搜索 D7 CA F8 F1，支持前面带噪声或上一次残留半帧。 */
+    if (ExternalComm_RxFifoFind(s_external_comm_frame_head,
+                                EXTERNAL_COMM_FRAME_HEAD_SIZE,
+                                0U,
+                                &head_offset) == 0U)
+    {
+        /* 没找到完整帧头时保留最后 3 字节，防止帧头被拆成前后两包。 */
+        if (full > (EXTERNAL_COMM_FRAME_HEAD_SIZE - 1U))
+        {
+            /* 其余前导噪声没有继续解析价值，跳过后让下一包继续拼帧头。 */
+            (void)ExternalComm_RxFifoSkip((uint16_t)(full - (EXTERNAL_COMM_FRAME_HEAD_SIZE - 1U)));
+        }
+        return 0U;
+    }
+
+    /* 帧头前有噪声或旧坏帧残留时先跳过，保证 FIFO 读指针正对候选帧头。 */
+    if (head_offset > 0U)
+    {
+        (void)ExternalComm_RxFifoSkip(head_offset);
+        /* 跳过后重新读取 FIFO 有效字节数，后续判断都基于新读指针。 */
+        full = ExternalComm_RxFifoFull();
+    }
+
+    /* 帧头后不足最短 16 字节时说明半帧还没收完，保留缓存等待下一包。 */
+    if (full < EXTERNAL_COMM_FRAME_FIXED_SIZE)
+    {
+        return 0U;
+    }
+
+    /* 只窥探 Length 两个字节，不移动读指针，避免半帧被提前消费。 */
+    if (ExternalComm_RxFifoPeek(EXTERNAL_COMM_FRAME_LENGTH_OFFSET,
+                                length_bytes,
+                                sizeof(length_bytes)) == 0U)
+    {
+        return 0U;
+    }
+
+    /* Length 字段按协议高字节在前，表示整帧长度。 */
+    frame_len = ExternalComm_ReadBE16(length_bytes);
+    /* 非法长度通常是噪声或坏帧，只跳过 1 字节重新找帧头，避免误删后续合法帧。 */
+    if ((frame_len < EXTERNAL_COMM_FRAME_FIXED_SIZE) || (frame_len > EXTERNAL_COMM_MAX_FRAME_SIZE))
+    {
+        (void)ExternalComm_RxFifoSkip(1U);
+        return 1U;
+    }
+
+    /* FIFO 中还没有凑齐 Length 声明的整帧时保留当前数据，等待下一包补齐。 */
+    if (full < frame_len)
+    {
+        return 0U;
+    }
+
+    /* 把候选整帧取到线性缓存中，继续复用已经验证过的协议解析和 CRC 校验逻辑。 */
+    if (ExternalComm_RxFifoPeek(0U, s_frame_buf, frame_len) == 0U)
+    {
+        return 0U;
+    }
+
+    /* 使用原协议解析器做帧尾、CRC、字段拆解，避免在 FIFO 层重复实现业务解析。 */
+    parse_result = ExternalCommProtocol_Parse(s_frame_buf, frame_len, &frame);
+    if (parse_result == EXTERNAL_COMM_PARSE_OK)
+    {
+        /* 合法下行帧到达说明 RS485 链路仍存在，先喂外控保活计时。 */
+        ExternalComm_ResetLinkWatchdog();
+        /* 消费当前完整帧，后续循环会继续处理同一 FIFO 里的下一帧。 */
+        (void)ExternalComm_RxFifoSkip(frame_len);
+        /* 按 FunCode 分发下行命令，业务层仍然只看到一帧完整协议数据。 */
+        ExternalComm_DispatchFrame(&frame);
+        return 1U;
+    }
+
+    /* 候选帧 CRC 或帧尾不合法时只跳过帧头首字节，尽量保住后续可能粘连的合法帧。 */
+    (void)ExternalComm_RxFifoSkip(1U);
+    return 1U;
+}
+
+static void ExternalComm_ProcessRxFifo(void)
+{
+    /* step_count 限制单次任务处理次数，避免异常噪声导致 10ms 任务被长期占用。 */
+    uint16_t step_count = 0U;
+
+    /* 只要本轮处理有推进，就继续尝试吐出下一帧，实现一包多帧连续分发。 */
+    while (step_count < EXTERNAL_COMM_RX_FIFO_MAX_STEPS)
+    {
+        /* 返回 0 表示当前 FIFO 暂无完整帧或只剩半帧，本周期处理结束。 */
+        if (ExternalComm_ProcessRxFifoFrame() == 0U)
+        {
+            break;
+        }
+        /* 每成功消费或跳过一段异常数据，都累计一次循环次数。 */
+        ++step_count;
+    }
+}
+
+static void ExternalComm_ProcessReceive(void)
+{
+    /* recv_len 保存 UART2 DMA 空闲包长度。 */
+    uint16_t recv_len;
+
+    /* 从 UART2 DMA 缓存取出一包已经静默稳定的数据。 */
+    recv_len = Uart2_DMARecvDataPeek(s_rx_buf);
+    /* 有新空闲包时先追加到软件 FIFO，不在 DMA 临时包里直接只解析第一帧。 */
+    if (recv_len > 0U)
+    {
+        /* FIFO 会保留粘包和半包，解决一包多帧或一帧跨包时被 DMAReset 清掉的问题。 */
+        ExternalComm_WriteRxChunk(s_rx_buf, recv_len);
+    }
+
+    /* 无论本周期有没有新包，都继续尝试处理 FIFO 中上一轮剩下的完整帧。 */
+    ExternalComm_ProcessRxFifo();
 }
 
 static void ExternalCommTaskFunc(uint32_t event)
@@ -1608,6 +2109,9 @@ static void ExternalCommTaskFunc(uint32_t event)
 
     /* 每 10ms 检查一次 UART2 是否收到完整空闲包。 */
     ExternalComm_ProcessReceive();
+
+    /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
+    ExternalComm_CheckLinkWatchdog();
 
     /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
     ExternalComm_SendAlarmInfoIfChanged();
@@ -1626,6 +2130,8 @@ static void ExternalCommTaskFunc(uint32_t event)
 
 void ExternalComm_Init(void)
 {
+    /* 初始化外控 RX FIFO，保证任务第一次运行前已经准备好接收粘包/半包数据。 */
+    ExternalComm_RxFifoInit();
     /* 创建 UART2 外部通信任务。 */
     Kernel_TaskCreate(&ExternalCommTaskHandle, ExternalCommTaskFunc);
     /* 任务常驻运行，每 10ms 执行一次接收和心跳调度。 */

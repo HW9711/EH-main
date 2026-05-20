@@ -31,7 +31,6 @@
 /* USER CODE BEGIN Includes */
 #include "hw_bootstrap.h"
 #include "app_bootstrap.h"
-#include "data.h"
 #include "at24cs32_crc_verify.h"
 #include "tracealyzer_recorder.h"
 /* USER CODE END Includes */
@@ -218,8 +217,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 	//1s
   else if (htim->Instance == TIM14) {
-	  SysRunData.SustainedBuzzerFlag++;
-		SysRunData.SystemTime++;
+    /* 旧计时状态已经下线，TIM14 只保留中断入口，避免旧报警蜂鸣计数继续运行。 */
   }
   /* USER CODE END Callback 1 */
 }

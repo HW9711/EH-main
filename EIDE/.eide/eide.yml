@@ -126,7 +126,6 @@ virtualFolder:
             - path: ../User/Application/Common/common.c
             - path: ../User/Application/DriveCtrl/drivectrl_adapter.c
             - path: ../User/Application/FootPedal/footpedal_ui_adapter.c
-            - path: ../User/Application/Handle/handledata.c
             - path: ../User/Application/Handle/handlekey.c
             - path: ../User/Application/Handle/handlescan.c
             - path: ../User/Application/Motor/motor.c
@@ -137,9 +136,7 @@ virtualFolder:
             - path: ../User/Application/Pump/pump.c
             - path: ../User/Application/Pump/pump_pressure_control.c
             - path: ../User/Application/Screen/screen_adapter.c
-            - path: ../User/Application/ScreenKey/param.c
             - path: ../User/Application/ScreenKey/screenkey.c
-            - path: ../User/Application/Warn/warn.c
             - path: ../User/Application/Led/sysrunled.c
             - path: ../User/Application/Led/led.c
             - path: ../User/Application/DataHand/datahand.c
@@ -154,15 +151,11 @@ virtualFolder:
             - path: ../User/Application/Beep/sscUIDP.c
           folders: []
         - name: State
-          files:
-            - path: ../User/Data/data.c
+          files: []
           folders: []
         - name: UI
           files:
             - path: ../User/UI/src/UI_FootPedalCalibration.c
-            - path: ../User/UI/src/UI_Main.c
-            - path: ../User/UI/src/UI_ModelConfiguration.c
-            - path: ../User/UI/src/UI_Password.c
             - path: ../User/UI/src/UI_Start.c
           folders: []
         - name: Doc

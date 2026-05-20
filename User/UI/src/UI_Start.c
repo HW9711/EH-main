@@ -1,15 +1,14 @@
 //UI_Start.c
 
 #include "UI_Start.h"
-#include "UI_Password.h"
 #include "UI_FootPedalCalibration.h"
-#include "UI_ModelConfiguration.h"
 #include "iwdg.h"
 #include "delay.h"
 #include "data.h"
 #include "screenkey.h"
 #include "lcd.h"
 #include "screen.h"
+#include "sscBEEP.h"
 
 #include <stdint.h>
 
@@ -39,12 +38,11 @@ void UI_Start_Fun(void)
 	  TimeCnt = 0;
 
 	  Iwdg_Reset();
- 
- 	  if (SysRunData.KeyValue == KEY_CONTINUOUSCLICK)
-	  {
-	    SysRunData.BeepTimeMS = 100;
 
-			SysRunData.KeyValue = KEY_NONE;
+	  if (ScreenKey_LegacyEventTake() == KEY_CONTINUOUSCLICK)
+	  {
+	    // 启动页按键提示统一进入新蜂鸣队列，不再写旧蜂鸣时长状态。
+	    SendKeyBeepMessage(1U);
 
 			LCD_Show_Which_Map(3); 
 			LCD_Show_Which_Map(0); 

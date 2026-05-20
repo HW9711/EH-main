@@ -17,7 +17,7 @@
 /*
  * PUMP_INJECTWATER_SPEED_MAX 是注水泵业务速度上限。
  * 上位机调泵时会把 16 位速度直接写入 pumpMessageA/B.speed_work，泵任务在换算 UART 驱动帧前按本宏限幅。
- * 旧代码固定为 70，导致上位机设置 100 以上时最终仍按 70 输出；当前联调需要 100~300 区间继续有速度变化。
+ * 旧代码固定为 70，导致上位机设置 100 以上时最终仍按 70 输出；当前交付配置保留 100~300 区间的速度变化。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
 #define PUMP_INJECTWATER_SPEED_MAX 300U
@@ -42,17 +42,6 @@ void Pump_SetSpeed_B(uint32_t s);
 // 函数说明: 泵转速设置
 //============================================================================
 void Pump_SetSpeed_A(uint32_t s);
-
-/**
- * @brief Function implementing the Time thread.
- * @param argument: Not used
- * @retval None
- */
-//============================================================================
-void Pump_RunTask_Init(void);
-
-//============================================================================
-void Pump_Pedal2Pump5sTask_Init(void);
 
 #endif //__PUMP_H
 

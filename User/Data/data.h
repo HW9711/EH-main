@@ -89,7 +89,9 @@
 #define Handle_Type_22    22  //PXBA
 #define Handle_Type_23    23  //PXBB
 
-#define KEY_NONE          0xFF
+#ifndef KEY_NONE
+#define KEY_NONE          0xFF  // 屏幕键值空状态；若 screenkey.h 已定义，则沿用桥接定义。
+#endif
 #define KEY_ZERO          0
 #define KEY_ONE           1
 #define KEY_TWO           2
@@ -107,17 +109,35 @@
 #define KEY_LASTPAGE      13    //上一页
 #define KEY_REINPUT       14    //重新输入
 
+#ifndef KEY_STORAGEMIN
 #define KEY_STORAGEMIN    15    //存储最小值
+#endif
+#ifndef KEY_STORAGEMAX
 #define KEY_STORAGEMAX    16    //存储最大值
+#endif
 
+#ifndef KEY_STORAGEMIN2
 #define KEY_STORAGEMIN2    80    //存储最小值2
+#endif
+#ifndef KEY_STORAGEMAX2
 #define KEY_STORAGEMAX2    81    //存储最大值2
+#endif
 
+#ifndef KEY_STORAMEDIAN
 #define KEY_STORAMEDIAN     82    //存储中间值
+#endif
+#ifndef KEY_STORAMEDIAN2
 #define KEY_STORAMEDIAN2    83    //存储中间值2
-#define M_KEY_FOOT            85
-#define L_KEY_FOOT            86
-#define R_KEY_FOOT            87
+#endif
+#ifndef M_KEY_FOOT
+#define M_KEY_FOOT            85   //脚踏中键桥接到定标页事件。
+#endif
+#ifndef L_KEY_FOOT
+#define L_KEY_FOOT            86   //脚踏左键桥接到定标页事件。
+#endif
+#ifndef R_KEY_FOOT
+#define R_KEY_FOOT            87   //脚踏右键桥接到定标页事件。
+#endif
 
 
 #define KEY_JMB           17    //手柄1
@@ -125,7 +145,9 @@
 #define KEY_TMBB          19    //‘’
 #define KEY_TMBC          20    //‘’
 
+#ifndef KEY_CONTINUOUSCLICK
 #define KEY_CONTINUOUSCLICK  21  //LOGO的连续点击
+#endif
 
 #define KEY_HANDLEONE     22    //手柄1
 #define KEY_HANDLETWO     23    //手柄2
@@ -458,22 +480,14 @@ typedef struct SystemSetParamTag
 } SystemSetParam;
 
  
-extern ModelConfig SysModelConfig;
 
-extern HandleData SysHandleData;
 
-extern InterfaceData SysInterface;
 
-extern FootPedalData SysFootPedalData;
 
-extern UIDisplayData SysUIDisplayData;
 
-extern SystemRunParam SysRunData;
 
 //按接口存参数
-extern SystemSetParam SysSetParam[5];
 
-uint8_t Data_GetOnLineCnt(void);
 
 #endif  //__DATA_H
 

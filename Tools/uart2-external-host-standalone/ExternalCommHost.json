@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "serial": {
+    "baudRate": 115200,
+    "dataBits": 8,
+    "stopBits": 1,
+    "parity": "none",
+    "flowControl": "none"
+  },
+  "authCode": "11 22 33 44 55 66 77 88",
+  "presets": {
+    "speed": 3000,
+    "freq": 20,
+    "pumpA": 100,
+    "pumpB": 100
+  },
+  "safety": {
+    "confirmWrites": true,
+    "holdEmergencyMs": 700
+  },
+  "eepromTemplates": [
+    {
+      "name": "空白业务页",
+      "areaCode": "01",
+      "bytes": "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+    }
+  ]
+}

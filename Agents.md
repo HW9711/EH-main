@@ -13,3 +13,11 @@
 
 1. `handlescan.c` 中的 `HandlescanA_Fun_SSC()` 和 `HandlescanB_Fun_SSC()` 需要保持中文注释清晰可读。
 2. 如果后续继续调整 A/B 通道扫描逻辑，新增注释时应保持与现有注释风格一致，避免出现乱码问题。
+
+## EIDE 配置同步要求
+
+1. 本工程主要在 EIDE 中开发和构建，调整源文件注册关系时，不能只验证根目录 `build/MainCtrlF413MXOs/builder.params`。
+2. 删除、替换或新增 `.c` 文件后，必须同步检查 `EIDE/.eide/eide.yml`、`EIDE/build/MainCtrlF413MXOs/builder.params`、根目录 `build/MainCtrlF413MXOs/builder.params`、`MDK-ARM/MainCtrlF413MXOs.uvprojx`，必要时也清理 `MDK-ARM/MainCtrlF413MXOs.uvoptx` 里的旧文件记录和 watch 项。
+3. EIDE 插件实际构建时优先使用 `EIDE/build/MainCtrlF413MXOs/builder.params`，因此最终验证必须覆盖这一路径，避免旧模块被 EIDE 生成清单重新带回编译。
+4. 清理旧状态模块时，尤其要确认 `handledata.c`、`param.c`、`warn.c`、`User/Data/data.c`、`UI_Main.c`、`UI_ModelConfiguration.c`、`UI_Password.c` 不再出现在 EIDE 和 Keil 的源文件清单中。
+5. 如果 EIDE 插件缓存或工程视图临时把上述旧模块重新加入构建，这些旧模块源文件也只能保留为空兼容文件，不能恢复任何 `SysRunData`、`SysSetParam`、`SysModelConfig`、`SysHandleData`、`SysInterface`、`SysFootPedalData`、`SysUIDisplayData` 读写。

@@ -946,11 +946,6 @@
               <FilePath>..\User\Application\FootPedal\footpedal_ui_adapter.c</FilePath>
             </File>
             <File>
-              <FileName>handledata.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\Handle\handledata.c</FilePath>
-            </File>
-            <File>
               <FileName>handlekey.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\Handle\handlekey.c</FilePath>
@@ -1001,11 +996,6 @@
                 <FilePath>..\User\Application\Screen\screen_adapter.c</FilePath>
             </File>
             <File>
-              <FileName>param.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\ScreenKey\param.c</FilePath>
-            </File>
-            <File>
               <FileName>screenkey.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\ScreenKey\screenkey.c</FilePath>
@@ -1014,11 +1004,6 @@
               <FileName>userparser.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\Src\userparser.c</FilePath>
-            </File>
-            <File>
-              <FileName>warn.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\Warn\warn.c</FilePath>
             </File>
             <File>
               <FileName>sysrunled.c</FileName>
@@ -1085,11 +1070,6 @@
         <Group>
           <GroupName>User/Data</GroupName>
           <Files>
-            <File>
-              <FileName>data.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Data\data.c</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
@@ -1204,21 +1184,6 @@
               <FileName>UI_FootPedalCalibration.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\UI\src\UI_FootPedalCalibration.c</FilePath>
-            </File>
-            <File>
-              <FileName>UI_Main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\UI\src\UI_Main.c</FilePath>
-            </File>
-            <File>
-              <FileName>UI_ModelConfiguration.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\UI\src\UI_ModelConfiguration.c</FilePath>
-            </File>
-            <File>
-              <FileName>UI_Password.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\UI\src\UI_Password.c</FilePath>
             </File>
             <File>
               <FileName>UI_Start.c</FileName>

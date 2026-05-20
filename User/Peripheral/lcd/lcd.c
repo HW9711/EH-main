@@ -3,8 +3,25 @@
 #include "lcd.h"
 #include "uart6.h"
 #include "common.h"
-#include "data.h"
 #include "delay.h"
+
+typedef struct
+{
+  uint8_t UIDisplay0x1403;  // 往复角度图片显示状态缓存，0=隐藏，1=显示。
+  uint8_t UIDisplay0x1303;  // 转速栏图片状态缓存，避免重复刷新同一状态。
+  uint8_t UIDisplay0x1304;  // 频率/挡位栏图片状态缓存，供 LCD 局部刷新判断。
+  uint8_t UIDisplay0x1305;  // B 泵区域图片状态缓存。
+  uint8_t UIDisplay0x1311;  // 往复方向图片状态缓存。
+  uint8_t UIDisplay0x1310;  // 正向方向图片状态缓存。
+  uint8_t UIDisplay0x1312;  // 脚踏控制图片状态缓存。
+  uint8_t UIDisplay0x1313;  // 手控图片状态缓存。
+  uint8_t UIDisplay0x1500;  // A 手柄图片状态缓存。
+  uint8_t UIDisplay0x1501;  // B 手柄图片状态缓存。
+  uint8_t UIDisplay0x1318;  // A 泵区域图片状态缓存。
+} LCD_DisplayCache_t;
+
+static uint8_t s_lcd_background_page = 0;                 // 当前背景页缓存，只服务 LCD 背景页去重发送。
+static volatile LCD_DisplayCache_t s_lcd_display_cache = { 0 };  // LCD 图片显示状态缓存，写入具备调试可见性，不再依赖旧 UI 全局状态。
 
 //============================================================================
 // 函数名称: LCD_Show_Which_Map()
@@ -20,7 +37,7 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
 
   static uint8_t SendCnt = 1;
 
-  if (MapAddr == SysInterface.BackgroundPag)
+  if (MapAddr == s_lcd_background_page)
   {
     if (SendCnt > 0)
 	    SendCnt--;
@@ -30,7 +47,7 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
   else
 	  SendCnt = 1;
 
-  SysInterface.BackgroundPag = MapAddr;
+  s_lcd_background_page = MapAddr;
 
   dat[8] = (MapAddr >> 8) & 0x00ff;
   dat[9] = MapAddr & 0x00ff;
@@ -80,24 +97,23 @@ void LCD_Disappear_Picture(uint16_t PicAddr)
 
   switch (PicAddr)
   {
-	  case 0x1606 : SysUIDisplayData.UIDisplay0x1403 = 0;	break;  //往复角度图片
-	  case 0x1600 : SysUIDisplayData.UIDisplay0x1303 = 0; break;  //转速
-	  case 0x1601 : SysUIDisplayData.UIDisplay0x1304 = 0; break;  //频率 or 挡位
-	  case 0x1506 : SysUIDisplayData.UIDisplay0x1305 = 0; break;  //泵2
-	  case 0x1502 : SysUIDisplayData.UIDisplay0x1318 = 0; break;  //泵1
+	  case 0x1606 : s_lcd_display_cache.UIDisplay0x1403 = 0;	break;  // 往复角度图片隐藏。
+	  case 0x1600 : s_lcd_display_cache.UIDisplay0x1303 = 0; break;  // 转速栏隐藏。
+	  case 0x1601 : s_lcd_display_cache.UIDisplay0x1304 = 0; break;  // 频率或挡位栏隐藏。
+	  case 0x1506 : s_lcd_display_cache.UIDisplay0x1305 = 0; break;  // B 泵区域隐藏。
+	  case 0x1502 : s_lcd_display_cache.UIDisplay0x1318 = 0; break;  // A 泵区域隐藏。
 
 		case 0x1602 :
     {
-			SysUIDisplayData.UIDisplay0x1311 = 0;
-		  SysUIDisplayData.UIDisplay0x1310 = 0;
+			s_lcd_display_cache.UIDisplay0x1311 = 0;
+		  s_lcd_display_cache.UIDisplay0x1310 = 0;
 			break;
 		}		
-//	  case 0x1311 : SysUIDisplayData.UIDisplay0x1311 = 0; break;  //往复
-//	  case 0x1310 : SysUIDisplayData.UIDisplay0x1310 = 0; break;  //正向
-//	  case 0x1316 : SysUIDisplayData.UIDisplay0x1316 = 0; break;  //反向
+//	  case 0x1311 : s_lcd_display_cache.UIDisplay0x1311 = 0; break;  //往复
+//	  case 0x1310 : s_lcd_display_cache.UIDisplay0x1310 = 0; break;  //正向
 
-	  case 0x1312 : SysUIDisplayData.UIDisplay0x1312 = 0; break;  //脚踏
-	  case 0x1313 : SysUIDisplayData.UIDisplay0x1313 = 0; break;  //手控
+	  case 0x1312 : s_lcd_display_cache.UIDisplay0x1312 = 0; break;  // 脚踏控制图标隐藏。
+	  case 0x1313 : s_lcd_display_cache.UIDisplay0x1313 = 0; break;  // 手控图标隐藏。
 	  default : break;
   }
 }
@@ -149,40 +165,40 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 	  case 0x1606 :
 	  {
 	    if (PicNum == 400)  //往复角度图片显
-		    SysUIDisplayData.UIDisplay0x1403 = 1;
+		    s_lcd_display_cache.UIDisplay0x1403 = 1;
 	  }
 	  break;
 	  case 0x1600 :
 	  {
 	    if (PicNum == 340)  //转速 灰
-		    SysUIDisplayData.UIDisplay0x1303 = 1;
+		    s_lcd_display_cache.UIDisplay0x1303 = 1;
 	    else if (PicNum == 341)
-		    SysUIDisplayData.UIDisplay0x1303 = 2;
+		    s_lcd_display_cache.UIDisplay0x1303 = 2;
 	  }
 	  break;
 	  case 0x1601 :
 	  {
 	    if ((PicNum == 350) || (PicNum == 355))  //灰色
-		    SysUIDisplayData.UIDisplay0x1304 = 1;
+		    s_lcd_display_cache.UIDisplay0x1304 = 1;
 	    else if (PicNum == 351)  //频率栏高亮
-		    SysUIDisplayData.UIDisplay0x1304 = 2;
+		    s_lcd_display_cache.UIDisplay0x1304 = 2;
 	    else if (PicNum == 352)  //I档选中
-		    SysUIDisplayData.UIDisplay0x1304 = 3;
+		    s_lcd_display_cache.UIDisplay0x1304 = 3;
 	    else if (PicNum == 353)  //Ⅱ档选中
-		    SysUIDisplayData.UIDisplay0x1304 = 4;
+		    s_lcd_display_cache.UIDisplay0x1304 = 4;
 	    else if (PicNum == 354)  //Ⅲ档选中
-		    SysUIDisplayData.UIDisplay0x1304 = 5;
+		    s_lcd_display_cache.UIDisplay0x1304 = 5;
 	  }
 	  break;
 		case 0x1500 :
 		{
 	    if (PicNum == 106)  //A手柄未连接		
 			{
-				SysUIDisplayData.UIDisplay0x1500 = 0;
+				s_lcd_display_cache.UIDisplay0x1500 = 0;
 			}
 			else
       {
-				SysUIDisplayData.UIDisplay0x1500 = 1;				
+				s_lcd_display_cache.UIDisplay0x1500 = 1;
 			}
 		}	  
 		break;			
@@ -190,122 +206,122 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 		{
 	    if (PicNum == 206)  //B手柄未连接	
 			{
-				SysUIDisplayData.UIDisplay0x1501 = 0;			
+				s_lcd_display_cache.UIDisplay0x1501 = 0;
 			}
 			else
       {
-				SysUIDisplayData.UIDisplay0x1501 = 1;					
+				s_lcd_display_cache.UIDisplay0x1501 = 1;
 			}				
 		}	  
 		break;
 	  case 0x1506 :
 	  {
 	    if (PicNum == 302)  //流量 灰
-		    SysUIDisplayData.UIDisplay0x1305 = 1;
+		    s_lcd_display_cache.UIDisplay0x1305 = 1;
 	    else //if (PicNum == 227)
-		    SysUIDisplayData.UIDisplay0x1305 = 2;
+		    s_lcd_display_cache.UIDisplay0x1305 = 2;
 	  }
 	  break;	
  		
 	  case 0x1502 :
 	  {
 	    if (PicNum == 302)  //流量 灰
-		    SysUIDisplayData.UIDisplay0x1318 = 1;
+		    s_lcd_display_cache.UIDisplay0x1318 = 1;
 	    else //if (PicNum == 227)
-		    SysUIDisplayData.UIDisplay0x1318 = 2;
+		    s_lcd_display_cache.UIDisplay0x1318 = 2;
 	  }
 	  break;		
 	  case 0x1312 :
 	  {
 	    if (PicNum == 260)  //未选中
-		    SysUIDisplayData.UIDisplay0x1312 = 2;
+		    s_lcd_display_cache.UIDisplay0x1312 = 2;
 	    else if (PicNum == 261)  //选中
-		    SysUIDisplayData.UIDisplay0x1312 = 3;
+		    s_lcd_display_cache.UIDisplay0x1312 = 3;
 	    else
-		    SysUIDisplayData.UIDisplay0x1312 = 1;
+		    s_lcd_display_cache.UIDisplay0x1312 = 1;
 	  }
 	  break;
 	  case 0x1313 :
 	  {
 	    if (PicNum == 262)  //未选中
-	      SysUIDisplayData.UIDisplay0x1313 = 2;
+	      s_lcd_display_cache.UIDisplay0x1313 = 2;
 	    else if (PicNum == 263)  //选中
-		    SysUIDisplayData.UIDisplay0x1313 = 3;
+		    s_lcd_display_cache.UIDisplay0x1313 = 3;
 	    else
-		    SysUIDisplayData.UIDisplay0x1313 = 1;
+		    s_lcd_display_cache.UIDisplay0x1313 = 1;
 	  }
 	  break;
 	  case 0x1602 :
 	  {		
 	    if (PicNum == 360)  //未选中
 			{
-		    SysUIDisplayData.UIDisplay0x1310 = 0;
-			  SysUIDisplayData.UIDisplay0x1311 = 0;	
+		    s_lcd_display_cache.UIDisplay0x1310 = 0;
+			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
 	    else if (PicNum == 361)  //正3
 			{	
-		    SysUIDisplayData.UIDisplay0x1310 = 1;
-			  SysUIDisplayData.UIDisplay0x1311 = 1;	
+		    s_lcd_display_cache.UIDisplay0x1310 = 1;
+			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 	    else if (PicNum == 362)  //往复3
 			{	
-				SysUIDisplayData.UIDisplay0x1310 = 2;
-			  SysUIDisplayData.UIDisplay0x1311 = 1;				
+				s_lcd_display_cache.UIDisplay0x1310 = 2;
+			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 			else if (PicNum == 363)  //反3
 			{	
-				SysUIDisplayData.UIDisplay0x1310 = 3;
-			  SysUIDisplayData.UIDisplay0x1311 = 1;				
+				s_lcd_display_cache.UIDisplay0x1310 = 3;
+			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 			else if (PicNum == 364)  //正2
 			{	
-				SysUIDisplayData.UIDisplay0x1310 = 1;
-			  SysUIDisplayData.UIDisplay0x1311 = 0;				
+				s_lcd_display_cache.UIDisplay0x1310 = 1;
+			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
 			else if (PicNum == 365)  //反2
 			{	
-				SysUIDisplayData.UIDisplay0x1310 = 3;
-			  SysUIDisplayData.UIDisplay0x1311 = 0;				
+				s_lcd_display_cache.UIDisplay0x1310 = 3;
+			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
 			else    //未选中
 			{
-		    SysUIDisplayData.UIDisplay0x1310 = 0;
-			  SysUIDisplayData.UIDisplay0x1311 = 0;				
+		    s_lcd_display_cache.UIDisplay0x1310 = 0;
+			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}	
 	  }
 	  break;		
 //	  case 0x1311 :
 //	  {
 //	    if (PicNum == 256)  //未选中
-//		    SysUIDisplayData.UIDisplay0x1311 = 2;
+//		    s_lcd_display_cache.UIDisplay0x1311 = 2;
 //	    else if (PicNum == 257)  //选中
-//		    SysUIDisplayData.UIDisplay0x1311 = 3;
+//		    s_lcd_display_cache.UIDisplay0x1311 = 3;
 //	    else
-//		    SysUIDisplayData.UIDisplay0x1311 = 1;
+//		    s_lcd_display_cache.UIDisplay0x1311 = 1;
 //	  }
 //	  break;
 //	  case 0x1310 :
 //	  {
 //	    if (PicNum == 250)  //未选中
-//		    SysUIDisplayData.UIDisplay0x1310 = 2;
+//		    s_lcd_display_cache.UIDisplay0x1310 = 2;
 //	    else if (PicNum == 251)  //选中
-//		    SysUIDisplayData.UIDisplay0x1310 = 3;
+//		    s_lcd_display_cache.UIDisplay0x1310 = 3;
 //	    else if (PicNum == 254)  //未选中 长
-//		    SysUIDisplayData.UIDisplay0x1310 = 4;
+//		    s_lcd_display_cache.UIDisplay0x1310 = 4;
 //	    else if (PicNum == 255)  //选中 长
-//		    SysUIDisplayData.UIDisplay0x1310 = 5;
+//		    s_lcd_display_cache.UIDisplay0x1310 = 5;
 //      else
-//		    SysUIDisplayData.UIDisplay0x1310 = 1;
+//		    s_lcd_display_cache.UIDisplay0x1310 = 1;
 //	  }
 //	  break;
 //	  case 0x1316 :
 //	  {
 //	    if (PicNum == 303)  //未选中
-//		    SysUIDisplayData.UIDisplay0x1316 = 2;
+//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
 //	    else if (PicNum == 304)  //选中
-//		    SysUIDisplayData.UIDisplay0x1316 = 3;
+//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
 //	    else
-//		    SysUIDisplayData.UIDisplay0x1316 = 1;
+//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
 //	  }
 //	  break;
 	  default : break;

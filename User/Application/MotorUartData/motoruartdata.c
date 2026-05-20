@@ -2,7 +2,6 @@
 
 #include "motoruartdata.h"
 #include "common.h"
-#include "data.h"
 #include "uart1.h"
 #include "pump.h"
 #include <string.h>
@@ -178,9 +177,6 @@ void BrushlessMotorUartData_ReceiveData(void)
 					default : break;
 				}
 
-				SysRunData.DriveBoardOffTimes = 0;  //Communicat_Status_Time = 0;
-				SysRunData.DriveBoardConnectFlag = Connect;  //Communicat_Status = No_Error;
-
 				memset(dat1, 0, 15);
 				i += 12;
 			}
@@ -215,7 +211,6 @@ void MotorUartData_Init(void)
 	Kernel_TaskCreate(&MOTORUARTTaskHandle, MOTORUARTTaskFunc);
 	Kernel_TaskStart(&MOTORUARTTaskHandle, KERNEL_TASK_ALWAYS, 3);//3
 }
-
 
 
 

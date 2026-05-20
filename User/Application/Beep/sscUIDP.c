@@ -277,7 +277,8 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 					case 4://
 					light_flag?LCD_Show_Picture(0x1401,108):LCD_Show_Picture(0x1401,107);//一体磨削
 					break;
-					case 5://
+					case PXBA_ONLINES://空心钻 A 型手柄
+					case PXBB_ONLINES://空心钻 B 型手柄，屏幕图标和 PXBA 使用同一组资源
 					light_flag?LCD_Show_Picture(0x1401,110):LCD_Show_Picture(0x1401,109);//空心钻
 					break;
 				}
@@ -299,7 +300,8 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 					case 4://
 					light_flag?LCD_Show_Picture(0x1402,208):LCD_Show_Picture(0x1402,207);//一体磨削
 					break;
-					case 5://
+					case PXBA_ONLINES://空心钻 A 型手柄
+					case PXBB_ONLINES://空心钻 B 型手柄，屏幕图标和 PXBA 使用同一组资源
 					light_flag?LCD_Show_Picture(0x1402,210):LCD_Show_Picture(0x1402,209);//空心钻
 					break;
 				}

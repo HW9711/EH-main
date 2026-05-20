@@ -4,12 +4,16 @@
 #include "uart4.h"
 #include "common.h"
 #include "delay.h"
-#include "data.h"
 #include "Pubinterface.h"
+#include "screenkey.h"
 #include "kernel_scheduler.h"
 #include "kernel_osal.h"
 
 kernel_task_t PEDALRECVTaskHandle;
+
+PedalCalibrationData_t PedalCalibrationData = { 0 };  // 脚踏定标页专用缓存，只保存 UART4 定标回包和按键事件。
+
+#define PEDAL_CALIBRATION_CONNECTED  1U  // UART4 定标报文 CRC 校验通过后使用的本地连接标志。
 
 static void PedalTaskDelayMs(uint32_t delay_ms)
 {
@@ -230,24 +234,24 @@ void PedalRecv_Scan(void)
 					
 					if ((dat1[4] == 0x01) && (dat1[5] == 0x01)) 
 					{
-						SysFootPedalData.FootPedalType = 0;   // 单踏板：校准页与报警页统一从 SysFootPedalData 读取类型，不再依赖旧屏幕数据仓库。
+						PedalCalibrationData.FootPedalType = 0;   // 单踏板：定标页统一从 PedalCalibrationData 读取类型，不再依赖旧全局数据仓库。
 					}
           else if(((dat1[4] == 0x01) && (dat1[5] == 0x0A)) || ((dat1[4] == 0x01) && (dat1[5] == 0x0B))) 
           {
-						SysFootPedalData.FootPedalType = 1;		// 双踏板：保留原有左右 AD 值解析规则，仅替换脚踏类型数据源。
+						PedalCalibrationData.FootPedalType = 1;		// 双踏板：保留原有左右 AD 值解析规则，仅替换脚踏类型数据源。
 					}
 					
-					if (SysFootPedalData.FootPedalType == 1)
+					if (PedalCalibrationData.FootPedalType == 1)
 					{
 						
 							 if ((dat1[4] == 0x01) && (dat1[5] == 0x0A))//左边值
 							 {
-									SysFootPedalData.FootPedalADValue = (dat1[6] << 8) + dat1[7];   //左边AD值
+									PedalCalibrationData.FootPedalADValue = (dat1[6] << 8) + dat1[7];   // 左踏板实时 AD 值，供定标页显示。
 								 
 							 }
                else if ((dat1[4] == 0x01) && (dat1[5] == 0x0B))//右边的AD值
 							 {
-								  SysFootPedalData.FootPedalADValue_Right = (dat1[6] << 8) + dat1[7];   
+								  PedalCalibrationData.FootPedalADValue_Right = (dat1[6] << 8) + dat1[7];   // 右踏板实时 AD 值，供定标页显示。
 								 
 							 }								 
 						}
@@ -255,96 +259,94 @@ void PedalRecv_Scan(void)
 						{
 							if ((dat1[4] == 0x01) && (dat1[5] == 0x01))
 							{
-								SysFootPedalData.FootPedalADValue = (dat1[6] << 8) + dat1[7];  //默认左边AD值
-								//ysFootPedalData.FootPedalADValue_Right=SysFootPedalData.FootPedalADValue;
+								PedalCalibrationData.FootPedalADValue = (dat1[6] << 8) + dat1[7];  // 单踏板实时 AD 值，沿用左侧显示地址。
+								// 单踏板只更新统一 AD 值，右侧 AD 显示不再额外镜像。
 							} 					
 						}				
 		    }
 		    //主控板发送命令给脚踏板，脚踏板回复的读取已存储
 		    else if ((dat1[2] == 0xD0) && (dat1[3] == 0xB4))  
 		    {
-					if (SysFootPedalData.FootPedalType == 1)
+					if (PedalCalibrationData.FootPedalType == 1)
 					{
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
 						{
-							SysFootPedalData.FootPedalMemoryLValue_Right = (dat1[6]<<8) + dat1[7]; //JT_Memory_L_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];											
+							PedalCalibrationData.FootPedalMemoryLValue_Right = (dat1[6]<<8) + dat1[7]; // 右踏板低点定标值来自脚踏板回包。
 						}
 						else if((dat1[4] == 0xB6) && (dat1[5] == 0xCD))//B6 CD 表示低的低值左
 						{
-							SysFootPedalData.FootPedalMemoryLValue_Left = (dat1[6]<<8) + dat1[7]; //JT_Memory_L_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];	
+							PedalCalibrationData.FootPedalMemoryLValue_Left = (dat1[6]<<8) + dat1[7]; // 左踏板低点定标值来自脚踏板回包。
 						}
 	 
 						if((dat1[4] == 0xB8) && (dat1[5] == 0xDF))//B8 DF表示高右
 						{
-							SysFootPedalData.FootPedalMemoryHValue_Right = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];
+							PedalCalibrationData.FootPedalMemoryHValue_Right = (dat1[6] << 8) + dat1[7];  // 右踏板高点定标值来自脚踏板回包。
 						}
 						else if((dat1[4] == 0xB9) && (dat1[5] == 0xDF))//B9 DF表示高左
 						{
-							SysFootPedalData.FootPedalMemoryHValue_Left = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];					
+							PedalCalibrationData.FootPedalMemoryHValue_Left = (dat1[6] << 8) + dat1[7];  // 左踏板高点定标值来自脚踏板回包。
 						}	
 
 						if((dat1[4] == 0xB2) && (dat1[5] == 0xEE))//B2 EE表示中右
 						{
-							SysFootPedalData.FootPedalMemoryMValue_Right = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];
+							PedalCalibrationData.FootPedalMemoryMValue_Right = (dat1[6] << 8) + dat1[7];  // 右踏板中点定标值来自脚踏板回包。
 						}
 						else if((dat1[4] == 0xB3) && (dat1[5] == 0xEE))//B3 EE表示中左
 						{
-							SysFootPedalData.FootPedalMemoryMValue_Left = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];			
+							PedalCalibrationData.FootPedalMemoryMValue_Left = (dat1[6] << 8) + dat1[7];  // 左踏板中点定标值来自脚踏板回包。
 														
 						}	
 						
 					}						
-          else if(SysFootPedalData.FootPedalType == 0)
+          else if(PedalCalibrationData.FootPedalType == 0)
           {
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
 						{
-							SysFootPedalData.FootPedalMemoryLValue = (dat1[6]<<8) + dat1[7]; //JT_Memory_L_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];	
-							SysFootPedalData.FootPedalMemoryLValue_Right=	SysFootPedalData.FootPedalMemoryLValue;							
+							PedalCalibrationData.FootPedalMemoryLValue = (dat1[6]<<8) + dat1[7]; // 单踏板低点定标值来自脚踏板回包。
+							PedalCalibrationData.FootPedalMemoryLValue_Right = PedalCalibrationData.FootPedalMemoryLValue; // 单踏板兼容右侧显示缓存。
 						}
 						if((dat1[4] == 0xB8) && (dat1[5] == 0xDF))//B8 DF表示高右
 						{
-							SysFootPedalData.FootPedalMemoryHValue = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];
-							SysFootPedalData.FootPedalMemoryHValue_Right=SysFootPedalData.FootPedalMemoryHValue;
+							PedalCalibrationData.FootPedalMemoryHValue = (dat1[6] << 8) + dat1[7];  // 单踏板高点定标值来自脚踏板回包。
+							PedalCalibrationData.FootPedalMemoryHValue_Right = PedalCalibrationData.FootPedalMemoryHValue; // 单踏板兼容右侧显示缓存。
 						}	
 						if((dat1[4] == 0xB2) && (dat1[5] == 0xee))//中
 						{
 							
-							SysFootPedalData.FootPedalMemoryMValue_Right = (dat1[6] << 8) + dat1[7];  //JT_Memory_H_value = (Uart1_Temp_Buff[6]<<8) + Uart1_Temp_Buff[7];
-							//SysFootPedalData.FootPedalMemoryMValue_Right=SysFootPedalData.FootPedalMemoryHValue;
+							PedalCalibrationData.FootPedalMemoryMValue_Right = (dat1[6] << 8) + dat1[7];  // 单踏板中点定标值沿用右侧缓存字段。
+							// 单踏板中点独立保存，不再复用高点定标值。
 						}
 	
 						
 					}
 		    }
 		    //电机处于停止状态，响应按键
-		    else if ((SysRunData.MotorRun == MotorStop) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0xDD))
+		    else if ((WorkMessage.runflag_work == false) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0xDD))
 		    {
 		      switch (dat1[7])
 		      {
-			      case 0x03 : SysFootPedalData.FootPedalKeyValue = 1; break; //手柄切换 长按C键1.2s
-			      case 0x05 : SysFootPedalData.FootPedalKeyValue = 2;SysRunData.KeyValue=M_KEY_FOOT; break; //模式调节 短按C键200ms
-			      case 0x0A : SysFootPedalData.FootPedalKeyValue = 3;SysRunData.KeyValue=L_KEY_FOOT; break; //参数- 短按B键200ms
-			      case 0x0B : SysFootPedalData.FootPedalKeyValue = 4; SysRunData.KeyValue=R_KEY_FOOT;break; //参数+ 短按A键200ms
-						case 0x0C : SysFootPedalData.FootPedalKeyValue = 5; break; //右間廠按
+			      case 0x03 : PedalCalibrationData.FootPedalKeyValue = 1; break; // 手柄切换长按键，只记录原始编号。
+			      case 0x05 : PedalCalibrationData.FootPedalKeyValue = 2; ScreenKey_LegacyEventPost(M_KEY_FOOT); break; // 模式调节，交给定标页一次性事件缓存。
+			      case 0x0A : PedalCalibrationData.FootPedalKeyValue = 3; ScreenKey_LegacyEventPost(L_KEY_FOOT); break; // 参数-，交给定标页一次性事件缓存。
+			      case 0x0B : PedalCalibrationData.FootPedalKeyValue = 4; ScreenKey_LegacyEventPost(R_KEY_FOOT); break; // 参数+，交给定标页一次性事件缓存。
+						case 0x0C : PedalCalibrationData.FootPedalKeyValue = 5; break; // 右侧长按键，只记录原始编号。
 			      default : break;
 		      }
 		    }
-		    else if ((SysRunData.MotorRun == MotorStop) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0x02))
+		    else if ((WorkMessage.runflag_work == false) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0x02))
 		    {
 		      switch (dat1[7])
 		      {
-			      case 0x03 : SysFootPedalData.FootPedalKeyValue = 1; 
-						
-						break; //手柄切换 长按C键1.2s
-			      case 0x05 : SysFootPedalData.FootPedalKeyValue = 2; SysRunData.KeyValue=M_KEY_FOOT; break; //模式调节 短按C键200ms
-			      case 0x0A : SysFootPedalData.FootPedalKeyValue = 3; SysRunData.KeyValue=L_KEY_FOOT; break; //左邊
-			      case 0x0B : SysFootPedalData.FootPedalKeyValue = 4; SysRunData.KeyValue=R_KEY_FOOT; break; //右邊
-						case 0x0C : SysFootPedalData.FootPedalKeyValue = 5; break; //右間廠按
+			      case 0x03 : PedalCalibrationData.FootPedalKeyValue = 1; break; // 手柄切换长按键，只记录原始编号。
+			      case 0x05 : PedalCalibrationData.FootPedalKeyValue = 2; ScreenKey_LegacyEventPost(M_KEY_FOOT); break; // 模式调节，交给定标页一次性事件缓存。
+			      case 0x0A : PedalCalibrationData.FootPedalKeyValue = 3; ScreenKey_LegacyEventPost(L_KEY_FOOT); break; // 左键，交给定标页一次性事件缓存。
+			      case 0x0B : PedalCalibrationData.FootPedalKeyValue = 4; ScreenKey_LegacyEventPost(R_KEY_FOOT); break; // 右键，交给定标页一次性事件缓存。
+						case 0x0C : PedalCalibrationData.FootPedalKeyValue = 5; break; // 右侧长按键，只记录原始编号。
 			      default : break;
 		      }
 		    }
-        SysFootPedalData.FootPedalOffTimes = 0;  //JT_Offtimes = 0;
-		    SysFootPedalData.FootPedalConnectFlag = Connect;  //JT_Flag = Connect;
+        PedalCalibrationData.FootPedalOffTimes = 0;  // 定标串口收到有效回包后清零离线计数。
+		    PedalCalibrationData.FootPedalConnectFlag = PEDAL_CALIBRATION_CONNECTED;  // 定标缓存记录 UART4 当前在线。
 
 		    Common_Memset(0, dat1, 15);
 		    i += 9;

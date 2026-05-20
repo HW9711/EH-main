@@ -4,10 +4,10 @@
 #include "lcd.h"
 #include "delay.h"
 #include "pedal.h"
-#include "data.h"
 #include "flash.h"
 #include "iwdg.h"
 #include "screenkey.h"
+#include "sscBEEP.h"
 
 //============================================================================
 // 函数名称: UI_FootPedalCalibration_Fun()
@@ -23,6 +23,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	static uint8_t r_k_v=0;
 	static uint16_t read_times=0;
 	static uint8_t write_foot_key_time=0;
+	uint8_t key_value = KEY_NONE;
 //  LCD_Show_4byte_Number(0x3700, 0);
 //	LCD_Show_4byte_Number(0x3710, 0);
 //	LCD_Show_4byte_Number(0x3720, 0);
@@ -49,26 +50,23 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 
     Iwdg_Reset();  //喂狗
 
-   
-    switch (SysRunData.KeyValue)
+    // 定标页只消费屏幕/脚踏桥接过来的一次性事件，避免继续把按键暂存在旧全局状态。
+    key_value = ScreenKey_LegacyEventTake();
+    switch (key_value)
     {
 			case M_KEY_FOOT:
-				    SysRunData.KeyValue = KEY_NONE;
 				m_k_v>0?m_k_v--:m_k_v++;
 				break;
 			case L_KEY_FOOT:
-				    SysRunData.KeyValue = KEY_NONE;
 					l_k_v>0?l_k_v--:l_k_v++;
 				break;
 			case R_KEY_FOOT:
-				    SysRunData.KeyValue = KEY_NONE;
 					r_k_v>0?r_k_v--:r_k_v++;
 				break;
       case KEY_STORAGEMIN :   //最低值
       {
-        SysRunData.BeepTimeMS = 100;
-		    SysRunData.KeyValue = KEY_NONE;
-			  if (SysFootPedalData.FootPedalType == 1)
+        SendKeyBeepMessage(1U);
+			  if (PedalCalibrationData.FootPedalType == 1)
 				{
 					 Pedal_StorageLValue_Left();
 				}
@@ -82,9 +80,8 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    break;
 	    case KEY_STORAGEMAX :  //最高值
 	    {
-		    SysRunData.BeepTimeMS = 100;
-		    SysRunData.KeyValue = KEY_NONE;
-				if (SysFootPedalData.FootPedalType == 1)
+		    SendKeyBeepMessage(1U);
+				if (PedalCalibrationData.FootPedalType == 1)
 				{
 					Pedal_StorageHValue_Left();
 				}
@@ -98,9 +95,8 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    break;
 	    case KEY_STORAMEDIAN :  //中间值
 	    {
-		    SysRunData.BeepTimeMS = 100;
-		    SysRunData.KeyValue = KEY_NONE;
-						if (SysFootPedalData.FootPedalType == 1){
+		    SendKeyBeepMessage(1U);
+						if (PedalCalibrationData.FootPedalType == 1){
 							Pedal_StorageMValue_Left();
 						}
 						else
@@ -114,8 +110,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    case KEY_STORAMEDIAN2 :  //中间值2
 	    {
 			
-					SysRunData.BeepTimeMS = 100;
-					SysRunData.KeyValue = KEY_NONE;
+					SendKeyBeepMessage(1U);
 					Pedal_StorageMValue();
 				
 					Delay_ms(5);
@@ -124,8 +119,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    case KEY_STORAGEMIN2 :  //存储最小值2 右
 	    {
 				
-					SysRunData.BeepTimeMS = 100;
-					SysRunData.KeyValue = KEY_NONE;
+					SendKeyBeepMessage(1U);
 					Pedal_StorageLValue();
 					Delay_ms(5);				
 				
@@ -134,9 +128,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    case KEY_STORAGEMAX2 :  //存储最大值2 右
 	    {
 						
-					SysRunData.BeepTimeMS = 100;
-
-					SysRunData.KeyValue = KEY_NONE;
+					SendKeyBeepMessage(1U);
 					 
 					Pedal_StorageHValue();
 					Delay_ms(5);
@@ -145,7 +137,7 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	    break;			
 		default : break;
 	  }
-		if(SysFootPedalData.FootPedalType == 1)
+		if(PedalCalibrationData.FootPedalType == 1)
 		{
 //				//刷新UI
 			read_times++;
@@ -178,28 +170,28 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 			{
 				read_times=0;
 				
-				LCD_Show_4byte_Number(0x3740, SysFootPedalData.FootPedalMemoryLValue_Left);
+				LCD_Show_4byte_Number(0x3740, PedalCalibrationData.FootPedalMemoryLValue_Left);
 				Delay_ms(2);
 			
-				LCD_Show_4byte_Number(0x3750, SysFootPedalData.FootPedalMemoryHValue_Left);
+				LCD_Show_4byte_Number(0x3750, PedalCalibrationData.FootPedalMemoryHValue_Left);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3790, SysFootPedalData.FootPedalMemoryMValue_Left);		
+				LCD_Show_4byte_Number(0x3790, PedalCalibrationData.FootPedalMemoryMValue_Left);
 				Delay_ms(2);
 				
 				
 				
 				
-				LCD_Show_4byte_Number(0x3770, SysFootPedalData.FootPedalMemoryLValue_Right);
+				LCD_Show_4byte_Number(0x3770, PedalCalibrationData.FootPedalMemoryLValue_Right);
 				Delay_ms(2);
 			
-				LCD_Show_4byte_Number(0x3780, SysFootPedalData.FootPedalMemoryHValue_Right);
+				LCD_Show_4byte_Number(0x3780, PedalCalibrationData.FootPedalMemoryHValue_Right);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x37A0, SysFootPedalData.FootPedalMemoryMValue_Right);		
+				LCD_Show_4byte_Number(0x37A0, PedalCalibrationData.FootPedalMemoryMValue_Right);
 				Delay_ms(2);
 			}
-				LCD_Show_4byte_Number(0x3730, SysFootPedalData.FootPedalADValue);
+				LCD_Show_4byte_Number(0x3730, PedalCalibrationData.FootPedalADValue);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3760, SysFootPedalData.FootPedalADValue_Right);
+				LCD_Show_4byte_Number(0x3760, PedalCalibrationData.FootPedalADValue_Right);
 				Delay_ms(2);
 		}
 		else
@@ -220,14 +212,14 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 			else if(read_times==120)
 			{
 				read_times=0;
-				LCD_Show_4byte_Number(0x3740, SysFootPedalData.FootPedalMemoryLValue);
+				LCD_Show_4byte_Number(0x3740, PedalCalibrationData.FootPedalMemoryLValue);
 				Delay_ms(2);
-			LCD_Show_4byte_Number(0x3750, SysFootPedalData.FootPedalMemoryHValue);
+			LCD_Show_4byte_Number(0x3750, PedalCalibrationData.FootPedalMemoryHValue);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3790, SysFootPedalData.FootPedalMemoryMValue_Right);		
+				LCD_Show_4byte_Number(0x3790, PedalCalibrationData.FootPedalMemoryMValue_Right);
 				Delay_ms(2);
 			}
-				LCD_Show_4byte_Number(0x3730, SysFootPedalData.FootPedalADValue);
+				LCD_Show_4byte_Number(0x3730, PedalCalibrationData.FootPedalADValue);
 				Delay_ms(2);
 		}
 

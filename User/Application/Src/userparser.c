@@ -3,8 +3,6 @@
 #include "userparser.h"
 #include "iwdg.h"
 #include "sysrunled.h"
-#include "flash.h"
-#include "data.h"
 #include "delay.h"
 #include "eeprom.h"
 #include "bsp_board.h"
@@ -26,13 +24,11 @@
 
 #include "handlescan.h"
 #include "drivectrl.h"
-#include "warn.h"
 #include "pedal.h"
 #include "motoruartdata.h"
 #include "external_comm_task.h"
 #include "screenkey.h"
 #include "pump.h"
-#include "UI_Main.h"
 #include "soft_uart.h"
 #include "handlekey.h"
 #include "Pubinterface.h"
@@ -62,66 +58,6 @@ static void Userparser_PubinterfaceInit(void)
   ChannelFlagMessageInit();
 }
 
-//============================================================================
-//手柄模式 读取Flash
-void Storage_HandleMode_init(void)
-{
-  Flash_Read(ADDR_BASE, (uint32_t*)&SysModelConfig.type[0], 1);
-  if (SysModelConfig.type[0] == 0xff)
-  {
-    SysModelConfig.type[0] = 0x03;
-    SysModelConfig.type[1] = 20;
-
-    Flash_Write(ADDR_BASE, (uint32_t*)&SysModelConfig.type[0], 1);
-//    Handle_Model = SysModelConfig.type[0];
-//		SysRunData.PumpFlowEEPOM = SysModelConfig.type[1];
-  }
-  else
-  {
-//		Handle_Model = SysModelConfig.type[0] & 0x0F;
-//    SysRunData.PumpFlowEEPOM = SysModelConfig.type[1];
-  }
-}
-
-void Storage_PumpFlow_init(void)
-{
-  uint8_t EEPOMDat[2] = { 0 };
- 
-  //泵流量读取 ---1
-  EEPROM_AT24CXX_Read(0x20, EEPOMDat, 2);
-  if (EEPOMDat[0] == 0x55)
-  {
-		SysRunData.PumpFlowEEPOM = EEPOMDat[1];
-    if (SysRunData.PumpFlowEEPOM > PUMPMLUNITMAX)
-    {
-      SysRunData.PumpFlowEEPOM = 20;
-	    EEPROM_AT24CXX_Write(0x21, &SysRunData.PumpFlowEEPOM, 1); 
-			EEPROM_AT24CXX_Write(0x23, &SysRunData.PumpFlowEEPOM, 1);
-	  }
-		
-		EEPROM_AT24CXX_Read(0x25, &SysRunData.PumpFlowEEPOM, 1);
-    if (SysRunData.PumpFlowEEPOM > PUMPMLUNITMAX)
-    {
-      SysRunData.PumpFlowEEPOM = 20;
- 			EEPROM_AT24CXX_Write(0x25, &SysRunData.PumpFlowEEPOM, 1);
-			EEPROM_AT24CXX_Write(0x27, &SysRunData.PumpFlowEEPOM, 1);
-	  }		
-  }
-  else
-  {
-	  EEPOMDat[0] = 0x55;
-	  SysRunData.PumpFlowEEPOM = EEPOMDat[1] = 20;
-
-	  EEPROM_AT24CXX_Write(0x20, EEPOMDat, 2);
-	  EEPROM_AT24CXX_Write(0x23, &SysRunData.PumpFlowEEPOM, 1);
-  	EEPROM_AT24CXX_Write(0x25, &SysRunData.PumpFlowEEPOM, 1);
-  	EEPROM_AT24CXX_Write(0x27, &SysRunData.PumpFlowEEPOM, 1);		
-
-  }
-}
-
-
-//============================================================================
 void Userparser_Init(void)
 {
   LCD_Show_Which_Map(0);  //开机页
@@ -149,20 +85,14 @@ void Userparser_Init(void)
 
   Screen_TipInfo_Update(0);     //清除报警显示
 
-  SysFootPedalData.FootPedalLiftFlag = No_Lift;   //脚踏抬起
-
   Motor_ErrorEmergencyStop_Ctrl();  //21ms 电机停止发送...
 
   //”出厂配置模式“等待
   UI_Start_Fun();//脚踏定标界面，关系界面
-  Storage_HandleMode_init();  //读取存储的手柄模式（本设备允许的手柄） 
-  Storage_PumpFlow_init();    //流量（耳磨）...
   Iwdg_Reset();
   Delay_ms(500);
 	Iwdg_Reset();
 	Delay_ms(500);
-	Common_Memset(0, SysHandleData.Ds2431BuffBB[0], 14);
-  Common_Memset(0, SysHandleData.Ds2431BuffBB[1], 14);
   Userparser_PubinterfaceInit();
 	SscRadioFreq_Init();  //150ms射频初始化...串口3
   Iwdg_Reset();

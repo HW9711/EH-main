@@ -6,6 +6,7 @@
 //#include <screen.h>
 //#include "datahand.h"
 #include "sscDRIVE.h"
+#include "sscUIDP.h"
 
 
 
@@ -24,6 +25,41 @@ pumpMessage_t pumpMessageA;
 pumpMessage_t pumpMessageB;
 /* 当前控制权持有者，四种控制方式必须等待当前持有者结束后才能重新申请。 */
 static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
+
+static void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag)
+{
+	uint8_t display_value[10] = {0U};
+
+	/* Value[0] 传手柄类型，sscUIDP::UIHANDLEDP() 用它决定显示哪一种手柄图标。 */
+	display_value[0] = handle_model;
+	/* Value[1] 传 A/B 通道号，1 表示 A 通道，2 表示 B 通道。 */
+	display_value[1] = channel;
+	/* Value[2] 传选中高亮状态，当前工作通道亮起，非当前通道只显示在线。 */
+	display_value[2] = light_flag ? 1U : 0U;
+	/* 手柄插拔事件已经完成状态更新后，通过 UIDP 队列刷新屏幕手柄区域。 */
+	SendUIDSMessage(UI_HANDLE_ID, enable_flag, display_value);
+}
+
+static void Pubinterface_RefreshOnlineHandleDisplay(void)
+{
+	/* A 通道在线时刷新 A 手柄图标，并按当前工作通道决定是否高亮。 */
+	if(WorkMessage.Channel_Aonline)
+	{
+		Pubinterface_SendHandleDisplay(CHANNEL_A,
+									  MemoryMsgA.hand_model,
+									  true,
+									  (WorkMessage.channel_work == CHANNEL_A));
+	}
+
+	/* B 通道在线时刷新 B 手柄图标，并按当前工作通道决定是否高亮。 */
+	if(WorkMessage.Channel_Bonline)
+	{
+		Pubinterface_SendHandleDisplay(CHANNEL_B,
+									  MemoryMsgB.hand_model,
+									  true,
+									  (WorkMessage.channel_work == CHANNEL_B));
+	}
+}
  void ChannelrecognizeMessageInit(void)
  {
 	memset(&ChannelrecognizeMessageA, 0, sizeof(ChannelrecognizeMessageA));
@@ -47,7 +83,7 @@ void pumpMessageInit(void)
 
 void WorkAlarm_Set(uint8_t alarm_value)
 {
-	/* 所有新报警统一写 WorkMessage，避免再通过 SysRunData.WarnID/StuckFlag 分散传递。 */
+	/* 所有新报警统一写 WorkMessage，避免再通过旧报警字段分散传递。 */
 	WorkMessage.alarm_value = alarm_value;
 	WorkMessage.alarm_flag = (alarm_value != WORK_ALARM_NONE);
 }
@@ -909,6 +945,8 @@ void PlugORunPLUGActive(uint8_t key_value)
 				//B插头区域，显示为连接状态头
 			}
 			WorkMessage.channel_work=CHANNEL_A;
+			/* A 通道认证上线后立即刷新手柄区域，A 作为当前工作通道高亮，B 若在线则改为普通在线显示。 */
+			Pubinterface_RefreshOnlineHandleDisplay();
 	  break;
 	  case SCREENKey_PLUG_B://插入B
 
@@ -950,6 +988,8 @@ void PlugORunPLUGActive(uint8_t key_value)
 				//A插头区域，显示为连接状态头
 			}
 			WorkMessage.channel_work=CHANNEL_B;
+			/* B 通道认证上线后立即刷新手柄区域，B 作为当前工作通道高亮，A 若在线则改为普通在线显示。 */
+			Pubinterface_RefreshOnlineHandleDisplay();
 	  break;
 	  case SCREENKey_UNPLUG_A://拔出A
 
@@ -988,6 +1028,9 @@ void PlugORunPLUGActive(uint8_t key_value)
 		  WorkMessage.channel_work=0;
           //界面暗黑无手柄接入（速度，频率，暗黑）
 	  }
+	  /* A 通道拔出后暗灭 A 手柄区域，若 B 通道仍在线则刷新 B 通道高亮状态。 */
+	  Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false);
+	  Pubinterface_RefreshOnlineHandleDisplay();
 	  break;
 	  case SCREENKey_UNPLUG_B://拔出B
 	  WorkMessage.Channel_Bonline=false;
@@ -1020,8 +1063,11 @@ void PlugORunPLUGActive(uint8_t key_value)
 		  WorkMessage.hand_model=0;
 		  WorkMessage.tool_type=0;
 		  WorkMessage.channel_work=0;
- 				//界面暗黑无手柄接入（速度，频率，暗黑）
+				//界面暗黑无手柄接入（速度，频率，暗黑）
 	  }
+	  /* B 通道拔出后暗灭 B 手柄区域，若 A 通道仍在线则刷新 A 通道高亮状态。 */
+	  Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false);
+	  Pubinterface_RefreshOnlineHandleDisplay();
 	  break;
   }
 }
