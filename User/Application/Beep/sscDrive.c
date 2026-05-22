@@ -142,9 +142,19 @@ void MOTORRUN(void)
 
 }
 
+/*
+ * 函数功能：电机输出周期任务，按当前 WorkMessage 下发启动/停止帧，并刷新本地电机仲裁释放。
+ * 输入参数：event 调度器传入的任务事件值，当前任务不使用该参数。
+ * 返回参数：无。
+ */
 void MOTORRUNTask(uint32_t event) 
 { 
+    /* 当前任务不按 event 分支处理，显式丢弃参数避免后续误解。 */
+    (void)event;
+    /* 根据 runflag_work、方向、通道、速度和保护电流组帧，向 UART1 电机驱动板下发命令。 */
     MOTORRUN();
+    /* 每个电机输出周期刷新本地控制权，确保停止命令和驱动反馈都归零后再允许其它模式接管。 */
+    ControlArbitration_RefreshMotorOwner();
 }
 void SscDriveMotorTask_Init(void)
 {

@@ -244,8 +244,10 @@ static bool Foot_EnsureFootControlMode(void)
  */
 
 
-/**
- * @brief 脚踏板控制任务
+/*
+ * 函数功能：脚踏业务控制任务，消费 UART4 解析出的脚踏消息，并根据踏板行程控制注水泵预启动和手柄电机运行。
+ * 输入参数：event 调度器传入的任务事件值，当前任务不使用该参数。
+ * 返回参数：无。
  */
 void FootControlTask(uint32_t event)
 {
@@ -369,8 +371,7 @@ void FootControlTask(uint32_t event)
                            // SendKeyBeepMessage(1);//滴一声,（这里带考虑，显示请停止其他控制，再控制-代码逻辑不强制关闭运行，只是提示应该有提示）
                             return;//不参与
                         }
-                       /* 脚踏即将启动联动泵或电机，先占用脚踏控制权，避免其它来源同时下发控制。 */
-                       if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
+                       /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
                        if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
                         {
                             /* 单踏板左侧脚踏默认以 70 启动 A 注水泵，并同步打开 A 泵 run_flag 门控。 */
@@ -440,8 +441,7 @@ void FootControlTask(uint32_t event)
                             return;//不参与
                         }
 
-                        /* 脚踏即将启动联动泵或电机，先占用脚踏控制权，避免其它来源同时下发控制。 */
-                        if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
+                        /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
                         if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
                         {
@@ -535,8 +535,7 @@ void FootControlTask(uint32_t event)
                             return;//不参与
                         }
 
-                        /* 脚踏即将启动联动泵或电机，先占用脚踏控制权，避免其它来源同时下发控制。 */
-                        if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
+                        /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
                         if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
                         {
@@ -647,8 +646,7 @@ void FootControlTask(uint32_t event)
                             return;//不参与
                         }
 
-                       /* 脚踏即将启动联动泵或电机，先占用脚踏控制权，避免其它来源同时下发控制。 */
-                       if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
+                       /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
                        if(pumpMessageB.type==INJECTWATER)
                         {

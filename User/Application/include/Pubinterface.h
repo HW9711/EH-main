@@ -366,6 +366,8 @@ bool ControlArbitration_IsBusyByOther(uint8_t owner);
 bool ControlArbitration_TryEnter(uint8_t owner);
 void ControlArbitration_Exit(uint8_t owner);
 void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner);
+/* 周期刷新本地电机 owner 释放，电机命令停止且驱动反馈归零后允许其它本地模式接管。 */
+void ControlArbitration_RefreshMotorOwner(void);
 void ControlArbitration_ForceRelease(void);
 bool ControlArbitration_EnterExternalControl(void);
 void ControlArbitration_ReleaseExternalControl(void);

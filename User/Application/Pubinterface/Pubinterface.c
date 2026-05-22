@@ -15,7 +15,7 @@
 ChannelrecognizeMessage_t ChannelrecognizeMessageA;
 ChannelrecognizeMessage_t ChannelrecognizeMessageB;
 ControlSigleMessage_t ControlSigleMssage;
- ControlSignalMessage_t ControlSignalMessage;
+ControlSignalMessage_t ControlSignalMessage;
 
 
 WorkMessage_t WorkMessage;//工作信息
@@ -25,6 +25,9 @@ pumpMessage_t pumpMessageA;
 pumpMessage_t pumpMessageB;
 /* 当前控制权持有者，四种控制方式必须等待当前持有者结束后才能重新申请。 */
 static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
+
+/* 电机反馈小于等于该阈值时认为机械输出已停止；0 表示必须等驱动反馈真实归零。 */
+#define CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD 0U
 
 static void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag)
 {
@@ -118,6 +121,11 @@ static void ControlMessageInit(void)
 	memset(&ControlSigleMssage, 0, sizeof(ControlSigleMssage));
 }
 
+/*
+ * 函数功能：清除当前电机、脚踏、外控和 A/B 泵输出状态，用于外控进入、退出和超时安全停机。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ControlArbitration_StopMotionOutput(void)
 {
 	/* 仲裁切换控制权时，先停电机，避免上一个控制源留下运行状态。 */
@@ -150,6 +158,11 @@ static void ControlArbitration_StopMotionOutput(void)
 	pumpMessageB.speed_work = 0U;
 }
 
+/*
+ * 函数功能：外部控制退出后，根据当前通道记忆和手柄在线类型计算应恢复的本机控制模式。
+ * 输入参数：无，读取 WorkMessage.channel_work、MemoryMsgA/B.drive_type 和 WorkMessage.hand_model。
+ * 返回参数：JTWORK/HANDLEWORK/NOWORK，表示外控退出后的本机驱动方式。
+ */
 static uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
 {
 	uint8_t drive_type = NOWORK;
@@ -180,6 +193,65 @@ static uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
 	return NOWORK;
 }
 
+/*
+ * 函数功能：判断驱动板反馈的实际转速是否仍表示电机在转动。
+ * 输入参数：无，直接读取 WorkMessage.driver_speed_feedback。
+ * 返回参数：true 表示驱动反馈转速仍大于停止阈值；false 表示反馈已经低于停止阈值。
+ */
+static bool ControlArbitration_IsMotorFeedbackActive(void)
+{
+	/* 反馈转速来自 UART1 驱动板回包，用于避免刚下发停止命令但电机还未真实停稳时提前释放控制权。 */
+	return (WorkMessage.driver_speed_feedback > CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD);
+}
+
+/*
+ * 函数功能：判断手柄电机当前是否处于忙状态。
+ * 输入参数：无，读取 runflag_work 命令标志和 driver_speed_feedback 实际反馈。
+ * 返回参数：true 表示电机被要求运行或反馈仍在转动；false 表示命令停止且反馈已停稳。
+ */
+static bool ControlArbitration_IsMotorBusy(void)
+{
+	/* runflag_work 是主控下发运行帧的命令源，置位时必须认为电机正在被控制。 */
+	if(WorkMessage.runflag_work == true)
+	{
+		return true;
+	}
+
+	/* runflag_work 清零后继续看驱动反馈，保证仲裁释放跟真实停转绑定。 */
+	return ControlArbitration_IsMotorFeedbackActive();
+}
+
+/*
+ * 函数功能：当本地电机已经停稳时自动释放脚踏、屏幕或手柄的电机控制权。
+ * 输入参数：无，读取当前 owner 和电机忙状态。
+ * 返回参数：无；满足释放条件时把 s_control_owner 置为 CONTROL_OWNER_NONE。
+ */
+static void ControlArbitration_ReleaseLocalOwnerIfMotorIdle(void)
+{
+	/* 外部通信必须由主动退出、超时释放或急停释放，不能因为本地电机停稳自动退出。 */
+	if(s_control_owner == CONTROL_OWNER_EXTERNAL)
+	{
+		return;
+	}
+
+	/* 没有本地 owner 时不用处理，保持空闲状态。 */
+	if(s_control_owner == CONTROL_OWNER_NONE)
+	{
+		return;
+	}
+
+	/* 电机命令和反馈都已经停止时，本地控制源结束，本地三种方式可以重新竞争。 */
+	if(ControlArbitration_IsMotorBusy() == false)
+	{
+		s_control_owner = CONTROL_OWNER_NONE;
+	}
+}
+
+/*
+ * 函数功能：校验传入的控制源编号是否合法。
+ * 输入参数：owner 控制源编号，取 CONTROL_OWNER_EXTERNAL/FOOT/SCREEN/HANDLE。
+ * 返回参数：true 表示控制源合法；false 表示非法编号，不能参与仲裁。
+ */
 static bool ControlArbitration_IsValidOwner(uint8_t owner)
 {
 	/* 只接受四种正式控制来源，防止错误参数把仲裁锁写成未知状态。 */
@@ -189,6 +261,11 @@ static bool ControlArbitration_IsValidOwner(uint8_t owner)
 			(owner == CONTROL_OWNER_HANDLE));
 }
 
+/*
+ * 函数功能：把按键队列中的控制来源类型转换为电机仲裁 owner。
+ * 输入参数：control_type 按键消息来源，取 JTKey/HANDLEKey/SCREENKey/HMIkey/PLUGunPLUG 等。
+ * 返回参数：CONTROL_OWNER_*；插拔和未知来源返回 CONTROL_OWNER_NONE。
+ */
 static uint8_t ControlArbitration_GetOwnerByKeySource(uint8_t control_type)
 {
 	/* 脚踏队列消息统一归属脚踏控制来源。 */
@@ -219,9 +296,14 @@ static uint8_t ControlArbitration_GetOwnerByKeySource(uint8_t control_type)
 	return CONTROL_OWNER_NONE;
 }
 
+/*
+ * 函数功能：判断泵控制按键是否需要占用电机仲裁 owner。
+ * 输入参数：key_value 业务按键值，包含脚踏泵键、屏幕泵键和外控 HMI 泵键。
+ * 返回参数：本地泵键返回 CONTROL_OWNER_NONE；外控泵键返回 CONTROL_OWNER_EXTERNAL。
+ */
 static uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
 {
-	/* 脚踏泵按键和脚踏轻排按键都属于脚踏控制。 */
+	/* 脚踏泵按键和脚踏轻排按键只影响泵输出，不应该因为泵运行占用手柄电机 owner。 */
 	if((key_value == JTkey_left_short) ||
 	   (key_value == JTKey_left_long) ||
 	   (key_value == JTKey_right_short) ||
@@ -231,10 +313,11 @@ static uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
 	   (key_value == JTKey_Gently_right_start) ||
 	   (key_value == JTKey_Gently_rigth_stop))
 	{
-		return CONTROL_OWNER_FOOT;
+		/* 脚踏泵键只控制泵，不占用手柄电机 owner；脚踏真正启动电机时由 FootControlTask 申请 FOOT owner。 */
+		return CONTROL_OWNER_NONE;
 	}
 
-	/* 屏幕泵按钮由屏幕控制来源占用。 */
+	/* 屏幕泵按钮只影响泵输出，不应该因为屏幕点过泵就锁住脚踏或手柄电机控制。 */
 	if((key_value == SCREENKey_APUMP_Add) ||
 	   (key_value == SCREENKey_APUMP_Sub) ||
 	   (key_value == SCREENKey_APUMP_control) ||
@@ -242,7 +325,8 @@ static uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
 	   (key_value == SCREENKey_BPUMP_Sub) ||
 	   (key_value == SCREENKey_BPUMP_control))
 	{
-		return CONTROL_OWNER_SCREEN;
+		/* 屏幕泵键只控制泵，不占用手柄电机 owner；屏幕触控启动电机时才申请 SCREEN owner。 */
+		return CONTROL_OWNER_NONE;
 	}
 
 	/* 历史 HMI 泵按钮由外部来源占用。 */
@@ -262,55 +346,93 @@ static uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
 	return CONTROL_OWNER_NONE;
 }
 
+/*
+ * 函数功能：判断指定控制源是否为当前仲裁 owner。
+ * 输入参数：owner 待查询的控制源编号。
+ * 返回参数：true 表示当前 owner 与输入来源一致；false 表示不一致。
+ */
 bool ControlArbitration_IsOwner(uint8_t owner)
 {
 	/* 当前持有者和查询来源一致时，允许该来源继续控制或主动停止。 */
 	return (s_control_owner == owner);
 }
 
+/*
+ * 函数功能：判断指定控制源是否被其它控制源阻塞。
+ * 输入参数：owner 当前准备执行动作的控制源编号。
+ * 返回参数：true 表示需要阻塞当前动作；false 表示当前动作可以继续处理。
+ */
 bool ControlArbitration_IsBusyByOther(uint8_t owner)
 {
-	/* 空闲时任何合法来源都可以尝试申请控制权。 */
+	/* 查询前先释放已经停稳的本地 owner，避免停止后残留锁挡住下一种本地控制方式。 */
+	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
+
+	/* 没有 owner 时表示电机仲裁空闲，任意本地来源都可以尝试控制。 */
 	if(s_control_owner == CONTROL_OWNER_NONE)
 	{
 		return false;
 	}
 
-	/* 同一个来源可以持续发送控制或停止命令，不视为互斥冲突。 */
+	/* 当前来源就是 owner 时允许继续控制或发送停止命令。 */
 	if(s_control_owner == owner)
 	{
 		return false;
 	}
 
-	/* 只要已有其它来源占用，当前来源必须等待对方结束。 */
-	return true;
+	/* 外部通信授权期间，本地脚踏、屏幕、手柄都必须等待外控主动退出或超时释放。 */
+	if(s_control_owner == CONTROL_OWNER_EXTERNAL)
+	{
+		return true;
+	}
+
+	/* 本地三种方式只在手柄电机忙时互斥；泵运行不参与电机控制权阻塞。 */
+	return ControlArbitration_IsMotorBusy();
 }
 
+/*
+ * 函数功能：尝试让指定控制源取得电机控制权。
+ * 输入参数：owner 申请控制权的来源编号。
+ * 返回参数：true 表示申请成功或已经持有；false 表示无效来源或被其它来源阻塞。
+ */
 bool ControlArbitration_TryEnter(uint8_t owner)
 {
-	/* 无效来源不允许拿控制权，避免未知按键把系统锁死。 */
+	/* 无效来源不能写入 owner，避免未知按键把仲裁状态写乱。 */
 	if(ControlArbitration_IsValidOwner(owner) == false)
 	{
 		return false;
 	}
 
-	/* 当前空闲时记录新的控制来源。 */
-	if(s_control_owner == CONTROL_OWNER_NONE)
-	{
-		s_control_owner = owner;
-		return true;
-	}
+	/* 申请前先清掉已经停稳的本地 owner，保证电机停止后其它本地模式能接管。 */
+	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
 
-	/* 当前来源已经持有控制权时，重复申请按成功处理。 */
+	/* 已经持有控制权时重复申请按成功处理。 */
 	if(s_control_owner == owner)
 	{
 		return true;
 	}
 
-	/* 其它来源正在控制，必须等它释放后才能接管。 */
-	return false;
+	/* 外部通信授权期间，只有外部通信自己能继续控制。 */
+	if(s_control_owner == CONTROL_OWNER_EXTERNAL)
+	{
+		return false;
+	}
+
+	/* 电机命令仍在运行或驱动反馈仍在转动时，不允许不同来源抢占。 */
+	if(ControlArbitration_IsMotorBusy())
+	{
+		return false;
+	}
+
+	/* 电机已经空闲时记录新的控制源；本地泵动作不会调用本路径占用 owner。 */
+	s_control_owner = owner;
+	return true;
 }
 
+/*
+ * 函数功能：释放指定控制源持有的仲裁 owner，只允许当前持有者释放自己。
+ * 输入参数：owner 请求释放控制权的来源编号。
+ * 返回参数：无。
+ */
 void ControlArbitration_Exit(uint8_t owner)
 {
 	/* 只有当前持有者本人才能释放，避免其它来源误清正在运行的控制权。 */
@@ -320,54 +442,67 @@ void ControlArbitration_Exit(uint8_t owner)
 	}
 }
 
+/*
+ * 函数功能：当本地控制源对应的电机已经停止时释放本地电机控制权。
+ * 输入参数：owner 请求释放的本地控制源编号。
+ * 返回参数：无。
+ */
 void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner)
 {
-	/* 上位机控制必须由退出外控或急停释放，不能因为单个泵停止就自动失效。 */
+	/* 外部通信必须由外控退出、链路超时或急停释放，不能由本地空闲逻辑释放。 */
 	if(owner == CONTROL_OWNER_EXTERNAL)
 	{
 		return;
 	}
 
-	/* 电机仍在运行时，本地来源还没有结束。 */
-	if(WorkMessage.runflag_work == true)
+	/* 电机命令仍在运行或驱动反馈仍未归零时，本地来源还没有真正结束。 */
+	if(ControlArbitration_IsMotorBusy())
 	{
 		return;
 	}
 
-	/* 任意脚踏联动标志仍有效时，脚踏控制还没有完全松开。 */
-	if(ControlSignalMessage.jtL_control_flag ||
-	   ControlSignalMessage.jtR_control_flag ||
-	   ControlSignalMessage.jtL_gentlypump_flag ||
-	   ControlSignalMessage.jtR_gentlypump_flag)
-	{
-		return;
-	}
-
-	/* A/B 泵仍在运行或定时排空时，屏幕/脚踏泵控制还没有结束。 */
-	if(pumpMessageA.run_flag ||
-	   pumpMessageB.run_flag ||
-	   pumpMessageA.timingDrainage_flag ||
-	   pumpMessageB.timingDrainage_flag)
-	{
-		return;
-	}
-
-	/* 所有本地输出都已经停下，释放当前本地控制来源。 */
+	/* 电机停稳后释放当前本地来源；泵状态不再影响手柄电机仲裁。 */
 	ControlArbitration_Exit(owner);
 }
 
+/*
+ * 函数功能：周期刷新电机控制权释放状态。
+ * 输入参数：无，由电机输出任务或反馈任务周期调用。
+ * 返回参数：无；本地 owner 停稳后自动释放，外部 owner 不自动释放。
+ */
+void ControlArbitration_RefreshMotorOwner(void)
+{
+	/* 统一复用本地 owner 释放逻辑，保证手柄、脚踏、屏幕停止后不因反馈延迟永久占用。 */
+	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
+}
+
+/*
+ * 函数功能：系统级强制释放当前仲裁 owner，用于急停或全局清状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void ControlArbitration_ForceRelease(void)
 {
 	/* 急停或系统级清状态使用强制释放，让任何来源都不能继续占用控制权。 */
 	s_control_owner = CONTROL_OWNER_NONE;
 }
 
+/*
+ * 函数功能：判断外部通信控制权是否处于有效占用状态。
+ * 输入参数：无，读取 s_control_owner 和 WorkMessage.hmiactive_work。
+ * 返回参数：true 表示外控已持有仲裁且界面状态仍有效；false 表示外控未激活。
+ */
 bool ControlArbitration_IsExternalActive(void)
 {
 	/* 外控是否有效以仲裁持有者为准，hmiactive_work 只作为界面/状态同步标志。 */
 	return ((s_control_owner == CONTROL_OWNER_EXTERNAL) && (WorkMessage.hmiactive_work != 0U));
 }
 
+/*
+ * 函数功能：申请进入外部通信控制模式，并初始化外控占用状态。
+ * 输入参数：无。
+ * 返回参数：true 表示外控取得控制权；false 表示本机电机仍忙或其它来源占用。
+ */
 bool ControlArbitration_EnterExternalControl(void)
 {
 	bool already_external = ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL);
@@ -396,6 +531,11 @@ bool ControlArbitration_EnterExternalControl(void)
 	return true;
 }
 
+/*
+ * 函数功能：退出外部通信控制模式，停止外控遗留输出并恢复本机可接管状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void ControlArbitration_ReleaseExternalControl(void)
 {
 	/* 当前不是外控时，退出外控只清理外控显示残留，不能影响脚踏、屏幕或手柄正在进行的控制。 */
@@ -420,6 +560,11 @@ void ControlArbitration_ReleaseExternalControl(void)
 	ControlArbitration_Exit(CONTROL_OWNER_EXTERNAL);
 }
 
+/*
+ * 函数功能：按键队列分发前判断当前消息是否应被仲裁阻塞。
+ * 输入参数：control_type 按键来源类型；control_key 具体业务按键值。
+ * 返回参数：true 表示本消息应丢弃等待当前 owner 结束；false 表示可继续分发。
+ */
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key)
 {
 	uint8_t key_owner = ControlArbitration_GetOwnerByKeySource(control_type);
@@ -479,6 +624,11 @@ void HmiExitActive(uint8_t key_value)
 	}
  }
 
+/*
+ * 函数功能：处理屏幕/HMI 的控制方式切换与屏幕触控启动、停止动作。
+ * 输入参数：key_value 屏幕或 HMI 下发的控制方式按键值。
+ * 返回参数：无。
+ */
  void ControlTypeActive(uint8_t key_value)
  {
 	if(WorkMessage.alarm_flag==true)return;
@@ -526,11 +676,12 @@ void HmiExitActive(uint8_t key_value)
 		WorkMessage.runflag_work=true;//drive执行
 		break;
 		case SCREENKey_TouchEXIT://停止
-		/* 屏幕触控退出时先停电机，再清触控占用，最后释放屏幕控制权。 */
+		/* 屏幕触控退出时先停电机，再清触控占用，控制权释放要继续等待驱动反馈归零。 */
 		WorkMessage.runflag_work=false;
 		WorkMessage.speed_work=0U;
 		WorkMessage.touchactive_work=0U;
-		ControlArbitration_Exit(CONTROL_OWNER_SCREEN);
+		/* 这里不能直接 Exit，否则刚下发停止但电机尚未停稳时其它来源会提前接管。 */
+		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_SCREEN);
 		//退出触控界面
 		break;
 	}
@@ -1101,6 +1252,11 @@ void ToolPosActive(uint8_t key_value)
 		}
 }	
 
+/*
+ * 函数功能：处理脚踏、屏幕和 HMI 的 A/B 泵档位、启停、轻排和排空控制。
+ * 输入参数：key_value 触发泵控制的业务按键值。
+ * 返回参数：无。
+ */
 void PUMPActive(uint8_t key_value)
 {
     static uint8_t PumpA_Gear=0;
@@ -1177,7 +1333,7 @@ void PUMPActive(uint8_t key_value)
 			 {
 				if(!pumpMessageA.run_flag)
 				{
-					/* A 泵由屏幕/脚踏/HMI 启动前先占用对应控制来源，互斥其它控制方式。 */
+					/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
 					if((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))return;
 					pumpMessageA.run_flag=true;
 					if(pumpMessageA.type==INJECTWATER)
@@ -1261,7 +1417,7 @@ void PUMPActive(uint8_t key_value)
 				{
 					if(!pumpMessageB.run_flag)
 					{
-						/* B 泵由屏幕/脚踏/HMI 启动前先占用对应控制来源，互斥其它控制方式。 */
+						/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
 						if((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))return;
 						pumpMessageB.run_flag=true;
 						if(pumpMessageB.type==INJECTWATER)
@@ -1367,7 +1523,7 @@ void PUMPActive(uint8_t key_value)
 			}
 		    break;
 		case JTKey_Gently_left_start://其实可以判断手柄类型决定是否给与注水
-				/* 脚踏轻排启动前先占用脚踏控制权，避免上位机/屏幕/手柄同时改泵。 */
+				/* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
 				if((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))return;
 				if(pumpMessageA.type==INJECTWATER)//注水
 				{
@@ -1409,7 +1565,7 @@ void PUMPActive(uint8_t key_value)
 			ControlArbitration_ExitLocalControlIfIdle(pump_owner);
 		break;
 		case JTKey_Gently_right_start:
-			   /* 脚踏轻排启动前先占用脚踏控制权，避免上位机/屏幕/手柄同时改泵。 */
+			   /* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
 			   if((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))return;
 			   if(pumpMessageB.type==INJECTWATER)//注水
 				{
@@ -1534,4 +1690,3 @@ void PUMPActive(uint8_t key_value)
 		break;
 	}
 }
-
