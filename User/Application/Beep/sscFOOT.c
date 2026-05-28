@@ -374,15 +374,15 @@ void FootControlTask(uint32_t event)
                        /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
                        if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
                         {
-                            /* 单踏板左侧脚踏默认以 70 启动 A 注水泵，并同步打开 A 泵 run_flag 门控。 */
-                            Foot_StartPumpAInjection(70U);
+                            /* 单踏板左侧脚踏按当前手柄 Page4 默认流量启动 A 注水泵，并同步打开 A 泵 run_flag 门控。 */
+                            Foot_StartPumpAInjection(Pubinterface_GetCurrentDefaultInjectionFlow());
                         }
                         else if(pumpMessageB.type==INJECTWATER)
                         {
                             /* B 泵作为注水泵时沿用当前设置速度启动，同时打开 B 泵 run_flag 门控。 */
                             Foot_StartPumpBInjection(pumpMessageB.speed_work);
                         }
-                        WorkMessage.speed_set_work=60000;
+                        if(WorkMessage.speed_set_work==0U)WorkMessage.speed_set_work=Pubinterface_GetCurrentDefaultMotorSpeed();//当前手柄还未装载速度时，使用 Page4 默认速度替代旧固定 60000
                         /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
                         if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                         ControlSignalMessage.jtL_control_flag=true;
@@ -445,8 +445,8 @@ void FootControlTask(uint32_t event)
 
                         if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
                         {
-                             /* A 泵是注水泵时只能启动 A 泵；旧代码误写 B 泵会导致脚踏踩下后目标泵不转。 */
-                             Foot_StartPumpAInjection(70U);
+                             /* A 泵是注水泵时按当前手柄 Page4 默认流量启动；旧代码误写 B 泵会导致脚踏踩下后目标泵不转。 */
+                             Foot_StartPumpAInjection(Pubinterface_GetCurrentDefaultInjectionFlow());
                         }
                         else if(pumpMessageB.type==INJECTWATER)
                         {
@@ -493,7 +493,7 @@ void FootControlTask(uint32_t event)
                 if(adValue-msg.MValue_Left>JT_threshold)
                 {
                      //手柄运行
-                       WorkMessage.speed_set_work=60000;
+                       if(WorkMessage.speed_set_work==0U)WorkMessage.speed_set_work=Pubinterface_GetCurrentDefaultMotorSpeed();//当前手柄还未装载速度时，使用 Page4 默认速度替代旧固定 60000
                     /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
                     if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                     ControlSignalMessage.jtL_control_flag=true;

@@ -17,6 +17,7 @@
 #include "Pubinterface.h"
 #include "sscBEEP.h"
 #include "sscKEYBH.h"
+#include "external_comm_task.h"
 #include "at24cs32.h"
 #include "at24cs32_crc_verify.h"
 
@@ -87,11 +88,31 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_TOOL_ANGLE_OFFSET          6U
 
 /*
+ * EEPROM 中 Page4 初始值信息区定义。
+ * Page4 对应 AT24CS32 驱动页下标 3，读取整页可以同步校验页尾，避免默认速度、流量和报警阈值读到损坏数据。
+ * Page4 的 16 位字段按业务说明使用小端格式，默认注水流量按 0.1 存储，写入泵业务流量前需要除以 10。
+ */
+#define HANDLESCAN_INITIAL_INFO_PAGE_INDEX    3U
+#define HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET 0U
+#define HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET 2U
+#define HANDLESCAN_INITIAL_MIN_SPEED_OFFSET   4U
+#define HANDLESCAN_INITIAL_MAX_SPEED_OFFSET   6U
+#define HANDLESCAN_INITIAL_DIRECTION_OFFSET   8U
+#define HANDLESCAN_INITIAL_FREQ_OFFSET        9U
+#define HANDLESCAN_INITIAL_FOR_ALARM_OFFSET   10U
+#define HANDLESCAN_INITIAL_REV_ALARM_OFFSET   12U
+#define HANDLESCAN_INITIAL_OSC_ALARM_OFFSET   14U
+#define HANDLESCAN_INITIAL_FLOW_SCALE         10U
+#define HANDLESCAN_INITIAL_FLOW_MAX           70U
+
+/*
  * 手柄扫描报警码定义。
  * 1. 13：运行中插拔报警，沿用旧逻辑；
- * 2. 只有 EEPROM 最终校验失败才上报 WORK_ALARM_HANDLE_MODEL_ERROR。
+ * 2. EEPROM 最终校验失败按 A/B 通道上报 WORK_ALARM_HANDLE_MODEL_ERROR_A/B/AB。
  */
 #define HANDLESCAN_ALARM_RUNNING_PLUG         13U
+#define HANDLESCAN_TRANSIENT_ALARM_MS         3000U
+#define HANDLESCAN_TRANSIENT_SCREEN_TICKS     (HANDLESCAN_TRANSIENT_ALARM_MS / HANDLESCAN_TASK_PERIOD_MS)
 
 /*
  * 串口调试步骤码定义。
@@ -100,8 +121,8 @@ kernel_task_t HANDLESCANTaskHandle;
  * 2. 设为 `0U` 时，基础调试报文都会被静默处理，业务状态机保持不变；
  * 3. 刀具扩展报文单独受 `HANDLESCAN_TOOL_TRACE_ENABLE` 控制，方便现场按需开启。
  */
-#define HANDLESCAN_TRACE_ENABLE               1U
-#define HANDLESCAN_TOOL_TRACE_ENABLE          1U
+#define HANDLESCAN_TRACE_ENABLE               0U
+#define HANDLESCAN_TOOL_TRACE_ENABLE          0U
 
 #define HANDLESCAN_DBG_STEP_INSERT_PASS       0x02U
 #define HANDLESCAN_DBG_STEP_REMOVE_PASS       0x03U
@@ -196,6 +217,7 @@ static uint8_t s_a_verify_retry_count = 0U;
 static uint16_t s_a_verify_retry_wait_ticks = 0U;
 static uint8_t s_a_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_a_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
+static uint8_t s_a_initial_info_buf[AT24CS32_PAGE_SIZE] = {0U}; /* A 通道 Page4 初始值页缓存，保存默认速度、流量和阈值。 */
 
 /* B 通道运行时状态变量。 */
 static HandlescanStage s_b_stage = HANDLESCAN_STAGE_IDLE;
@@ -206,6 +228,11 @@ static uint8_t s_b_verify_retry_count = 0U;
 static uint16_t s_b_verify_retry_wait_ticks = 0U;
 static uint8_t s_b_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_b_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
+static uint8_t s_b_initial_info_buf[AT24CS32_PAGE_SIZE] = {0U}; /* B 通道 Page4 初始值页缓存，保存默认速度、流量和阈值。 */
+
+/* 运行中另一路手柄校验失败时，屏幕提示只保持 3 秒，不写 WorkMessage，避免影响当前工作通道。 */
+static uint16_t s_transient_screen_alarm_ticks = 0U;
+static uint8_t s_transient_screen_alarm_value = 0U;
 
 /*
  * 输出基础 HS 调试报文。
@@ -436,6 +463,115 @@ static uint16_t Handlescan_ReadUint16BE(const uint8_t *buffer, uint32_t offset)
 }
 
 /*
+ * 函数功能：按小端格式读取 EEPROM Page4 中的 16 位初始值字段。
+ * 输入参数：buffer 指向已通过页校验的 Page4 缓存；offset 表示字段起始偏移。
+ * 返回参数：解析后的 16 位无符号值。
+ */
+static uint16_t Handlescan_ReadUint16LE(const uint8_t *buffer, uint32_t offset)
+{
+    return (uint16_t)(((uint16_t)buffer[offset + 1U] << 8) | (uint16_t)buffer[offset]); /* Page4 业务字段低字节在前，不能沿用 Page3 的大端解析。 */
+}
+
+/*
+ * 函数功能：把 EEPROM Page4 默认注水流量从 0.1 单位转换为泵业务流量并限制在 0~70。
+ * 输入参数：flow_x10 Page4 中按 0.1 单位保存的默认注水流量。
+ * 返回参数：现有 pumpMessage.speed_work 使用的整数流量值。
+ */
+static uint16_t Handlescan_BuildDefaultInjectionFlow(uint16_t flow_x10)
+{
+    uint16_t flow = (uint16_t)(flow_x10 / HANDLESCAN_INITIAL_FLOW_SCALE); /* Page4 默认流量按 x10 存储，泵任务当前使用整数流量。 */
+
+    if (flow > HANDLESCAN_INITIAL_FLOW_MAX)
+    {
+        flow = HANDLESCAN_INITIAL_FLOW_MAX; /* 业务范围明确为 0~70，超过上限时钳位，避免异常 EEPROM 值让注水泵过量输出。 */
+    }
+
+    return flow; /* 返回已经适配现有注水泵速度单位的默认流量。 */
+}
+
+/*
+ * 函数功能：把 Page4 默认速度限制到同页给出的最小速度和最大速度之间。
+ * 输入参数：default_speed 默认速度，min_speed 最小速度，max_speed 最大速度，三者均保持 EEPROM x10 原始单位。
+ * 返回参数：限制后的默认速度。
+ */
+static uint16_t Handlescan_ClampDefaultSpeed(uint16_t default_speed, uint16_t min_speed, uint16_t max_speed)
+{
+    if (max_speed < min_speed)
+    {
+        max_speed = min_speed; /* EEPROM 上下限异常时按最小值收敛，避免后续速度加减出现反向边界。 */
+    }
+
+    if (default_speed < min_speed)
+    {
+        default_speed = min_speed; /* 默认速度低于最小值时抬到最小值，保证上线初始速度在允许范围内。 */
+    }
+
+    if (default_speed > max_speed)
+    {
+        default_speed = max_speed; /* 默认速度高于最大值时降到最大值，保证上线初始速度不超过手柄配置上限。 */
+    }
+
+    return default_speed; /* 返回可直接写入 WorkMessage.speed_set_work 的 x10 速度值。 */
+}
+
+/*
+ * 函数功能：解析 Page4 默认运动方向。
+ * 输入参数：raw_direction EEPROM Page4 方向字节，当前业务确认初始方向按正转使用。
+ * 返回参数：项目内部方向值，当前固定返回 ZZDIR。
+ */
+static uint8_t Handlescan_ParseInitialDirection(uint8_t raw_direction)
+{
+    (void)raw_direction; /* 当前业务确认 Page4 默认方向为正转，保留原始字节入口便于后续扩展编码表。 */
+    return ZZDIR;        /* WorkMessage/MemoryMsg 内部使用 ZZDIR 表示正转。 */
+}
+
+/*
+ * 函数功能：把 EEPROM Page4 初始值信息解析到通道识别结构，供插入事件装载默认速度、频率、注水流量和阈值。
+ * 输入参数：message 目标通道识别结构；initial_info_buf 已通过页尾校验的 Page4 缓存。
+ * 返回参数：无。
+ */
+static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *message, const uint8_t *initial_info_buf)
+{
+    uint16_t default_speed;                                  /* 保存 Page4 默认速度，单位沿用 EEPROM x10，驱动下发时再 /10。 */
+    uint16_t min_speed;                                      /* 保存 Page4 最小速度，单位沿用 EEPROM x10。 */
+    uint16_t max_speed;                                      /* 保存 Page4 最大速度，单位沿用 EEPROM x10。 */
+
+    if ((message == NULL) || (initial_info_buf == NULL))
+    {
+        return;                                              /* 防御空指针，避免异常插拔路径破坏通道识别结构。 */
+    }
+
+    default_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET); /* 读取 Page4 默认速度，小端 x10。 */
+    min_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_MIN_SPEED_OFFSET); /* 读取 Page4 最小速度，小端 x10。 */
+    max_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_MAX_SPEED_OFFSET); /* 读取 Page4 最大速度，小端 x10。 */
+    if (max_speed < min_speed)
+    {
+        max_speed = min_speed;                               /* 上下限异常时同步修正保存值，避免后续 SpeedActive 读到反向边界。 */
+    }
+    default_speed = Handlescan_ClampDefaultSpeed(default_speed, min_speed, max_speed); /* 默认速度按同页上下限钳位，保证上线速度合法。 */
+
+    message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* 解析默认注水流量并转换到泵业务单位。 */
+    message->speed_min = min_speed;                         /* 保存通用最小速度，供后续 UI/外控边界逻辑复用。 */
+    message->speed_max = max_speed;                         /* 保存通用最大速度，供后续 UI/外控边界逻辑复用。 */
+    message->speed_zzmin = min_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
+    message->speed_zzmax = max_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最大速度。 */
+    message->speed_fzmin = min_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最小速度。 */
+    message->speed_fzmax = max_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最大速度。 */
+    message->speed_oscmin = min_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最小速度。 */
+    message->speed_oscmax = max_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最大速度。 */
+    message->speed_zzdefault = default_speed;                /* Page4 默认速度作为正转上线初始速度。 */
+    message->speed_fzdefault = default_speed;                /* Page4 默认速度作为反转上线初始速度。 */
+    message->speed_oscdefault = default_speed;               /* Page4 默认速度作为往复上线初始速度。 */
+    message->run_direction = Handlescan_ParseInitialDirection(initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 解析默认方向，当前按业务确认使用正转。 */
+    message->freq_default = initial_info_buf[HANDLESCAN_INITIAL_FREQ_OFFSET]; /* 保存 Page4 默认频率，往复模式启动时直接装载。 */
+    message->freq_min = FreqMin;                             /* Page4 未提供频率下限，沿用现有 UI 频率下限宏保持调节边界。 */
+    message->freq_max = FreqMax;                             /* Page4 未提供频率上限，沿用现有 UI 频率上限宏保持调节边界。 */
+    message->speed_alarm_for = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_FOR_ALARM_OFFSET); /* 保存正转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
+    message->speed_alarm_rev = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_REV_ALARM_OFFSET); /* 保存反转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
+    message->freq_alarm_osc = initial_info_buf[HANDLESCAN_INITIAL_OSC_ALARM_OFFSET]; /* 保存往复频率报警值，只用于蜂鸣阈值。 */
+}
+
+/*
  * 把 EEPROM 第 3 页解析到当前 UI 已使用的 `paoxueSpeciValue` 数组格式。
  * 当前 UI 适配层会按 `specidisplay(长度基值 * 5, 直径, 角度)` 来显示，因此这里保持兼容：
  * 1. `[0]` 保存长度基值，等于“0.1 精度长度值 / 5”；
@@ -467,11 +603,11 @@ static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
 }
 
 /*
- * 新接口只保留 A/B 在线、识别结果和当前工作态三层数据：
- * 1. `ChannelrecognizeMessageA/B` 保存本通道最新识别出的手柄与刀具信息；
- * 2. `MemoryMsgA/B` 保存当前通道的记忆化手柄型号；
- * 3. `WorkMessage` 保存系统当前正在工作的通道和型号。
- * 下面这些 helper 统一负责新接口写入，避免在状态机主体中反复展开字段赋值。
+ * 新接口把 A/B 识别缓存和实际工作态分开维护：
+ * 1. `ChannelrecognizeMessageA/B` 保存本通道最新识别出的手柄、刀具和 Page4 初始值；
+ * 2. `PlugORunPLUGActive()` 负责把识别缓存装载到 `MemoryMsgA/B` 和 `WorkMessage`；
+ * 3. 扫描任务只发布插拔事件，避免 I2C 扫描上下文和工作态切换上下文同时改全局状态。
+ * 下面这些 helper 统一负责识别缓存写入，避免在状态机主体中反复展开字段赋值。
  */
 static uint8_t Handlescan_TenthToUint8(uint16_t value_tenth)
 {
@@ -484,6 +620,11 @@ static uint8_t Handlescan_TenthToUint8(uint16_t value_tenth)
     return (uint8_t)value;
 }
 
+/*
+ * 函数功能：清空单通道手柄扫描识别缓存，确保拔出或无效插入后不会残留旧 EEPROM 数据。
+ * 输入参数：message 指向 A/B 通道的 ChannelrecognizeMessage 识别缓存。
+ * 返回参数：无。
+ */
 static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
 {
     if (message == NULL)
@@ -492,51 +633,57 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     }
 
     message->handle_type = 0U;
+    message->hand_type_raw_major = 0U;                       /* 清掉 Page2 原始主类型，避免下一次上线前外部通信读到旧手柄编码。 */
+    message->hand_type_raw_minor = 0U;                       /* 清掉 Page2 原始子类型，保持识别缓存和当前插拔状态一致。 */
     message->tool_type = 0U;
     message->diameter = 0U;
     message->length = 0U;
     message->draw = 0U;
+    message->default_injection_flow = 0U;                    /* 拔出后清掉 Page4 默认注水流量，避免下一次无效手柄沿用旧流量。 */
+    message->speed_min = 0U;                                 /* 拔出后清掉 Page4 最小速度，避免旧边界继续约束新手柄。 */
+    message->speed_max = 0U;                                 /* 拔出后清掉 Page4 最大速度，避免旧边界继续约束新手柄。 */
+    message->speed_zzmin = 0U;                               /* 清掉正转最小速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_zzmax = 0U;                               /* 清掉正转最大速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_fzmin = 0U;                               /* 清掉反转最小速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_fzmax = 0U;                               /* 清掉反转最大速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_oscmin = 0U;                              /* 清掉往复最小速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_oscmax = 0U;                              /* 清掉往复最大速度缓存，保证下一次扫描重新由 Page4 填充。 */
+    message->speed_zzdefault = 0U;                           /* 清掉正转默认速度，避免插拔后沿用旧 Page4 默认值。 */
+    message->speed_fzdefault = 0U;                           /* 清掉反转默认速度，避免插拔后沿用旧 Page4 默认值。 */
+    message->speed_oscdefault = 0U;                          /* 清掉往复默认速度，避免插拔后沿用旧 Page4 默认值。 */
+    message->freq_min = 0U;                                  /* 清掉频率下限缓存，避免下一次调频沿用旧手柄边界。 */
+    message->freq_max = 0U;                                  /* 清掉频率上限缓存，避免下一次调频沿用旧手柄边界。 */
+    message->freq_default = 0U;                              /* 清掉默认频率，避免往复模式沿用旧 Page4 默认频率。 */
+    message->speed_alarm_for = 0U;                           /* 清掉正转速度报警值，避免蜂鸣阈值跨手柄残留。 */
+    message->speed_alarm_rev = 0U;                           /* 清掉反转速度报警值，避免蜂鸣阈值跨手柄残留。 */
+    message->freq_alarm_osc = 0U;                            /* 清掉往复频率报警值，避免蜂鸣阈值跨手柄残留。 */
+    message->run_direction = 0U;                             /* 清掉默认方向，下一次上线重新按 Page4/业务规则初始化。 */
 }
 
-static void Handlescan_ClearActiveWorkIfNoOnlineHandle(void)
-{
-    if ((WorkMessage.Channel_Aonline == false) && (WorkMessage.Channel_Bonline == false))
-    {
-        WorkMessage.hand_model = 0U;
-        WorkMessage.tool_type = 0U;
-        WorkMessage.channel_work = 0U;
-    }
-}
-
+/*
+ * 函数功能：清空扫描层的指定通道识别缓存，不直接修改通道记忆和全局工作态。
+ * 输入参数：channel 需要清空的通道号，CHANNEL_A 表示 A 通道，其它值按 B 通道处理。
+ * 返回参数：无。
+ */
 static void Handlescan_ClearChannelState(uint8_t channel)
 {
     if (channel == CHANNEL_A)
     {
-        WorkMessage.Channel_Aonline = false;
-        MemoryMsgA.hand_model = 0U;
-        MemoryMsgA.hand_type_raw_major = 0U;                 /* A 通道拔出后清掉 EEPROM 原始手柄类型高字节，避免心跳误上传旧的 0x6B。 */
-        MemoryMsgA.hand_type_raw_minor = 0U;                 /* A 通道拔出后清掉 EEPROM 原始手柄类型低字节，避免心跳误上传旧的子型号。 */
-        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageA);
+        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageA); /* 扫描层只清 A 通道识别缓存，MemoryMsg/WorkMessage 由插拔事件统一处理。 */
     }
     else
     {
-        WorkMessage.Channel_Bonline = false;
-        MemoryMsgB.hand_model = 0U;
-        MemoryMsgB.hand_type_raw_major = 0U;                 /* B 通道拔出后清掉 EEPROM 原始手柄类型高字节，避免心跳误上传旧的 0x6B。 */
-        MemoryMsgB.hand_type_raw_minor = 0U;                 /* B 通道拔出后清掉 EEPROM 原始手柄类型低字节，避免心跳误上传旧的子型号。 */
-        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageB);
+        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageB); /* 扫描层只清 B 通道识别缓存，实际离线状态由 PlugORunPLUGActive 生效。 */
     }
-
-    Handlescan_ClearActiveWorkIfNoOnlineHandle();
 }
 
 /*
  * 判断报警码是否属于手柄校验链路。
- * EEPROM 最终校验失败使用 WORK_ALARM_HANDLE_MODEL_ERROR，由 handlescan 负责在坏手柄拔出后释放。
+ * EEPROM 最终校验失败按 A/B/AB 区分，由 handlescan 负责在坏手柄拔出后释放。
  */
 static uint8_t Handlescan_IsHandleVerifyAlarm(uint8_t alarm_value)
 {
-    return (uint8_t)(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR); /* 返回 1 表示这是手柄 EEPROM 校验/型号报警，返回 0 表示不是本模块可清的报警。 */
+    return Pubinterface_IsHandleVerifyAlarm(alarm_value) ? 1U : 0U; /* 返回 1 表示这是手柄 EEPROM 校验/型号报警，返回 0 表示不是本模块可清的报警。 */
 }
 
 /*
@@ -549,6 +696,55 @@ static void Handlescan_BeepOnceIfNoAlarm(void)
     {
         SendKeyBeepMessage(1U);                              /* 无报警时给用户一个 100ms 单响，用于提示插入成功或拔出确认。 */
     }
+}
+
+/*
+ * 函数功能：判断当前报警是否要求暂停手柄识别流程。
+ * 输入参数：channel 当前扫描通道，保留用于后续按通道扩展；当前实现只区分报警类型。
+ * 返回参数：1 表示暂停认证/读 EEPROM，0 表示允许继续识别。
+ */
+static uint8_t Handlescan_ShouldDeferRecognition(uint8_t channel)
+{
+    (void)channel;                                           /* 当前暂停策略只看全局报警类型，通道参数用于保持接口语义清晰。 */
+
+    if (WorkMessage.alarm_flag == true)
+    {
+        if (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) != 0U)
+        {
+            return 0U;                                       /* 手柄 EEPROM 报警不阻塞另一通道识别，满足 A 坏 B 仍可识别。 */
+        }
+
+        return 1U;                                           /* 普通系统报警期间不再访问 A/B EEPROM，等待报警解除。 */
+    }
+
+    return 0U;                                               /* 无报警时允许正常插入去抖和 EEPROM 识别。 */
+}
+
+/*
+ * 函数功能：根据通道返回本通道 EEPROM 校验失败报警码。
+ * 输入参数：channel 当前扫描通道。
+ * 返回参数：A/B 通道对应的报警码。
+ */
+static uint8_t Handlescan_GetChannelHandleAlarm(uint8_t channel)
+{
+    return (channel == CHANNEL_A) ? WORK_ALARM_HANDLE_MODEL_ERROR_A : WORK_ALARM_HANDLE_MODEL_ERROR_B; /* A/B 校验失败必须让上位机能分辨来源。 */
+}
+
+/*
+ * 函数功能：在 A/B 两通道都处于校验失败时，把全局报警升级为 AB。
+ * 输入参数：channel_alarm 当前通道报警码；peer_alarm 另一通道仍保持的报警码。
+ * 返回参数：需要写入 WorkMessage 或临时上传的报警码。
+ */
+static uint8_t Handlescan_CombineHandleAlarm(uint8_t channel_alarm, uint8_t peer_alarm)
+{
+    if ((Handlescan_IsHandleVerifyAlarm(channel_alarm) != 0U) &&
+        (Handlescan_IsHandleVerifyAlarm(peer_alarm) != 0U) &&
+        (channel_alarm != peer_alarm))
+    {
+        return WORK_ALARM_HANDLE_MODEL_ERROR_AB;             /* A/B 都坏时上传 AB，避免上位机只能看到最后一个通道。 */
+    }
+
+    return channel_alarm;                                    /* 只有单通道失败时保持 A 或 B 的独立报警码。 */
 }
 
 /*
@@ -590,7 +786,7 @@ static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
         return;                                              /* 非手柄校验报警不是本函数负责的报警，保持原报警状态不变。 */
     }
 
-    if ((WorkMessage.alarm_flag == false) || (WorkMessage.alarm_value != alarm_value))
+    if ((WorkMessage.alarm_flag == false) || (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) == 0U))
     {
         return;                                              /* 全局报警已被其他模块改写或清除，本通道不再覆盖它。 */
     }
@@ -611,8 +807,79 @@ static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_CLEAR, 0U); /* 输出报警清除调试码。 */
 }
 
+/*
+ * 函数功能：判断本次手柄校验失败是否只能作为运行中另一路的临时提示。
+ * 输入参数：channel 当前失败通道；alarm_value 当前失败报警码。
+ * 返回参数：1 表示只响 3 秒并临时弹窗，0 表示写入全局报警。
+ */
+static uint8_t Handlescan_ShouldUseTransientHandleAlarm(uint8_t channel, uint8_t alarm_value)
+{
+    if (Handlescan_IsHandleVerifyAlarm(alarm_value) == 0U)
+    {
+        return 0U;                                           /* 非手柄校验报警仍按原全局报警处理。 */
+    }
+
+    if (WorkMessage.runflag_work == false)
+    {
+        return 0U;                                           /* 非运行状态下坏手柄需要持续报警，直到拔出或恢复。 */
+    }
+
+    if (((WorkMessage.channel_work == CHANNEL_A) && (channel == CHANNEL_B)) ||
+        ((WorkMessage.channel_work == CHANNEL_B) && (channel == CHANNEL_A)))
+    {
+        return 1U;                                           /* 当前通道正在工作时，另一路坏手柄不能影响当前工作。 */
+    }
+
+    return 0U;                                               /* 当前工作通道自身异常仍按全局报警处理。 */
+}
+
+/*
+ * 函数功能：显示一个 3 秒临时手柄校验报警，不写 WorkMessage.alarm_flag。
+ * 输入参数：channel 当前失败通道；alarm_value A/B 手柄校验失败报警码。
+ * 返回参数：无。
+ */
+static void Handlescan_RaiseTransientHandleAlarm(uint8_t channel, uint8_t alarm_value)
+{
+    SendAlarmMessageTimed(alarm_value, HANDLESCAN_TRANSIENT_ALARM_MS); /* 蜂鸣器只响 3 秒，避免覆盖当前工作通道。 */
+    ExternalComm_SendTransientAlarm(alarm_value, HANDLESCAN_TRANSIENT_ALARM_MS); /* 上位机收到非 0 后，3 秒后会收到 0 自动关闭弹窗。 */
+    Screen_TipInfo_Update(alarm_value);                         /* 屏幕显示同一报警码，但不写 WorkMessage，避免阻塞其它操作。 */
+    s_transient_screen_alarm_value = alarm_value;                /* 记录当前临时屏幕报警码，到期后只清本次临时显示。 */
+    s_transient_screen_alarm_ticks = HANDLESCAN_TRANSIENT_SCREEN_TICKS; /* 10ms 扫描周期下保持 3 秒。 */
+    Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, alarm_value); /* 输出临时报警调试码，便于现场确认通道来源。 */
+}
+
+/*
+ * 函数功能：维护临时屏幕报警的 3 秒自动清除。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Handlescan_UpdateTransientScreenAlarm(void)
+{
+    if (s_transient_screen_alarm_ticks == 0U)
+    {
+        return;                                              /* 当前没有临时屏幕报警需要计时。 */
+    }
+
+    --s_transient_screen_alarm_ticks;                         /* 每个 handlescan 周期扣减一次，任务周期为 10ms。 */
+    if (s_transient_screen_alarm_ticks == 0U)
+    {
+        if ((WorkMessage.alarm_flag == false) && (s_transient_screen_alarm_value != 0U))
+        {
+            Screen_TipInfo_Update(0U);                        /* 没有真实全局报警时，3 秒到期后清掉临时弹窗。 */
+        }
+        s_transient_screen_alarm_value = 0U;                  /* 清本次临时报警归属，下一次可重新显示。 */
+    }
+}
+
+/*
+ * 函数功能：把认证通过后读取到的手柄/刀具基础信息写入通道识别缓存。
+ * 输入参数：message 目标通道识别缓存；mapped_model 映射后的手柄类型；raw_type_major/raw_type_minor 为 Page2 原始手柄类型字节；mapped_tool_model 为映射后的刀具类型；diameter_tenth/length_tenth/angle_tenth 为刀具规格原始 0.1 单位值。
+ * 返回参数：无。
+ */
 static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message,
                                               uint8_t mapped_model,
+                                              uint8_t raw_type_major,
+                                              uint8_t raw_type_minor,
                                               uint8_t mapped_tool_model,
                                               uint16_t diameter_tenth,
                                               uint16_t length_tenth,
@@ -624,6 +891,8 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
     }
 
     message->handle_type = mapped_model;
+    message->hand_type_raw_major = raw_type_major;            /* 原始主类型先保存在识别缓存，等待 PlugORunPLUGActive 统一搬到 MemoryMsg。 */
+    message->hand_type_raw_minor = raw_type_minor;            /* 原始子类型先保存在识别缓存，避免扫描任务直接写通道记忆。 */
     message->tool_type = mapped_tool_model;
     message->diameter = Handlescan_TenthToUint8(diameter_tenth);
     message->length = (uint16_t)(length_tenth / 10U);
@@ -632,9 +901,17 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
 
 static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 {
-    WorkAlarm_Set(alarm_value);                              /* 所有手柄扫描报警先统一写入 WorkMessage.alarm_value。 */
-    SendAlarmMessage(alarm_value);                           /* 校验失败和运行中插拔都进入报警蜂鸣，直到对应清除路径发送 0。 */
-    Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, alarm_value);
+    uint8_t report_alarm = alarm_value;                      /* 默认按当前通道报警码上报。 */
+
+    if (Handlescan_IsHandleVerifyAlarm(alarm_value) != 0U)
+    {
+        report_alarm = Handlescan_CombineHandleAlarm(alarm_value,
+                                                     Handlescan_GetPeerActiveHandleAlarm(channel)); /* 另一通道也失败时升级为 AB 报警。 */
+    }
+
+    WorkAlarm_Set(report_alarm);                             /* 所有持续报警统一写入 WorkMessage.alarm_value。 */
+    SendAlarmMessage(report_alarm);                          /* 持续报警蜂鸣直到对应清除路径发送 0。 */
+    Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, report_alarm);
 }
 
 /*
@@ -688,9 +965,17 @@ static void Handlescan_EnterRetryOrFail(uint8_t channel,
 
     if (alarm_value != 0U)
     {
-        if ((Handlescan_IsHandleVerifyAlarm(*last_alarm) == 0U) || (WorkAlarm_Is(alarm_value) == false))
+        if (Handlescan_ShouldUseTransientHandleAlarm(channel, alarm_value) != 0U)
         {
-            *last_alarm = alarm_value;                        /* 第一次达到最终失败时记录报警归属。 */
+            if (*last_alarm != alarm_value)
+            {
+                *last_alarm = alarm_value;                    /* 记录另一路坏手柄归属，但不写 WorkMessage，避免影响当前运行通道。 */
+                Handlescan_RaiseTransientHandleAlarm(channel, alarm_value); /* 第一次最终失败时只提示 3 秒。 */
+            }
+        }
+        else if ((*last_alarm != alarm_value) || (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) == 0U))
+        {
+            *last_alarm = alarm_value;                        /* 第一次达到最终失败或从临时提示转为持续报警时记录报警归属。 */
             Handlescan_RaiseAlarm(channel, *last_alarm);      /* 最终失败才写 WorkMessage.alarm_value 并触发蜂鸣提示。 */
         }
         else
@@ -704,27 +989,10 @@ static void Handlescan_EnterRetryOrFail(uint8_t channel,
 }
 
 /*
- * 判断当前识别出的通道是否应该同步更新 `WorkMessage.hand_model`。
- * 规则尽量保持保守：
- * 1. 如果另一通道当前不在线，则允许当前通道刷新全局工作手柄型号；
- * 2. 如果另一通道也在线，则只有当前通道正好是选中通道时才允许刷新；
- * 3. 这样可以避免双通道同时在线时，后一次扫描把另一通道的工作型号覆盖掉。
- */
-static uint8_t Handlescan_ShouldSyncGlobalHandModel(uint8_t channel)
-{
-    if (channel == CHANNEL_A)
-    {
-        return (uint8_t)((WorkMessage.Channel_Bonline == false) || (WorkMessage.channel_work == CHANNEL_A));
-    }
-
-    return (uint8_t)((WorkMessage.Channel_Aonline == false) || (WorkMessage.channel_work == CHANNEL_B));
-}
-
-/*
  * 把 EEPROM 认证返回码映射为系统报警码。
- * 当前策略：只有 EEPROM 最终校验失败才映射为 WORK_ALARM_HANDLE_MODEL_ERROR。
+ * 当前策略：只有 EEPROM 最终校验失败才按通道映射为 A/B 手柄型号错误。
  */
-static uint8_t Handlescan_MapVerifyStatusToAlarm(AT24CS32_CRC_Status verify_status)
+static uint8_t Handlescan_MapVerifyStatusToAlarm(uint8_t channel, AT24CS32_CRC_Status verify_status)
 {
     switch (verify_status)
     {
@@ -738,7 +1006,7 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(AT24CS32_CRC_Status verify_stat
         case AT24CS32_CRC_STATUS_SN_READ_FAILED:
         case AT24CS32_CRC_STATUS_CRC_MISMATCH:
         default:
-            return WORK_ALARM_HANDLE_MODEL_ERROR;
+            return Handlescan_GetChannelHandleAlarm(channel); /* A/B 通道使用不同报警码，供上位机弹窗直接区分来源。 */
     }
 }
 
@@ -763,12 +1031,14 @@ static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
 }
 
 /*
- * A 通道 SSC 扫描函数。
+ * 函数功能：执行 A 通道手柄插拔去抖、EEPROM 认证和识别缓存更新，认证通过后只发布插拔事件。
+ * 输入参数：无。
+ * 返回参数：无。
  * 设计目标：
  * 1. 仅在插入稳定后做一次认证和一次信息区读取；
  * 2. 认证成功后保持在线，不再重复访问 EEPROM；
  * 3. 认证失败后保持安静，但仍持续监视拔出边沿；
- * 4. 拔出稳定后只输出一次离线报文，并清理 A 通道在线状态。
+ * 4. 拔出稳定后只输出一次离线报文，并清理 A 通道扫描识别缓存。
  */
 void HandlescanA_Fun_SSC(void)
 {
@@ -847,6 +1117,14 @@ void HandlescanA_Fun_SSC(void)
 
     /*
      * 当前已经检测到 A 通道短接成立。
+     * 如果系统存在普通阻塞报警，此时只保持短接状态，不进入 EEPROM 认证。
+     */
+    if (Handlescan_ShouldDeferRecognition(CHANNEL_A) != 0U)
+    {
+        return;                                             /* 普通报警未解除前暂停识别，坏手柄 EEPROM 报警除外。 */
+    }
+
+    /*
      * 如果状态机还在空闲态，则说明这是一次新的插入开始，先进入插入去抖阶段。
      */
     if (s_a_stage == HANDLESCAN_STAGE_IDLE)
@@ -926,7 +1204,7 @@ void HandlescanA_Fun_SSC(void)
                                          &s_a_verify_retry_count,
                                          &s_a_verify_retry_wait_ticks,
                                          &s_a_last_alarm,
-                                         Handlescan_MapVerifyStatusToAlarm(verify_status)); /* 先快速重试，最终失败才报警。 */
+                                         Handlescan_MapVerifyStatusToAlarm(CHANNEL_A, verify_status)); /* 先快速重试，最终失败才按 A 通道报警。 */
             Handlescan_DebugTraceI2cDetail(1U);              /* 输出最近一次底层 I2C 访问细节。 */
             return;                                          /* 本轮不再继续读信息区。 */
         }
@@ -985,6 +1263,21 @@ void HandlescanA_Fun_SSC(void)
             return;                                         /* 本轮停止后续处理。 */
         }
 
+        AT24CS32_ClearLastDebugInfo();                       /* 读取初始值页之前，先把调试缓存切到 Page4 访问。 */
+        read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_initial_info_buf); /* 从 A 通道 EEPROM 读取 Page4 初始值信息区，并校验页尾。 */
+        if (read_status == 0U)
+        {
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 A 通道初始值页读取或页校验失败报文。 */
+            Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                         &s_a_stage,
+                                         &s_a_verify_retry_count,
+                                         &s_a_verify_retry_wait_ticks,
+                                         &s_a_last_alarm,
+                                         0U);                /* 初始值页瞬时读取失败只重试，不立刻锁死手柄。 */
+            return;                                         /* 本轮停止后续处理，等待下一次重新读取完整业务页。 */
+        }
+
         raw_tool_major = s_a_tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出刀具信息区第 1 字节作为刀具主类型。 */
         raw_tool_minor = s_a_tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出刀具信息区第 2 字节作为刀具子类型。 */
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
@@ -1006,28 +1299,22 @@ void HandlescanA_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        MemoryMsgA.hand_model = mapped_model;               /* 把 A 通道记忆的手柄型号同步更新到新接口。 */
-        MemoryMsgA.hand_type_raw_major = raw_type_major;    /* 保存 A 通道 EEPROM 原始手柄类型高字节，供 UART2 心跳直接上传。 */
-        MemoryMsgA.hand_type_raw_minor = raw_type_minor;    /* 保存 A 通道 EEPROM 原始手柄类型低字节，供 UART2 心跳直接上传。 */
         Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageA,
                                           mapped_model,
+                                          raw_type_major,
+                                          raw_type_minor,
                                           mapped_tool_model,
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 A 通道识别结果。 */
-        if (Handlescan_ShouldSyncGlobalHandModel(1U) != 0U)
-        {
-            WorkMessage.hand_model = mapped_model;          /* 只在 A 通道应接管当前工作态时，同步全局工作手柄型号。 */
-            WorkMessage.tool_type = mapped_tool_model;      /* 当前工作通道切到 A 时，同步刀具类型。 */
-            WorkMessage.channel_work = CHANNEL_A;           /* 当前工作通道切到 A。 */
-        }
+        Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
+                                            s_a_initial_info_buf); /* 同步更新 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 A 通道刀具规格缓存。 */
-        WorkMessage.Channel_Aonline = true;                 /* 置位 A 通道在线标志。 */
-        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知新接口事件链：A 通道手柄上线。 */
+        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
         Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
         Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
         s_a_last_alarm = 0U;                                /* 上线成功后清掉最近一次报警缓存。 */
@@ -1066,10 +1353,13 @@ void HandlescanA_Fun_SSC(void)
 
 /*
  * B 通道 SSC 扫描函数。
+ * 函数功能：执行 B 通道手柄插拔去抖、EEPROM 认证和识别缓存更新，认证通过后只发布插拔事件。
+ * 输入参数：无。
+ * 返回参数：无。
  * B 通道沿用与 A 通道一致的状态机流程，但底层资源切换为：
  * 1. 短接检测脚使用 B 通道输入脚；
  * 2. EEPROM 认证和信息区读取使用 I2C3；
- * 3. 在线状态和手柄型号写回到 B 通道全局变量；
+ * 3. 在线状态和手柄型号由 PlugORunPLUGActive 统一写回；
  * 4. 串口报文通道号使用 `CH=02`。
  */
 void HandlescanB_Fun_SSC(void)
@@ -1148,8 +1438,14 @@ void HandlescanB_Fun_SSC(void)
     }
 
     /*
-     * B 通道检测到新的插入开始，进入插入去抖阶段。
+     * B 通道检测到插入后，先判断当前报警是否允许继续识别。
+     * 普通系统报警未解除前不访问 B 通道 EEPROM；手柄校验报警允许另一通道继续识别。
      */
+    if (Handlescan_ShouldDeferRecognition(CHANNEL_B) != 0U)
+    {
+        return;                                             /* 保持当前阶段，等报警解除后继续本通道识别流程。 */
+    }
+    /* 报警允许识别后，如果 B 状态机还在空闲态，则进入插入去抖阶段。 */
     if (s_b_stage == HANDLESCAN_STAGE_IDLE)
     {
         s_handleB_debounce.in_debounce_ticks = 0U;           /* 新一轮 B 通道插入开始时，先清空插入去抖计数。 */
@@ -1227,7 +1523,7 @@ void HandlescanB_Fun_SSC(void)
                                          &s_b_verify_retry_count,
                                          &s_b_verify_retry_wait_ticks,
                                          &s_b_last_alarm,
-                                         Handlescan_MapVerifyStatusToAlarm(verify_status)); /* 先快速重试，最终失败才报警。 */
+                                         Handlescan_MapVerifyStatusToAlarm(CHANNEL_B, verify_status)); /* 先快速重试，最终失败才按 B 通道报警。 */
             Handlescan_DebugTraceI2cDetail(2U);              /* 输出本轮 B 通道失败的 I2C 细节。 */
             return;                                          /* 停止后续信息区读取。 */
         }
@@ -1286,6 +1582,21 @@ void HandlescanB_Fun_SSC(void)
             return;                                         /* 本轮停止后续处理。 */
         }
 
+        AT24CS32_ClearLastDebugInfo();                       /* 读取初始值页之前，先把调试缓存切到 Page4 访问。 */
+        read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_initial_info_buf); /* 从 B 通道 EEPROM 读取 Page4 初始值信息区，并校验页尾。 */
+        if (read_status == 0U)
+        {
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道初始值页读取或页校验失败报文。 */
+            Handlescan_DebugTraceI2cDetail(2U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+            Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                         &s_b_stage,
+                                         &s_b_verify_retry_count,
+                                         &s_b_verify_retry_wait_ticks,
+                                         &s_b_last_alarm,
+                                         0U);                /* 初始值页瞬时读取失败只重试，不立刻锁死手柄。 */
+            return;                                         /* 本轮停止后续处理，等待下一次重新读取完整业务页。 */
+        }
+
         raw_tool_major = s_b_tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出 B 通道刀具主类型。 */
         raw_tool_minor = s_b_tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出 B 通道刀具子类型。 */
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
@@ -1307,28 +1618,22 @@ void HandlescanB_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 取出查表后的系统内部手柄型号值。 */
         mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        MemoryMsgB.hand_model = mapped_model;               /* 更新 B 通道记忆的手柄型号到新接口。 */
-        MemoryMsgB.hand_type_raw_major = raw_type_major;    /* 保存 B 通道 EEPROM 原始手柄类型高字节，供 UART2 心跳直接上传。 */
-        MemoryMsgB.hand_type_raw_minor = raw_type_minor;    /* 保存 B 通道 EEPROM 原始手柄类型低字节，供 UART2 心跳直接上传。 */
         Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageB,
                                           mapped_model,
+                                          raw_type_major,
+                                          raw_type_minor,
                                           mapped_tool_model,
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 B 通道识别结果。 */
-        if (Handlescan_ShouldSyncGlobalHandModel(2U) != 0U)
-        {
-            WorkMessage.hand_model = mapped_model;          /* 只在 B 通道应接管当前工作态时，同步全局工作手柄型号。 */
-            WorkMessage.tool_type = mapped_tool_model;      /* 当前工作通道切到 B 时，同步刀具类型。 */
-            WorkMessage.channel_work = CHANNEL_B;           /* 当前工作通道切到 B。 */
-        }
+        Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
+                                            s_b_initial_info_buf); /* 同步更新 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
                                         mapped_tool_model); /* 按当前 UI 使用的数组格式更新 B 通道刀具规格缓存。 */
-        WorkMessage.Channel_Bonline = true;                 /* 置位 B 通道在线标志。 */
-        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知新接口事件链：B 通道手柄上线。 */
+        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
         Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
         Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
         s_b_last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
@@ -1374,6 +1679,7 @@ void Handlescan_Fun(void)
 {
     HandlescanA_Fun_SSC();
     HandlescanB_Fun_SSC();
+    Handlescan_UpdateTransientScreenAlarm();                 /* 维护运行中另一路坏手柄的 3 秒屏幕临时提示。 */
 }
 
 /* HANDLESCANTask 的任务执行入口 */

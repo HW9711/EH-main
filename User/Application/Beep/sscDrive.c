@@ -81,6 +81,11 @@ void MotorStart()
          ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
+/*
+ * 函数功能：根据当前 WorkMessage 运行态组装电机驱动帧，向 UART1 电机驱动板下发启动或停止命令。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void MOTORRUN(void)
 {
     
@@ -153,6 +158,8 @@ void MOTORRUNTask(uint32_t event)
     (void)event;
     /* 根据 runflag_work、方向、通道、速度和保护电流组帧，向 UART1 电机驱动板下发命令。 */
     MOTORRUN();
+    /* 每个电机输出周期检查 Page4 速度/频率阈值，只触发蜂鸣提示，不强制停止电机输出。 */
+    Pubinterface_CheckSpeedThresholdAlarm();
     /* 每个电机输出周期刷新本地控制权，确保停止命令和驱动反馈都归零后再允许其它模式接管。 */
     ControlArbitration_RefreshMotorOwner();
 }

@@ -462,7 +462,9 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value)
 		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(0x1421,535);//英文HALL值错误
 		break;
-		case WORK_ALARM_HANDLE_MODEL_ERROR:
+		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
+		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
+		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
 		LCD_Show_Picture(0x1421,536);//英文手柄型号错误
 		break;
 	  }

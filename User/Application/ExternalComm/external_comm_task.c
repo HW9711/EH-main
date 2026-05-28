@@ -19,10 +19,8 @@
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE 1U /* UART5 A 泵固定识别开关：1 表示按交付配置识别为注水泵，0 表示使用真实识别结果。 */
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
 #define EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE    INJECTWATER /* 固定识别打开时，UART5 A 泵类型固定成注水泵，PUMPA 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED 30U  /* 固定注水泵且上位机未设置 A 泵速度时，给 UART5 注水泵补一个可转动的默认速度。 */
 #define EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE 1U /* B 泵固定识别开关：1 表示按交付配置识别为注水泵，便于无 CS1237 霍尔识别时保持 B 通道可控。 */
 #define EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE    INJECTWATER /* B 泵固定识别打开时，业务类型固定成注水泵，PUMPB 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED 30U  /* B 泵固定注水泵且上位机未设置 B 泵速度时，补一个可转动的默认速度。 */
 #define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
 #define EXTERNAL_COMM_FRAME_HEAD_SIZE    4U      /* 外部通信帧头固定 4 字节：D7 CA F8 F1。 */
 #define EXTERNAL_COMM_FRAME_LENGTH_OFFSET 5U     /* Length_H 在帧内偏移 5，Length_L 在偏移 6。 */
@@ -75,6 +73,8 @@ static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外
 static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
 static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
+static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄校验失败时临时上传的报警码，不写入 WorkMessage。 */
+static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持时间，递减到 0 后自动上传无报警关闭上位机弹窗。 */
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 手柄运行触发的注水泵冷却跟随请求，手柄停止或急停时清零。 */
 
@@ -163,16 +163,28 @@ static void ExternalComm_SendAlarmInfoIfChanged(void)
     /* alarm_value 是协议 InforArea[0]，0 表示无报警，非 0 表示固件当前 WorkMessage 报警码。 */
     uint8_t alarm_value;
 
-    /* 全局报警标志为 false 时强制上传 0，用于通知上位机关闭已弹出的故障窗口。 */
-    if (WorkMessage.alarm_flag == false)
+    /* 全局报警优先级最高，一旦存在真实系统报警，临时报警必须让位，避免覆盖持续故障。 */
+    if (WorkMessage.alarm_flag == true)
     {
-        /* 无报警时协议报警码固定为 0x00。 */
-        alarm_value = 0U;
+        s_transient_alarm_value = 0U;                 /* 清掉临时报警值，后续只以上报真实报警为准。 */
+        s_transient_alarm_remaining_ms = 0U;          /* 清掉临时报警计时，防止真实报警解除后旧弹窗再次出现。 */
+        alarm_value = WorkMessage.alarm_value;        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机一致。 */
+    }
+    else if (s_transient_alarm_remaining_ms > 0U)
+    {
+        alarm_value = s_transient_alarm_value;        /* 无真实报警但临时报警未超时，继续让上位机显示本次提示。 */
+        if (s_transient_alarm_remaining_ms > EXTERNAL_COMM_TASK_PERIOD_MS)
+        {
+            s_transient_alarm_remaining_ms = (uint16_t)(s_transient_alarm_remaining_ms - EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个通信周期扣减 10ms。 */
+        }
+        else
+        {
+            s_transient_alarm_remaining_ms = 0U;      /* 最后一个周期扣到 0，下个周期会上传 0 关闭弹窗。 */
+        }
     }
     else
     {
-        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机看到同一故障来源。 */
-        alarm_value = WorkMessage.alarm_value;
+        alarm_value = 0U;                             /* 无真实报警且无临时报警时，协议报警码固定为 0。 */
     }
 
     /* 状态未变化时不重复刷报警帧，避免串口日志被同一个报警码持续淹没。 */
@@ -192,6 +204,23 @@ static void ExternalComm_SendAlarmInfoIfChanged(void)
                            EXTERNAL_COMM_RUNNING_INFO_ALARM,
                            &alarm_value,
                            1U);
+}
+
+/*
+ * 函数功能：上传一个不写入 WorkMessage 的限时报警码，用于运行中另一路手柄校验失败提示。
+ * 输入参数：alarm_value 需要上位机显示的报警码；hold_ms 保持时间，单位毫秒。
+ * 返回参数：无。
+ */
+void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms)
+{
+    if ((alarm_value == 0U) || (hold_ms == 0U))
+    {
+        return;                                      /* 空报警或 0 时长没有意义，保持当前通信报警状态不变。 */
+    }
+
+    s_transient_alarm_value = alarm_value;           /* 记录临时报警码，通信任务下一周期会上传给上位机。 */
+    s_transient_alarm_remaining_ms = hold_ms;        /* 记录保持时间，到期后由 ExternalComm_SendAlarmInfoIfChanged 自动发 0。 */
+    s_alarm_report_ready = 0U;                       /* 强制下一周期立即重发，避免同码临时报警被变化检测吞掉。 */
 }
 
 static uint8_t ExternalComm_IsAuthorizedCode(const uint8_t *code, uint16_t code_len)
@@ -339,50 +368,6 @@ static uint8_t ExternalComm_MapNavPageToIndex(uint8_t page_code, uint16_t *page_
     *page_index = (uint16_t)(page_no - 1U);
     /* 导航页码映射成功。 */
     return 1U;
-}
-
-static void ExternalComm_LoadChannelMemory(uint8_t channel)
-{
-    /* memory 指向当前通道保存的 EEPROM/识别结果缓存。 */
-    ChannelMemoryMessagr_t *memory;
-
-    /* A 通道取 MemoryMsgA，B 通道取 MemoryMsgB。 */
-    memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB;
-    /* 同步保护电流。 */
-    WorkMessage.current_work = memory->current_work;
-    /* 同步工具减速比。 */
-    WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio;
-    /* 同步运行方向。 */
-    WorkMessage.dir_work = memory->dir;
-    /* 同步控制模式。 */
-    WorkMessage.drivetype_work = memory->drive_type;
-    /* 同步往复频率。 */
-    WorkMessage.freq_work = memory->freq;
-    /* 同步刨/磨工具类型。 */
-    WorkMessage.tool_type = memory->tool_type;
-    /* 同步手柄模型。 */
-    WorkMessage.hand_model = memory->hand_model;
-    /* 最后切换当前工作通道，后续启动命令会使用这个通道。 */
-    WorkMessage.channel_work = channel;
-
-    /* 正转方向使用该通道保存的正转速度。 */
-    if (WorkMessage.dir_work == ZZDIR)
-    {
-        WorkMessage.speed_set_work = memory->zz_speed;
-    }
-    /* 反转方向使用该通道保存的反转速度。 */
-    else if (WorkMessage.dir_work == FZDIR)
-    {
-        WorkMessage.speed_set_work = memory->fz_speed;
-    }
-    /* 其他方向当前按往复处理，使用往复速度。 */
-    else
-    {
-        WorkMessage.speed_set_work = memory->osc_speed;
-    }
-
-    /* 实际输出速度同步为当前设置速度，避免切换通道后保留旧速度。 */
-    WorkMessage.speed_work = WorkMessage.speed_set_work;
 }
 
 static void ExternalComm_SaveCurrentSpeed(uint16_t speed)
@@ -599,7 +584,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 速度、A 泵速度、B 泵速度按 2 字节大端值解析。 */
+    /* 手柄速度按 WorkMessage.speed_work 的内部 x10 单位解析；A/B 泵速度仍按泵业务流量值解析，三者协议字段都是 2 字节大端。 */
     if ((frame->area_code == 0x01U) || (frame->area_code == 0x03U) || (frame->area_code == 0x04U))
     {
         /* 2 字节参数不足时不能解析。 */
@@ -720,7 +705,7 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
                 return;
             }
             /* 把 A 通道记忆状态装载到当前工作状态。 */
-            ExternalComm_LoadChannelMemory(CHANNEL_A);
+            Pubinterface_LoadChannelMemory(CHANNEL_A);
             break;
         case 0x02U:
             /* 切换到 B 通道前必须确认 B 通道在线。 */
@@ -732,7 +717,7 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
                 return;
             }
             /* 把 B 通道记忆状态装载到当前工作状态。 */
-            ExternalComm_LoadChannelMemory(CHANNEL_B);
+            Pubinterface_LoadChannelMemory(CHANNEL_B);
             break;
         case 0x03U:
             /* 方向切换需要至少 1 字节方向值，并且必须能映射到内部方向。 */
@@ -828,6 +813,11 @@ static uint8_t ExternalComm_EnsureActiveForRun(uint8_t allow_emergency_stop)
     return 1U;
 }
 
+/*
+ * 函数功能：刷新 UART5 A 注水泵最终运行状态，并在速度为 0 时使用当前手柄 Page4 默认流量补初始值。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_RefreshUart5PumpRunState(void)
 {
     /*
@@ -850,7 +840,7 @@ static void ExternalComm_RefreshUart5PumpRunState(void)
 #if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
 		if ((pumpMessageA.type == INJECTWATER) && (pumpMessageA.speed_work == 0U))
 		{
-            pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED; /* 固定注水泵识别时补默认速度，避免已启动但输出仍为 0。 */
+            pumpMessageA.speed_work = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 固定注水泵识别时补当前手柄 Page4 默认流量，避免继续使用程序固定值。 */
         }
 #endif
         pumpMessageA.run_flag = true;         /* 任一来源请求运行时，A 泵最终运行标志置位。 */
@@ -1015,6 +1005,11 @@ static void ExternalComm_StopAllWork(void)
     ControlArbitration_ForceRelease();
 }
 
+/*
+ * 函数功能：按交付配置补齐固定注水泵身份，并在泵速度为 0 时使用当前手柄 Page4 默认流量初始化。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_ApplyFixedPumpIdentity(void)
 {
 #if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
@@ -1022,11 +1017,11 @@ static void ExternalComm_ApplyFixedPumpIdentity(void)
     pumpMessageA.online_flag = true;
     /* 固定识别打开时固定 A 泵为注水泵，PUMPAehaviors() 后续按注水泵方向和公式换算 UART5 驱动数据。 */
     pumpMessageA.type = EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE;
-    /* 如果上位机还没有单独下发 A 泵速度，则补默认速度，避免手柄跟随或单独启动时 UART5 输出仍为 0。 */
+    /* 如果上位机还没有单独下发 A 泵速度，则补当前手柄 Page4 默认流量，避免手柄跟随或单独启动时 UART5 输出仍为 0。 */
     if (pumpMessageA.speed_work == 0U)
     {
-        /* 默认速度只在 0 时写入；已经通过 AreaCode=03 设置过速度时，不覆盖用户下发值。 */
-        pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED;
+        /* 默认流量只在 0 时写入；已经通过 AreaCode=03 设置过速度时，不覆盖用户下发值。 */
+        pumpMessageA.speed_work = Pubinterface_GetCurrentDefaultInjectionFlow();
     }
     /* 清零识别丢失计数，让心跳和后续控制都看到 A 泵处于稳定识别状态。 */
     pumpMessageA.losses_times = 0U;
@@ -1037,11 +1032,11 @@ static void ExternalComm_ApplyFixedPumpIdentity(void)
     pumpMessageB.online_flag = true;
     /* 固定识别打开时固定 B 泵为注水泵，PUMPBBehaviors() 后续按注水泵方向和公式换算输出。 */
     pumpMessageB.type = EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE;
-    /* 如果上位机还没有单独下发 B 泵速度，则补默认速度，避免已启动但输出仍为 0。 */
+    /* 如果上位机还没有单独下发 B 泵速度，则补当前手柄 Page4 默认流量，避免已启动但输出仍为 0。 */
     if (pumpMessageB.speed_work == 0U)
     {
-        /* 默认速度只在 0 时写入；已经通过 AreaCode=04 设置过速度时，不覆盖用户下发值。 */
-        pumpMessageB.speed_work = EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED;
+        /* 默认流量只在 0 时写入；已经通过 AreaCode=04 设置过速度时，不覆盖用户下发值。 */
+        pumpMessageB.speed_work = Pubinterface_GetCurrentDefaultInjectionFlow();
     }
     /* 清零识别丢失计数，让心跳和后续控制都看到 B 泵处于稳定识别状态。 */
     pumpMessageB.losses_times = 0U;
@@ -1696,7 +1691,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
-        /* 当前通道手柄工作速度，2 字节大端。 */
+        /* 当前通道手柄工作速度，单位为 WorkMessage.speed_work 内部 x10，2 字节大端；上位机显示 rpm 时需要除以 10。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
         /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);

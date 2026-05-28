@@ -433,8 +433,9 @@ void Screen_ElectricalMachineryDirectionState_Update(uint8_t Dir1, uint8_t Dir2,
 
 void Screen_TipInfo_Update(uint8_t TipID)
 {
+    /* 10/12/14 分别是 A/B/AB 手柄 EEPROM 校验失败，当前屏幕素材复用同一张手柄型号错误图。 */
     static const uint16_t pic_table[] = {
-        0U, 407U, 403U, 408U, 404U, 406U, 410U, 405U, 409U, 411U, 410U, 411U, 412U, 413U
+        0U, 407U, 403U, 408U, 404U, 406U, 410U, 405U, 409U, 411U, 410U, 411U, 410U, 413U, 410U
     };
 
     if (TipID == 0U)

@@ -59,7 +59,11 @@
 #define WORK_ALARM_UID_ERROR            7U//UID 错误
 #define WORK_ALARM_MOTOR_COMM_ERROR     8U//电机通讯异常
 #define WORK_ALARM_HALL_ERROR           9U//HALL 值错误
-#define WORK_ALARM_HANDLE_MODEL_ERROR   10U//EEprom校验失败，手柄型号错误
+#define WORK_ALARM_HANDLE_MODEL_ERROR_A 10U//A通道EEprom校验失败，手柄型号错误
+#define WORK_ALARM_HANDLE_MODEL_ERROR   WORK_ALARM_HANDLE_MODEL_ERROR_A//兼容旧代码：未区分通道时默认沿用A通道手柄校验报警
+#define WORK_ALARM_SPEED_THRESHOLD      11U//Page4速度/频率阈值蜂鸣报警，只驱动蜂鸣，不强制停机
+#define WORK_ALARM_HANDLE_MODEL_ERROR_B 12U//B通道EEprom校验失败，手柄型号错误
+#define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U//A/B通道EEprom均校验失败，上位机需要显示双通道来源
 
 
 #define PLANER      1U//刨头
@@ -259,6 +263,10 @@ typedef struct {
   volatile uint16_t  dir;///工作方向
   
   volatile uint16_t  current_work;
+  volatile uint16_t  default_injection_flow;//Page4默认注水流量，解析后按泵业务流量保存
+  volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
+  volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
+  volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint32_t  tool_reduction_ratio;//刀具减数比
 }
 ChannelMemoryMessagr_t;
@@ -296,7 +304,13 @@ typedef struct
 	volatile uint16_t  overloadThresholdFor;//过载阀值（正）
 	volatile uint16_t  overloadThresholdRev;//过载阀值（反）
 	volatile uint16_t  overloadThresholdOSC;//过载阀值（往复）
+	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM按0.1保存，解析后按泵业务流量保存
+	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
+	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
+	volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值，只用于蜂鸣阈值
 	volatile uint8_t   handle_type;//手柄类型
+	volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，扫描认证后先暂存在识别结构，后续由PlugORunPLUGActive统一写入MemoryMsg
+	volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，扫描认证后先暂存在识别结构，后续由PlugORunPLUGActive统一写入MemoryMsg
     volatile uint8_t   run_direction;//运行方向
     volatile uint8_t   control_mode;//控制模式
     volatile uint8_t   tool_type;//刀具类型	
@@ -376,6 +390,12 @@ void WorkAlarm_Set(uint8_t alarm_value);
 void WorkAlarm_Clear(void);
 void WorkAlarm_ClearIf(uint8_t alarm_value);
 bool WorkAlarm_Is(uint8_t alarm_value);
+bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
+void Pubinterface_LoadChannelMemory(uint8_t channel);
+uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel);
+uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void);
+uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
+void Pubinterface_CheckSpeedThresholdAlarm(void);
 void ControlTypeActive(uint8_t key_value);
 void PlanerGridH(uint8_t key_value);
  void ChannelrecognizeMessageInit(void);
