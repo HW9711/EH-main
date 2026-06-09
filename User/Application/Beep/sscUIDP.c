@@ -286,8 +286,8 @@ void UIPUMPADP(bool enable_flag,uint8_t pump_type,uint16_t pump_value )
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_GEAR_AREA, UIDP_PumpGearPicture(1U, 0U, UIDP_PUMP_GEAR_RUN_FRAME));//A 泵区域回到 0 档 349
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_UNIT, 220U);//A 泵单位暗态资源，当前导出资源中 220/221 为单位图
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(pump_type, false, false));//A 泵启动按钮暗态/停止图
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 223U);//A 泵加按钮最后重画，避免被 UIDP_LCD_VP_PUMP_A_GEAR_AREA 泵区底图覆盖
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 222U);//A 泵减按钮最后重画，避免刷新后方向被底图残留影响
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 222U);//A 泵加按钮暗态，使用 8 寸屏统一加号失能资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 223U);//A 泵减按钮暗态，使用 8 寸屏统一减号失能资源
 		LCD_Disappear_Number(UIDP_LCD_SP_PUMP_A_VALUE);//流量值
 	}
 	else
@@ -314,8 +314,8 @@ void UIPUMPADP(bool enable_flag,uint8_t pump_type,uint16_t pump_value )
 			break;
 		}
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(pump_type, true, false));//档位图写完后再补画 A 侧停止态按钮，防止按钮区域被泵区刷新盖住
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 225U);//A 泵加按钮最后重画，保持新屏加号方向
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 224U);//A 泵减按钮最后重画，保持新屏减号方向
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 225U);//A 泵加按钮亮态，泵区底图刷新后最后补画避免被覆盖
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 224U);//A 泵减按钮亮态，泵区底图刷新后最后补画避免方向反
 	}
 }
 //B泵区域显示，参数（是否激活，流量值，单位ml或者l）
@@ -339,8 +339,8 @@ if(!enable_flag)//B区域暗灭
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 220U);//B 泵单位暗态资源
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA, UIDP_PumpGearPicture(2U, 0U, UIDP_PUMP_GEAR_RUN_FRAME));//B 泵区域回到 0 档 249
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, false, false));//B 泵启动按钮暗态/停止图
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 498U);//B 泵加按钮使用屏幕导出绑定的 B 区暗态资源，避免资源绑定超出 UIDP_LCD_VP_PUMP_B_PLUS 控件范围后不显示
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 500U);//B 泵减按钮使用屏幕导出绑定的 B 区暗态资源，避免 222/224 只适用于 A 区控件
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 222U);//B 泵加按钮暗态，8 寸屏已改为和 A 泵共用加号失能资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 223U);//B 泵减按钮暗态，8 寸屏已改为和 A 泵共用减号失能资源
 		LCD_Disappear_Number(UIDP_LCD_SP_PUMP_B_VALUE);
 	}
 	else
@@ -369,8 +369,8 @@ if(!enable_flag)//B区域暗灭
 			break;
 		}
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, true, false));//档位图写完后再补画 B 侧停止态按钮，防止按钮区域被泵区刷新盖住
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 499U);//B 泵加按钮使用屏幕导出绑定的 B 区亮态资源，确保触控可用时按钮同步亮起
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 501U);//B 泵减按钮使用屏幕导出绑定的 B 区亮态资源，确保触控可用时按钮同步亮起
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 225U);//B 泵加按钮亮态，8 寸屏使用统一加号使能资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 224U);//B 泵减按钮亮态，8 寸屏使用统一减号使能资源
 	}
 }
 /*
@@ -460,19 +460,19 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 			break;
 			case 2://逆时针
 			if(light_flag == 1U)
-				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,28U);
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,25U);
 			else if(light_flag == 2U)
-				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,26U);
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
 			else
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,27U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,24U);
 			break;
 			case 3://往复
 			if(light_flag == 1U)
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,25U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,28U);
 			else if(light_flag == 2U)
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,23U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
 			else
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,24U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,27U);
 			break;
 		}
 	}
@@ -481,8 +481,8 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 		if(dir_type == 0U)
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD, 20U);
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 23U);
-			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE, 26U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 26U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE, 23U);
 		}
 		else
 		{
@@ -492,10 +492,10 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 				LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,20U);
 				break;
 				case 2://逆时针
-				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,26U);
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
 				break;
 				case 3://往复
-				LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,23U);
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
 				break;
 			}
 		}
@@ -540,7 +540,7 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,110):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,109);//空心钻
 					break;
 					case COMMON_SOCKET_ONLINES:
-					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,105):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,102);//公共接头没有实体键，A 通道先用分体连接图标占位
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,112):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,111);//公共接头 A 通道使用 8 寸屏专用图标
 					break;
 				}
 
@@ -572,7 +572,7 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,140):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,139);//空心钻
 					break;
 					case COMMON_SOCKET_ONLINES:
-					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,135):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,132);//公共接头没有实体键，B 通道先用分体连接图标占位
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,142):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,141);//公共接头 B 通道使用 8 寸屏专用图标
 					break;
 				}
 		}

@@ -68,6 +68,7 @@ static uint8_t Pubinterface_MapHandleModelToUiType(uint8_t handle_model)
 	case EMBA_ONLINES:
 	case EMBB_ONLINES:
 	case EMBD_ONLINES:
+	case EMBC_ONLINES:
 	case JMB_ONLINES:
 		return 1U; /* 耳膜/EMBD/磨钻类按 UI 类别 1 显示，避免直接发送原始型号导致错图。 */
 	case PXBA_ONLINES:
@@ -149,7 +150,9 @@ static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 static bool Pubinterface_IsOscDirectionSupportedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||
-			(hand_model == PXBB_ONLINES)); /* PXBA/PXBB 是带霍尔往复手柄，屏幕三方向按钮按手柄能力开放。 */
+			(hand_model == PXBB_ONLINES) ||
+			(hand_model == PX_YIM_ONLINES) ||
+			(hand_model == PX_YIP_ONLINES)); /* PXBA/PXBB 和 PXM/PXP 一体刨都支持往复，屏幕三方向按钮按手柄能力开放。 */
 }
 
 /*
@@ -279,6 +282,41 @@ static bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
 static bool Pubinterface_IsCommonSocketReservedModel(uint8_t hand_model)
 {
 	return (hand_model == COMMON_SOCKET_ONLINES); /* 公共接头仅用于连接/显示，不占用手柄实体键控制逻辑。 */
+}
+
+/*
+ * 函数功能：判断当前选中的公共接头通道是否已经读取到有效 EPC 刀具头。
+ * 输入参数：无，直接读取 WorkMessage 和当前通道 MemoryMsg。
+ * 返回参数：true 表示非公共接头或公共接头刀具已就绪；false 表示公共接头基座在线但 EPC 刀具未就绪。
+ */
+bool Pubinterface_IsCommonSocketToolReady(void)
+{
+	ChannelMemoryMessagr_t *memory = NULL; /* 当前通道记忆用于复核刀具类型，避免 WorkMessage 切换过程中的短暂字段不一致。 */
+
+	if (WorkMessage.hand_model != COMMON_SOCKET_ONLINES)
+	{
+		return true; /* 非公共接头不受 EPC 刀具头 gate 限制，保持原有启动逻辑。 */
+	}
+
+	if (WorkMessage.channel_work == CHANNEL_A)
+	{
+		memory = &MemoryMsgA; /* A 通道公共接头使用 A 通道记忆判断 EPC 刀具是否已写入。 */
+	}
+	else if (WorkMessage.channel_work == CHANNEL_B)
+	{
+		memory = &MemoryMsgB; /* B 通道公共接头使用 B 通道记忆判断 EPC 刀具是否已写入。 */
+	}
+	else
+	{
+		return false; /* 没有选中通道时不能运行公共接头，避免无归属的启动命令下发到驱动。 */
+	}
+
+	if ((memory == NULL) || (memory->hand_model != COMMON_SOCKET_ONLINES))
+	{
+		return false; /* 通道记忆尚未同步为公共接头时，认为刀具头未就绪，等待插拔事件完成。 */
+	}
+
+	return ((WorkMessage.tool_type != 0U) && (memory->tool_type != 0U)); /* EPC 识别成功后会写入刀具类型；为 0 表示仍在等待标签。 */
 }
 
 /*
@@ -789,6 +827,7 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 	WorkMessage.drivetype_work = memory->drive_type;			  /* 同步控制方式，切换通道后脚控/手控状态来自通道记忆。 */
 	WorkMessage.freq_work = memory->freq;						  /* 同步往复频率，避免 A/B 频率串用。 */
 	WorkMessage.tool_type = memory->tool_type;					  /* 同步刨/磨刀具类型，界面和限速逻辑都读取这里。 */
+	WorkMessage.auto_identify = memory->auto_identify;			  /* 同步当前通道自动识别状态，切通道后 RFID 识别模式不丢失。 */
 	WorkMessage.hand_model = memory->hand_model;				  /* 同步手柄型号，手柄按键扫描依赖当前型号判断。 */
 	WorkMessage.channel_work = channel;						  /* 最后切换当前工作通道，避免中间状态被其它任务读成新通道旧参数。 */
 
@@ -843,6 +882,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层刚刚完成认证的临时识别缓存。 */
 	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向要更新的 A/B 通道记忆结构。 */
+	uint8_t keep_auto_identify = 0U;				  /* RFID 二次刷新前保留通道自动识别状态，避免新刀具参数覆盖该模式记忆。 */
 
 	if (channel == CHANNEL_A)
 	{
@@ -859,6 +899,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 		return;									  /* 非 A/B 通道不写通道记忆，避免破坏当前工作态。 */
 	}
 
+	keep_auto_identify = memory->auto_identify;	  /* 识别缓存只包含刀具/手柄参数，自动识别模式属于通道 UI 记忆，需要单独保留。 */
 	memset(memory, 0, sizeof(*memory));			  /* 新手柄上线前清掉该通道旧 EEPROM 参数，避免旧字段残留参与后续切换。 */
 	memory->hand_model = recognize->handle_type;  /* 保存手柄型号，后续通道切换时再装载到 WorkMessage。 */
 	memory->hand_type_raw_major = recognize->hand_type_raw_major; /* 保存 EEPROM 原始主类型，上位机心跳需要区分真实编码。 */
@@ -875,6 +916,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	memory->fz_speed = recognize->speed_fzdefault;				  /* 保存反转默认速度，只影响本通道记忆。 */
 	memory->osc_speed = recognize->speed_oscdefault;			  /* 保存往复默认速度，只影响本通道记忆。 */
 	memory->tool_type = recognize->tool_type;					  /* 保存刀具类型，切换到该通道后再影响当前工具显示。 */
+	memory->auto_identify = keep_auto_identify;					  /* 恢复自动识别模式记忆，避免 RFID 结果刷新把屏幕选择状态清掉。 */
 
 	if (Pubinterface_IsHandleControlReservedModel(memory->hand_model))
 	{
@@ -1382,6 +1424,14 @@ bool ControlArbitration_TryEnter(uint8_t owner)
 		return false;
 	}
 
+	if (((owner == CONTROL_OWNER_FOOT) ||
+		 (owner == CONTROL_OWNER_HANDLE) ||
+		 (owner == CONTROL_OWNER_SCREEN)) &&
+		(Pubinterface_IsCommonSocketToolReady() == false))
+	{
+		return false; /* 公共接头基座已上线但 EPC 刀具头未识别时，本地脚踏/手柄/屏幕都不能启动电机。 */
+	}
+
 	/* 申请前先清掉已经停稳的本地 owner，保证电机停止后其它本地模式能接管。 */
 	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
 
@@ -1616,6 +1666,27 @@ void HmiExitActive(uint8_t key_value)
 }
 
 /*
+ * 函数功能：触控运行保活超时后只停止电机运行，不退出触控控制界面。
+ * 输入参数：无，直接读取 WorkMessage 当前触控状态。
+ * 返回参数：无。
+ */
+void Pubinterface_StopTouchKeepAliveRun(void)
+{
+	uint8_t data[10] = {0U}; /* UI_TOUCH_ID 使用 Value[0] 表示运行态，0 表示触控仍激活但电机停止。 */
+
+	if ((WorkMessage.touchactive_work != TOUCHWORK) || (WorkMessage.drivetype_work != TOUCHWORK))
+	{
+		return; /* 当前不是本机触控模式时不处理，避免外控或脚踏被保活超时误停。 */
+	}
+
+	WorkMessage.runflag_work = false; /* 保活超时只撤销运行命令，屏幕触控模式保持占用。 */
+	WorkMessage.speed_work = 0U; /* 实际输出速度同步清零，驱动任务下一周期下发停止帧。 */
+	data[0] = 0U; /* 触控界面仍显示，但运行态从黄色运行回到白色待运行。 */
+	SendUIDSMessage(UI_TOUCH_ID, true, data); /* 不发送 enable=false，避免触控界面被隐藏。 */
+	Pubinterface_RefreshControlModeDisplay(); /* 刷新主运行页触控按钮状态，保持触控模式和运行态显示同步。 */
+}
+
+/*
  * 函数功能：处理屏幕/HMI 的控制方式切换与屏幕触控启动、停止动作。
  * 输入参数：key_value 屏幕或 HMI 下发的控制方式按键值。
  * 返回参数：无。
@@ -1676,10 +1747,11 @@ void ControlTypeActive(uint8_t key_value)
 			MemoryMsgA.drive_type = TOUCHWORK; /* A 通道记忆当前触控来源，后续切回 A 时保持显示一致。 */
 		else if (WorkMessage.channel_work == CHANNEL_B)
 			MemoryMsgB.drive_type = TOUCHWORK; /* B 通道记忆当前触控来源，避免切通道后又显示为手控。 */
-		data[0] = 1U; /* 触控键已直接启动，弹窗/触控状态按运行态显示。 */
-		SendUIDSMessage(UI_TOUCH_ID, true, data); /* 通知屏幕触控入口进入运行态，保持按键反馈明确。 */
-		WorkMessage.runflag_work = true; /* 置位电机运行命令，让触控点击可以实际驱动当前手柄转动。 */
-		Pubinterface_RefreshControlModeDisplay(); /* 触控启动后立即刷新控制方式，清掉手控/脚控旧高亮。 */
+		data[0] = 0U; /* 点击触控图标只进入触控模式，不直接启动电机；运行由 0x5520 保活帧维持。 */
+		SendUIDSMessage(UI_TOUCH_ID, true, data); /* 通知屏幕触控入口进入待运行状态，保持触控界面可见。 */
+		WorkMessage.runflag_work = false; /* 未收到保活前保持停机，避免进入触控模式瞬间误启动手柄。 */
+		WorkMessage.speed_work = 0U; /* 进入触控待运行态时实际输出清零，后续保活再恢复设定速度。 */
+		Pubinterface_RefreshControlModeDisplay(); /* 触控模式进入后立即刷新控制方式，清掉手控/脚控旧高亮。 */
 		break;
 	}
 	case SCREENKey_TouchStart: // 启动
@@ -1697,8 +1769,39 @@ void ControlTypeActive(uint8_t key_value)
 			MemoryMsgB.drive_type = TOUCHWORK; /* B 通道触控启动后同步通道记忆，避免切换刷新回退。 */
 		data[0] = 1U; /* 触控启动后切换为运行态图标，提示当前屏幕控制已经生效。 */
 		SendUIDSMessage(UI_TOUCH_ID, true, data); /* 刷新触控弹窗为运行状态。 */
+		if (WorkMessage.speed_set_work == 0U)
+		{
+			WorkMessage.speed_set_work = Pubinterface_GetCurrentDefaultMotorSpeed(); /* 旧触控启动路径没有速度时补当前通道默认速度。 */
+		}
+		WorkMessage.speed_work = WorkMessage.speed_set_work; /* 触控启动后把实际输出恢复到设定速度，保证电机启动帧非零。 */
 		WorkMessage.runflag_work = true; // drive执行
 		Pubinterface_RefreshControlModeDisplay(); /* 兼容旧触控启动路径，也要同步控制方式黄色高亮。 */
+		break;
+	case SCREENKey_TouchKeepAlive:
+		if (Pubinterface_IsCommonSocketToolReady() == false)
+		{
+			Pubinterface_StopTouchKeepAliveRun(); /* 公共接头等待 EPC 刀具头时，保活帧也只能保持停机。 */
+			return;
+		}
+		if (ControlArbitration_TryEnter(CONTROL_OWNER_SCREEN) == false)
+		{
+			return; /* 其它来源占用时忽略本次保活，避免触控抢占脚踏/手柄/外控。 */
+		}
+		WorkMessage.touchactive_work = TOUCHWORK; /* 收到 0x5520 表示触控仍在按压，保持触控占用。 */
+		WorkMessage.drivetype_work = TOUCHWORK; /* 保活期间驱动方式固定为触控，屏幕图标保持触控高亮。 */
+		if (WorkMessage.channel_work == CHANNEL_A)
+			MemoryMsgA.drive_type = TOUCHWORK; /* A 通道保活时同步通道控制方式记忆。 */
+		else if (WorkMessage.channel_work == CHANNEL_B)
+			MemoryMsgB.drive_type = TOUCHWORK; /* B 通道保活时同步通道控制方式记忆。 */
+		if (WorkMessage.speed_set_work == 0U)
+		{
+			WorkMessage.speed_set_work = Pubinterface_GetCurrentDefaultMotorSpeed(); /* 保活启动时若速度未装载，补当前通道默认速度。 */
+		}
+		WorkMessage.speed_work = WorkMessage.speed_set_work; /* 每次保活都恢复目标速度，超时停转后再次按下可立即恢复。 */
+		WorkMessage.runflag_work = true; /* 100ms 保活窗口内持续置位运行命令。 */
+		data[0] = 1U; /* 触控正在运行，屏幕触控图标显示黄色运行态。 */
+		SendUIDSMessage(UI_TOUCH_ID, true, data); /* 保活只刷新运行态，不改变触控界面显隐。 */
+		Pubinterface_RefreshControlModeDisplay(); /* 同步主运行页触控高亮，避免其它刷新把触控误刷白。 */
 		break;
 	case SCREENKey_TouchEXIT: // 停止
 		/* 屏幕触控退出时先停电机，再清触控占用，控制权释放要继续等待驱动反馈归零。 */
@@ -1887,53 +1990,86 @@ void SpeedActive(uint8_t key_value)
  */
 void FreqActive(uint8_t key_value)
 {
-	uint8_t freq_value;
-	uint8_t freq_step = 10;
+	uint8_t freq_value = (uint8_t)WorkMessage.freq_work;
+	uint8_t freq_step = 5U;
+	uint8_t freq_min = FreqMin;
+	uint8_t freq_max = FreqMax;
+	uint8_t display_value[10] = {0U};
 	if ((WorkMessage.alarm_flag == true) ||
 		(Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model) == false))
 	{
 		return; /* 只有当前选中手柄支持往复时才允许调频，避免普通手柄进入无效频率窗口。 */
 	}
+
+	if (WorkMessage.channel_work == CHANNEL_A)
+	{
+		freq_min = (ChannelrecognizeMessageA.freq_min > FreqMin) ? ChannelrecognizeMessageA.freq_min : FreqMin; /* A 通道下限至少为 5Hz。 */
+		freq_max = (ChannelrecognizeMessageA.freq_max != 0U) ? ChannelrecognizeMessageA.freq_max : FreqMax; /* A 通道未给上限时使用工程默认 40Hz。 */
+	}
+	else if (WorkMessage.channel_work == CHANNEL_B)
+	{
+		freq_min = (ChannelrecognizeMessageB.freq_min > FreqMin) ? ChannelrecognizeMessageB.freq_min : FreqMin; /* B 通道下限至少为 5Hz。 */
+		freq_max = (ChannelrecognizeMessageB.freq_max != 0U) ? ChannelrecognizeMessageB.freq_max : FreqMax; /* B 通道未给上限时使用工程默认 40Hz。 */
+	}
+	else
+	{
+		return; /* 未选中 A/B 通道时没有可保存的频率记忆。 */
+	}
+
+	if (freq_max < freq_min)
+	{
+		freq_max = freq_min; /* 识别参数异常时钳到下限，避免后续上下限反向。 */
+	}
+	if (freq_value < freq_min)
+	{
+		freq_value = freq_min; /* 旧记忆低于 5Hz 时先抬到下限，再执行本次按键。 */
+	}
+	else if (freq_value > freq_max)
+	{
+		freq_value = freq_max; /* 旧记忆超过上限时先降到上限，避免加减计算下溢。 */
+	}
+
 	switch (key_value)
 	{
 	case HMIkey_FREQ_Add:
 	case SCREENKey_FREQ_Add:
-		if (WorkMessage.channel_work == CHANNEL_A)
+		if ((uint8_t)(freq_max - freq_value) <= freq_step)
 		{
-			freq_value = WorkMessage.freq_work + freq_step;
-			if (freq_value > ChannelrecognizeMessageA.freq_max)
-				freq_value = ChannelrecognizeMessageA.freq_max;
-			WorkMessage.freq_work = MemoryMsgA.freq = freq_value;
+			freq_value = freq_max; /* 接近上限时直接钳到上限，避免 8 位加法溢出。 */
 		}
-		else if (WorkMessage.channel_work == CHANNEL_B)
+		else
 		{
-			freq_value = WorkMessage.freq_work + freq_step;
-			if (freq_value > ChannelrecognizeMessageB.freq_max)
-				freq_value = ChannelrecognizeMessageB.freq_max;
-			WorkMessage.freq_work = MemoryMsgB.freq = freq_value;
+			freq_value = (uint8_t)(freq_value + freq_step); /* 正常范围内按 5Hz 增加。 */
 		}
-		// 频率加
 		break;
 
 	case HMIkey_FREQ_Sub:
 	case SCREENKey_FREQ_Sub:
-		if (WorkMessage.channel_work == CHANNEL_A)
+		if ((freq_value <= freq_min) || ((uint8_t)(freq_value - freq_min) <= freq_step))
 		{
-			freq_value = WorkMessage.freq_work - freq_step;
-			if (freq_value < ChannelrecognizeMessageA.freq_min)
-				freq_value = ChannelrecognizeMessageA.freq_min;
-			WorkMessage.freq_work = MemoryMsgA.freq = freq_value;
+			freq_value = freq_min; /* 接近下限时直接钳到 5Hz 或通道下限，避免无符号下溢。 */
 		}
-		else if (WorkMessage.channel_work == CHANNEL_B)
+		else
 		{
-			freq_value = WorkMessage.freq_work - freq_step;
-			if (freq_value > ChannelrecognizeMessageB.freq_min)
-				freq_value = ChannelrecognizeMessageB.freq_min;
-			WorkMessage.freq_work = MemoryMsgB.freq = freq_value;
+			freq_value = (uint8_t)(freq_value - freq_step); /* 正常范围内按 5Hz 减少。 */
 		}
-		// 频率减
 		break;
+	default:
+		return; /* 非频率按键不更新记忆和 UI。 */
 	}
+
+	WorkMessage.freq_work = freq_value; /* 写回当前运行态频率。 */
+	if (WorkMessage.channel_work == CHANNEL_A)
+	{
+		MemoryMsgA.freq = freq_value; /* A 通道同步频率记忆。 */
+	}
+	else if (WorkMessage.channel_work == CHANNEL_B)
+	{
+		MemoryMsgB.freq = freq_value; /* B 通道同步频率记忆。 */
+	}
+	display_value[0] = freq_value; /* UI_FREQ_ID Value[0] 传当前频率值。 */
+	display_value[1] = 1U; /* 1 表示按键后只刷新数值，减少整块重绘造成的视觉闪烁。 */
+	SendUIDSMessage(UI_FREQ_ID, true, display_value); /* 频率按键生效后立即刷新屏幕，避免等待下一次整页刷新。 */
 }
 /*
  * 函数功能：处理屏幕、手柄或上位机发起的正转、反转、往复方向切换。
@@ -2111,10 +2247,14 @@ void AutoIdentifyActive(uint8_t key_value)
 
 	if (WorkMessage.channel_work == CHANNEL_A)
 	{
+		WorkMessage.auto_identify = 1U; /* A 通道按下自动识别后，当前工作态记录为 RFID 自动识别模式。 */
+		MemoryMsgA.auto_identify = 1U; /* A 通道记忆同步保存自动识别模式，切换通道后仍可恢复。 */
 		SendKeyRFIDMessageAup(1U); /* A 通道沿用现有读取 USER 区入口，触发刀具自动识别。 */
 	}
 	else if (WorkMessage.channel_work == CHANNEL_B)
 	{
+		WorkMessage.auto_identify = 1U; /* B 通道按下自动识别后，当前工作态记录为 RFID 自动识别模式。 */
+		MemoryMsgB.auto_identify = 1U; /* B 通道记忆同步保存自动识别模式，避免 RFID 结果回来前状态丢失。 */
 		SendKeyRFIDMessageBup(1U); /* B 通道通过独立入口发起一次普通 RFID 读取，同一标签不重复发布刀具变化。 */
 	}
 	else
@@ -2269,26 +2409,24 @@ void ToolPosActive(uint8_t key_value)
 	if (WorkMessage.runflag_work == true || WorkMessage.alarm_flag == true)
 		return;
 
-	if (WorkMessage.hand_model == PXBA_ONLINES || WorkMessage.hand_model == PXBB_ONLINES)
+	if (WorkMessage.tool_type != PLANER)
 	{
-		if ((WorkMessage.tool_reduction_ratio & 0xffffU) == 500U) /* 只比较低 16 位 5 倍减速比，避免运算符优先级把比较结果当掩码。 */
-		{
+		return; /* 开口定位只由刀具类型决定，非 PLANER 刀具不允许发送开口定位动作。 */
+	}
 
-			switch (key_value)
-			{
-			case HMIkey_OpenPos_ClockWise:
-			case SCREENKey_OpenPos_ClockWise:
-				ToolPosMay(WorkMessage.channel_work, 1, 1); // 一度
-				// 逆时针
-				break;
-			case JTKey_middle_short:
-			case HMIkey_OpenPos_AntiClockWise:
-			case SCREENKey_OpenPos_AntiClockWise:
-				ToolPosMay(WorkMessage.channel_work, 2, 1); // 一度
-				// 顺时针
-				break;
-			}
-		}
+	switch (key_value)
+	{
+	case HMIkey_OpenPos_ClockWise:
+	case SCREENKey_OpenPos_ClockWise:
+		ToolPosMay(WorkMessage.channel_work, true, 1U); /* 顺时针开口定位，角度固定 1 度。 */
+		break;
+	case JTKey_middle_short:
+	case HMIkey_OpenPos_AntiClockWise:
+	case SCREENKey_OpenPos_AntiClockWise:
+		ToolPosMay(WorkMessage.channel_work, false, 1U); /* 逆时针开口定位，角度固定 1 度。 */
+		break;
+	default:
+		break; /* 其它按键不触发开口定位，避免误发驱动命令。 */
 	}
 }
 

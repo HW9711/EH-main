@@ -21,6 +21,7 @@
 #define KXZ_II_ONLINES       18U//空心钻二型手柄预留，保留 UI 绑定编号
 #define COMMON_SOCKET_ONLINES 19U//公共接头预留，没有手柄实体键，仅用于识别和屏幕显示
 #define EMBD_ONLINES         20U//EMBD 6万增速手柄，用于 EEPROM 识别和普通电动手柄 UI 显示
+#define EMBC_ONLINES         21U//EMBC 新增普通电动手柄，用于 EEPROM 识别和通用手柄 UI 显示
 
 
 #define CHANNEL_A 1U
@@ -83,7 +84,7 @@
 #define OSCDIR 2U//往复
 
 #define FreqMax 40U//新屏未单独下发频率上限时沿用 4.0Hz 上限
-#define FreqMin 0U//新屏未单独下发频率下限时沿用 0Hz 下限
+#define FreqMin 5U//8寸屏往复频率按 5Hz 起调，避免 0Hz 被显示为可用频率
 
 
 #define JTKey        1U//脚踏调节按键
@@ -194,6 +195,7 @@
 #define SCREENKey_SPEED_Add_Small 66U//新屏速度小幅增加，固定增加 1000
 #define SCREENKey_SPEED_Add_Large 67U//新屏速度大幅增加，固定增加 10000
 #define SCREENKey_AutoIdentify    68U//新屏自动识别刀具按钮，进入 RFID 自动识别入口
+#define SCREENKey_TouchKeepAlive  69U//8寸屏触控运行保活键，持续收到才保持触控运行
 
 
 
@@ -241,6 +243,7 @@ typedef struct
   volatile uint16_t  driver_speed_feedback;//驱动板反馈实际转速，来自 0xAA 回包 byte4~5，保持驱动协议中的“实际转速/10”单位，不覆盖控制目标速度
   volatile uint16_t  driver_current_x100;//驱动板反馈实时电流，来自 0xAA 回包 byte8~9，单位 0.01A，只用于监测上传，不能覆盖 current_work 保护电流
   volatile uint32_t  tool_reduction_ratio;//减速比 高16位表示增速16位表示减速
+  volatile uint8_t   auto_identify;//当前通道是否由屏幕自动识别/RFID 流程触发，切通道时同步记忆
 }
 WorkMessage_t;
 extern WorkMessage_t WorkMessage;//工作信息
@@ -288,6 +291,7 @@ typedef struct {
   volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint32_t  tool_reduction_ratio;//刀具减数比
+  volatile uint8_t   auto_identify;//通道自动识别状态记忆，避免切换通道后丢失 RFID 识别模式
 }
 ChannelMemoryMessagr_t;
 extern ChannelMemoryMessagr_t MemoryMsgA;//通道记忆（增对可调节参数），用于切换手柄
@@ -419,6 +423,8 @@ void WorkAlarm_Clear(void);
 void WorkAlarm_ClearIf(uint8_t alarm_value);
 bool WorkAlarm_Is(uint8_t alarm_value);
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
+bool Pubinterface_IsCommonSocketToolReady(void);
+void Pubinterface_StopTouchKeepAliveRun(void);
 void Pubinterface_LoadChannelMemory(uint8_t channel);
 uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel);
 uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void);
