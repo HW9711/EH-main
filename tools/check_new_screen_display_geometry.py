@@ -5,9 +5,9 @@ from pathlib import Path
 
 
 SCREEN_ROOT = (
-    Path(r"D:\EH_main\soft\Screen_uart\EH-main")
-    / "DL-EX7\u4e2d\u6587 \u704c\u6ce8"
-    / "DL-EX7\u4e2d\u6587 \u704c\u6ce8"
+    Path(r"D:\EH_main\soft\Screen_uart")
+    / "DL-EX8\u4e2d\u6587 \u62bd\u54380609"
+    / "DL-EX8\u4e2d\u6587 \u62bd\u5438"
 )
 DWIN_SET = SCREEN_ROOT / "DWIN_SET"
 SHOW_BIN = DWIN_SET / "14ShowFile.bin"
@@ -86,30 +86,30 @@ def main() -> int:
     touch_data = TOUCH_BIN.read_bytes()
     page4_show = {show_record_vp(record): record for record in show_page_records(show_data, 4)}
 
-    b_add = page4_show.get(0x1423)
-    b_sub = page4_show.get(0x1425)
+    b_add = page4_show.get(0x1422)
+    b_sub = page4_show.get(0x1424)
     external = page4_show.get(0x1416)
 
-    require(b_add is not None, "page4 show file is missing B pump add VP 0x1423.", errors)
-    require(b_sub is not None, "page4 show file is missing B pump sub VP 0x1425.", errors)
+    require(b_add is not None, "page4 show file is missing B pump add VP 0x1422.", errors)
+    require(b_sub is not None, "page4 show file is missing B pump sub VP 0x1424.", errors)
     require(external is not None, "page4 show file is missing external communication VP 0x1416.", errors)
 
     if b_add is not None:
         require(
             show_record_icon_range(b_add) == (498, 499, 498, 499),
-            "B pump add display VP 0x1423 must be bound to icon resources 498/499.",
+            "B pump add display VP 0x1422 must be bound to icon resources 498/499.",
             errors,
         )
     if b_sub is not None:
         require(
             show_record_icon_range(b_sub) == (500, 501, 500, 501),
-            "B pump sub display VP 0x1425 must be bound to icon resources 500/501.",
+            "B pump sub display VP 0x1424 must be bound to icon resources 500/501.",
             errors,
         )
     if external is not None:
         require(
-            show_record_xy(external) == (683, 443),
-            "External communication display VP 0x1416 must be moved to x=683,y=443 to avoid the touch icon.",
+            show_record_xy(external) == (1130, 2),
+            "External communication display VP 0x1416 must stay at x=1130,y=2 to avoid the touch icon.",
             errors,
         )
 
@@ -130,8 +130,8 @@ def main() -> int:
     require(touch_control_touch is not None, "page4 touch file is missing touch-control key 0x2404/key3.", errors)
     if external_touch is not None:
         require(
-            touch_record_rect(external_touch) == (683, 443, 818, 493),
-            "External communication touch key must follow the moved icon rectangle.",
+            touch_record_rect(external_touch) == (1157, 0, 1266, 41),
+            "External communication touch key must follow the top-right EX8 icon rectangle.",
             errors,
         )
     if external_touch is not None and touch_control_touch is not None:

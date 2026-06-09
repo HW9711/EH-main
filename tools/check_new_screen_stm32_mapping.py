@@ -110,7 +110,8 @@ def main() -> int:
     require("case0x03:" in scan and "ScreenKey_PostLegacyAction(10U)" in scan and "ScreenKey_PostLegacyAction(9U)" in scan, "0x2403 频率加减键未映射。", errors)
     require("case0x04:" in scan and "ScreenKey_PostLegacyAction(16U)" in scan and "ScreenKey_PostLegacyAction(43U)" in scan, "0x2404 控制模式/外控键未映射。", errors)
     require("case0x06:" in scan and "ScreenKey_PostLegacyAction(5U)" in scan and "ScreenKey_PostLegacyAction(11U)" in scan, "0x2406 应映射为 B 泵加/减/启停。", errors)
-    require("0x2407" not in screenkey and "0x2408" not in screenkey and "0x2409" not in screenkey, "新屏主运行页不应再依赖旧 0x2407/0x2408/0x2409。", errors)
+    require("case0x07:" in scan and "case0x02:ScreenKey_PostLegacyAction(42U);" in scan, "0x2407/key2 应保留为 8 寸屏触控工作区退出。", errors)
+    require("0x2408" not in screenkey and "0x2409" not in screenkey, "新屏主运行页不应再依赖旧 0x2408/0x2409。", errors)
 
     keybh_screen = compact(function_body(keybh, "SCREENKeyBehanior"))
     require("caseSCREENKey_SPEED_Sub_Large:" in keybh_screen and "caseSCREENKey_SPEED_Add_Large:" in keybh_screen, "sscKEYBH 未把新屏大/小速度键分派给 SpeedActive。", errors)
