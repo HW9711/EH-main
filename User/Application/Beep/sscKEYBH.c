@@ -216,6 +216,7 @@ void SCREENKeyBehanior(uint8_t key_value)
 		case SCREENKey_HandleActi:
 		case SCREENKey_TouchActi:
 		case SCREENKey_TouchStart:
+		case SCREENKey_TouchKeepAlive:
 		case SCREENKey_TouchEXIT:
 		ControlTypeActive(key_value);
 		break;

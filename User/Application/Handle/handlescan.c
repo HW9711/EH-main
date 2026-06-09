@@ -213,7 +213,8 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
     {0x6B, 0x0B, KXZ_I_ONLINES, "KXZ_I"},                 /* 空心钻一型预留，沿用当前扫描状态机。 */
     {0x6B, 0x0C, KXZ_II_ONLINES, "KXZ_II"},               /* 空心钻二型预留，沿用当前扫描状态机。 */
     {0x6B, 0x0D, COMMON_SOCKET_ONLINES, "COMMON_SOCKET"}, /* 公共接头没有实体键，只作为在线类型和 UI 占位。 */
-    {0x6B, 0x0E, EMBD_ONLINES, "EMBD"}                    /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。 */
+    {0x6B, 0x0E, EMBD_ONLINES, "EMBD"},                   /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。 */
+    {0x6B, 0x0F, EMBC_ONLINES, "EMBC"}                    /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。 */
 };
 
 /*
@@ -283,6 +284,7 @@ static uint8_t s_transient_screen_alarm_value = 0U;
 static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value);
 static void Handlescan_ClearToolSpecValues(uint32_t *spec_values);
 static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
+                                           HandlescanToolSource tool_source,
                                            ChannelrecognizeMessage_t *message,
                                            uint32_t *spec_values,
                                            uint8_t mapped_model,
@@ -696,6 +698,7 @@ static void Handlescan_PrepareRfidBaseRecognizeMessage(ChannelrecognizeMessage_t
  * 返回参数：无。
  */
 static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
+                                           HandlescanToolSource tool_source,
                                            ChannelrecognizeMessage_t *message,
                                            uint32_t *spec_values,
                                            uint8_t mapped_model,
@@ -722,20 +725,26 @@ static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
         return; /* 已经离线时不重复清 MemoryMsg、不重复发插拔事件，也不重复蜂鸣。 */
     }
 
-    Handlescan_PrepareRfidBaseRecognizeMessage(message,
-                                               mapped_model,
-                                               raw_type_major,
-                                               raw_type_minor); /* 保留基座字段，清掉刀具字段，让上位机显示等待 RFID 刀具头。 */
-    Handlescan_ClearToolSpecValues(spec_values); /* 清掉屏幕刀具规格缓存，避免刀具头移开后屏幕继续显示旧规格。 */
-    Rfid_ClearChannelResult(channel); /* 清掉 RFID 缓存，下一次相同型号刀具头重新读到时也会被当成状态变化。 */
-    Pubinterface_ClearRfidToolMemory(channel); /* 同步清通道记忆和当前工作刀具字段，避免插拔事件排队期间上位机心跳继续发送旧刀具信息。 */
+    if (tool_source == HANDLESCAN_TOOL_SOURCE_RFID_EPC)
+    {
+        Handlescan_PrepareRfidBaseRecognizeMessage(message,
+                                                   mapped_model,
+                                                   raw_type_major,
+                                                   raw_type_minor); /* 公共接头离线必须清刀具字段，让运行 gate 重新等待 EPC 刀具头。 */
+        Handlescan_ClearToolSpecValues(spec_values); /* 公共接头刀具头移开后清屏幕规格，避免继续显示旧刀具。 */
+        Rfid_ClearChannelResult(channel); /* 只清 EPC 公共接头缓存，下一次刀具头上线必须重新解析。 */
+        Pubinterface_ClearRfidToolMemory(channel); /* 公共接头无刀具头时同步清通道记忆，保证上位机心跳不再带旧刀具。 */
+        SendKeyBehMessage(PLUGunPLUG, plug_key); /* 公共接头复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
+    }
     *tool_online = 0U; /* 先把边沿状态切到离线，后续周期继续读不到标签时不会再次进入离线提示。 */
     Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头离线确认时单响一次，让使用者知道刀具头已移开。 */
-    *last_sequence = 0U; /* 刀具头已被清除，后续读到任意有效标签都需要重新消费。 */
-    *last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 继续挡住下一次上线。 */
+    if (tool_source == HANDLESCAN_TOOL_SOURCE_RFID_EPC)
+    {
+        *last_sequence = 0U; /* EPC 公共接头刀具头已被清除，后续读到任意有效标签都需要重新消费。 */
+        *last_presence_sequence = 0U; /* EPC 公共接头清掉存在序号，避免旧 presence 继续挡住下一次上线。 */
+    }
     *miss_count = 0U; /* 清掉缺失次数，当前这次状态变化已经处理完成。 */
     *monitor_pending = 0U; /* 清掉未完成监测标志，等待下一轮 1 秒周期重新读取。 */
-    SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳，但不把基座置离线。 */
 }
 
 /*
@@ -964,6 +973,7 @@ static void Handlescan_ProcessOnlineRfidResult(uint8_t channel,
     if (*miss_count >= HANDLESCAN_RFID_MISS_MAX)
     {
         Handlescan_ClearOnlineRfidTool(channel,
+                                       tool_source,
                                        message,
                                        spec_values,
                                        mapped_model,

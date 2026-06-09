@@ -14,6 +14,10 @@ kernel_task_t SCREENKEYTaskHandle;
 
 /* 启动页和脚踏定标页仍沿用少量旧按键编码，这里只保存一次性事件，不再回写 旧全局键值。 */
 static uint8_t s_screenkey_legacy_event = KEY_NONE;
+/* 触控保活超时按 4 个 30ms 扫描周期处理，屏幕停止发送 0x5520 后约 100ms 停止电机输出。 */
+#define SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS 4U
+/* 触控保活计数器只在触控模式下递增，收到 0x5520 后清零，避免触控按钮松开后电机继续运行。 */
+static uint8_t s_touch_keepalive_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS;
 
 void ScreenKey_LegacyEventPost(uint8_t key_value)
 {
@@ -32,6 +36,40 @@ uint8_t ScreenKey_LegacyEventTake(void)
   s_screenkey_legacy_event = KEY_NONE;
 
   return key_value;
+}
+
+/*
+ * 函数功能：复位 8 寸屏触控保活计数。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ScreenKey_ResetTouchKeepAlive(void)
+{
+  s_touch_keepalive_ticks = 0U; /* 收到 0x5520 保活帧时从 0 重新计数，保证按压期间电机持续运行。 */
+}
+
+/*
+ * 函数功能：周期检查 8 寸屏触控保活是否超时。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ScreenKey_ServiceTouchKeepAlive(void)
+{
+  if ((WorkMessage.drivetype_work != TOUCHWORK) || (WorkMessage.touchactive_work != TOUCHWORK))
+  {
+    s_touch_keepalive_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS; /* 非触控模式不累计超时，避免脚踏/手控被误停。 */
+    return;
+  }
+
+  if (s_touch_keepalive_ticks < SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS)
+  {
+    s_touch_keepalive_ticks++; /* 30ms 任务每跑一次累计一次，连续未收到 0x5520 才判定松手。 */
+  }
+
+  if (s_touch_keepalive_ticks >= SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS)
+  {
+    Pubinterface_StopTouchKeepAliveRun(); /* 超时只停电机输出，不退出触控模式，屏幕仍保持触控入口状态。 */
+  }
 }
 
 /*
@@ -169,6 +207,10 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
       screen_key = SCREENKey_HMI_EXIT;
       break;
 
+    case 44U: /* ScreenKey_TouchKeepAlive：脚本验收标记，实际业务宏名保持 SCREENKey_TouchKeepAlive。 */
+      screen_key = SCREENKey_TouchKeepAlive; /* 8 寸屏 0x5520 触控按住保活，持续收到才允许触控运行。 */
+      break;
+
     case 30U:
       screen_key = SCREENKey_SPEED_Sub_Large; /* 新屏速度左侧大减键，固定减少 10000。 */
       break;
@@ -199,7 +241,19 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
 
   if (screen_key != 0U)
   {
-    SendKeyBeepMessage(1U); /* 屏幕有效触控已被主控解析，先给 100ms 单响反馈，再交给业务队列执行。 */
+    uint8_t beep_enable = 1U; /* 默认所有有效触控按键响一声，给操作者明确反馈。 */
+    if (screen_key == SCREENKey_TouchKeepAlive)
+    {
+      if (s_touch_keepalive_ticks < SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS)
+      {
+        beep_enable = 0U; /* 0x5520 连续保活帧不重复蜂鸣，只在刚按下或超时后重新按下时响一次。 */
+      }
+      ScreenKey_ResetTouchKeepAlive(); /* 保活帧进入业务队列前先清本地超时计数，防止队列调度延迟造成误停。 */
+    }
+    if (beep_enable != 0U)
+    {
+      SendKeyBeepMessage(1U); /* 屏幕有效触控已被主控解析，先给 100ms 单响反馈，再交给业务队列执行。 */
+    }
     SendKeyBehMessage(SCREENKey, screen_key);
   }
 }
@@ -328,6 +382,14 @@ void ScreenKey_Scan(void)
 										default : break;
 									}
 							}break;
+            case 0x07 ://  触控工作区：key2 为触控退出
+						{
+							switch (dat1[8])
+							{
+								case 0x02 : ScreenKey_PostLegacyAction(42U); break;  //触控退出，释放屏幕控制
+								default : break;
+							}
+						}break;
             case 0x20 ://  定标按键
 						{ 
 							switch (dat1[8])
@@ -393,6 +455,7 @@ void ScreenKey_Scan(void)
 				 switch (dat1[5])
 					{
 						 case 0x10 : ScreenKey_PostLegacyAction(41U); break;  //触控启动
+						case 0x20 : ScreenKey_PostLegacyAction(44U); break;  //触控保活，按住期间持续运行
 						case 0x30 : ScreenKey_PostLegacyAction(42U); break;  //触控停止
 					}
 					break;
@@ -426,6 +489,7 @@ void SCREENKEYTaskFunc(uint32_t event)
   /* Infinite loop */
 	
   ScreenKey_Scan();
+  ScreenKey_ServiceTouchKeepAlive();
   /* USER CODE END SCREENKEYTaskFunc */
 }
 
