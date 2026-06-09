@@ -116,29 +116,29 @@ def main() -> int:
     require("LCD_Show_Picture(0x1415,483)" not in normalize(b_pump) and "LCD_Show_Picture(0x1415,383)" not in normalize(b_pump),
             "right B pump title must not use old 0x1415 resources after new-screen export.",
             errors)
-    require("LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(DRAWWATER,true))" in a_draw_norm and
-            "LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(POURWATER,true))" in a_pour_norm and
-            "LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(INJECTWATER,true))" in a_inject_norm,
-            "left A pump title must use new-screen 0x1417 type resource.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(DRAWWATER,true))" in a_draw_norm and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(POURWATER,true))" in a_pour_norm and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(INJECTWATER,true))" in a_inject_norm,
+            "left A pump title must use EX8 0x1417 type macro.",
             errors)
-    require("LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(DRAWWATER,true))" in b_draw_norm and
-            "LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(POURWATER,true))" in b_pour_norm and
-            "LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(INJECTWATER,true))" in b_inject_norm,
-            "right B pump title must use new-screen 0x1418 type resource.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(DRAWWATER,true))" in b_draw_norm and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(POURWATER,true))" in b_pour_norm and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(INJECTWATER,true))" in b_inject_norm,
+            "right B pump title must use EX8 0x1418 type macro.",
             errors)
     a_button = normalize(function_body(uidp, "UIPUMPABUTTONDP"))
     b_button = normalize(function_body(uidp, "UIPUMPBBUTTONDP"))
-    require("LCD_Show_Picture(0x1606U,UIDP_PumpButtonPicture(button_type,true,run_flag))" in a_button and
-            "LCD_Show_Picture(0x1606U,UIDP_PumpButtonPicture(button_type,false,false))" in a_button and
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(button_type,true,run_flag))" in a_button and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(button_type,false,false))" in a_button and
             "LCD_Show_Picture(0x1606,485)" not in a_button and
             "LCD_Show_Picture(0x1606,486)" not in a_button,
-            "left A pump button must use new-screen 0x1606 with 200-205 resources.",
+            "left A pump button must use EX8 0x1427 macro with 200-205 resources.",
             errors)
-    require("LCD_Show_Picture(0x1422U,UIDP_PumpButtonPicture(button_type,true,run_flag))" in b_button and
-            "LCD_Show_Picture(0x1422U,UIDP_PumpButtonPicture(button_type,false,false))" in b_button and
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture(button_type,true,run_flag))" in b_button and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture(button_type,false,false))" in b_button and
             "LCD_Show_Picture(0x1420,385)" not in b_button and
             "LCD_Show_Picture(0x1420,386)" not in b_button,
-            "right B pump button must use new-screen 0x1422 with 200-205 resources.",
+            "right B pump button must use EX8 0x1428 macro with 200-205 resources.",
             errors)
 
     if errors:

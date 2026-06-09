@@ -111,10 +111,10 @@ def main() -> None:
     uidp_control_body = function_body(uidp_text, "UICONTROLDP")
     require(
         "control_type == 0U" in uidp_control_body
-        and "LCD_Show_Picture(0x1413U, 30U)" in uidp_control_body
-        and "LCD_Show_Picture(0x1414U, 34U)" in uidp_control_body
-        and "LCD_Show_Picture(0x1415U, 37U)" in uidp_control_body
-        and "LCD_Disappear_Picture(0x1416U)" in uidp_control_body,
+        and "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT, 30U)" in uidp_control_body
+        and "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE, 34U)" in uidp_control_body
+        and "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 37U)" in uidp_control_body
+        and "LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL)" in uidp_control_body,
         "UICONTROLDP(false, 0, 0) must draw handle/touch white and hide external comm",
     )
 
@@ -123,9 +123,9 @@ def main() -> None:
         "uint8_t light_flag" in uidp_text
         and "light_flag == 2U" in uidp_dir_body
         and "dir_type == 0U" in uidp_dir_body
-        and "LCD_Show_Picture(0x1410U, 20U)" in uidp_dir_body
-        and "LCD_Show_Picture(0x1411U, 23U)" in uidp_dir_body
-        and "LCD_Show_Picture(0x1412U, 26U)" in uidp_dir_body,
+        and "LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD, 20U)" in uidp_dir_body
+        and "LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 26U)" in uidp_dir_body
+        and "LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE, 23U)" in uidp_dir_body,
         "UIDIRDP must support disabled direction icons and light_flag 2 dark state",
     )
 

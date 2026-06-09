@@ -43,10 +43,17 @@ static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
     return (uint8_t)freq_work; /* 参考驱动接收端会再执行 `R_DATA[2] * 2`，主控这里保持原始命令值，不再提前翻倍。 */
 }
 
-static uint8_t MotorDrive_IsBrushedTool(uint8_t tool_type)
+/*
+ * 函数功能：判断当前通道是否需要按有刷一体刨/一体磨协议下发驱动帧。
+ * 输入参数：hand_model 为 EEPROM 第二页识别出的手柄型号；tool_type 为当前刀具类型或一体刨型号值。
+ * 返回参数：1 表示按有刷电机通道下发；0 表示按无刷/霍尔通道下发。
+ */
+static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type)
 {
-    return (uint8_t)((tool_type == PX_YIP_ONLINES) ||
-                     (tool_type == PX_YIM_ONLINES)); /* PX 一体刨/一体磨属于有刷刀具，必须用刀具类型判断，不能误用手柄型号。 */
+    return (uint8_t)((hand_model == PX_YIP_ONLINES) ||
+                     (hand_model == PX_YIM_ONLINES) ||
+                     (tool_type == PX_YIP_ONLINES) ||
+                     (tool_type == PX_YIM_ONLINES)); /* PXM/PXP 既可能来自 Page2 手柄型号，也可能来自 Page3 刀具型号，两路都按有刷处理。 */
 }
 
 static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
@@ -111,7 +118,7 @@ void MOTORRUN(void)
         }
         if(WorkMessage.channel_work==1)//通道1
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type) == 0U)
             {
                 msg.motor_type=0x01;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
@@ -124,7 +131,7 @@ void MOTORRUN(void)
         }
         else if(WorkMessage.channel_work==2)//通道2
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type) == 0U)
             {
                 msg.motor_type=0x02;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);

@@ -74,8 +74,8 @@ def main() -> int:
     require("LCD_ForceShow_Which_Map" in lcd_h, "lcd.h must expose a forced page-switch API.", errors)
     require("LCD_ForceShow_Which_Map" in lcd_c, "lcd.c must implement a forced page-switch API.", errors)
     require(
-        "LCD_ForceShow_Which_Map(4);" in uidp_body_c,
-        "UI_POWERINIT_ID must force page4 instead of relying on cached LCD_Show_Which_Map(0).",
+        "LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);" in uidp_body_c,
+        "UI_POWERINIT_ID must force UIDP_LCD_PAGE_MAIN_RUN instead of relying on cached LCD_Show_Which_Map(0).",
         errors,
     )
     require(
@@ -90,8 +90,8 @@ def main() -> int:
         errors,
     )
     require(
-        "LCD_Disappear_Picture(0x1417U)" in lcd_c + uidp_c
-        and "LCD_Disappear_Picture(0x1418U)" in lcd_c + uidp_c,
+        "LCD_Disappear_Picture(UIDP_LCD_VP_PUMP_A_TYPE)" in lcd_c + uidp_c
+        and "LCD_Disappear_Picture(UIDP_LCD_VP_PUMP_B_TYPE)" in lcd_c + uidp_c,
         "Unknown pump type must hide A/B type icons instead of falling back to draw-water.",
         errors,
     )

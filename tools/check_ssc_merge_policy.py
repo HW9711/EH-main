@@ -55,7 +55,7 @@ def main():
             "case UI_TOUCH_ID:",
             "UITOUCHDP(msg.enable_flag",
             "case UI_POWERINIT_ID:",
-            "LCD_Show_Which_Map(4)",
+            "LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN)",
         ],
         errors,
     )

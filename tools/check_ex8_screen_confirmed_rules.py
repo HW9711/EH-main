@@ -137,8 +137,8 @@ def main() -> int:
     require("hand_model==PX_YIM_ONLINES" in osc_support and "hand_model==PX_YIP_ONLINES" in osc_support,
             "PXM/PXP one-piece planer handles must support OSC direction", errors)
     toolpos = compact(function_body(pub_c, "ToolPosActive"))
-    require("(WorkMessage.tool_type!=PLANER)" in toolpos or "WorkMessage.tool_type==PLANER" in toolpos,
-            "ToolPosActive must gate by PLANER tool_type", errors)
+    require("Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type)==false" in toolpos,
+            "ToolPosActive must gate by PLANER/PXM/PXP tool capability", errors)
     require("tool_reduction_ratio" not in toolpos and "500U" not in toolpos,
             "ToolPosActive must not keep low16 reduction-ratio 500 gate", errors)
     require("ToolPosMay(WorkMessage.channel_work,true,1U)" in toolpos and

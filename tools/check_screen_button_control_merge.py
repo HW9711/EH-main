@@ -73,16 +73,18 @@ def main() -> int:
 
     direction = function_body(pub, "DirActive")
     osc_case = case_body(direction, "case HANDLEKey_dir_OSC:", ("break;",))
-    require("Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model) == false" in osc_case and "return;" in osc_case,
-            "OSC direction must be rejected when the selected handle model does not support reciprocation.",
+    require("Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type) == false" in osc_case and "return;" in osc_case,
+            "OSC direction must be rejected when the selected handle/tool capability does not support reciprocation.",
             errors)
     require("Pubinterface_RefreshSelectedChannelDisplay(WorkMessage.channel_work);" in direction,
             "direction switching must refresh selected direction/speed UI after changing state.",
             errors)
 
     tool_pos = function_body(pub, "ToolPosActive")
-    require("(WorkMessage.tool_reduction_ratio & 0xffffU) == 500U" in tool_pos,
-            "open-position reduction-ratio test must mask the low 16 bits before comparing.",
+    require("Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type) == false" in tool_pos and
+            "tool_reduction_ratio" not in tool_pos and
+            "500U" not in tool_pos,
+            "open-position must be gated by PLANER/PXM/PXP tool capability and must not use the old low16 reduction-ratio 500 condition.",
             errors)
 
     require("void Pubinterface_RefreshPumpADisplay(void)" in pub and

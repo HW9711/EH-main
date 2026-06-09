@@ -75,17 +75,17 @@ def main() -> int:
 
     a_button = normalize(function_body(uidp, "UIPUMPABUTTONDP"))
     b_button = normalize(function_body(uidp, "UIPUMPBBUTTONDP"))
-    require("LCD_Show_Picture(0x1606U,UIDP_PumpButtonPicture(button_type,true,run_flag))" in a_button and
-            "LCD_Show_Picture(0x1606U,UIDP_PumpButtonPicture(button_type,false,false))" in a_button,
-            "A pump button must use new-screen VP 0x1606 and shared 200-205 resources.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(button_type,true,run_flag))" in a_button and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(button_type,false,false))" in a_button,
+            "A pump button must use EX8 VP 0x1427 macro and shared 200-205 resources.",
             errors)
     require("LCD_Show_Picture(0x1606,486)" not in a_button and
             "LCD_Show_Picture(0x1606,485)" not in a_button,
             "A pump button must not keep old 48x resources after new-screen export.",
             errors)
-    require("LCD_Show_Picture(0x1422U,UIDP_PumpButtonPicture(button_type,true,run_flag))" in b_button and
-            "LCD_Show_Picture(0x1422U,UIDP_PumpButtonPicture(button_type,false,false))" in b_button,
-            "B pump button must use new-screen VP 0x1422 and shared 200-205 resources.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture(button_type,true,run_flag))" in b_button and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture(button_type,false,false))" in b_button,
+            "B pump button must use EX8 VP 0x1428 macro and shared 200-205 resources.",
             errors)
     require("LCD_Show_Picture(0x1420,386)" not in b_button and
             "LCD_Show_Picture(0x1420,385)" not in b_button,
@@ -94,10 +94,10 @@ def main() -> int:
 
     a_pump = function_body(uidp, "UIPUMPADP")
     b_pump = function_body(uidp, "UIPUMPBDP")
-    require("LCD_Show_Picture(0x1606U,UIDP_PumpButtonPicture(pump_type,true,false))" in normalize(a_pump),
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(pump_type,true,false))" in normalize(a_pump),
             "A pump region refresh must draw the new-screen A stopped button as a fallback before the separate button-state message.",
             errors)
-    require("LCD_Show_Picture(0x1422U,UIDP_PumpButtonPicture(pump_type,true,false))" in normalize(b_pump),
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture(pump_type,true,false))" in normalize(b_pump),
             "B pump region refresh must draw the new-screen B stopped button as a fallback before the separate button-state message.",
             errors)
     a_draw = case_body(a_pump, "case DRAWWATER:", ("case POURWATER:",))
@@ -110,21 +110,21 @@ def main() -> int:
             errors)
     b_pour = case_body(b_pump, "case POURWATER:", ("case INJECTWATER:",))
     b_inject = case_body_to_end(b_pump, "case INJECTWATER:")
-    require("0x1418U" in b_pour and "0x1427U" in b_pour and "0x1601" not in b_pour and "0x1605" not in b_pour,
+    require("UIDP_LCD_VP_PUMP_B_TYPE" in b_pour and "0x1601" not in b_pour and "0x1605" not in b_pour,
             "B pump POURWATER display must use new B-side coordinates, not old A-side coordinates.",
             errors)
-    require("0x1418U" in b_inject and "0x1427U" in b_inject and "0x1601" not in b_inject and "0x1605" not in b_inject,
+    require("UIDP_LCD_VP_PUMP_B_TYPE" in b_inject and "UIDP_LCD_VP_PUMP_B_BUTTON" in b_inject and "0x1601" not in b_inject and "0x1605" not in b_inject,
             "B pump INJECTWATER display must use new B-side coordinates, not old A-side coordinates.",
             errors)
-    require("LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(DRAWWATER,true))" in normalize(a_draw) and
-            "LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(POURWATER,true))" in normalize(case_body(a_pump, "case POURWATER:", ("case INJECTWATER:",))) and
-            "LCD_Show_Picture(0x1417U,UIDP_PumpTypePicture(INJECTWATER,true))" in normalize(case_body_to_end(a_pump, "case INJECTWATER:")),
-            "A pump title must use new-screen VP 0x1417 and type resources 210-215.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(DRAWWATER,true))" in normalize(a_draw) and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(POURWATER,true))" in normalize(case_body(a_pump, "case POURWATER:", ("case INJECTWATER:",))) and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE,UIDP_PumpTypePicture(INJECTWATER,true))" in normalize(case_body_to_end(a_pump, "case INJECTWATER:")),
+            "A pump title must use EX8 VP 0x1417 macro and type resources 210-215.",
             errors)
-    require("LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(DRAWWATER,true))" in normalize(b_draw) and
-            "LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(POURWATER,true))" in normalize(b_pour) and
-            "LCD_Show_Picture(0x1418U,UIDP_PumpTypePicture(INJECTWATER,true))" in normalize(b_inject),
-            "B pump title must use new-screen VP 0x1418 and type resources 210-215.",
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(DRAWWATER,true))" in normalize(b_draw) and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(POURWATER,true))" in normalize(b_pour) and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE,UIDP_PumpTypePicture(INJECTWATER,true))" in normalize(b_inject),
+            "B pump title must use EX8 VP 0x1418 macro and type resources 210-215.",
             errors)
 
     require("void Pubinterface_RefreshPumpADisplay(void);" in pub_h and

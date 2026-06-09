@@ -90,22 +90,26 @@ def main() -> int:
     require("caseDRAWWATER:returnenable_flag?214U:215U;" in pump_type_picture,
             "DRAWWATER must map to 214 yellow and 215 gray after the new pump-title export.", errors)
 
-    require("LCD_Show_Picture(0x1423U,498U)" in pump_b and "LCD_Show_Picture(0x1425U,500U)" in pump_b,
-            "B pump disabled +/- icons must match current screen export: 0x1423=498 and 0x1425=500.", errors)
-    require("LCD_Show_Picture(0x1423U,499U)" in pump_b and "LCD_Show_Picture(0x1425U,501U)" in pump_b,
-            "B pump enabled +/- icons must match current screen export: 0x1423=499 and 0x1425=501.", errors)
-    require("LCD_Show_Picture(0x1421U,223U)" in pump_a and "LCD_Show_Picture(0x1424U,222U)" in pump_a,
-            "A 泵暗态加/减按钮应写 0x1421=223、0x1424=222，避免刷新后方向反。", errors)
-    require("LCD_Show_Picture(0x1421U,225U)" in pump_a and "LCD_Show_Picture(0x1424U,224U)" in pump_a,
-            "A 泵亮态加/减按钮应写 0x1421=225、0x1424=224，避免刷新后方向反。", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,222U)" in pump_b and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,223U)" in pump_b,
+            "B pump disabled +/- icons must match EX8 export: 0x1422=222 plus-disabled and 0x1424=223 minus-disabled.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,225U)" in pump_b and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,224U)" in pump_b,
+            "B pump enabled +/- icons must match EX8 export: 0x1422=225 plus-enabled and 0x1424=224 minus-enabled.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS,222U)" in pump_a and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,223U)" in pump_a,
+            "A pump disabled +/- icons must match EX8 export: 0x1421=222 plus-disabled and 0x1423=223 minus-disabled.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS,225U)" in pump_a and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,224U)" in pump_a,
+            "A pump enabled +/- icons must match EX8 export: 0x1421=225 plus-enabled and 0x1423=224 minus-enabled.", errors)
 
-    require(pump_a.find("LCD_Show_Picture(0x1419U,UIDP_PumpGearPicture(1U,0U,UIDP_PUMP_GEAR_RUN_FRAME))") <
-            pump_a.find("LCD_Show_Picture(0x1421U,223U)") <
-            pump_a.find("LCD_Show_Picture(0x1424U,222U)"),
+    require(pump_a.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_GEAR_AREA,UIDP_PumpGearPicture(1U,0U,UIDP_PUMP_GEAR_RUN_FRAME))") <
+            pump_a.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS,222U)") <
+            pump_a.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,223U)"),
             "A pump disabled refresh must draw the gear background before +/- buttons.", errors)
-    require(pump_b.find("LCD_Show_Picture(0x1420U,UIDP_PumpGearPicture(2U,0U,UIDP_PUMP_GEAR_RUN_FRAME))") <
-            pump_b.find("LCD_Show_Picture(0x1423U,498U)") <
-            pump_b.find("LCD_Show_Picture(0x1425U,500U)"),
+    require(pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA,UIDP_PumpGearPicture(2U,0U,UIDP_PUMP_GEAR_RUN_FRAME))") <
+            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,222U)") <
+            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,223U)"),
             "B pump disabled refresh must draw the gear background before +/- buttons.", errors)
     last_a_gear = max(pump_a.rfind("PumpGeardisplay(1,DRAWWATER,pump_value);"),
                       pump_a.rfind("PumpGeardisplay(1,POURWATER,pump_value);"),
@@ -114,12 +118,12 @@ def main() -> int:
                       pump_b.rfind("PumpGeardisplay(2,POURWATER,pump_value);"),
                       pump_b.rfind("PumpGeardisplay(2,INJECTWATER,pump_value);"))
     require(last_a_gear <
-            pump_a.rfind("LCD_Show_Picture(0x1421U,225U)") <
-            pump_a.rfind("LCD_Show_Picture(0x1424U,224U)"),
+            pump_a.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS,225U)") <
+            pump_a.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,224U)"),
             "A pump enabled refresh must redraw +/- buttons after the gear background.", errors)
     require(last_b_gear <
-            pump_b.rfind("LCD_Show_Picture(0x1423U,499U)") <
-            pump_b.rfind("LCD_Show_Picture(0x1425U,501U)"),
+            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,225U)") <
+            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,224U)"),
             "B pump enabled refresh must redraw +/- buttons after the gear background.", errors)
 
     dir_active = compact(function_body(pub, "DirActive"))
@@ -127,8 +131,8 @@ def main() -> int:
             "Pubinterface.c must use the selected handle model to decide whether OSC direction is supported.", errors)
     require("WorkMessage.tool_type!=PLANER" not in dir_active,
             "DirActive must not block the screen OSC key only by WorkMessage.tool_type; PXBA/PXBB support OSC by handle model.", errors)
-    require("Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model)==false" in dir_active,
-            "DirActive OSC branch must reject only when the selected handle model does not support OSC.", errors)
+    require("Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model,WorkMessage.tool_type)==false" in dir_active,
+            "DirActive OSC branch must reject only when the selected handle/tool capability does not support OSC.", errors)
 
     require('#include "sscBEEP.h"' in screenkey,
             "screenkey.c 应包含 sscBEEP.h，屏幕有效触控需要蜂鸣反馈。", errors)
@@ -151,9 +155,9 @@ def main() -> int:
             "booltouch_control_available=(external_control_active==false);" in selected_channel,
             "Channel refresh must not turn handle/touch gray after the main run page has loaded.", errors)
     require("control_type==0U" in ui_control and
-            "LCD_Show_Picture(0x1414U,34U)" in ui_control and
-            "LCD_Show_Picture(0x1415U,37U)" in ui_control and
-            "LCD_Disappear_Picture(0x1416U)" in ui_control,
+            "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,34U)" in ui_control and
+            "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U)" in ui_control and
+            "LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL)" in ui_control,
             "Power-init control icons must show handle/touch white and hide external comm until connected.", errors)
     require("caseSCREENKey_TouchActi:" in control_type and
             "ControlArbitration_TryEnter(CONTROL_OWNER_SCREEN)" in control_type and

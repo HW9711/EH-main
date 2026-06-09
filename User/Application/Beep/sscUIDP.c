@@ -843,6 +843,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 {
 	if(enable_flag)
 	{
+		LCD_Show_Picture(UIDP_LCD_VP_TOUCH_WORK,70U);//触控激活时显示 0x1430 触控工作界面，保持主图标和工作区同步
 		if(run_flag)
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U);//触控运行中高亮主运行页触控图标
@@ -854,6 +855,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 	else
 	{
+		LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//触控退出时隐藏 0x1430 工作区，避免旧触控界面残留
 		LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,36U);//触控退出或外控释放时回到暗态，不再写旧弹窗 VP
 	}
 }

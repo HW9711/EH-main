@@ -143,6 +143,18 @@ static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 }
 
 /*
+ * 函数功能：判断当前刀具字段是否代表支持往复和开口定位的刨刀能力。
+ * 输入参数：tool_type 当前通道识别或手动选择得到的刀具类型字段。
+ * 返回参数：true 表示该刀具按刨刀能力开放往复和开口定位；false 表示按普通磨头/未知刀具处理。
+ */
+static bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
+{
+	return ((tool_type == PLANER) ||
+			(tool_type == PX_YIM_ONLINES) ||
+			(tool_type == PX_YIP_ONLINES)); /* PLANER 是新业务确认的刨刀能力标志，PXM/PXP 老型号值也按一体刨兼容。 */
+}
+
+/*
  * 函数功能：判断当前手柄型号是否允许切换到往复方向。
  * 输入参数：hand_model EEPROM 识别出的手柄型号。
  * 返回参数：true 表示该手柄支持正转/往复/反转三种方向切换，false 表示只能使用正反转。
@@ -153,6 +165,21 @@ static bool Pubinterface_IsOscDirectionSupportedModel(uint8_t hand_model)
 			(hand_model == PXBB_ONLINES) ||
 			(hand_model == PX_YIM_ONLINES) ||
 			(hand_model == PX_YIP_ONLINES)); /* PXBA/PXBB 和 PXM/PXP 一体刨都支持往复，屏幕三方向按钮按手柄能力开放。 */
+}
+
+/*
+ * 函数功能：综合手柄型号和刀具类型判断当前通道是否支持往复方向。
+ * 输入参数：hand_model 当前选中通道手柄型号；tool_type 当前选中通道刀具类型。
+ * 返回参数：true 表示方向键可切入 OSCDIR；false 表示往复键保持禁用或按键无效。
+ */
+static bool Pubinterface_IsOscDirectionSupported(uint8_t hand_model, uint8_t tool_type)
+{
+	if (Pubinterface_IsPlanerCapabilityTool(tool_type))
+	{
+		return true; /* 最新规则确认 tool_type=PLANER 即代表刨刀能力，PXM/PXP 型号值也从这里放行往复。 */
+	}
+
+	return Pubinterface_IsOscDirectionSupportedModel(hand_model); /* 兼容旧 EEPROM 只把能力写在手柄型号里的 PXBA/PXBB/PXM/PXP。 */
 }
 
 /*
@@ -472,8 +499,8 @@ static void Pubinterface_SendDirectionDisplay(uint8_t ui_dir_id, bool enable_fla
 static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 {
 	uint8_t display_value[10] = {0U}; /* 所有 UI 消息都使用 10 字节缓冲，保持 UIDP 队列拷贝格式稳定。 */
-	bool planer_selected = (WorkMessage.tool_type == PLANER); /* 刀具类型只决定开口定位和刀具图显示，往复方向另按手柄能力判断。 */
-	bool osc_supported = Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model); /* 往复方向按当前选中手柄能力开放，避免支持往复的手柄被刀具类型误挡。 */
+	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* PLANER 或 PXM/PXP 型号值都按刨刀能力显示开口定位。 */
+	bool osc_supported = Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向同时看手柄能力和刀具能力，避免字段来源变化后误挡。 */
 	bool foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 切通道刷新时脚踏图标也按实际在线状态显示。 */
 	bool external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控占用时内部驱动方式也可能是 TOUCHWORK，但屏幕不能显示为触控。 */
 	bool handle_control_available = (external_control_active == false); /* 切通道重绘也保持手控白色可选态，避免后续刷新把图标改灰。 */
@@ -1996,7 +2023,7 @@ void FreqActive(uint8_t key_value)
 	uint8_t freq_max = FreqMax;
 	uint8_t display_value[10] = {0U};
 	if ((WorkMessage.alarm_flag == true) ||
-		(Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model) == false))
+		(Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type) == false))
 	{
 		return; /* 只有当前选中手柄支持往复时才允许调频，避免普通手柄进入无效频率窗口。 */
 	}
@@ -2115,7 +2142,7 @@ void DirActive(uint8_t key_value)
 	case HANDLEKey_dir_OSC:
 	case HMIkey_Dir_OSC:
 	case SCREENKey_Dir_OSC:
-		if (Pubinterface_IsOscDirectionSupportedModel(WorkMessage.hand_model) == false)
+		if (Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type) == false)
 		{
 			return; /* 当前选中手柄不支持往复时拒绝 OSCDIR，避免屏幕误发往复键后切入驱动不支持模式。 */
 		}
@@ -2409,9 +2436,9 @@ void ToolPosActive(uint8_t key_value)
 	if (WorkMessage.runflag_work == true || WorkMessage.alarm_flag == true)
 		return;
 
-	if (WorkMessage.tool_type != PLANER)
+	if (Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type) == false)
 	{
-		return; /* 开口定位只由刀具类型决定，非 PLANER 刀具不允许发送开口定位动作。 */
+		return; /* 开口定位只由刀具能力决定，非 PLANER/PXM/PXP 刀具不允许发送开口定位动作。 */
 	}
 
 	switch (key_value)
