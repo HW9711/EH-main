@@ -990,11 +990,6 @@
                 <FileType>1</FileType>
                 <FilePath>..\User\Application\Pump\pump_pressure_control.c</FilePath>
               </File>
-              <File>
-                <FileName>screen_adapter.c</FileName>
-                <FileType>1</FileType>
-                <FilePath>..\User\Application\Screen\screen_adapter.c</FilePath>
-            </File>
             <File>
               <FileName>screenkey.c</FileName>
               <FileType>1</FileType>

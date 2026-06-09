@@ -76,7 +76,11 @@ static void BeepQueue_Init(void)
     BeepMsgQueue = Kernel_QueueCreate(5, sizeof(BeepMessage_t), "BeepMsgQueue");
 }
 
-
+/*
+ * 函数功能：按 100ms 调度周期处理按键蜂鸣和报警蜂鸣，函数内部不阻塞其它业务软任务。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void BeepControl(void)
 {
 static uint8_t alarmCounter = 0;     // 每个阶段的计数器 (0-9, 共10次=100ms)
@@ -117,11 +121,8 @@ if(BeepMsgQueue != NULL)
 	// 按键响应模式（优先级高）
 	if(key_flag && !alarm_flag)
 	{
-		BEEP_ON();
-		// 延时100ms (beep_time = 100ms)
-		vTaskDelay(pdMS_TO_TICKS(100));
-		BEEP_OFF();
-	key_flag=0;
+		BEEP_ON();                                     /* 按键蜂鸣采用非阻塞计数，当前 100ms 周期打开蜂鸣器后立即返回。 */
+		key_flag--;                                    /* 每个任务周期扣减一次，time=1 时保持一个 100ms 蜂鸣周期。 */
 	}
 	// 报警模式
 	else if(alarm_flag)
@@ -153,6 +154,7 @@ if(BeepMsgQueue != NULL)
 	{
 		BEEP_OFF();
 		alarmCounter = 0;
+		key_flag = 0;
 		//ALARMdisplay();
 	}
 }

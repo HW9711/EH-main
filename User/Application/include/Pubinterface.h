@@ -13,6 +13,14 @@
 #define PX_YIP_ONLINES 10 //刨削 一体刨
 #define JMB_ONLINES    11 //
 #define MX_YIM16_ONLINES    12 //
+#define LGZ_I_ONLINES        13U//颅骨钻单按键手柄预留，按 UI 类型编号保持一致
+#define LGZ_II_ONLINES       14U//颅骨钻双按键手柄预留，后续实物协议确认后直接复用该类型
+#define KSZ_I_ONLINES        15U//克氏针一型手柄预留，用于屏幕显示和识别表占位
+#define KSZ_II_ONLINES       16U//克氏针二型手柄预留，用于屏幕显示和识别表占位
+#define KXZ_I_ONLINES        17U//空心钻一型手柄预留，保留 UI 绑定编号
+#define KXZ_II_ONLINES       18U//空心钻二型手柄预留，保留 UI 绑定编号
+#define COMMON_SOCKET_ONLINES 19U//公共接头预留，没有手柄实体键，仅用于识别和屏幕显示
+#define EMBD_ONLINES         20U//EMBD 6万增速手柄，用于 EEPROM 识别和普通电动手柄 UI 显示
 
 
 #define CHANNEL_A 1U
@@ -62,6 +70,7 @@
 #define WORK_ALARM_HANDLE_MODEL_ERROR_A 10U//A通道EEprom校验失败，手柄型号错误
 #define WORK_ALARM_HANDLE_MODEL_ERROR   WORK_ALARM_HANDLE_MODEL_ERROR_A//兼容旧代码：未区分通道时默认沿用A通道手柄校验报警
 #define WORK_ALARM_SPEED_THRESHOLD      11U//Page4速度/频率阈值蜂鸣报警，只驱动蜂鸣，不强制停机
+#define WORK_ALARM_MOTOR_DRIVER_BOARD   11U//电机驱动板故障报警码，UI 绑定 0x0B；真实报警写 WorkMessage，阈值报警只蜂鸣
 #define WORK_ALARM_HANDLE_MODEL_ERROR_B 12U//B通道EEprom校验失败，手柄型号错误
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U//A/B通道EEprom均校验失败，上位机需要显示双通道来源
 
@@ -72,6 +81,9 @@
 #define ZZDIR 0U//正转
 #define FZDIR 1U//反转
 #define OSCDIR 2U//往复
+
+#define FreqMax 40U//新屏未单独下发频率上限时沿用 4.0Hz 上限
+#define FreqMin 0U//新屏未单独下发频率下限时沿用 0Hz 下限
 
 
 #define JTKey        1U//脚踏调节按键
@@ -177,6 +189,12 @@
 #define SCREENKey_TouchEXIT 62U///触控退出
 #define SCREENKey_HMI_EXIT 63U//外部控制退出，显示器共计25个按钮指令
 
+#define SCREENKey_SPEED_Sub_Large 64U//新屏速度大幅减少，固定减少 10000
+#define SCREENKey_SPEED_Sub_Small 65U//新屏速度小幅减少，固定减少 1000
+#define SCREENKey_SPEED_Add_Small 66U//新屏速度小幅增加，固定增加 1000
+#define SCREENKey_SPEED_Add_Large 67U//新屏速度大幅增加，固定增加 10000
+#define SCREENKey_AutoIdentify    68U//新屏自动识别刀具按钮，进入 RFID 自动识别入口
+
 
 
 #define UI_PUMPA_ID 1U//泵A区域
@@ -195,6 +213,8 @@
 #define UI_PUMPBGEAR_ID 14U//B泵档位显示
 #define UI_PUMPABUTTON_ID 15U//A泵按钮显示
 #define UI_PUMPBBUTTON_ID 16U//B泵按钮显示
+#define UI_POWERINIT_ID 17U//屏幕开机初始化区域，统一交给 UIDP 任务刷新主运行页 4
+#define UI_TOUCH_ID 18U//触控/外部控制弹窗显示区域，由屏幕 UI 模块负责开关
 
 
 typedef struct 
@@ -286,6 +306,7 @@ typedef struct
 	volatile uint8_t   draw;//角度
 	volatile uint8_t   diameter;//直径
 	volatile uint8_t   meioticratio;//减数比
+	volatile uint32_t  tool_reduction_ratio;//RFID/EEPROM 解析出的完整刀具减速比，高16位表示增速、低16位表示减速
   volatile uint16_t  speed_zzmax;
     volatile uint16_t  speed_zzmin;
     volatile uint16_t  speed_fzmax;
@@ -332,6 +353,7 @@ typedef struct
   volatile uint16_t  type;//业务泵类型：DRAWWATER/INJECTWATER/POURWATER，不能保存 CS1237 霍尔设备码
   volatile uint8_t  direction;//方向
   volatile uint16_t speed_work;//泵速度，灌注最大到300ml，必须使用16位避免截断
+  volatile uint16_t speed_output;//压力闭环修正后的实际输出速度，屏幕和上位机运行态显示读这里，speed_work 保持设定值
   volatile uint16_t speed_Max;
   volatile uint16_t speed_Min;
   volatile uint16_t speed_step_value;//调节步进值一次多少ml，快速档位先不管，后续在判断最大值最小值之间分为6档进行分配
@@ -345,6 +367,9 @@ typedef struct
 pumpMessage_t;
 extern pumpMessage_t pumpMessageA;//泵A结构体
 extern pumpMessage_t pumpMessageB;//泵B结构体
+extern uint32_t paoxueSpeciValue_A[4];//A 通道刀具规格缓存，供手柄识别写入并由 UI 刷新读取
+extern uint32_t paoxueSpeciValue_B[4];//B 通道刀具规格缓存，供手柄识别写入并由 UI 刷新读取
+extern uint8_t paoxueSpeciValue_F[16];//分体刀具扩展缓存，保留给识别流程和后续显示逻辑使用
 
 
 
@@ -373,6 +398,7 @@ void HandleSwitchActive(uint8_t key_value);
 void SpeedActive(uint8_t key_value);
 void DirActive(uint8_t key_value);
 void FreqActive(uint8_t key_value);
+void AutoIdentifyActive(uint8_t key_value);//新屏自动识别刀具入口，按当前通道触发 RFID 识别
 void HmiExitActive(uint8_t key_value);
 bool ControlArbitration_IsExternalActive(void);
 bool ControlArbitration_IsOwner(uint8_t owner);
@@ -386,6 +412,8 @@ void ControlArbitration_ForceRelease(void);
 bool ControlArbitration_EnterExternalControl(void);
 void ControlArbitration_ReleaseExternalControl(void);
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key);
+void Pubinterface_RefreshControlModeDisplay(void); /* 统一刷新脚控、手控、触控三个控制方式图标，避免脚踏任务分散直写残留高亮。 */
+void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag); /* 刷新外部通信小电脑图标：在线白色、外控黄色、离线熄灭。 */
 void WorkAlarm_Set(uint8_t alarm_value);
 void WorkAlarm_Clear(void);
 void WorkAlarm_ClearIf(uint8_t alarm_value);
@@ -394,11 +422,20 @@ bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
 void Pubinterface_LoadChannelMemory(uint8_t channel);
 uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel);
 uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void);
+uint16_t Pubinterface_GetInjectionPumpStartFlow(void); /* 取得注水泵启动兜底流量，保证上位机/屏幕/脚踏启动泵时 speed_work 不为 0。 */
+uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message); /* 按泵业务类型取得启动兜底速度，避免灌注/抽吸泵只置 run_flag 但 0 速不转。 */
+uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message); /* 取得泵显示速度：运行态显示闭环后的实际输出，停止态保留设定速度。 */
+void Pubinterface_UpdatePumpAOutputSpeed(uint16_t output_speed); /* A 泵任务发布压力闭环后的实际输出速度，并在变化时刷新左侧泵显示。 */
+void Pubinterface_UpdatePumpBOutputSpeed(uint16_t output_speed); /* B 泵任务发布压力闭环后的实际输出速度，并在变化时刷新右侧泵显示。 */
+void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
+void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
+void Pubinterface_SetHandleInjectionPumpRun(bool enable);
 void Pubinterface_CheckSpeedThresholdAlarm(void);
 void ControlTypeActive(uint8_t key_value);
 void PlanerGridH(uint8_t key_value);
  void ChannelrecognizeMessageInit(void);
 void ChannelFlagMessageInit(void);
 void pumpMessageInit(void);
+void Pubinterface_ClearRfidToolMemory(uint8_t channel);
 void PlugORunPLUGActive(uint8_t key_value);

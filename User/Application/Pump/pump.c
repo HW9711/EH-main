@@ -12,6 +12,7 @@
 #include "uart7.h"
 #include <stdint.h>
 #include "lcd.h"
+#include "screen_address.h"
 #include "kernel_osal.h"
 
 
@@ -87,8 +88,8 @@ void PumpDebugPoint(uint16_t point, uint16_t value, uint8_t detail)
 {
 	(void)value;
 	(void)detail;
-	LCD_Show_2byte_Number(0x8008,34);
-	LCD_IntegratedCutterData_Update(0x4200, point, value, detail);
+	LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,34);
+	LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, point, value, detail);
 }
 
 //static uint16_t PumpSpeed = 0;
@@ -140,11 +141,11 @@ void Pump_SetSpeed_B(uint32_t s)
 	//ssc  加上标志位
 	if(s)
 	{
-		LCD_Show_2byte_Number(0x9553,0xffE0);
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,0xffE0);
 	}
 	else
 	{
-			LCD_Show_2byte_Number(0x9553,0xffff);
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,0xffff);
 	}
 		
 		uint8_t dat[6] = {0xAA, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -200,11 +201,11 @@ void Pump_SetSpeed_A(uint32_t s)
 	if((repeat_data!=s) || (s == 0U)){
 		if(s)
 		{
-			LCD_Show_2byte_Number(0x9533,0xffE0);
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffE0);
 		}
 		else
 		{
-			LCD_Show_2byte_Number(0x9533,0xffff);
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffff);
 		}
 	uint8_t dat[6] = {0xAA, 0x00, 0x00, 0x00, 0x00, 0x00};
 	

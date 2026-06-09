@@ -3,7 +3,6 @@
 #include "bsp_gpio.h"
 #include "handlekey.h"
 #include "data.h"
-#include "screen.h"
 //#include "adc.h"
 #include "soft_uart.h"
 
@@ -367,6 +366,7 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 
 	ControlSignalMessage.handle_control_flag = enable; /* 通知公共控制信号当前由手柄实体键控制电机启停。 */
 	WorkMessage.runflag_work = enable;				 /* sscDrive任务读取该标志后下发无刷运行或停止控制帧。 */
+	Pubinterface_SetHandleInjectionPumpRun(enable);	 /* 注水泵是手柄冷却联动泵，实体键让手柄运行/停止时按泵类型和当前通道同步启停 A/B 冷却泵。 */
 
 	if (enable == false)
 	{

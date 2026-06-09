@@ -31,14 +31,10 @@
 #define CS1237_PAYLOAD_LENGTH          0x0CU
 #define CS1237_CRC_OFFSET              17U
 #define CS1237_CRC_LENGTH              15U
-/* CS1237 下位机霍尔设备类型码：只有这些预设组合才认为泵设备在线。
- * 设备码由 PA1~PA4 按位组合得到；对应孔位有磁铁时，霍尔输入会从 1 被拉成 0。
- * 当前泵体四个孔均可安装磁铁，因此“四孔都有磁铁”的合法在线码应为 0000/0x00。 */
-#define CS1237_DEVICE_CODE_0000        0x00U   /* PA1~PA4 均检测到磁铁，四个霍尔位全为低电平，是当前四孔全装磁铁泵的合法在线码。 */
-#define CS1237_DEVICE_CODE_1110        0x0EU   /* 保留历史合法组合；bit0 为 0 表示 PA4 对应孔位检测到磁铁。 */
-#define CS1237_DEVICE_CODE_1100        0x0CU   /* 保留历史合法组合；bit1~bit0 为 0 表示 PA3、PA4 对应孔位检测到磁铁。 */
-#define CS1237_DEVICE_CODE_1000        0x08U   /* 保留历史合法组合；bit2~bit0 为 0 表示 PA2、PA3、PA4 对应孔位检测到磁铁。 */
-#define CS1237_DEVICE_CODE_1001        0x09U   /* 保留历史合法组合；bit2~bit1 为 0 表示 PA2、PA3 对应孔位检测到磁铁。 */
+/* CS1237 下位机设备码映射业务泵类型；未列出的编码先作为备用码处理，不参与泵类型识别。 */
+#define CS1237_DEVICE_CODE_INJECT_WATER 0x00U  /* 0x00 表示注水泵，PUMPA/PUMPB 按注水方向和流量公式输出。 */
+#define CS1237_DEVICE_CODE_POUR_WATER   0x08U  /* 0x08 表示灌注泵，PUMPA/PUMPB 按灌注方向和流量公式输出。 */
+#define CS1237_DEVICE_CODE_DRAW_WATER   0x09U  /* 0x09 表示抽水泵，PUMPA/PUMPB 按抽水方向和流量公式输出。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -642,22 +638,32 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
     return frame_crc == calc_crc;
 }
 
-static bool Cs1237_DeviceCodeValid(uint8_t device_code)
+/*
+ * 函数功能：把 CS1237 模拟串口帧中的设备码转换成业务泵类型。
+ * 输入参数：device_code 为下位机上报帧第 16 字节设备码。
+ * 返回参数：DRAWWATER/INJECTWATER/POURWATER 表示已识别泵类型，0 表示备用码或未知码。
+ */
+static uint16_t Cs1237_MapDeviceCodeToPumpType(uint8_t device_code)
 {
-    /* 只接受协议文档中预设的 5 种霍尔状态组合。 */
+    /* 设备码只在这里转换为业务类型，避免外部通信或手柄联动路径再固定覆盖泵类型。 */
     switch (device_code)
     {
-        case CS1237_DEVICE_CODE_0000:
-        case CS1237_DEVICE_CODE_1110:
-        case CS1237_DEVICE_CODE_1100:
-        case CS1237_DEVICE_CODE_1000:
-        case CS1237_DEVICE_CODE_1001:
-            return true;
+        case CS1237_DEVICE_CODE_INJECT_WATER:
+            return INJECTWATER; /* 0x00 明确识别为注水泵，允许手柄冷却联动。 */
+        case CS1237_DEVICE_CODE_POUR_WATER:
+            return POURWATER; /* 0x08 明确识别为灌注泵，不参与手柄冷却联动。 */
+        case CS1237_DEVICE_CODE_DRAW_WATER:
+            return DRAWWATER; /* 0x09 明确识别为抽水泵，不参与手柄冷却联动。 */
         default:
-            return false;
+            return 0U; /* 其它设备码为备用码，当前不强行映射为任何已知泵类型。 */
     }
 }
 
+/*
+ * 函数功能：把一帧有效 CS1237 模拟串口数据同步到对应 A/B 泵运行状态。
+ * 输入参数：channel 表示模拟串口通道，frame 指向已通过帧头、长度和 CRC 校验的 21 字节帧。
+ * 返回参数：无。
+ */
 static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame)
 {
     pumpMessage_t *pump_message;
@@ -665,6 +671,10 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     uint32_t weight_x10 = Cs1237_ReadU32Le(&frame[10]);
     uint16_t threshold_g = Cs1237_ReadU16Le(&frame[14]);
     uint8_t device_code = frame[16];
+    uint16_t pump_type = Cs1237_MapDeviceCodeToPumpType(device_code);
+    uint16_t old_pump_type;
+    bool old_online_flag;
+    bool pump_display_changed;
 
     if (channel == SIM_UART_1)
     {
@@ -682,18 +692,31 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     }
 
     taskENTER_CRITICAL();
+    old_pump_type = pump_message->type; /* 记录本帧前的业务泵类型，只在识别变化时刷新屏幕，避免每帧压满 UIDP 队列。 */
+    old_online_flag = pump_message->online_flag; /* 记录本帧前在线状态，未识别/重新识别时需要让屏幕可用状态同步变化。 */
     pump_message->pressure_value = raw_cs1237;
     pump_message->weight_x10 = weight_x10;
     pump_message->pressure_threshold = threshold_g;
-    /*
-     * device_code 是 CS1237 压力模块上传的霍尔识别组合，只能用于在线/丢失判断。
-     * pump_message->type 是业务泵类型，由脚踏、上位机、屏幕和手柄控制路径维护；
-     * 这里如果写入霍尔码，PUMPA/PUMPB 会把它当成未知泵类型并间歇输出 0 速帧。
-     */
+    /* 把设备码转换后的业务泵类型写入公共状态，后续泵任务按该类型选择方向和换算公式。 */
+    pump_message->type = pump_type;
     pump_message->seq = frame[5];
-    pump_message->online_flag = Cs1237_DeviceCodeValid(device_code);
+    pump_message->online_flag = (pump_type != 0U);
     pump_message->losses_times = pump_message->online_flag ? 0U : (uint8_t)(pump_message->losses_times + 1U);
+    pump_display_changed = ((old_pump_type != pump_type) ||
+                            (old_online_flag != pump_message->online_flag)); /* 类型或在线状态变化才触发 A/B 对应区域重绘，保持 A 左 B 右不换位。 */
     taskEXIT_CRITICAL();
+
+    if (pump_display_changed)
+    {
+        if (channel == SIM_UART_1)
+        {
+            Pubinterface_RefreshPumpBDisplay(); /* SIM_UART_1/PE4 固定对应 B 泵，只刷新右侧 B 泵显示，不改变控制归属。 */
+        }
+        else
+        {
+            Pubinterface_RefreshPumpADisplay(); /* SIM_UART_2/PE6 固定对应 A 泵，只刷新左侧 A 泵显示，不改变控制归属。 */
+        }
+    }
 }
 
 static void Cs1237_ParserResync(Cs1237FrameParser *parser)

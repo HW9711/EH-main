@@ -17,7 +17,7 @@
 
 //#include "adc.h"
 #include "lcd.h"
-#include "screen.h"
+#include "screen_address.h"
 #include "motor.h"
 #include "UI_Start.h"
 #include "common.h"
@@ -83,7 +83,7 @@ void Userparser_Init(void)
 	//............	
   Iwdg_Reset();
 
-  Screen_TipInfo_Update(0);     //清除报警显示
+  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);     //清除新屏报警显示区，旧屏提示接口不再参与开机流程
 
   Motor_ErrorEmergencyStop_Ctrl();  //21ms 电机停止发送...
 
@@ -117,7 +117,6 @@ void Userparser_Init(void)
 	SscUIDisplayTask_Init();
 	SimUartTask_Init();
 
-	LCD_Show_Which_Map(4);
-	PoweronInit();
+	SendUIDSMessage(UI_POWERINIT_ID, false, NULL); //屏幕开机初始化由 UIDP 任务统一刷新，避免绕过统一 UI 入口
 
 }

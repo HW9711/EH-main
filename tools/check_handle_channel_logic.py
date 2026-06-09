@@ -8,7 +8,20 @@ HDR = ROOT / "User" / "Application" / "include" / "Pubinterface.h"
 SCAN = ROOT / "User" / "Application" / "Handle" / "handlescan.c"
 COMM = ROOT / "User" / "Application" / "ExternalComm" / "external_comm_task.c"
 BEEP = ROOT / "User" / "Application" / "Beep" / "sscBEEP.c"
-HOST = ROOT.parents[1] / "外部通信上位机" / "uart2-external-host-standalone" / "ExternalCommHost.html"
+
+
+def resolve_host_path() -> Path:
+    candidates = [
+        ROOT.parents[1] / "外部通信上位机" / "uart2-external-host-standalone" / "ExternalCommHost.html",
+        ROOT.parents[2] / "FinalSoft_test" / "外部通信上位机" / "uart2-external-host-standalone" / "ExternalCommHost.html",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+HOST = resolve_host_path()
 
 
 def read(path: Path) -> str:

@@ -102,8 +102,7 @@ static void PUMPBehaviors(void)
 			// 非阻塞方式接收消息
 			if(Kernel_QueueReceive(PUMPBMsgQueue, &msg, 0) == pdTRUE)
 			{
-				/* 队列消息只同步公共泵状态，实际输出继续由 pumpMessageB 统一驱动，避免绕开 ExternalComm/CS1237/压力闭环链路。 */
-				pumpMessageB.type=msg.pump_type;
+				/* 队列消息只同步速度；泵类型只能由模拟串口设备码刷新，避免脚踏轻排把 B 泵重新写成注水泵。 */
 				pumpMessageB.speed_work=msg.Value;
 			}
 		}
@@ -167,11 +166,13 @@ static void PUMPBehaviors(void)
            else if(pumpMessageB.timingDrainage_times++>100)//排空计时，当为注水的时候
 		   {
 			uart_data=0;
+			pump_speed = 0U; /* 排空计时结束后实际输出已经关断，显示速度必须同步清零。 */
 			pumpMessageB.timingDrainage_flag=false;
 			pumpMessageB.run_flag=false;
 			pumpMessageB.timingDrainage_times=0;
 		   }
 		}
+		Pubinterface_UpdatePumpBOutputSpeed(pump_speed); /* 发布闭环限速后的实际业务速度，驱动屏幕和上位机显示实时变化。 */
 		Pump_SetSpeedS_B(uart_data,pump_dir);
 }
 

@@ -9,6 +9,8 @@
   kernel_task_t    KeyBehaviorsHandle;
 QueueHandle_t KeyBehivQueue = NULL;
 
+#define KEYBEH_PLUG_EVENT_WAIT_TICKS pdMS_TO_TICKS(60U) /* 手柄插拔和 RFID 二次刷新是状态同步事件，队列满时短等待，避免上位机/屏幕丢在线刷新。 */
+
 typedef struct
 {
 	uint8_t control_type;//脚踏key,显示屏key,外部通讯key，手控key
@@ -20,11 +22,17 @@ static void KeyBehivQueue_Init(void)
 }
 void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
+	TickType_t wait_ticks = 0U; /* 普通按键仍保持非阻塞，避免脚踏/屏幕高频按键拖慢控制任务。 */
+
 	if(KeyBehivQueue == NULL) return;
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
-	(void)Kernel_QueueSend(KeyBehivQueue, &msg, 0);
+	if (control_type == PLUGunPLUG)
+	{
+		wait_ticks = KEYBEH_PLUG_EVENT_WAIT_TICKS; /* 插拔/RFID 刷新必须尽量入队，否则 MemoryMsg 和心跳会停在旧状态。 */
+	}
+	(void)Kernel_QueueSend(KeyBehivQueue, &msg, wait_ticks);
 }
 void JTKeyBehavior(uint8_t key_value)
 {
@@ -126,10 +134,12 @@ void HANDLEKeyBehavior(uint8_t key_value)
 		if(ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)return;
 		WorkMessage.runflag_work = true;
 		ControlSignalMessage.handle_control_flag = true;
+		Pubinterface_SetHandleInjectionPumpRun(true); /* 手柄队列启动电机时按泵类型和当前通道同步启动 A/B 注水冷却泵，保证绕过实体键直发消息时也保持联动。 */
 		break;
 		case HANDLEKey_motor_stop: 
 		WorkMessage.runflag_work = false;
 		ControlSignalMessage.handle_control_flag = false;
+		Pubinterface_SetHandleInjectionPumpRun(false); /* 手柄队列停止电机时同步关闭本次跟随的 A/B 注水冷却泵，避免手柄停转后冷却泵继续运行。 */
 		/* 手柄停止消息完成后，如果没有其它本地输出，就释放手柄控制权。 */
 		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE);
 		break;
@@ -147,6 +157,11 @@ void HANDLEKeyBehavior(uint8_t key_value)
 	}
 }
 
+/*
+ * 函数功能：分发新串口屏按键事件到对应业务处理入口。
+ * 输入参数：key_value 为 ScreenKey_Scan() 解析后的 SCREENKey_* 逻辑键值。
+ * 返回参数：无。
+ */
 void SCREENKeyBehanior(uint8_t key_value)
 {
 	switch(key_value)
@@ -161,6 +176,10 @@ void SCREENKeyBehanior(uint8_t key_value)
 		break;
 		case SCREENKey_SPEED_Add: 
 		case SCREENKey_SPEED_Sub: 
+		case SCREENKey_SPEED_Sub_Large:
+		case SCREENKey_SPEED_Sub_Small:
+		case SCREENKey_SPEED_Add_Small:
+		case SCREENKey_SPEED_Add_Large:
 		SpeedActive(key_value);
 		break;
 		case SCREENKey_FREQ_Add: 
@@ -180,6 +199,9 @@ void SCREENKeyBehanior(uint8_t key_value)
 		case SCREENKey_PlanerH: 
 		case SCREENKey_GrindH: 
 		PlanerGridH(key_value);
+		break;
+		case SCREENKey_AutoIdentify:
+		AutoIdentifyActive(key_value);
 		break;
 		case SCREENKey_Dir_Forward: 
 		case SCREENKey_Dir_Reverse: 
@@ -218,45 +240,47 @@ void PlugunPLUGActive(uint8_t key_value)
 		break;
 	}
 }
+/*
+ * 函数功能：从统一按键队列中取出并分发所有待处理事件。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void KeyBehaviors()
 {
-	//判断keybehavior的队列是否为空
-    uint8_t control_type=0;
-	uint8_t control_key=0;
 	if(KeyBehivQueue == NULL)
 	return;
 	KeyBehMessage_t msg={0};
-   		 // 非阻塞方式接收消息
-    if(Kernel_QueueReceive(KeyBehivQueue, &msg, 0) == pdTRUE)
-    {
-        control_type=msg.control_type;
-        control_key=msg.control_key;
-    }
-	/* 任一控制方式被其它来源持有时，本来源按键只允许排队后丢弃，避免抢写 WorkMessage。 */
-	if(ControlArbitration_ShouldBlockLocalKey(control_type, control_key))
+	/* 每 30ms 调度一次时尽量清空队列，避免被阻塞的本地控制键长期压住后面的插拔/RFID 刷新事件。 */
+	while(Kernel_QueueReceive(KeyBehivQueue, &msg, 0) == pdTRUE)
 	{
-		return;
+		uint8_t control_type=msg.control_type; /* 当前队列项的来源类型，用于仲裁和后续分发。 */
+		uint8_t control_key=msg.control_key; /* 当前队列项的业务按键值，保持与来源类型一一对应。 */
+		/* 任一控制方式被其它来源持有时，只丢弃当前本地控制键，继续处理后续插拔/RFID 状态事件。 */
+		if(ControlArbitration_ShouldBlockLocalKey(control_type, control_key))
+		{
+			continue;
+		}
+		switch(control_type)
+		{
+			case JTKey:
+				JTKeyBehavior(control_key);
+			break;
+			case HANDLEKey:
+				HANDLEKeyBehavior(control_key);
+			break;
+			case HMIkey:
+				HMIkeyBehanior(control_key);
+			break;
+			case SCREENKey:
+			   SCREENKeyBehanior(control_key);
+			break;
+			case PLUGunPLUG:
+			 PlugunPLUGActive(control_key);
+			break;
+			default:
+			break;
+		}
 	}
-	switch(control_type)
-	{
-		case JTKey:
-			JTKeyBehavior(control_key);
-		break;
-		case HANDLEKey:
-			HANDLEKeyBehavior(control_key);
-		break;
-		case HMIkey:
-			HMIkeyBehanior(control_key);
-		break;
-		case SCREENKey:
-		   SCREENKeyBehanior(control_key);
-		break;
-		case PLUGunPLUG:
-		 PlugunPLUGActive(control_key);
-		break;
-		default:
-		break;
-    }
 }
 void KeyBehaviorsTask(uint32_t event)
 {

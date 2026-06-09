@@ -106,8 +106,7 @@ void PUMPAehaviors()
 			// 非阻塞方式接收消息
 			if(Kernel_QueueReceive(PUMPAMsgQueue, &msg, 0) == pdTRUE)
 			{
-				/* 队列消息只同步公共泵状态，实际输出继续由 pumpMessageA 统一驱动，避免绕开 ExternalComm/CS1237/压力闭环链路。 */
-				pumpMessageA.type=msg.pump_type;
+				/* 队列消息只同步速度；泵类型只能由模拟串口设备码刷新，避免脚踏轻排把 A 泵重新写成注水泵。 */
 				pumpMessageA.speed_work=msg.Value;
 			}
 		}
@@ -171,11 +170,13 @@ void PUMPAehaviors()
            else if(pumpMessageA.timingDrainage_times++>100)
 		   {
 			uart_data=0;
+			pump_speed = 0U; /* 排空计时结束后实际输出已经关断，显示速度必须同步清零。 */
 			pumpMessageA.timingDrainage_flag=false;
 			pumpMessageA.run_flag=false;
 			pumpMessageA.timingDrainage_times=0;
 		   }
 		}
+		Pubinterface_UpdatePumpAOutputSpeed(pump_speed); /* 发布闭环限速后的实际业务速度，驱动屏幕和上位机显示实时变化。 */
 		Pump_SetSpeedS_A(uart_data,pump_dir);
 
 }

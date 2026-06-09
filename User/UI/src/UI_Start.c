@@ -7,8 +7,8 @@
 #include "data.h"
 #include "screenkey.h"
 #include "lcd.h"
-#include "screen.h"
 #include "sscBEEP.h"
+#include "screen_address.h"
 
 #include <stdint.h>
 
@@ -44,10 +44,10 @@ void UI_Start_Fun(void)
 	    // 启动页按键提示统一进入新蜂鸣队列，不再写旧蜂鸣时长状态。
 	    SendKeyBeepMessage(1U);
 
-			LCD_Show_Which_Map(3); 
-			LCD_Show_Which_Map(0); 
-			LCD_Show_Which_Map(3); 
-		
+			LCD_Show_Which_Map(3);
+			LCD_Show_Which_Map(0);
+			LCD_Show_Which_Map(3);
+
       Delay_ms(5);
 
 			UI_FootPedalCalibration_Fun();
@@ -67,25 +67,9 @@ void UI_Start_Fun(void)
 //============================================================================
 void UI_Show_init(void)
 {
-  uint8_t temp[5] = { 0 };
+  LCD_Show_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);        //新屏开机后主运行页固定为 page4，保持老成功版启动页和运行页分离
+  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//清掉新屏报警提示区，后续完整区域刷新由 UIDP 任务统一接管
 
-  //先复位所有参数
-  Screen_InformationBarImage_Update(2, 4, 2, 4);  //	LCD_Show_Info(2,2,2);
-  Screen_IntegratedCutterPic_Update(0);  //	LCD_Show_Cutter(0);    //刀具连接图片  30ms
-  Screen_HandleConnectState_Update(temp, temp);  //  LCD_Show_Handle_Connect(0,0,0);  50ms
-  Screen_FootPedalConnectState_Update(1);  //  LCD_Show_FootPedal(1); //脚踏连接图片
-
-  Screen_ElectricalMachineryDirectionState_Update2(0);// 运行模式切换 单向，往复
-  Screen_TipInfo_Update(0);  // 	LCD_Show_Error(0);     //报警显示  5ms
-
-//  LCD_Show_Which_Map(2); //运行界面
-	LCD_Disappear_Picture(0x1410);
-	LCD_Disappear_Picture(0x1411);	
-	LCD_Disappear_Picture(0x1412);	
-//	LCD_Disappear_Picture(0x1413);	
-	LCD_Disappear_Picture(0x1414);
-	LCD_Disappear_Picture(0x1415);	
-	
 }
 
 

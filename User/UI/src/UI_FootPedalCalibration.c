@@ -8,6 +8,7 @@
 #include "iwdg.h"
 #include "screenkey.h"
 #include "sscBEEP.h"
+#include "screen_address.h"
 
 //============================================================================
 // 函数名称: UI_FootPedalCalibration_Fun()
@@ -24,17 +25,17 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 	static uint16_t read_times=0;
 	static uint8_t write_foot_key_time=0;
 	uint8_t key_value = KEY_NONE;
-//  LCD_Show_4byte_Number(0x3700, 0);
-//	LCD_Show_4byte_Number(0x3710, 0);
-//	LCD_Show_4byte_Number(0x3720, 0);
-//	LCD_Show_4byte_Number(0x3730, 0);
-//	LCD_Show_4byte_Number(0x3740, 0);
-//	LCD_Show_4byte_Number(0x3750, 0);
-//	LCD_Show_4byte_Number(0x3760, 0);
-//	LCD_Show_4byte_Number(0x3770, 0);
-//	LCD_Show_4byte_Number(0x3780, 0);
-//	LCD_Show_4byte_Number(0x3790, 0);
-//	LCD_Show_4byte_Number(0x37A0, 0);
+//  LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LOW_KEY_VALUE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_MID_KEY_VALUE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_HIGH_KEY_VALUE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_AD_VALUE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_LOW_STORE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_HIGH_STORE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_AD_VALUE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_LOW_STORE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_HIGH_STORE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_MID_STORE, 0);
+//	LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_MID_STORE, 0);
   while (1)
   {
     Delay_ms(2);
@@ -170,28 +171,28 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 			{
 				read_times=0;
 				
-				LCD_Show_4byte_Number(0x3740, PedalCalibrationData.FootPedalMemoryLValue_Left);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_LOW_STORE, PedalCalibrationData.FootPedalMemoryLValue_Left);
 				Delay_ms(2);
 			
-				LCD_Show_4byte_Number(0x3750, PedalCalibrationData.FootPedalMemoryHValue_Left);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_HIGH_STORE, PedalCalibrationData.FootPedalMemoryHValue_Left);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3790, PedalCalibrationData.FootPedalMemoryMValue_Left);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_MID_STORE, PedalCalibrationData.FootPedalMemoryMValue_Left);
 				Delay_ms(2);
 				
 				
 				
 				
-				LCD_Show_4byte_Number(0x3770, PedalCalibrationData.FootPedalMemoryLValue_Right);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_LOW_STORE, PedalCalibrationData.FootPedalMemoryLValue_Right);
 				Delay_ms(2);
 			
-				LCD_Show_4byte_Number(0x3780, PedalCalibrationData.FootPedalMemoryHValue_Right);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_HIGH_STORE, PedalCalibrationData.FootPedalMemoryHValue_Right);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x37A0, PedalCalibrationData.FootPedalMemoryMValue_Right);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_MID_STORE, PedalCalibrationData.FootPedalMemoryMValue_Right);
 				Delay_ms(2);
 			}
-				LCD_Show_4byte_Number(0x3730, PedalCalibrationData.FootPedalADValue);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_AD_VALUE, PedalCalibrationData.FootPedalADValue);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3760, PedalCalibrationData.FootPedalADValue_Right);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_RIGHT_AD_VALUE, PedalCalibrationData.FootPedalADValue_Right);
 				Delay_ms(2);
 		}
 		else
@@ -212,24 +213,24 @@ uint8_t UI_FootPedalCalibration_Fun(void)
 			else if(read_times==120)
 			{
 				read_times=0;
-				LCD_Show_4byte_Number(0x3740, PedalCalibrationData.FootPedalMemoryLValue);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_LOW_STORE, PedalCalibrationData.FootPedalMemoryLValue);
 				Delay_ms(2);
-			LCD_Show_4byte_Number(0x3750, PedalCalibrationData.FootPedalMemoryHValue);
+			LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_HIGH_STORE, PedalCalibrationData.FootPedalMemoryHValue);
 				Delay_ms(2);
-				LCD_Show_4byte_Number(0x3790, PedalCalibrationData.FootPedalMemoryMValue_Right);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_MID_STORE, PedalCalibrationData.FootPedalMemoryMValue_Right);
 				Delay_ms(2);
 			}
-				LCD_Show_4byte_Number(0x3730, PedalCalibrationData.FootPedalADValue);
+				LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LEFT_AD_VALUE, PedalCalibrationData.FootPedalADValue);
 				Delay_ms(2);
 		}
 
 		write_foot_key_time++;
 		if(write_foot_key_time%30==0){
-		  LCD_Show_4byte_Number(0x3700, l_k_v);
+		  LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_LOW_KEY_VALUE, l_k_v);
 			Delay_ms(2);
-			LCD_Show_4byte_Number(0x3710, m_k_v);
+			LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_MID_KEY_VALUE, m_k_v);
 			Delay_ms(2);
-			LCD_Show_4byte_Number(0x3720, r_k_v);		
+			LCD_Show_4byte_Number(UIDP_LCD_VP_PEDAL_HIGH_KEY_VALUE, r_k_v);
 		  Delay_ms(2);
 		}
   }

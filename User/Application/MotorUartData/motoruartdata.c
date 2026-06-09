@@ -8,6 +8,7 @@
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
+#include "sscUIDP.h"
 
 kernel_task_t MOTORUARTTaskHandle;
 
@@ -28,6 +29,12 @@ kernel_task_t MOTORUARTTaskHandle;
 #define MOTOR_UART_DRIVER_ERR_PHASELOSS  14U /* 参考驱动 Err=14：缺相，主控按电机相位错误处理。 */
 #define MOTOR_UART_DRIVER_ERR_POSDRAG    15U /* 参考驱动 Err=15：有 Hall 拖动错误，归入驱动板故障。 */
 
+#define MOTOR_UART_ALARM_PHASE           3U  /* UI 绑定报警码 0x03：电机相位错误。 */
+#define MOTOR_UART_ALARM_HALL            4U  /* UI 绑定报警码 0x04：电机霍尔错误。 */
+#define MOTOR_UART_ALARM_OVERLOAD        5U  /* UI 绑定报警码 0x05：电机过载或刀具卡住。 */
+#define MOTOR_UART_ALARM_VOLTAGE         8U  /* UI 绑定报警码 0x08：系统供电电压不稳定。 */
+#define MOTOR_UART_ALARM_DRIVER_BOARD    11U /* UI 绑定报警码 0x0B：驱动板故障。 */
+
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
 
@@ -37,7 +44,12 @@ static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Er
  */
 static void MotorUart_SetAlarm(uint8_t alarm_value)
 {
-	WorkAlarm_Set(alarm_value);
+	uint8_t display_value[10] = {0U};     /* UI_AIARM_ID 只读取 Value[0]，其余补零避免残留旧报警参数。 */
+
+	display_value[0] = alarm_value;       /* 把驱动细分报警码直接传给 UI 绑定表。 */
+	WorkAlarm_Set(alarm_value);           /* 统一报警状态仍由 WorkAlarm_Set 维护，避免直接改 WorkMessage。 */
+	SendAlarmMessage(alarm_value);         /* 同步蜂鸣任务进入对应报警声。 */
+	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 同步屏幕报警弹窗，报警码仍来自统一 WorkMessage 体系。 */
 }
 
 static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
@@ -46,24 +58,24 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 	{
 		case MOTOR_UART_DRIVER_ERR_OC1:
 		case MOTOR_UART_DRIVER_ERR_RUNSTALL:
-			return WORK_ALARM_MOTOR_OVERLOAD; /* 过流和堵转都属于“电机过载/刀具卡住”这类现场可处理故障。 */
+			return MOTOR_UART_ALARM_OVERLOAD; /* 过流和堵转都属于“电机过载/刀具卡住”这类现场可处理故障。 */
 
 		case MOTOR_UART_DRIVER_ERR_OV:
 		case MOTOR_UART_DRIVER_ERR_UV:
-			return WORK_ALARM_MOTOR_COMM_ERROR; /* UI 当前无独立电压图片，归入电机通讯/驱动异常，避免上报无显示码。 */
+			return MOTOR_UART_ALARM_VOLTAGE; /* 过压/欠压按 UI 绑定显示系统供电电压异常。 */
 
 		case MOTOR_UART_DRIVER_ERR_NOHALL:
 		case MOTOR_UART_DRIVER_ERR_SDAHALL:
-			return WORK_ALARM_HALL_ERROR; /* 霍尔断线/学习错误均走统一 HALL 值错误报警。 */
+			return MOTOR_UART_ALARM_HALL; /* 霍尔断线/学习错误均走 0x04 霍尔错误报警。 */
 
 		case MOTOR_UART_DRIVER_ERR_PHASELOSS:
-			return WORK_ALARM_MOTOR_COMM_ERROR; /* UI 当前无独立相位图片，归入电机通讯/驱动异常。 */
+			return MOTOR_UART_ALARM_PHASE; /* 缺相比普通驱动故障更具体，优先映射到相位错误。 */
 
 		case MOTOR_UART_DRIVER_ERR_NONE:
 			return WORK_ALARM_NONE; /* 无故障不产生报警，调用方会负责释放本模块拥有的旧报警。 */
 
 		default:
-			return WORK_ALARM_MOTOR_COMM_ERROR; /* 保存错误、刹车超时、握手错误等都统一显示电机通讯异常。 */
+			return MOTOR_UART_ALARM_DRIVER_BOARD; /* 保存错误、刹车超时、握手错误等统一提示驱动板故障。 */
 	}
 }
 
@@ -96,6 +108,8 @@ static void MotorUart_ClearDriverAlarmIfOwned(void)
 	    (WorkMessage.alarm_value == s_motor_uart_alarm_owned))
 	{
 		WorkAlarm_Clear();                 /* 驱动 Err 已经恢复为 0，并且当前报警仍是本模块写入的值，允许清报警码。 */
+		SendAlarmMessage(WORK_ALARM_NONE); /* 驱动报警恢复后同步释放蜂鸣，避免蜂鸣锁存继续保持。 */
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 驱动报警恢复后关闭屏幕报警弹窗，NULL 参数由 UIDP 统一补零。 */
 	}
 
 	s_motor_uart_alarm_owned = 0U;        /* 无论当前报警是否被其他模块接管，都释放本模块报警所有权。 */

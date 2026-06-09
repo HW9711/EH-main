@@ -46,6 +46,16 @@ void Uart3_SendPacket(uint8_t *pData, uint16_t Length)
   Bsp_UartTransmit(BSP_UART_PORT_3, pData, Length, 100);
 }
 
+/*
+ * 函数功能：清空 UART3 当前 DMA 接收缓存并重新启动接收。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Uart3_ClearRecvData(void)
+{
+  Uart3_DMAReset(); /* RFID 发起新读命令前调用，避免把上一轮残留回包当成本轮刀具标签。 */
+}
+
 uint16_t Uart3_DMARecvDataPeek(uint8_t *data)
 {
   uint32_t RemainLen = 0;

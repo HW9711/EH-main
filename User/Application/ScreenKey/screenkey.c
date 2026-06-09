@@ -4,9 +4,9 @@
 #include "uart6.h"
 #include "data.h"
 #include "common.h"
-#include "screen.h"
 #include "Pubinterface.h"
 #include "sscKEYBH.h"
+#include "sscBEEP.h"
 
 #include "kernel_scheduler.h"
 
@@ -169,12 +169,37 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
       screen_key = SCREENKey_HMI_EXIT;
       break;
 
+    case 30U:
+      screen_key = SCREENKey_SPEED_Sub_Large; /* 新屏速度左侧大减键，固定减少 10000。 */
+      break;
+
+    case 31U:
+      screen_key = SCREENKey_SPEED_Sub_Small; /* 新屏速度左侧小减键，固定减少 1000。 */
+      break;
+
+    case 32U:
+      screen_key = SCREENKey_SPEED_Add_Small; /* 新屏速度右侧小加键，固定增加 1000。 */
+      break;
+
+    case 33U:
+      screen_key = SCREENKey_SPEED_Add_Large; /* 新屏速度右侧大加键，固定增加 10000。 */
+      break;
+
+    case 36U:
+      screen_key = SCREENKey_AutoIdentify; /* 新屏自动识别键沿用旧 36 号入口，但业务层改为明确 RFID 事件。 */
+      break;
+
+    case 50U:
+      screen_key = SCREENKey_HMI_EXIT; /* 新屏幕资源的强制退出按钮复用外控退出行为，只补入口不改业务仲裁。 */
+      break;
+
     default:
       break;
   }
 
   if (screen_key != 0U)
   {
+    SendKeyBeepMessage(1U); /* 屏幕有效触控已被主控解析，先给 100ms 单响反馈，再交给业务队列执行。 */
     SendKeyBehMessage(SCREENKey, screen_key);
   }
 }
@@ -192,7 +217,6 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
 //============================================================================
 void ScreenKey_Scan(void)
 {
-  static uint8_t ScrLOGOKeyCnt = 0;
   uint8_t rlen = 0, slen = 0, i = 0, len = 0;
   uint8_t dat[UART6_MAX_PACKET_SIZE] = { 0 }, dat1[16] = { 0 };
 
@@ -220,95 +244,90 @@ void ScreenKey_Scan(void)
 	    {
 		    case 0x20 :  //第一幅图“LOGO连续点击”进入管理者模式 0_开机界面
 		    {
-		      if (dat1[5] == 0x01)
-		      {
-			      if (++ScrLOGOKeyCnt >= 5)
-			      {
-			        ScrLOGOKeyCnt = 0;
-			        ScreenKey_LegacyEventPost(KEY_CONTINUOUSCLICK);
-			      }
-		      }
+		      /* 新屏不再保留老屏入口，启动页 0x2001 只消费串口帧不进入业务。 */
 		    }
 		   break;
 		  	case 0x24 :  // 
 		    {
 		      switch (dat1[5])
 		      {				
-            case 0x00 : // 手柄
+            case 0x00 : // 主运行页顶部：手柄、开口定位、磨/刨、自动识别
 						{
 			         switch (dat1[8])
 							 {
-								 	case 0x01 : ScreenKey_PostLegacyAction(24U);  break;//1号手柄
-									case 0x02 : ScreenKey_PostLegacyAction(25U);  break;//2号手柄	
-							    default : break;								 
+									case 0x01 : ScreenKey_PostLegacyAction(24U);  break;//A 手柄
+									case 0x02 : ScreenKey_PostLegacyAction(25U);  break;//B 手柄
+									case 0x03 : ScreenKey_PostLegacyAction(22U); break;	//开口定位减
+									case 0x04 : ScreenKey_PostLegacyAction(23U); break;	//开口定位加
+									case 0x05 : ScreenKey_PostLegacyAction(20U); break;	//选择磨头模式
+									case 0x06 : ScreenKey_PostLegacyAction(21U); break;	//选择刨刀模式
+									case 0x07 : ScreenKey_PostLegacyAction(36U); break;	//自动识别刀具
+									default : break;
 							 }
              }break; 
-            case 0x01 : // 
+            case 0x01 : // 主运行页速度：大减、小减、小加、大加
 						{
 			         switch (dat1[8])
 							 {
-									case 0x01 : ScreenKey_PostLegacyAction(21U); break;	//刨刀
-									case 0x02 : ScreenKey_PostLegacyAction(20U); break;  //磨头
-									case 0x03 : ScreenKey_PostLegacyAction(22U); break;	//开口左
-									case 0x04 : ScreenKey_PostLegacyAction(23U); break;	//开口右
-								 	case 0x05 : ScreenKey_PostLegacyAction(36U); break;	//自动识别按钮开关
-								 default : break;
+									case 0x01 : ScreenKey_PostLegacyAction(30U); break;	//速度大幅减少 10000
+									case 0x02 : ScreenKey_PostLegacyAction(31U); break;  //速度小幅减少 1000
+									case 0x03 : ScreenKey_PostLegacyAction(32U); break;	//速度小幅增加 1000
+									case 0x04 : ScreenKey_PostLegacyAction(33U); break;	//速度大幅增加 10000
+									default : break;
 							 }
 						}break;						
-           	case 0x05 :// 注水+，-，排空
+            case 0x02 :// 主运行页方向：正转、往复、反转
 						{ 
-						
-								switch (dat1[8])
-								{
-									case 0x01 : ScreenKey_PostLegacyAction(7U); break;  //
-									case 0x02 : ScreenKey_PostLegacyAction(8U); break;       //
-									case 0x03 : ScreenKey_PostLegacyAction(12U); break;    //
-									default : break;
-								}
-						}break; 	
-
-					case 0x06 :// 运动方向 正反往复
+									switch (dat1[8])
+									{
+										case 0x01 : ScreenKey_PostLegacyAction(13U); break;    //正转
+										case 0x02 : ScreenKey_PostLegacyAction(15U); break;    //往复
+										case 0x03 : ScreenKey_PostLegacyAction(14U); break;    //反转
+										default : break;
+									}
+							}break;
+            case 0x03 :// 主运行页频率：减、加
 								{ 
 									switch (dat1[8])
 									{
-										case 0x01 : ScreenKey_PostLegacyAction(13U); break;    //
-										case 0x02 : ScreenKey_PostLegacyAction(15U); break;    //
-										case 0x03 : ScreenKey_PostLegacyAction(14U); break;    //
+										case 0x01 : ScreenKey_PostLegacyAction(10U); break;      //频率减
+										case 0x02 : ScreenKey_PostLegacyAction(9U);	 break;      //频率加
 										default : break;
 									}
-							}break;	
-						case 0x07 :// 控制方式，脚控手控，触控
+								}break;
+						case 0x04 :// 主运行页控制方式：脚控、手控、触控、外部通信
 									{ 
 										switch (dat1[8])
 										{
-											case 0x01 : ScreenKey_PostLegacyAction(16U); break;    //
-											case 0x02 : ScreenKey_PostLegacyAction(17U); break;    //
-											case 0x03 : ScreenKey_PostLegacyAction(18U); break;    //
-											case 0x04 : ScreenKey_PostLegacyAction(40U); break;
-											case 0x05 : ScreenKey_PostLegacyAction(43U); break;
+											case 0x01 : ScreenKey_PostLegacyAction(16U); break;    //脚控
+											case 0x02 : ScreenKey_PostLegacyAction(17U); break;    //手控
+											case 0x03 : ScreenKey_PostLegacyAction(18U); break;    //触控
+											case 0x04 : ScreenKey_PostLegacyAction(43U); break;    //外部通信/外控退出
 											default : break;
 										}
 								}break;	
-								case 0x08 :// 频率加频率减
+            case 0x05 :// A 泵加、减、启停
+						{
+
+								switch (dat1[8])
+								{
+									case 0x01 : ScreenKey_PostLegacyAction(7U); break;  //A 泵加
+									case 0x02 : ScreenKey_PostLegacyAction(8U); break;  //A 泵减
+									case 0x03 : ScreenKey_PostLegacyAction(12U); break; //A 泵启停
+									default : break;
+								}
+						}break;
+
+					case 0x06 :// B 泵加、减、启停
 								{ 
 									switch (dat1[8])
 									{
-										case 0x01 : ScreenKey_PostLegacyAction(10U); break;      //
-										case 0x02 : ScreenKey_PostLegacyAction(9U);	 break;      //
-									
+										case 0x01 : ScreenKey_PostLegacyAction(5U); break;  //B 泵加
+										case 0x02 : ScreenKey_PostLegacyAction(6U); break;  //B 泵减
+										case 0x03 : ScreenKey_PostLegacyAction(11U); break; //B 泵启停
 										default : break;
 									}
-								}break;	
-								case 0x09 :// 灌注+，-，启动
-								{ 
-									switch (dat1[8])
-									{
-										case 0x01 : ScreenKey_PostLegacyAction(5U); break;      //
-										case 0x02 : ScreenKey_PostLegacyAction(6U);	 break;      //
-										case 0x03 : ScreenKey_PostLegacyAction(11U);	 break;      //
-										default : break;
-									}
-								}break;	
+							}break;
             case 0x20 ://  定标按键
 						{ 
 							switch (dat1[8])
@@ -377,7 +396,6 @@ void ScreenKey_Scan(void)
 						case 0x30 : ScreenKey_PostLegacyAction(42U); break;  //触控停止
 					}
 					break;
-							
 		    default : break;
 				
 	    }

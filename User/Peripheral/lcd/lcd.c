@@ -1,6 +1,7 @@
 //lcd.c
 
 #include "lcd.h"
+#include "screen_address.h"
 #include "uart6.h"
 #include "common.h"
 #include "delay.h"
@@ -55,6 +56,22 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
   Uart6_SendPacket(dat, 10);
 }
 
+/*
+ * 函数功能：强制刷新指定背景页，绕过普通 LCD_Show_Which_Map() 的同页去重。
+ * 输入参数：MapAddr 为 DWIN 背景页号，主运行页固定传 0。
+ * 返回参数：无。
+ */
+void LCD_ForceShow_Which_Map(uint8_t MapAddr)
+{
+  uint8_t dat[10] = {0x5A, 0xA5, 0x07, 0x82, 0x00, 0x84, 0x5A, 0x01}; /* DWIN 背景页切换命令，开机初始化必须完整重发。 */
+
+  s_lcd_background_page = MapAddr; /* 强制切页成功发送前同步软件缓存，后续普通切页仍按当前页去重。 */
+  dat[8] = (MapAddr >> 8) & 0x00ff; /* 背景页号高字节，当前工程实际只使用低 8 位页号。 */
+  dat[9] = MapAddr & 0x00ff;        /* 背景页号低字节，page0 主运行页会写入 0。 */
+
+  Uart6_SendPacket(dat, 10); /* 直接走屏幕串口发送，不受同页 SendCnt 影响，避免启动页底图残留。 */
+}
+
 //============================================================================
 // 函数名称: LCD_Disappear_Number()
 // 功能描述: 隐藏某个数据
@@ -97,23 +114,23 @@ void LCD_Disappear_Picture(uint16_t PicAddr)
 
   switch (PicAddr)
   {
-	  case 0x1606 : s_lcd_display_cache.UIDisplay0x1403 = 0;	break;  // 往复角度图片隐藏。
-	  case 0x1600 : s_lcd_display_cache.UIDisplay0x1303 = 0; break;  // 转速栏隐藏。
-	  case 0x1601 : s_lcd_display_cache.UIDisplay0x1304 = 0; break;  // 频率或挡位栏隐藏。
-	  case 0x1506 : s_lcd_display_cache.UIDisplay0x1305 = 0; break;  // B 泵区域隐藏。
-	  case 0x1502 : s_lcd_display_cache.UIDisplay0x1318 = 0; break;  // A 泵区域隐藏。
+	  case UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE : s_lcd_display_cache.UIDisplay0x1403 = 0;	break;  // 往复角度图片隐藏。
+	  case UIDP_LCD_LEGACY_VP_SPEED_AREA_CACHE : s_lcd_display_cache.UIDisplay0x1303 = 0; break;  // 转速栏隐藏。
+	  case UIDP_LCD_LEGACY_VP_FREQ_GEAR_CACHE : s_lcd_display_cache.UIDisplay0x1304 = 0; break;  // 频率或挡位栏隐藏。
+	  case UIDP_LCD_LEGACY_VP_PUMP_B_CACHE : s_lcd_display_cache.UIDisplay0x1305 = 0; break;  // B 泵区域隐藏。
+	  case UIDP_LCD_LEGACY_VP_PUMP_A_CACHE : s_lcd_display_cache.UIDisplay0x1318 = 0; break;  // A 泵区域隐藏。
 
-		case 0x1602 :
+		case UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE :
     {
 			s_lcd_display_cache.UIDisplay0x1311 = 0;
 		  s_lcd_display_cache.UIDisplay0x1310 = 0;
 			break;
-		}		
-//	  case 0x1311 : s_lcd_display_cache.UIDisplay0x1311 = 0; break;  //往复
-//	  case 0x1310 : s_lcd_display_cache.UIDisplay0x1310 = 0; break;  //正向
+		}
+//	  case UIDP_LCD_LEGACY_VP_DIR_OSC_CACHE : s_lcd_display_cache.UIDisplay0x1311 = 0; break;  //往复
+//	  case UIDP_LCD_LEGACY_VP_DIR_FORWARD_CACHE : s_lcd_display_cache.UIDisplay0x1310 = 0; break;  //正向
 
-	  case 0x1312 : s_lcd_display_cache.UIDisplay0x1312 = 0; break;  // 脚踏控制图标隐藏。
-	  case 0x1313 : s_lcd_display_cache.UIDisplay0x1313 = 0; break;  // 手控图标隐藏。
+	  case UIDP_LCD_LEGACY_VP_CONTROL_FOOT_CACHE : s_lcd_display_cache.UIDisplay0x1312 = 0; break;  // 脚踏控制图标隐藏。
+	  case UIDP_LCD_LEGACY_VP_CONTROL_HANDLE_CACHE : s_lcd_display_cache.UIDisplay0x1313 = 0; break;  // 手控图标隐藏。
 	  default : break;
   }
 }
@@ -162,13 +179,13 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 
   switch (PicAddr)
   {
-	  case 0x1606 :
+	  case UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE :
 	  {
 	    if (PicNum == 400)  //往复角度图片显
 		    s_lcd_display_cache.UIDisplay0x1403 = 1;
 	  }
 	  break;
-	  case 0x1600 :
+	  case UIDP_LCD_LEGACY_VP_SPEED_AREA_CACHE :
 	  {
 	    if (PicNum == 340)  //转速 灰
 		    s_lcd_display_cache.UIDisplay0x1303 = 1;
@@ -176,7 +193,7 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 		    s_lcd_display_cache.UIDisplay0x1303 = 2;
 	  }
 	  break;
-	  case 0x1601 :
+	  case UIDP_LCD_LEGACY_VP_FREQ_GEAR_CACHE :
 	  {
 	    if ((PicNum == 350) || (PicNum == 355))  //灰色
 		    s_lcd_display_cache.UIDisplay0x1304 = 1;
@@ -190,9 +207,9 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 		    s_lcd_display_cache.UIDisplay0x1304 = 5;
 	  }
 	  break;
-		case 0x1500 :
+		case UIDP_LCD_LEGACY_VP_HANDLE_A_CACHE :
 		{
-	    if (PicNum == 106)  //A手柄未连接		
+	    if (PicNum == 106)  //A手柄未连接
 			{
 				s_lcd_display_cache.UIDisplay0x1500 = 0;
 			}
@@ -200,38 +217,38 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
       {
 				s_lcd_display_cache.UIDisplay0x1500 = 1;
 			}
-		}	  
-		break;			
-		case 0x1501 :			
+		}
+		break;
+		case UIDP_LCD_LEGACY_VP_HANDLE_B_CACHE :
 		{
-	    if (PicNum == 206)  //B手柄未连接	
+	    if (PicNum == 206)  //B手柄未连接
 			{
 				s_lcd_display_cache.UIDisplay0x1501 = 0;
 			}
 			else
       {
 				s_lcd_display_cache.UIDisplay0x1501 = 1;
-			}				
-		}	  
+			}
+		}
 		break;
-	  case 0x1506 :
+	  case UIDP_LCD_LEGACY_VP_PUMP_B_CACHE :
 	  {
 	    if (PicNum == 302)  //流量 灰
 		    s_lcd_display_cache.UIDisplay0x1305 = 1;
 	    else //if (PicNum == 227)
 		    s_lcd_display_cache.UIDisplay0x1305 = 2;
 	  }
-	  break;	
- 		
-	  case 0x1502 :
+	  break;
+
+	  case UIDP_LCD_LEGACY_VP_PUMP_A_CACHE :
 	  {
 	    if (PicNum == 302)  //流量 灰
 		    s_lcd_display_cache.UIDisplay0x1318 = 1;
 	    else //if (PicNum == 227)
 		    s_lcd_display_cache.UIDisplay0x1318 = 2;
 	  }
-	  break;		
-	  case 0x1312 :
+	  break;
+	  case UIDP_LCD_LEGACY_VP_CONTROL_FOOT_CACHE :
 	  {
 	    if (PicNum == 260)  //未选中
 		    s_lcd_display_cache.UIDisplay0x1312 = 2;
@@ -241,7 +258,7 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 		    s_lcd_display_cache.UIDisplay0x1312 = 1;
 	  }
 	  break;
-	  case 0x1313 :
+	  case UIDP_LCD_LEGACY_VP_CONTROL_HANDLE_CACHE :
 	  {
 	    if (PicNum == 262)  //未选中
 	      s_lcd_display_cache.UIDisplay0x1313 = 2;
@@ -251,30 +268,30 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 		    s_lcd_display_cache.UIDisplay0x1313 = 1;
 	  }
 	  break;
-	  case 0x1602 :
-	  {		
+	  case UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE :
+	  {
 	    if (PicNum == 360)  //未选中
 			{
 		    s_lcd_display_cache.UIDisplay0x1310 = 0;
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
 	    else if (PicNum == 361)  //正3
-			{	
+			{
 		    s_lcd_display_cache.UIDisplay0x1310 = 1;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 	    else if (PicNum == 362)  //往复3
-			{	
+			{
 				s_lcd_display_cache.UIDisplay0x1310 = 2;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 			else if (PicNum == 363)  //反3
-			{	
+			{
 				s_lcd_display_cache.UIDisplay0x1310 = 3;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
 			else if (PicNum == 364)  //正2
-			{	
+			{
 				s_lcd_display_cache.UIDisplay0x1310 = 1;
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
@@ -289,8 +306,8 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}	
 	  }
-	  break;		
-//	  case 0x1311 :
+	  break;
+//	  case UIDP_LCD_LEGACY_VP_DIR_OSC_CACHE :
 //	  {
 //	    if (PicNum == 256)  //未选中
 //		    s_lcd_display_cache.UIDisplay0x1311 = 2;
@@ -300,7 +317,7 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 //		    s_lcd_display_cache.UIDisplay0x1311 = 1;
 //	  }
 //	  break;
-//	  case 0x1310 :
+//	  case UIDP_LCD_LEGACY_VP_DIR_FORWARD_CACHE :
 //	  {
 //	    if (PicNum == 250)  //未选中
 //		    s_lcd_display_cache.UIDisplay0x1310 = 2;
@@ -314,14 +331,14 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 //		    s_lcd_display_cache.UIDisplay0x1310 = 1;
 //	  }
 //	  break;
-//	  case 0x1316 :
+//	  case UIDP_LCD_LEGACY_VP_DIR_REVERSE_CACHE :
 //	  {
 //	    if (PicNum == 303)  //未选中
-//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
+//		    旧反向图标缓存分支已停用，当前方向图标由 UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE 组合图缓存维护。
 //	    else if (PicNum == 304)  //选中
-//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
+//		    旧反向图标缓存分支已停用，当前方向图标由 UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE 组合图缓存维护。
 //	    else
-//		    旧反向图标缓存分支已停用，当前方向图标由 0x1602 组合图缓存维护。
+//		    旧反向图标缓存分支已停用，当前方向图标由 UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE 组合图缓存维护。
 //	  }
 //	  break;
 	  default : break;
