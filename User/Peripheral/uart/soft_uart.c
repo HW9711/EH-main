@@ -698,7 +698,11 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     pump_message->weight_x10 = weight_x10;
     pump_message->pressure_threshold = threshold_g;
     /* 把设备码转换后的业务泵类型写入公共状态，后续泵任务按该类型选择方向和换算公式。 */
+   
+   
     pump_message->type = pump_type;
+   
+    
     pump_message->seq = frame[5];
     pump_message->online_flag = (pump_type != 0U);
     pump_message->losses_times = pump_message->online_flag ? 0U : (uint8_t)(pump_message->losses_times + 1U);
@@ -708,6 +712,18 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
 
     if (pump_display_changed)
     {
+        if(pump_message->type==INJECTWATER)
+        {
+        pump_message->speed_work=30;
+        }
+        else if(pump_message->type==POURWATER)
+        {
+        pump_message->speed_work=200;
+        }
+        else if(pump_message->type==DRAWWATER)
+        {
+        pump_message->speed_work=10;
+        }
         if (channel == SIM_UART_1)
         {
             Pubinterface_RefreshPumpBDisplay(); /* SIM_UART_1/PE4 固定对应 B 泵，只刷新右侧 B 泵显示，不改变控制归属。 */

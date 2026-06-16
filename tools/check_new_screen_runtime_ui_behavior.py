@@ -76,26 +76,29 @@ def main() -> int:
     control_mode = compact(function_body(pub, "Pubinterface_RefreshControlModeDisplay"))
     selected_channel = compact(function_body(pub, "Pubinterface_RefreshSelectedChannelDisplay"))
     control_type = compact(function_body(pub, "ControlTypeActive"))
+    touch_acti = control_type.split("caseSCREENKey_TouchActi:", 1)[1].split("caseSCREENKey_TouchKeepAlive:", 1)[0]
+    touch_keepalive = control_type.split("caseSCREENKey_TouchKeepAlive:", 1)[1].split("caseSCREENKey_TouchEXIT:", 1)[0]
     ui_control = compact(function_body(uidp, "UICONTROLDP"))
     uidp_behavior = compact(function_body(uidp, "UIDISPLAYBehavior"))
     external_reset = compact(function_body(external, "ExternalComm_ResetLinkWatchdog"))
     external_timeout = compact(function_body(external, "ExternalComm_HandleLinkReleaseTimeout"))
     external_enter = compact(function_body(pub, "ControlArbitration_EnterExternalControl"))
     external_release = compact(function_body(pub, "ControlArbitration_ReleaseExternalControl"))
+    hmi_exit = compact(function_body(pub, "HmiExitActive"))
 
     require("caseINJECTWATER:returnenable_flag?211U:210U;" in pump_type_picture,
             "INJECTWATER must map to 211 yellow and 210 gray after the new pump-title export.", errors)
     require("casePOURWATER:returnenable_flag?213U:212U;" in pump_type_picture,
             "POURWATER must map to 213 yellow and 212 gray after the new pump-title export.", errors)
-    require("caseDRAWWATER:returnenable_flag?214U:215U;" in pump_type_picture,
-            "DRAWWATER must map to 214 yellow and 215 gray after the new pump-title export.", errors)
+    require("caseDRAWWATER:returnenable_flag?215U:214U;" in pump_type_picture,
+            "DRAWWATER must map to 215 yellow and 214 gray after the EX8 pump-title export.", errors)
 
-    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,222U)" in pump_b and
-            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,223U)" in pump_b,
-            "B pump disabled +/- icons must match EX8 export: 0x1422=222 plus-disabled and 0x1424=223 minus-disabled.", errors)
-    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,225U)" in pump_b and
-            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,224U)" in pump_b,
-            "B pump enabled +/- icons must match EX8 export: 0x1422=225 plus-enabled and 0x1424=224 minus-enabled.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,498U)" in pump_b and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,500U)" in pump_b,
+            "B pump disabled +/- icons must match current EX8 export: 0x1422=498 plus-disabled and 0x1424=500 minus-disabled.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,499U)" in pump_b and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,501U)" in pump_b,
+            "B pump enabled +/- icons must match current EX8 export: 0x1422=499 plus-enabled and 0x1424=501 minus-enabled.", errors)
     require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS,222U)" in pump_a and
             "LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,223U)" in pump_a,
             "A pump disabled +/- icons must match EX8 export: 0x1421=222 plus-disabled and 0x1423=223 minus-disabled.", errors)
@@ -108,8 +111,8 @@ def main() -> int:
             pump_a.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,223U)"),
             "A pump disabled refresh must draw the gear background before +/- buttons.", errors)
     require(pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA,UIDP_PumpGearPicture(2U,0U,UIDP_PUMP_GEAR_RUN_FRAME))") <
-            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,222U)") <
-            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,223U)"),
+            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,498U)") <
+            pump_b.find("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,500U)"),
             "B pump disabled refresh must draw the gear background before +/- buttons.", errors)
     last_a_gear = max(pump_a.rfind("PumpGeardisplay(1,DRAWWATER,pump_value);"),
                       pump_a.rfind("PumpGeardisplay(1,POURWATER,pump_value);"),
@@ -122,8 +125,8 @@ def main() -> int:
             pump_a.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS,224U)"),
             "A pump enabled refresh must redraw +/- buttons after the gear background.", errors)
     require(last_b_gear <
-            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,225U)") <
-            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,224U)"),
+            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,499U)") <
+            pump_b.rfind("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,501U)"),
             "B pump enabled refresh must redraw +/- buttons after the gear background.", errors)
 
     dir_active = compact(function_body(pub, "DirActive"))
@@ -148,22 +151,25 @@ def main() -> int:
     require("Pubinterface_RefreshControlModeDisplay" in pub_h and
             "voidPubinterface_RefreshControlModeDisplay(void)" in pub_c,
             "控制模式刷新函数应对脚踏任务公开，避免分散直写 UI_CONTROL_ID。", errors)
-    require("boolhandle_control_available=(external_control_active==false);" in control_mode and
-            "booltouch_control_available=(external_control_active==false);" in control_mode,
-            "Control-mode refresh must show handle/touch as white selectable when external control is not active.", errors)
-    require("boolhandle_control_available=(external_control_active==false);" in selected_channel and
-            "booltouch_control_available=(external_control_active==false);" in selected_channel,
-            "Channel refresh must not turn handle/touch gray after the main run page has loaded.", errors)
+    require("handle_control_available=((external_control_active==false)&&Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model));" in control_mode and
+            "touch_control_available=((external_control_active==false)&&(WorkMessage.hand_model!=0U));" in control_mode,
+            "Control-mode refresh must enable touch only when external control is inactive and a handle is valid.", errors)
+    require("handle_control_available=((external_control_active==false)&&Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model));" in selected_channel and
+            "touch_control_available=((external_control_active==false)&&(WorkMessage.hand_model!=0U));" in selected_channel,
+            "Channel refresh must keep touch disabled when no valid handle is present.", errors)
     require("control_type==0U" in ui_control and
             "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,34U)" in ui_control and
             "LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U)" in ui_control and
             "LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL)" in ui_control,
             "Power-init control icons must show handle/touch white and hide external comm until connected.", errors)
-    require("caseSCREENKey_TouchActi:" in control_type and
-            "ControlArbitration_TryEnter(CONTROL_OWNER_SCREEN)" in control_type and
-            "WorkMessage.drivetype_work=TOUCHWORK;" in control_type and
-            "WorkMessage.runflag_work=true;" in control_type,
-            "The new-screen touch button must directly enter screen touch control and start motion.", errors)
+    require("ControlArbitration_TryEnter(CONTROL_OWNER_SCREEN)" in touch_acti and
+            "WorkMessage.drivetype_work=TOUCHWORK;" in touch_acti and
+            "WorkMessage.runflag_work=false;" in touch_acti and
+            "WorkMessage.runflag_work=true;" not in touch_acti,
+            "0x2404/key3 must enter touch mode without starting motion.", errors)
+    require("WorkMessage.runflag_work=true;" in touch_keepalive and
+            "Pubinterface_CheckCommonSocketToolReadyForRun()==false" in touch_keepalive,
+            "0x5520 keepalive must be the only touch path that starts motion.", errors)
 
     require("SendUIDSMessage(UI_CONTROL_ID" not in foot_c,
             "sscFOOT.c 不应直接写 UI_CONTROL_ID，应统一调用 Pubinterface_RefreshControlModeDisplay。", errors)
@@ -176,10 +182,21 @@ def main() -> int:
             "申请外控成功后应把小电脑图标刷成黄色。", errors)
     require("Pubinterface_RefreshExternalCommDisplay(true,false);" in external_release,
             "退出外控后应保留外部通信在线白色图标。", errors)
+    require("key_value==SCREENKey_HMI_EXIT" in hmi_exit and
+            "Pubinterface_ConsumeScreenExternalExitDoubleClick()==false" in hmi_exit and
+            "return;" in hmi_exit.split("ControlArbitration_ReleaseExternalControl();", 1)[0],
+            "screen external-control exit must not release control on the first click.", errors)
+    require("s_screen_external_exit_pending=0U;" in hmi_exit and
+            hmi_exit.find("ControlArbitration_ReleaseExternalControl();") < hmi_exit.rfind("s_screen_external_exit_pending=0U;"),
+            "screen external-control exit must clear the double-click latch after release.", errors)
     require("Pubinterface_RefreshExternalCommDisplay(true,ControlArbitration_IsExternalActive());" in external_reset,
             "收到合法外部通信帧时应刷新小电脑图标在线状态。", errors)
     require("Pubinterface_RefreshExternalCommDisplay(false,false);" in external_timeout,
             "外部通信长时间无合法帧后应熄灭小电脑图标。", errors)
+
+    require("ControlArbitration_ReleaseExternalControl();" in external_timeout and
+            external_timeout.find("ControlArbitration_ReleaseExternalControl();") < external_timeout.rfind("Pubinterface_RefreshExternalCommDisplay(false,false);"),
+            "external communication long-timeout must release external control before hiding the icon.", errors)
 
     batch_limit_match = re.search(r"#define\s+UIDP_DISPLAY_BATCH_LIMIT\s+(\d+)U", uidp)
     require(batch_limit_match is not None and int(batch_limit_match.group(1)) >= 12,

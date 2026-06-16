@@ -1,6 +1,8 @@
 #ifndef SCREEN_ADDRESS_H
 #define SCREEN_ADDRESS_H
 
+/* 启动页页号：上电等待期固定停留在 EX8 启动页，避免屏幕复位后沿用上一次背景页。 */
+#define UIDP_LCD_PAGE_STARTUP 0U
 /* 主运行页页号：开机后强制切换到8寸屏主运行页面。 */
 #define UIDP_LCD_PAGE_MAIN_RUN 4U
 /* A手柄识别VP：用于刷新A通道手柄类型和在线状态图标。 */
@@ -35,32 +37,84 @@
 #define UIDP_LCD_VP_CONTROL_TOUCH 0x1415U
 /* 外部控制VP：用于显示外部控制或预值通信状态图标。 */
 #define UIDP_LCD_VP_CONTROL_EXTERNAL 0x1416U
+/* 屏幕安装镜像时开启 A/B 泵显示交换：1=逻辑 A 写到屏幕 B 位，0=保持原始 A/B 位置。 */
+#ifndef UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE
+#define UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE 0U
+#endif
 /* A泵类型VP：用于显示A泵抽吸、灌注或注水类型标题。 */
-#define UIDP_LCD_VP_PUMP_A_TYPE 0x1417U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_TYPE 0x1418U /* 镜像开启：逻辑 A 泵类型写到屏幕 B 泵位置。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_TYPE 0x1417U /* 镜像关闭：逻辑 A 泵类型写到原 A 泵位置。 */
+#endif
 /* B泵类型VP：用于显示B泵抽吸、灌注或注水类型标题。 */
-#define UIDP_LCD_VP_PUMP_B_TYPE 0x1418U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_TYPE 0x1417U /* 镜像开启：逻辑 B 泵类型写到屏幕 A 泵位置。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_TYPE 0x1418U /* 镜像关闭：逻辑 B 泵类型写到原 B 泵位置。 */
+#endif
 /* A泵档位区VP：用于刷新A泵蓝色流量可视化档位。 */
-#define UIDP_LCD_VP_PUMP_A_GEAR_AREA 0x1419U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_GEAR_AREA 0x1420U /* 镜像开启：逻辑 A 泵档位写到屏幕 B 泵档位区。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_GEAR_AREA 0x1419U /* 镜像关闭：逻辑 A 泵档位写到原 A 泵档位区。 */
+#endif
 /* B泵档位区VP：用于刷新B泵蓝色流量可视化档位。 */
-#define UIDP_LCD_VP_PUMP_B_GEAR_AREA 0x1420U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_GEAR_AREA 0x1419U /* 镜像开启：逻辑 B 泵档位写到屏幕 A 泵档位区。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_GEAR_AREA 0x1420U /* 镜像关闭：逻辑 B 泵档位写到原 B 泵档位区。 */
+#endif
 /* A泵加号VP：当前代码用于刷新A泵上调按钮。 */
-#define UIDP_LCD_VP_PUMP_A_PLUS 0x1421U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_PLUS 0x1422U /* 镜像开启：逻辑 A 泵加号写到屏幕 B 泵加号位。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_PLUS 0x1421U /* 镜像关闭：逻辑 A 泵加号写到原 A 泵加号位。 */
+#endif
 /* B泵启停VP：当前代码用于刷新B泵启停按钮，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_B_BUTTON 0x1428U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_BUTTON 0x1427U /* 镜像开启：逻辑 B 泵启停按钮写到屏幕 A 泵按钮位。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_BUTTON 0x1428U /* 镜像关闭：逻辑 B 泵启停按钮写到原 B 泵按钮位。 */
+#endif
 /* B泵加号VP：当前代码用于刷新B泵上调按钮，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_B_PLUS 0x1422U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_PLUS 0x1421U /* 镜像开启：逻辑 B 泵加号写到屏幕 A 泵加号位。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_PLUS 0x1422U /* 镜像关闭：逻辑 B 泵加号写到原 B 泵加号位。 */
+#endif
 /* A泵减号VP：当前代码用于刷新A泵下调按钮，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_A_MINUS 0x1423U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_MINUS 0x1424U /* 镜像开启：逻辑 A 泵减号写到屏幕 B 泵减号位。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_MINUS 0x1423U /* 镜像关闭：逻辑 A 泵减号写到原 A 泵减号位。 */
+#endif
 /* B泵减号VP：当前代码用于刷新B泵下调按钮，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_B_MINUS 0x1424U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_MINUS 0x1423U /* 镜像开启：逻辑 B 泵减号写到屏幕 A 泵减号位。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_MINUS 0x1424U /* 镜像关闭：逻辑 B 泵减号写到原 B 泵减号位。 */
+#endif
 /* A泵单位VP：当前代码用于刷新A泵流量单位，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_A_UNIT 0x1425U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_UNIT 0x1426U /* 镜像开启：逻辑 A 泵单位写到屏幕 B 泵单位位。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_UNIT 0x1425U /* 镜像关闭：逻辑 A 泵单位写到原 A 泵单位位。 */
+#endif
 /* B泵单位VP：当前代码用于刷新B泵流量单位，后续地址校正时统一从此宏调整。 */
-#define UIDP_LCD_VP_PUMP_B_UNIT 0x1426U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_UNIT 0x1425U /* 镜像开启：逻辑 B 泵单位写到屏幕 A 泵单位位。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_UNIT 0x1426U /* 镜像关闭：逻辑 B 泵单位写到原 B 泵单位位。 */
+#endif
 /* 报警提示VP：当前代码用于刷新报警提示图片，后续地址校正时统一从此宏调整。 */
 #define UIDP_LCD_VP_ALARM_TIP 0x1429U
 /* A泵启停旧VP：当前代码仍写入A泵启停按钮的历史地址，暂不在本轮修正。 */
-#define UIDP_LCD_VP_PUMP_A_BUTTON 0x1427U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_BUTTON 0x1428U /* 镜像开启：逻辑 A 泵启停按钮写到屏幕 B 泵按钮位。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_BUTTON 0x1427U /* 镜像关闭：逻辑 A 泵启停按钮写到原 A 泵按钮位。 */
+#endif
 /* 主运行页触控工作 VP：用于 0x5520 保活触发的触控运行显示。 */
 #define UIDP_LCD_VP_TOUCH_WORK 0x1430U
 /* 转速数值VP：用于写入主电机转速数值。 */
@@ -68,9 +122,17 @@
 /* 频率数值VP：用于写入往复或方向相关频率数值。 */
 #define UIDP_LCD_VP_FREQ_VALUE 0x3470U
 /* A泵流量数值VP：用于写入A泵当前流量数值。 */
-#define UIDP_LCD_VP_PUMP_A_VALUE 0x3530U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_A_VALUE 0x3550U /* 镜像开启：逻辑 A 泵数值写到屏幕 B 泵数值 VP。 */
+#else
+#define UIDP_LCD_VP_PUMP_A_VALUE 0x3530U /* 镜像关闭：逻辑 A 泵数值写到原 A 泵数值 VP。 */
+#endif
 /* B泵流量数值VP：用于写入B泵当前流量数值。 */
-#define UIDP_LCD_VP_PUMP_B_VALUE 0x3550U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_VP_PUMP_B_VALUE 0x3530U /* 镜像开启：逻辑 B 泵数值写到屏幕 A 泵数值 VP。 */
+#else
+#define UIDP_LCD_VP_PUMP_B_VALUE 0x3550U /* 镜像关闭：逻辑 B 泵数值写到原 B 泵数值 VP。 */
+#endif
 /* 脚踏标定左低值VP：用于显示左侧脚踏低位存储值。 */
 #define UIDP_LCD_VP_PEDAL_LEFT_LOW_STORE 0x3740U
 /* 脚踏标定左高值VP：用于显示左侧脚踏高位存储值。 */
@@ -104,13 +166,29 @@
 /* 频率数值显示SP：用于绑定或隐藏频率数值控件。 */
 #define UIDP_LCD_SP_FREQ_VALUE 0x9470U
 /* A泵流量数值显示SP：用于绑定或隐藏A泵流量数值控件。 */
-#define UIDP_LCD_SP_PUMP_A_VALUE 0x9530U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_SP_PUMP_A_VALUE 0x9550U /* 镜像开启：逻辑 A 泵数值控件绑定到屏幕 B 泵控件。 */
+#else
+#define UIDP_LCD_SP_PUMP_A_VALUE 0x9530U /* 镜像关闭：逻辑 A 泵数值控件保持原 A 泵控件。 */
+#endif
 /* A泵输出颜色SP：旧泵直连路径用于切换A泵数值颜色。 */
-#define UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR 0x9533U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR 0x9553U /* 镜像开启：逻辑 A 泵输出颜色写到屏幕 B 泵颜色控件。 */
+#else
+#define UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR 0x9533U /* 镜像关闭：逻辑 A 泵输出颜色保持原 A 泵颜色控件。 */
+#endif
 /* B泵流量数值显示SP：用于绑定或隐藏B泵流量数值控件。 */
-#define UIDP_LCD_SP_PUMP_B_VALUE 0x9550U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_SP_PUMP_B_VALUE 0x9530U /* 镜像开启：逻辑 B 泵数值控件绑定到屏幕 A 泵控件。 */
+#else
+#define UIDP_LCD_SP_PUMP_B_VALUE 0x9550U /* 镜像关闭：逻辑 B 泵数值控件保持原 B 泵控件。 */
+#endif
 /* B泵输出颜色SP：旧泵直连路径用于切换B泵数值颜色。 */
-#define UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR 0x9553U
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+#define UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR 0x9533U /* 镜像开启：逻辑 B 泵输出颜色写到屏幕 A 泵颜色控件。 */
+#else
+#define UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR 0x9553U /* 镜像关闭：逻辑 B 泵输出颜色保持原 B 泵颜色控件。 */
+#endif
 
 /* 旧屏A手柄缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
 #define UIDP_LCD_LEGACY_VP_HANDLE_A_CACHE 0x1500U

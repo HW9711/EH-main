@@ -45,15 +45,17 @@ static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
 
 /*
  * 函数功能：判断当前通道是否需要按有刷一体刨/一体磨协议下发驱动帧。
- * 输入参数：hand_model 为 EEPROM 第二页识别出的手柄型号；tool_type 为当前刀具类型或一体刨型号值。
+ * 输入参数：hand_model 为 EEPROM 第二页识别出的手柄型号；tool_type 为归一后的业务刀具类型；raw_tool_type 为 EEPROM/RFID 原始刀具型号。
  * 返回参数：1 表示按有刷电机通道下发；0 表示按无刷/霍尔通道下发。
  */
-static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type)
+static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type, uint8_t raw_tool_type)
 {
     return (uint8_t)((hand_model == PX_YIP_ONLINES) ||
                      (hand_model == PX_YIM_ONLINES) ||
                      (tool_type == PX_YIP_ONLINES) ||
-                     (tool_type == PX_YIM_ONLINES)); /* PXM/PXP 既可能来自 Page2 手柄型号，也可能来自 Page3 刀具型号，两路都按有刷处理。 */
+                     (tool_type == PX_YIM_ONLINES) ||
+                     (raw_tool_type == PX_YIP_ONLINES) ||
+                     (raw_tool_type == PX_YIM_ONLINES)); /* tool_type 归一为 PLANER/GRINDH 后，仍用 raw_tool_type 保留 PXM/PXP 有刷判定。 */
 }
 
 static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
@@ -95,9 +97,35 @@ void MotorStart()
  */
 void MOTORRUN(void)
 {
-    
+    static uint8_t huci=0;
+    uint8_t display_value[10]={0};
+    if(WorkMessage.tool_reduction_ratio==0)WorkMessage.tool_reduction_ratio=1;
+    if(WorkMessage.auto_identify==0)WorkMessage.tool_reduction_ratio=1;
+    uint32_t ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
+    if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)
+    {
+        if(WorkMessage.tool_type==PLANER)
+        {
+            if(ssc_speed_value<1500)
+          ssc_speed_value=ssc_speed_value*1.3;
+          if(ssc_speed_value<500)
+          ssc_speed_value=500;
+        }
+    }
+   
     if(WorkMessage.runflag_work)
     {
+        if(huci==0)
+        {
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[1] = (uint8_t)((WorkMessage.speed_set_work >> 8)&0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
+         display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
+            display_value[3] = 1U;             
+            display_value[4] = 1U; 
+            huci=1;
+	SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+     LCD_Show_2byte_Number(0x9473,0xffE0);
+        }
         //msg的数据填充
         switch(WorkMessage.dir_work)
         {
@@ -118,7 +146,7 @@ void MOTORRUN(void)
         }
         if(WorkMessage.channel_work==1)//通道1
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x01;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
@@ -131,7 +159,7 @@ void MOTORRUN(void)
         }
         else if(WorkMessage.channel_work==2)//通道2
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x02;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
@@ -141,14 +169,27 @@ void MOTORRUN(void)
                  msg.run_type=0x04;
             }
         }
-      msg.speed_h=WorkMessage.speed_work/2560;
-      msg.speed_l=(WorkMessage.speed_work/10)%256;//速度
+        WorkMessage.current_work=0x1ff;
+      msg.speed_h=ssc_speed_value/256;
+      msg.speed_l=(ssc_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256;
       msg.pro_current_l=WorkMessage.current_work%256;//电流
       MotorStart();
     }
     else
     {
+         if(huci==1){
+            huci=0;
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[1] = (uint8_t)((WorkMessage.speed_set_work >>8)& 0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
+             display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
+            display_value[3] = 1U; 
+            display_value[4] = 0U; 
+            SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+       
+	        LCD_Show_2byte_Number(0x9473,0xffff);
+
+         }
        MotorStops();
     }
 

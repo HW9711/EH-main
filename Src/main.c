@@ -117,15 +117,11 @@ int main(void)
 
   Hardware_PostInit();
   App_Bootstrap_Init();
-
   /* USER CODE END 2 */
-
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
-
   /* Start scheduler */
   vTaskStartScheduler();
-
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */

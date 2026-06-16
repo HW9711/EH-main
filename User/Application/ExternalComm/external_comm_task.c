@@ -1195,12 +1195,12 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
                                          EXTERNAL_COMM_REASON_NO_CHANNEL);
                 return;
             }
-            if (Pubinterface_IsCommonSocketToolReady() == false)
+            if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
             {
                 ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                          frame->area_code,
                                          EXTERNAL_COMM_REASON_NOT_SUPPORT);
-                return; /* 公共接头基座在线但 EPC 刀具头未识别时，外控启动也必须被统一拦截。 */
+                return; /* 公共接头基座在线但 EPC 刀具头未识别时，外控真正启动电机才报警并拒绝运行。 */
             }
             /* 恢复实际速度为已设置速度。 */
             WorkMessage.speed_work = WorkMessage.speed_set_work;

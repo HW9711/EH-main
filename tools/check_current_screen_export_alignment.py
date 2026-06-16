@@ -22,6 +22,10 @@ UIDP_C = ROOT / "User" / "Application" / "Beep" / "sscUIDP.c"
 SCREEN_ADDRESS_H = ROOT / "User" / "Application" / "include" / "screen_address.h"
 ADAPTER_C = ROOT / "User" / "Application" / "Screen" / "screen_adapter.c"
 SCREEN_H = ROOT / "User" / "Application" / "include" / "screen.h"
+SOURCE_REFERENCE_ROOTS = [
+    ROOT / "User" / "Application",
+    ROOT / "User" / "UI",
+]
 PROJECT_LISTS = [
     ROOT / "EIDE" / ".eide" / "eide.yml",
     ROOT / "EIDE" / "build" / "MainCtrlF413MXOs" / "builder.params",
@@ -52,6 +56,45 @@ EXPECTED_PAGE4_TOUCH = {
     0x2405: {1, 2, 3},
     0x2406: {1, 2, 3},
     0x2407: {2},
+}
+
+PAGE4_TOUCH_ACTIONS = {
+    (0x2400, 0x0001): ("ScreenKey_PostLegacyAction(24U);",),
+    (0x2400, 0x0002): ("ScreenKey_PostLegacyAction(25U);",),
+    (0x2400, 0x0003): ("ScreenKey_PostLegacyAction(22U);",),
+    (0x2400, 0x0004): ("ScreenKey_PostLegacyAction(23U);",),
+    (0x2400, 0x0005): ("ScreenKey_PostLegacyAction(20U);",),
+    (0x2400, 0x0006): ("ScreenKey_PostLegacyAction(21U);",),
+    (0x2400, 0x0007): ("ScreenKey_PostLegacyAction(36U);",),
+    (0x2401, 0x0001): ("ScreenKey_PostLegacyAction(30U);",),
+    (0x2401, 0x0002): ("ScreenKey_PostLegacyAction(31U);",),
+    (0x2401, 0x0003): ("ScreenKey_PostLegacyAction(32U);",),
+    (0x2401, 0x0004): ("ScreenKey_PostLegacyAction(33U);",),
+    (0x2402, 0x0001): ("ScreenKey_PostLegacyAction(13U);",),
+    (0x2402, 0x0002): ("ScreenKey_PostLegacyAction(15U);",),
+    (0x2402, 0x0003): ("ScreenKey_PostLegacyAction(14U);",),
+    (0x2403, 0x0001): ("ScreenKey_PostLegacyAction(9U);",),
+    (0x2403, 0x0002): ("ScreenKey_PostLegacyAction(10U);",),
+    (0x2404, 0x0001): ("ScreenKey_PostLegacyAction(16U);",),
+    (0x2404, 0x0002): ("ScreenKey_PostLegacyAction(17U);",),
+    (0x2404, 0x0003): ("ScreenKey_PostLegacyAction(18U);",),
+    (0x2404, 0x0004): ("ScreenKey_PostLegacyAction(43U);",),
+    (0x2405, 0x0001): ("ScreenKey_PostLegacyAction(7U);",),
+    (0x2405, 0x0002): ("ScreenKey_PostLegacyAction(8U);",),
+    (0x2405, 0x0003): ("ScreenKey_PostLegacyAction(12U);",),
+    (0x2406, 0x0001): ("ScreenKey_PostLegacyAction(5U);",),
+    (0x2406, 0x0002): ("ScreenKey_PostLegacyAction(6U);",),
+    (0x2406, 0x0003): ("ScreenKey_PostLegacyAction(11U);",),
+    (0x2407, 0x0002): ("ScreenKey_PostLegacyAction(42U);",),
+    (0x0155, 0x5520): (
+        "case 0x55:",
+        "case 0x20 : ScreenKey_PostLegacyAction(44U);",
+        "case 0x30 : ScreenKey_PostLegacyAction(42U);",
+    ),
+}
+
+IGNORED_PAGE4_TOUCH = {
+    (0x0155, 0x5510),  # 旧触控启动键仍可能存在于导出记录前半段，固件按新逻辑忽略。
 }
 
 
@@ -123,6 +166,84 @@ def touch_record_key(record: bytes) -> int:
     return read_u16_be(record, 20)
 
 
+def touch_record_extra_vp(record: bytes) -> int:
+    return read_u16_be(record, 25)
+
+
+def touch_record_extra_key(record: bytes) -> int:
+    return read_u16_be(record, 28)
+
+
+def touch_record_pairs(record: bytes) -> list[tuple[int, int]]:
+    pairs = [(touch_record_vp(record), touch_record_key(record))]
+    extra_pair = (touch_record_extra_vp(record), touch_record_extra_key(record))
+    if extra_pair != (0, 0):
+        pairs.append(extra_pair)
+    return pairs
+
+
+def screen_vp_macros(address_h: str) -> dict[int, list[str]]:
+    macros: dict[int, list[str]] = {}
+    for name, value in re.findall(r"#define\s+(UIDP_LCD_VP_[A-Za-z0-9_]+)\s+0x([0-9A-Fa-f]+)U?", address_h):
+        macros.setdefault(int(value, 16), []).append(name)
+    return macros
+
+
+def firmware_source_references() -> str:
+    chunks: list[str] = []
+    for source_root in SOURCE_REFERENCE_ROOTS:
+        for source_path in sorted(source_root.rglob("*.c")):
+            # 只统计固件写屏源码，不把 screen_address.h 的宏定义误当成运行时引用。
+            chunks.append(read_text(source_path))
+    return "\n".join(chunks)
+
+
+def verify_page4_display_firmware_coverage(show_data: bytes, address_h: str, errors: list[str]) -> None:
+    macros_by_vp = screen_vp_macros(address_h)
+    firmware_refs = firmware_source_references()
+    page4_vps = sorted({show_record_vp(record) for record in show_page_records(show_data, 4)})
+
+    for vp in page4_vps:
+        macros = macros_by_vp.get(vp, [])
+        require(bool(macros), f"EX8 page4 display VP 0x{vp:04X} is missing a UIDP_LCD_VP_* macro.", errors)
+        if macros:
+            require(
+                any(macro in firmware_refs for macro in macros),
+                f"EX8 page4 display VP 0x{vp:04X} macros {macros} have no firmware write reference.",
+                errors,
+            )
+
+
+def verify_page4_touch_firmware_coverage(touch_data: bytes, screenkey: str, errors: list[str]) -> None:
+    scan = compact(function_body(screenkey, "ScreenKey_Scan"))
+    exported_pairs: set[tuple[int, int]] = set()
+    for record in touch_records(touch_data):
+        if touch_record_page(record) == 4:
+            exported_pairs.update(touch_record_pairs(record))
+
+    for vp, key in sorted(exported_pairs):
+        if (vp, key) in IGNORED_PAGE4_TOUCH:
+            continue
+        action_needles = PAGE4_TOUCH_ACTIONS.get((vp, key))
+        require(
+            action_needles is not None,
+            f"EX8 page4 touch VP 0x{vp:04X}/key 0x{key:04X} has no firmware parser expectation.",
+            errors,
+        )
+        if action_needles is None:
+            continue
+        for needle in action_needles:
+            require(
+                compact(needle) in scan,
+                f"EX8 page4 touch VP 0x{vp:04X}/key 0x{key:04X} is not covered by ScreenKey_Scan action {needle!r}.",
+                errors,
+            )
+
+    # 0x0155/key 0x5520 是当前触控运行保活入口；0x5510 旧启动入口不再作为固件必需项。
+    require((0x0155, 0x5520) in exported_pairs,
+            "EX8 page4 touch active-area VP 0x0155/key 0x5520 is missing from 13TouchFile.bin.", errors)
+
+
 def verify_screen_package(errors: list[str]) -> None:
     for path in (SHOW_BIN, TOUCH_BIN, STARTUP_BACKGROUND, RUN_BACKGROUND):
         require(path.exists(), f"missing screen package file: {path}", errors)
@@ -179,10 +300,20 @@ def verify_firmware_mapping(errors: list[str]) -> None:
     require("KEY_CONTINUOUSCLICK" not in scan, "startup 0x2001 must not keep the old hidden-entry action.", errors)
     require("case0x00:" in scan and "case0x07:ScreenKey_PostLegacyAction(36U);" in scan,
             "0x2400 top-key group must include auto-identify key7.", errors)
-    require("case0x01:" in scan and "ScreenKey_PostLegacyAction(30U)" in scan and "ScreenKey_PostLegacyAction(33U)" in scan,
-            "0x2401 speed keys must map to 10000/1000 step events.", errors)
+    require("case0x01:ScreenKey_PostLegacyAction(30U);break;" in scan,
+            "0x2401/key1 must map to fast speed decrease.", errors)
+    require("case0x02:ScreenKey_PostLegacyAction(31U);break;" in scan,
+            "0x2401/key2 must map to slow speed decrease.", errors)
+    require("case0x03:ScreenKey_PostLegacyAction(32U);break;" in scan,
+            "0x2401/key3 must map to slow speed increase.", errors)
+    require("case0x04:ScreenKey_PostLegacyAction(33U);break;" in scan,
+            "0x2401/key4 must map to fast speed increase.", errors)
     require("case0x02:" in scan and "ScreenKey_PostLegacyAction(13U)" in scan and "ScreenKey_PostLegacyAction(15U)" in scan and "ScreenKey_PostLegacyAction(14U)" in scan,
             "0x2402 direction keys must map forward/osc/reverse.", errors)
+    require("case0x01:ScreenKey_PostLegacyAction(9U);break;" in scan,
+            "0x2403/key1 must map to frequency increase.", errors)
+    require("case0x02:ScreenKey_PostLegacyAction(10U);break;" in scan,
+            "0x2403/key2 must map to frequency decrease.", errors)
     require("case0x04:" in scan and "ScreenKey_PostLegacyAction(16U)" in scan and "ScreenKey_PostLegacyAction(43U)" in scan,
             "0x2404 control keys must include foot and external-exit actions.", errors)
     require("case0x05:" in scan and "ScreenKey_PostLegacyAction(7U)" in scan and "ScreenKey_PostLegacyAction(12U)" in scan,
@@ -193,6 +324,9 @@ def verify_firmware_mapping(errors: list[str]) -> None:
             "0x2407/key2 must remain mapped to touch-exit on the EX8 touch work area.", errors)
     require("case0x55:" in scan and "case0x20:ScreenKey_PostLegacyAction(44U);" in scan,
             "0x5520 touch keep-alive must be parsed for press-and-hold touch running.", errors)
+    require("case0x51:" not in scan and "case0x52:" not in scan and
+            "case0x53:" not in scan and "case0x54:" not in scan,
+            "current EX8 firmware must not keep old-screen 0x51-0x54 touch parser branches.", errors)
 
     expected_address_macros = {
         "UIDP_LCD_VP_PUMP_B_PLUS": "0x1422U",
@@ -208,15 +342,20 @@ def verify_firmware_mapping(errors: list[str]) -> None:
             "power-init display must force the EX8 main-run page macro.", errors)
     require("LCD_Show_Picture(UIDP_LCD_VP_TOUCH_WORK,70U)" in uidp_c,
             "touch active display must draw the EX8 0x1430 touch work picture.", errors)
-    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,225U)" in uidp_c and
-            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,224U)" in uidp_c,
-            "B-pump +/- display must use EX8 0x1422/0x1424 macros.", errors)
+    require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS,499U)" in uidp_c and
+            "LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS,501U)" in uidp_c,
+            "B-pump +/- display must use current EX8 0x1422/0x1424 icon resources 499/501.", errors)
 
     project_lists = "\n".join(read_text(path) for path in PROJECT_LISTS if path.exists())
     require(not ADAPTER_C.exists(), "screen_adapter.c should stay deleted.", errors)
     require(not SCREEN_H.exists(), "screen.h should stay deleted.", errors)
     require("screen_adapter.c" not in project_lists and "screen.h" not in project_lists,
             "project source lists must not re-register the old screen interface.", errors)
+
+    if SHOW_BIN.exists():
+        verify_page4_display_firmware_coverage(SHOW_BIN.read_bytes(), address_h, errors)
+    if TOUCH_BIN.exists():
+        verify_page4_touch_firmware_coverage(TOUCH_BIN.read_bytes(), screenkey, errors)
 
 
 def main() -> int:

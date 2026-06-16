@@ -11,6 +11,7 @@ PUB_C = ROOT / "User" / "Application" / "Pubinterface" / "Pubinterface.c"
 KEYBH_C = ROOT / "User" / "Application" / "Beep" / "sscKEYBH.c"
 UIDP_C = ROOT / "User" / "Application" / "Beep" / "sscUIDP.c"
 SCREENKEY_C = ROOT / "User" / "Application" / "ScreenKey" / "screenkey.c"
+HANDLESCAN_C = ROOT / "User" / "Application" / "Handle" / "handlescan.c"
 ADAPTER_C = ROOT / "User" / "Application" / "Screen" / "screen_adapter.c"
 SCREEN_H = ROOT / "User" / "Application" / "include" / "screen.h"
 SCREEN_ADDRESS_H = ROOT / "User" / "Application" / "include" / "screen_address.h"
@@ -76,6 +77,7 @@ def main() -> int:
     keybh = read_text(KEYBH_C)
     uidp = read_text(UIDP_C)
     screenkey = read_text(SCREENKEY_C)
+    handlescan = read_text(HANDLESCAN_C)
     screen_address = read_text(SCREEN_ADDRESS_H)
     project_lists = "\n".join(read_text(path) for path in PROJECT_LISTS)
 
@@ -84,6 +86,7 @@ def main() -> int:
     keybh_c = compact(keybh)
     uidp_c = compact(uidp)
     screenkey_c = compact(screenkey)
+    handlescan_c = compact(handlescan)
     screen_address_c = compact(screen_address)
     project_lists_c = compact(project_lists)
 
@@ -96,18 +99,28 @@ def main() -> int:
             "UI_POWERINIT_ID must initialize the EX8 main run page4.", errors)
 
     post = compact(function_body(screenkey, "ScreenKey_PostLegacyAction"))
-    require("case30U:screen_key=SCREENKey_SPEED_Sub_Large;" in post, "0x2401/key1 应映射为速度大幅减少。", errors)
-    require("case31U:screen_key=SCREENKey_SPEED_Sub_Small;" in post, "0x2401/key2 应映射为速度小幅减少。", errors)
-    require("case32U:screen_key=SCREENKey_SPEED_Add_Small;" in post, "0x2401/key3 应映射为速度小幅增加。", errors)
-    require("case33U:screen_key=SCREENKey_SPEED_Add_Large;" in post, "0x2401/key4 应映射为速度大幅增加。", errors)
+    require("case30U:screen_key=SCREENKey_SPEED_Sub_Large;" in post, "legacy 30U must remain the EX8 fast speed decrease event.", errors)
+    require("case31U:screen_key=SCREENKey_SPEED_Sub_Small;" in post, "legacy 31U must remain the EX8 slow speed decrease event.", errors)
+    require("case32U:screen_key=SCREENKey_SPEED_Add_Small;" in post, "legacy 32U must remain the EX8 slow speed increase event.", errors)
+    require("case33U:screen_key=SCREENKey_SPEED_Add_Large;" in post, "legacy 33U must remain the EX8 fast speed increase event.", errors)
     require("case36U:screen_key=SCREENKey_AutoIdentify;" in post, "自动识别旧码 36U 应映射到新屏自动识别事件。", errors)
 
     scan = compact(function_body(screenkey, "ScreenKey_Scan"))
     require("KEY_CONTINUOUSCLICK" not in scan, "老屏 0x2001 连点入口仍会发 KEY_CONTINUOUSCLICK。", errors)
     require("case0x00:" in scan and "case0x03:ScreenKey_PostLegacyAction(22U);" in scan and "case0x07:ScreenKey_PostLegacyAction(36U);" in scan, "0x2400 顶部键未按新屏 key 表完整映射。", errors)
-    require("case0x01:" in scan and "ScreenKey_PostLegacyAction(30U)" in scan and "ScreenKey_PostLegacyAction(33U)" in scan, "0x2401 速度四键未按 +/-1000/10000 映射。", errors)
+    require("case0x01:ScreenKey_PostLegacyAction(30U);break;" in scan,
+            "0x2401/key1 must be fast speed decrease per the EX8 interaction sheet.", errors)
+    require("case0x02:ScreenKey_PostLegacyAction(31U);break;" in scan,
+            "0x2401/key2 must be slow speed decrease per the EX8 interaction sheet.", errors)
+    require("case0x03:ScreenKey_PostLegacyAction(32U);break;" in scan,
+            "0x2401/key3 must be slow speed increase per the EX8 interaction sheet.", errors)
+    require("case0x04:ScreenKey_PostLegacyAction(33U);break;" in scan,
+            "0x2401/key4 must be fast speed increase per the EX8 interaction sheet.", errors)
     require("case0x02:" in scan and "ScreenKey_PostLegacyAction(13U)" in scan and "ScreenKey_PostLegacyAction(15U)" in scan and "ScreenKey_PostLegacyAction(14U)" in scan, "0x2402 方向键未映射为正转/往复/反转。", errors)
-    require("case0x03:" in scan and "ScreenKey_PostLegacyAction(10U)" in scan and "ScreenKey_PostLegacyAction(9U)" in scan, "0x2403 频率加减键未映射。", errors)
+    require("case0x01:ScreenKey_PostLegacyAction(9U);break;" in scan,
+            "0x2403/key1 must be frequency increase per the EX8 interaction sheet.", errors)
+    require("case0x02:ScreenKey_PostLegacyAction(10U);break;" in scan,
+            "0x2403/key2 must be frequency decrease per the EX8 interaction sheet.", errors)
     require("case0x04:" in scan and "ScreenKey_PostLegacyAction(16U)" in scan and "ScreenKey_PostLegacyAction(43U)" in scan, "0x2404 控制模式/外控键未映射。", errors)
     require("case0x06:" in scan and "ScreenKey_PostLegacyAction(5U)" in scan and "ScreenKey_PostLegacyAction(11U)" in scan, "0x2406 应映射为 B 泵加/减/启停。", errors)
     require("case0x07:" in scan and "case0x02:ScreenKey_PostLegacyAction(42U);" in scan, "0x2407/key2 应保留为 8 寸屏触控工作区退出。", errors)
@@ -118,9 +131,23 @@ def main() -> int:
     require("caseSCREENKey_AutoIdentify:" in keybh_screen and "AutoIdentifyActive(key_value);" in keybh_screen, "sscKEYBH 未分派自动识别键。", errors)
 
     speed_active = compact(function_body(pub_c, "SpeedActive"))
-    require("SCREEN_SPEED_STEP_SMALL1000U" in pub_c_c and "SCREEN_SPEED_STEP_LARGE10000U" in pub_c_c, "缺少新屏速度 1000/10000 固定步进宏。", errors)
+    require("SCREEN_SPEED_STEP_FALLBACK1000U" in pub_c_c and "SCREEN_SPEED_STEP_DOUBLE_FACTOR2U" in pub_c_c,
+            "SpeedActive must keep a 1000 fallback and double-factor for EX8 fast speed keys.", errors)
     require("caseSCREENKey_SPEED_Sub_Large:" in speed_active and "caseSCREENKey_SPEED_Add_Large:" in speed_active, "SpeedActive 未处理新屏大/小速度键。", errors)
-    require("speed_step=SCREEN_SPEED_STEP_LARGE;" in speed_active and "speed_step=SCREEN_SPEED_STEP_SMALL;" in speed_active, "SpeedActive 未按 10000/1000 覆盖步进。", errors)
+    require("ChannelrecognizeMessageA.speed_zzstep" in speed_active and
+            "ChannelrecognizeMessageA.speed_fzstep" in speed_active and
+            "ChannelrecognizeMessageA.speed_oscstep" in speed_active and
+            "ChannelrecognizeMessageB.speed_zzstep" in speed_active and
+            "ChannelrecognizeMessageB.speed_fzstep" in speed_active and
+            "ChannelrecognizeMessageB.speed_oscstep" in speed_active,
+            "SpeedActive must use per-channel/per-direction recognized speed steps.", errors)
+    require("UINT16_MAX/SCREEN_SPEED_STEP_DOUBLE_FACTOR" in speed_active and
+            "speed_step*SCREEN_SPEED_STEP_DOUBLE_FACTOR" in speed_active,
+            "EX8 fast speed keys must double the slow-step value with overflow protection.", errors)
+    require("#defineHANDLESCAN_SPEED_STEP_PAGE_INDEX5U" in handlescan_c and
+            "Handlescan_LoadPage6SpeedStep(CHANNEL_A,&ChannelrecognizeMessageA)" in handlescan_c and
+            "Handlescan_LoadPage6SpeedStep(CHANNEL_B,&ChannelrecognizeMessageB)" in handlescan_c,
+            "handlescan must load EEPROM Page6 speed-step data for both channels.", errors)
     require("voidAutoIdentifyActive(uint8_tkey_value)" in pub_c_c and "SendKeyRFIDMessageAup(1U)" in pub_c_c, "缺少自动识别业务入口。", errors)
 
     require("LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);" in function_body(uidp, "UIDISPLAYBehavior"),
@@ -178,8 +205,9 @@ def main() -> int:
     require("LCD_Show_Picture(0x1421,520)" not in uidp and "LCD_Disappear_Picture(0x1421)" not in uidp, "报警仍写 0x1421，和 A 泵加号冲突。", errors)
     require("LCD_Show_Picture(0x1420,386)" not in uidp and "LCD_Show_Picture(0x1420,384)" not in uidp, "B 泵启停按钮仍写 0x1420。", errors)
     require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON,UIDP_PumpButtonPicture" in uidp_c and
-            "caseINJECTWATER:returnrun_flag?205U:204U;" in uidp_c,
-            "B pump start/stop button must use EX8 0x1428 macro and 200-205 resource group.", errors)
+            "caseDRAWWATER:caseINJECTWATER:returnenable_flag?(run_flag?202U:201U):200U;" in uidp_c and
+            "casePOURWATER:returnenable_flag?(run_flag?205U:204U):203U;" in uidp_c,
+            "B pump start/stop button must use EX8 0x1428 macro and 200-205 three-state resource groups.", errors)
 
     if errors:
         for error in errors:

@@ -73,6 +73,40 @@ def main() -> int:
     uidp = read_text(UIDP_C)
     ext = read_text(EXT_C)
 
+    pump_type_picture = normalize(function_body(uidp, "UIDP_PumpTypePicture"))
+    require("caseDRAWWATER:returnenable_flag?215U:214U;" in pump_type_picture,
+            "DRAWWATER title must use EX8 suction pictures 214 disabled / 215 enabled.",
+            errors)
+    require("caseINJECTWATER:returnenable_flag?211U:210U;" in pump_type_picture,
+            "INJECTWATER title must use EX8 injection pictures 210 disabled / 211 enabled.",
+            errors)
+    require("casePOURWATER:returnenable_flag?213U:212U;" in pump_type_picture,
+            "POURWATER title must use EX8 perfusion pictures 212 disabled / 213 enabled.",
+            errors)
+
+    pump_button_picture = normalize(function_body(uidp, "UIDP_PumpButtonPicture"))
+    require("caseDRAWWATER:caseINJECTWATER:returnenable_flag?(run_flag?202U:201U):200U;" in pump_button_picture,
+            "DRAWWATER/INJECTWATER buttons must use EX8 start pictures 200 disabled / 201 stopped / 202 running.",
+            errors)
+    require("casePOURWATER:returnenable_flag?(run_flag?205U:204U):203U;" in pump_button_picture,
+            "POURWATER button must use EX8 drain pictures 203 disabled / 204 stopped / 205 running.",
+            errors)
+    require("default:return200U;" in pump_button_picture,
+            "unknown pump buttons must fall back to disabled start picture 200.",
+            errors)
+    uidp_normalized = normalize(uidp)
+    require("{249U,249U,249U,249U,249U}" in uidp_normalized and
+            "{250U,251U,252U,253U,254U}" in uidp_normalized,
+            "B pump gradient table must keep 249 as gear-0 and 250-254 as gear-1 fade frames.",
+            errors)
+    require("{349U,349U,349U,349U,349U}" in uidp_normalized and
+            "{350U,351U,352U,353U,354U}" in uidp_normalized,
+            "A pump gradient table must keep 349 as gear-0 and 350-354 as gear-1 fade frames.",
+            errors)
+    require("#defineUIDP_PUMP_GEAR_RUN_FRAME0U" in uidp_normalized,
+            "pump display must use frame 0 as the normal running frame for each gear.",
+            errors)
+
     a_button = normalize(function_body(uidp, "UIPUMPABUTTONDP"))
     b_button = normalize(function_body(uidp, "UIPUMPBBUTTONDP"))
     require("LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON,UIDP_PumpButtonPicture(button_type,true,run_flag))" in a_button and

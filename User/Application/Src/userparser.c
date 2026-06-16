@@ -60,8 +60,6 @@ static void Userparser_PubinterfaceInit(void)
 
 void Userparser_Init(void)
 {
-  LCD_Show_Which_Map(0);  //开机页
-
   Iwdg_Reset();
 
   //1.GPIO
@@ -77,6 +75,7 @@ void Userparser_Init(void)
   Uart4_Init();  //脚踏
   Uart5_Init();  //步进1
 	Uart6_Init();  //屏
+  LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_STARTUP);  //串口6初始化后再强制切启动页，保证 EX8 实际收到 page0 切换帧
   Uart7_Init();  //步进2
 
 	//4.分体按键

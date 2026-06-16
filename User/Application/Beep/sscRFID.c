@@ -456,7 +456,7 @@ static void SplitType_AutoModeGetData_Task(void)
     }
 
     Rfid_SendReadCommand(s_request_source); /* 未读到有效帧时发送下一次读命令。 */
-    s_request_attempts_left--; /* 记录已消耗一次命令发送机会。 */
+    //s_request_attempts_left--; /* 记录已消耗一次命令发送机会。 */
 }
 
 /*
@@ -512,16 +512,52 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
 
     if (RFIDMsgQueue == NULL)
     {
+        if(channel == CHANNEL_A)
+        {
+            SendKeyRFIDMessageAdown();
+        }
+        else if(channel == CHANNEL_B)
+        {
+            SendKeyRFIDMessageBdown();
+        }
+      
         return false; /* 队列未初始化时不能接受请求。 */
     }
-
+    if(WorkMessage.auto_identify==false||WorkMessage.hand_model!=PXBA_ONLINES)
+    {
+      if(channel == CHANNEL_A)
+        {
+            SendKeyRFIDMessageAdown();
+        }
+        else if(channel == CHANNEL_B)
+        {
+            SendKeyRFIDMessageBdown();
+        }
+        return false; /* 非自动识别模式不接受请求，避免误发 RFID 命令。 */;
+    }
     if ((Rfid_ChannelToIndex(channel, &index) == false) || (Rfid_IsSourceValid(source) == false))
     {
+       if(channel == CHANNEL_A)
+        {
+            SendKeyRFIDMessageAdown();
+        }
+        else if(channel == CHANNEL_B)
+        {
+            SendKeyRFIDMessageBdown();
+        }
         return false; /* 只有有效 A/B 通道和 EPC/USER 来源才能发起读取。 */
     }
 
     if (WorkMessage.runflag_work == true)
     {
+        if(channel == CHANNEL_A)
+        {
+            SendKeyRFIDMessageAdown();
+        }
+        else if(channel == CHANNEL_B)
+        {
+            SendKeyRFIDMessageBdown();
+        }
         return false; /* 电机运行中不发起 RFID 请求，防止运行参数被新刀具头改变。 */
     }
 
@@ -666,7 +702,7 @@ void Rfid_ClearChannelResult(uint8_t channel)
     s_result_sequence[index] = 0U; /* 清除结果序号，下一次成功从 1 开始。 */
     s_presence_sequence[index] = 0U; /* 同步清除存在序号，下一次读到标签会被视为新的在线状态变化。 */
     s_request_generation[index]++; /* 清通道会作废清理前所有排队请求，防止旧请求稍后重新启动 RFID 读取。 */
-    Rfid_DiscardQueuedMessagesForChannel(channel); /* 同步丢弃该通道已排队但未执行的旧请求，避免清刀具后又启动一次旧读。 */
+ //   Rfid_DiscardQueuedMessagesForChannel(channel); /* 同步丢弃该通道已排队但未执行的旧请求，避免清刀具后又启动一次旧读。 */
     if ((s_request_active != false) && (s_request_channel == channel))
     {
         s_request_active = false; /* 清刀具时同步取消该通道未完成读取，避免丢失判定后晚到回包复活旧刀具。 */

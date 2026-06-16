@@ -507,7 +507,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   }
 
   Uart6_SendPacket(dat, 34);
-//	Delay_ms(100);
+
 }
 
 //============================================================================

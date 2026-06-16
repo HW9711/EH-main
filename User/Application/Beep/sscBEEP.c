@@ -38,6 +38,12 @@ typedef struct {
 //发送报警消息
  void SendAlarmMessage(uint8_t flag)
 {
+    static uint8_t flag_bijiao=0;
+    if(flag_bijiao==flag)return;
+    else
+    {
+        flag_bijiao=flag;
+    }
     if(BeepMsgQueue == NULL) return;
     BeepMessage_t msg;
     msg.msgType = BEEP_MSG_ALARM;

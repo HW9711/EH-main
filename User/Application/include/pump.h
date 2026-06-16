@@ -20,7 +20,7 @@
  * 旧代码固定为 70，导致上位机设置 100 以上时最终仍按 70 输出；当前交付配置保留 100~300 区间的速度变化。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
-#define PUMP_INJECTWATER_SPEED_MAX 300U
+#define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
 extern uint8_t pum_close_flag_B; 

@@ -22,8 +22,15 @@ static void KeyBehivQueue_Init(void)
 }
 void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
+	// static uint8_t control_types=0;
+	// static uint8_t control_keys=0;
 	TickType_t wait_ticks = 0U; /* 普通按键仍保持非阻塞，避免脚踏/屏幕高频按键拖慢控制任务。 */
-
+	// if(control_types==control_type&&control_keys==control_key)return;
+	// else
+	// {
+	// 	control_types=control_type;
+	// 	control_keys=control_key;
+	// }
 	if(KeyBehivQueue == NULL) return;
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
@@ -130,6 +137,7 @@ void HANDLEKeyBehavior(uint8_t key_value)
 		SpeedActive(key_value);
 		break;
 		case HANDLEKey_motor_start: 
+		if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)return; /* 手柄队列启动电机前检查公共接头 EPC 刀具头，缺失时只报警不运行。 */
 		/* 队列层再次确认手柄控制权，防止绕过手柄扫描任务直接投递启动消息。 */
 		if(ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)return;
 		WorkMessage.runflag_work = true;
@@ -190,11 +198,11 @@ void SCREENKeyBehanior(uint8_t key_value)
 		case SCREENKey_HANDLE_B: 
 		HandleSwitchActive(key_value);
 		break;
-		case SCREENKey_PLUG_A:
-		case SCREENKey_PLUG_B:
-		case SCREENKey_UNPLUG_A:
-		case SCREENKey_UNPLUG_B:
-		PlugORunPLUGActive(key_value);
+		// case SCREENKey_PLUG_A:
+		// case SCREENKey_PLUG_B:
+		// case SCREENKey_UNPLUG_A:
+		// case SCREENKey_UNPLUG_B:
+		// PlugORunPLUGActive(key_value);
 		break;
 		case SCREENKey_PlanerH: 
 		case SCREENKey_GrindH: 
@@ -215,7 +223,6 @@ void SCREENKeyBehanior(uint8_t key_value)
 		case SCREENKey_JTActi:
 		case SCREENKey_HandleActi:
 		case SCREENKey_TouchActi:
-		case SCREENKey_TouchStart:
 		case SCREENKey_TouchKeepAlive:
 		case SCREENKey_TouchEXIT:
 		ControlTypeActive(key_value);

@@ -1,13 +1,9 @@
 //UI_Start.c
 
 #include "UI_Start.h"
-#include "UI_FootPedalCalibration.h"
 #include "iwdg.h"
 #include "delay.h"
-#include "data.h"
-#include "screenkey.h"
 #include "lcd.h"
-#include "sscBEEP.h"
 #include "screen_address.h"
 
 #include <stdint.h>
@@ -19,6 +15,11 @@
 // 输    出: 0返回主界面 1下一页
 // 函数说明: 开机扫描”LOGO点击动作“ 进入厂家配置 4s等待...
 //============================================================================
+/*
+ * 函数功能：保持 EX8 启动页上电等待节奏，并周期性喂狗；旧屏 LOGO 连击入口已停用。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void UI_Start_Fun(void)
 {
   uint8_t TimeCnt = 0;
@@ -28,31 +29,13 @@ void UI_Start_Fun(void)
   {
     Delay_ms(2);
 
-    //按键扫描
-	  //....................
-    ScreenKey_Scan();
-
 	  if(++TimeCnt < 20)
 	    continue ;
 
 	  TimeCnt = 0;
 
 	  Iwdg_Reset();
-
-	  if (ScreenKey_LegacyEventTake() == KEY_CONTINUOUSCLICK)
-	  {
-	    // 启动页按键提示统一进入新蜂鸣队列，不再写旧蜂鸣时长状态。
-	    SendKeyBeepMessage(1U);
-
-			LCD_Show_Which_Map(3);
-			LCD_Show_Which_Map(0);
-			LCD_Show_Which_Map(3);
-
-      Delay_ms(5);
-
-			UI_FootPedalCalibration_Fun();
-			
-		}
+	  /* EX8 启动页不再保留旧 LOGO 连击入口；这里只保留启动页等待和喂狗节奏，标定页由新屏专用入口维护。 */
   }
 }
 

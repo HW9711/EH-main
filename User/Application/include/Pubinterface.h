@@ -63,8 +63,8 @@
 #define WORK_ALARM_MANUAL_SELECTED      2U//手控已选中，请用手控
 #define WORK_ALARM_FOOT_SELECTED        3U//脚控已选中，请用脚控
 #define WORK_ALARM_MOTOR_OVERLOAD       4U//电机过载，请松开脚踏
-#define WORK_ALARM_FOOT_VALUE_ERROR     5U//脚踏值错误，请联系售后
-#define WORK_ALARM_MOTOR_OVERLOAD_ALT   6U//电机过载，请松开脚踏，兼容旧 UI 图片位
+#define WORK_ALARM_FOOT_VALUE_ERROR     6U//脚踏值错误，请联系售后
+#define WORK_ALARM_MOTOR_OVERLOAD_ALT   5U//电机过载，请松开脚踏，兼容旧 UI 图片位
 #define WORK_ALARM_UID_ERROR            7U//UID 错误
 #define WORK_ALARM_MOTOR_COMM_ERROR     8U//电机通讯异常
 #define WORK_ALARM_HALL_ERROR           9U//HALL 值错误
@@ -186,7 +186,7 @@
 #define SCREENKey_JTActi 58U//脚控激活
 #define SCREENKey_HandleActi 59U//手控激活
 #define SCREENKey_TouchActi 60U//触控激活
-#define SCREENKey_TouchStart 61U///触控启动
+#define SCREENKey_TouchStart 61U///触控启动（已废弃，0x5510 不再参与新屏触控运行）
 #define SCREENKey_TouchEXIT 62U///触控退出
 #define SCREENKey_HMI_EXIT 63U//外部控制退出，显示器共计25个按钮指令
 
@@ -223,6 +223,7 @@ typedef struct
 {
   volatile bool      runflag_work;//电机运行标志位，这里考虑
   volatile uint8_t   switchhandle_counts;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机。
+  volatile uint8_t   switchhandle_countss;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机。
   volatile uint8_t   switchhandleA_flag;//脚踏切到 A 通道后的确认标志，未确认前不允许误启动 A 通道。
   volatile uint8_t   switchhandleB_flag;//脚踏切到 B 通道后的确认标志，未确认前不允许误启动 B 通道。
   volatile bool      alarm_flag;
@@ -233,10 +234,11 @@ typedef struct
   volatile uint8_t   channel_work;//工作通道//1为a通道，2为b通道,3为双通道（基于配合使用前提下）
   volatile uint8_t   drivetype_work;//驱动方式(脚控，手控，触控)
   volatile uint8_t   hmiactive_work;//外部控制激活标志位
-   volatile uint8_t   touchactive_work;//外部控制激活标志位
+  volatile uint8_t   touchactive_work;//外部控制激活标志位
   volatile uint8_t   tool_type;
-  volatile uint16_t  speed_work;//工作速度
-  volatile uint16_t  speed_set_work;//设置速度
+  volatile uint8_t   raw_tool_type;//原始刀具型号，保留 PXM/PXP/RFID 标签代号，驱动和上位机扩展可按原始来源判断
+  volatile uint32_t  speed_work;//工作速度
+  volatile uint32_t  speed_set_work;//设置速度
   volatile uint16_t  freq_work;//工作频率
   volatile uint16_t  dir_work;///工作方向
   volatile uint16_t  current_work;//工作电流
@@ -252,7 +254,7 @@ extern WorkMessage_t WorkMessage;//工作信息
 typedef struct 
 {
   volatile bool  jt_enable_flag;//脚踏启动flag-电机
-  volatile bool  handle_enable_flag;//脚踏启动flag-电机
+  volatile bool  handle_enable_flag;//手控启动flag-电机
   volatile bool  HMI_enable_flag;//脚踏启动flag-电机
   volatile bool  jtL_control_flag;//脚踏启动flag-电机,左
   volatile bool  jtR_control_flag;//脚踏启动flag-电机，右
@@ -278,17 +280,18 @@ typedef struct {
   volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，来自Page2第0字节，外部通信心跳在线时直接上传
   volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
   volatile uint8_t  tool_type;//刨还是磨
+  volatile uint8_t  raw_tool_type;//原始刀具型号，tool_type 归一为 PLANER/GRINDH 后仍保留旧型号码
   volatile uint8_t   drive_type;//驱动方式(脚控，手控，外控，触控)
-  volatile uint16_t  zz_speed;//正传速度
-  volatile uint16_t  fz_speed;//反传速度
-  volatile uint16_t  osc_speed;//往复速度
+  volatile uint32_t  zz_speed;//正传速度
+  volatile uint32_t  fz_speed;//反传速度
+  volatile uint32_t  osc_speed;//往复速度
   volatile uint16_t  freq;//工作频率
   volatile uint16_t  dir;///工作方向
   
   volatile uint16_t  current_work;
   volatile uint16_t  default_injection_flow;//Page4默认注水流量，解析后按泵业务流量保存
-  volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
-  volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
+  volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
+  volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint32_t  tool_reduction_ratio;//刀具减数比
   volatile uint8_t   auto_identify;//通道自动识别状态记忆，避免切换通道后丢失 RFID 识别模式
@@ -311,20 +314,20 @@ typedef struct
 	volatile uint8_t   diameter;//直径
 	volatile uint8_t   meioticratio;//减数比
 	volatile uint32_t  tool_reduction_ratio;//RFID/EEPROM 解析出的完整刀具减速比，高16位表示增速、低16位表示减速
-  volatile uint16_t  speed_zzmax;
-    volatile uint16_t  speed_zzmin;
-    volatile uint16_t  speed_fzmax;
-    volatile uint16_t  speed_fzmin;
-      volatile uint16_t  speed_oscmax;
-    volatile uint16_t  speed_oscmin;
+  volatile uint32_t  speed_zzmax;
+    volatile uint32_t  speed_zzmin;
+    volatile uint32_t  speed_fzmax;
+    volatile uint32_t  speed_fzmin;
+      volatile uint32_t  speed_oscmax;
+    volatile uint32_t  speed_oscmin;
    volatile uint16_t speed_zzstep;//正向步进速度
-    volatile uint16_t speed_fzstep;//正向步进速度
-   volatile uint16_t speed_oscstep;//正向步进速度
-  volatile uint16_t speed_zzdefault;//速度
-  volatile uint16_t speed_fzdefault;//速度
-  volatile uint16_t speed_oscdefault;//速度
-	volatile uint16_t  speed_min;//速度
-	volatile uint16_t  speed_max;//速度
+    volatile uint16_t speed_fzstep;//反步进速度
+   volatile uint16_t speed_oscstep;//往复步进速度
+  volatile uint32_t speed_zzdefault;//速度
+  volatile uint32_t speed_fzdefault;//速度
+  volatile uint32_t speed_oscdefault;//速度
+	volatile uint32_t  speed_min;//速度
+	volatile uint32_t  speed_max;//速度
 	volatile uint16_t  length;///长度
 	volatile uint16_t  overloadThresholdFor;//过载阀值（正）
 	volatile uint16_t  overloadThresholdRev;//过载阀值（反）
@@ -339,6 +342,7 @@ typedef struct
     volatile uint8_t   run_direction;//运行方向
     volatile uint8_t   control_mode;//控制模式
     volatile uint8_t   tool_type;//刀具类型	
+    volatile uint8_t   raw_tool_type;//原始刀具型号，RFID/EEPROM 解析后用于保留标签或旧表码
 }
 ChannelrecognizeMessage_t;//通道数据结构体(手柄，刀具识别内容)
 extern ChannelrecognizeMessage_t ChannelrecognizeMessageA;
@@ -424,6 +428,7 @@ void WorkAlarm_ClearIf(uint8_t alarm_value);
 bool WorkAlarm_Is(uint8_t alarm_value);
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
 bool Pubinterface_IsCommonSocketToolReady(void);
+bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 手柄电机启动前检查公共接头 EPC 刀具头，缺失时负责报警并拒绝运行。 */
 void Pubinterface_StopTouchKeepAliveRun(void);
 void Pubinterface_LoadChannelMemory(uint8_t channel);
 uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel);

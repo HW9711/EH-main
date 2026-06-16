@@ -66,6 +66,7 @@ def main() -> int:
     freq_active = compact(function_body(pub, "FreqActive"))
     tool_pos = compact(function_body(pub, "ToolPosActive"))
     osc_model = compact(function_body(pub, "Pubinterface_IsOscDirectionSupportedModel"))
+    handle_control = compact(function_body(pub, "Pubinterface_IsHandleControlReservedModel"))
     brushed = compact(function_body(drive, "MotorDrive_IsBrushedTool"))
     motor_run = compact(function_body(drive, "MOTORRUN"))
 
@@ -74,32 +75,37 @@ def main() -> int:
             "handlescan must recognize EMBC by EEPROM Page2 0x6B/0x0F.", errors)
 
     require("tool_type==PLANER" in planer_tool and
-            "tool_type==PX_YIM_ONLINES" in planer_tool and
-            "tool_type==PX_YIP_ONLINES" in planer_tool,
-            "planer-capability helper must accept PLANER and PXM/PXP tool codes.", errors)
-    require("Pubinterface_IsPlanerCapabilityTool(tool_type)" in osc_supported and
-            "Pubinterface_IsOscDirectionSupportedModel(hand_model)" in osc_supported and
-            "hand_model==PX_YIM_ONLINES" in osc_model and
-            "hand_model==PX_YIP_ONLINES" in osc_model,
-            "osc-support helper must use both selected tool capability and PXM/PXP handle codes.", errors)
+            "tool_type==PX_YIP_ONLINES" in planer_tool and
+            "tool_type==PX_YIM_ONLINES" not in planer_tool,
+            "planer-capability helper must accept PLANER/PXP and reject PXM.", errors)
+    require("Pubinterface_IsPlanerCapabilityTool(tool_type)" in osc_supported,
+            "osc-support helper must use PLANER tool capability.", errors)
     require("Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model,WorkMessage.tool_type)" in selected_refresh,
             "selected-channel refresh must decide OSC UI from handle plus tool capability.", errors)
     require("Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model,WorkMessage.tool_type)==false" in dir_active,
             "DirActive must reject OSC using the combined support helper.", errors)
     require("Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model,WorkMessage.tool_type)==false" in freq_active,
             "FreqActive must reject frequency changes using the combined support helper.", errors)
-    require("Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type)==false" in tool_pos,
-            "ToolPosActive must gate open-position by tool capability, not reduction ratio.", errors)
+    require("Pubinterface_IsOpenPositionEnabledTool(WorkMessage.hand_model,WorkMessage.tool_type)==false" in tool_pos,
+            "ToolPosActive must gate open-position by PXBA/PXBB plus PLANER capability.", errors)
     require("tool_reduction_ratio" not in tool_pos and "500U" not in tool_pos,
             "ToolPosActive must not keep the old low16 reduction-ratio 500 gate.", errors)
+    require("hand_model==PXBA_ONLINES" in handle_control and
+            "hand_model==PXBB_ONLINES" in handle_control and
+            "hand_model==LGZ_II_ONLINES" in handle_control,
+            "screen handle-control entry must allow PXBA/PXBB/LGZ_II from EX8 sheet.", errors)
+    require("LGZ_I_ONLINES" not in handle_control and
+            "KSZ_I_ONLINES" not in handle_control and
+            "KXZ_I_ONLINES" not in handle_control,
+            "screen handle-control entry must not allow old reserved LGZ_I/KSZ_I/KXZ_I models.", errors)
 
     require("hand_model==PX_YIM_ONLINES" in brushed and
             "hand_model==PX_YIP_ONLINES" in brushed and
-            "tool_type==PX_YIM_ONLINES" in brushed and
-            "tool_type==PX_YIP_ONLINES" in brushed,
-            "motor brushed helper must treat PXM/PXP as brushed from either handle or tool code.", errors)
-    require("MotorDrive_IsBrushedTool(WorkMessage.hand_model,WorkMessage.tool_type)" in motor_run,
-            "MOTORRUN must pass both hand_model and tool_type into brushed detection.", errors)
+            "raw_tool_type==PX_YIM_ONLINES" in brushed and
+            "raw_tool_type==PX_YIP_ONLINES" in brushed,
+            "motor brushed helper must treat PXM/PXP as brushed from handle or raw tool code.", errors)
+    require("MotorDrive_IsBrushedTool(WorkMessage.hand_model,WorkMessage.tool_type,WorkMessage.raw_tool_type)" in motor_run,
+            "MOTORRUN must pass hand_model, normalized tool_type, and raw_tool_type into brushed detection.", errors)
 
     if errors:
         for error in errors:

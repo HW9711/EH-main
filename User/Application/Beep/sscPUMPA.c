@@ -9,6 +9,8 @@
 #include "pump.h"
 #include "uart5.h"
 #include "uart7.h"
+#include "sscUIDP.h"
+#include "screen_address.h"
 
 
 kernel_task_t PUMPABehaviorHandle;
@@ -94,7 +96,7 @@ void Pump_SetSpeedS_A(uint16_t uart_data,uint8_t pump_dir)
 
 void PUMPAehaviors()
 {
-
+static uint8_t huici=0;//互斥
 	     uint8_t pump_type = 0;
 	     uint16_t pump_speed = 0;
 		uint16_t uart_data = 0;
@@ -163,11 +165,13 @@ void PUMPAehaviors()
 		}
 		if(pumpMessageA.timingDrainage_flag)
 		{
+			pump_speed=100;
+			uart_data=(pump_speed*0.02+2.1)*pump_speed;//
 		   if (pressure_force_stop != 0U)
 		   {
 			/* 压力暂停期间不累计排空时间，避免高压等待过程中把一次有效排空动作提前耗尽。 */
 		   }
-           else if(pumpMessageA.timingDrainage_times++>100)
+           else if(pumpMessageA.timingDrainage_times++>300)
 		   {
 			uart_data=0;
 			pump_speed = 0U; /* 排空计时结束后实际输出已经关断，显示速度必须同步清零。 */
@@ -178,6 +182,21 @@ void PUMPAehaviors()
 		}
 		Pubinterface_UpdatePumpAOutputSpeed(pump_speed); /* 发布闭环限速后的实际业务速度，驱动屏幕和上位机显示实时变化。 */
 		Pump_SetSpeedS_A(uart_data,pump_dir);
+		if(uart_data==0)
+		{
+			if(huici==0){
+				huici=1;
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffff);
+			}
+		}
+		else
+		{
+			if(huici==1){
+			huici=0;
+			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffE0);
+			}
+
+		}
 
 }
 void PUMPABehaviorTask(uint32_t event)

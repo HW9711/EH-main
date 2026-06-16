@@ -62,8 +62,8 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       900U
-#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     1000U  /* RFID 在线监测按 1 秒一轮执行，发读后下一轮仍未确认即可把用户可见清除时间压到约 2 秒。 */
-#define HANDLESCAN_RFID_MISS_MAX              1U
+#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     200U  /* RFID 在线监测按 1 秒一轮执行，发读后下一轮仍未确认即可把用户可见清除时间压到约 2 秒。 */
+#define HANDLESCAN_RFID_MISS_MAX              5U
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS    (HANDLESCAN_RFID_WAIT_TIMEOUT_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_MONITOR_PERIOD_TICKS  (HANDLESCAN_RFID_MONITOR_PERIOD_MS / HANDLESCAN_TASK_PERIOD_MS)
 
@@ -113,6 +113,19 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_FLOW_MAX           70U
 
 /*
+ * EEPROM 中 Page6 多档位速度区定义。
+ * Page6 对应 AT24CS32 驱动页下标 5，当前只读取三组 16 位速度字段作为正转、反转、往复的按键慢档步进。
+ * Page6 的速度字段按上位机布局使用大端格式；读不到或字段为 0 时，步进回退到 1000，避免新屏速度按键无响应。
+ */
+#define HANDLESCAN_SPEED_STEP_PAGE_INDEX      5U
+#define HANDLESCAN_SPEED_STEP_GEAR_COUNT_OFFSET 0U
+#define HANDLESCAN_SPEED_STEP_GEAR1_OFFSET    1U
+#define HANDLESCAN_SPEED_STEP_GEAR2_OFFSET    5U
+#define HANDLESCAN_SPEED_STEP_GEAR3_OFFSET    9U
+#define HANDLESCAN_SPEED_STEP_MAX_GEAR        3U
+#define HANDLESCAN_SPEED_STEP_FALLBACK        1000U
+
+/*
  * 手柄扫描报警码定义。
  * 1. 13：运行中插拔报警，沿用旧逻辑；
  * 2. EEPROM 最终校验失败按 A/B 通道上报 WORK_ALARM_HANDLE_MODEL_ERROR_A/B/AB。
@@ -149,16 +162,16 @@ kernel_task_t HANDLESCANTaskHandle;
  */
 typedef enum
 {
-    HANDLESCAN_STAGE_IDLE = 0,
-    HANDLESCAN_STAGE_DEBOUNCE_IN,
-    HANDLESCAN_STAGE_WAIT_VERIFY,
-    HANDLESCAN_STAGE_VERIFY,
-    HANDLESCAN_STAGE_READ_INFO,
-    HANDLESCAN_STAGE_WAIT_RFID_TOOL,
-    HANDLESCAN_STAGE_ONLINE,
-    HANDLESCAN_STAGE_DEBOUNCE_OUT,
-    HANDLESCAN_STAGE_RETRY_WAIT,
-    HANDLESCAN_STAGE_VERIFY_FAIL
+    HANDLESCAN_STAGE_IDLE = 0,//空闲/待机状态,等待插入
+    HANDLESCAN_STAGE_DEBOUNCE_IN,//插入消抖状态,硬件消抖
+    HANDLESCAN_STAGE_WAIT_VERIFY,//等待验证状态，身份验证
+    HANDLESCAN_STAGE_VERIFY,//验证中状态,正在验证
+    HANDLESCAN_STAGE_READ_INFO,//读取信息状态,手柄型号，内容信息
+    HANDLESCAN_STAGE_WAIT_RFID_TOOL,//如果是RFID工具手柄，等待RFID标签识别完成
+    HANDLESCAN_STAGE_ONLINE,//手柄正式接入系统，可以正常工作
+    HANDLESCAN_STAGE_DEBOUNCE_OUT,//检测到拔出信号，进行硬件消抖
+    HANDLESCAN_STAGE_RETRY_WAIT,//验证或读取失败，等待一段时间后重试
+    HANDLESCAN_STAGE_VERIFY_FAIL//身份验证失败，手柄被拒绝接入
 } HandlescanStage;
 
 typedef enum
@@ -249,6 +262,7 @@ static uint16_t s_a_verify_retry_wait_ticks = 0U;
 static uint8_t s_a_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_a_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 static uint8_t s_a_initial_info_buf[AT24CS32_PAGE_SIZE] = {0U}; /* A 通道 Page4 初始值页缓存，保存默认速度、流量和阈值。 */
+static uint8_t s_a_speed_step_buf[AT24CS32_PAGE_SIZE] = {0U}; /* A 通道 Page6 多档位速度页缓存，用来生成当前方向调速步进。 */
 static HandlescanToolSource s_a_tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* A 通道刀具信息来源，默认使用 EEPROM 第三页。 */
 static uint16_t s_a_rfid_wait_ticks = 0U; /* A 通道等待 RFID 结果的 10ms 计数。 */
 static uint16_t s_a_rfid_monitor_ticks = 0U; /* A 通道在线后低频监测 RFID 的 10ms 计数。 */
@@ -268,6 +282,7 @@ static uint16_t s_b_verify_retry_wait_ticks = 0U;
 static uint8_t s_b_info_buf[HANDLESCAN_INFO_SIZE] = {0U};
 static uint8_t s_b_tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE] = {0U};
 static uint8_t s_b_initial_info_buf[AT24CS32_PAGE_SIZE] = {0U}; /* B 通道 Page4 初始值页缓存，保存默认速度、流量和阈值。 */
+static uint8_t s_b_speed_step_buf[AT24CS32_PAGE_SIZE] = {0U}; /* B 通道 Page6 多档位速度页缓存，避免 B 通道调速误用 A 通道步进。 */
 static HandlescanToolSource s_b_tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* B 通道刀具信息来源，默认使用 EEPROM 第三页。 */
 static uint16_t s_b_rfid_wait_ticks = 0U; /* B 通道等待 RFID 结果的 10ms 计数。 */
 static uint16_t s_b_rfid_monitor_ticks = 0U; /* B 通道在线后低频监测 RFID 的 10ms 计数。 */
@@ -283,6 +298,7 @@ static uint8_t s_transient_screen_alarm_value = 0U;
 
 static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value);
 static void Handlescan_ClearToolSpecValues(uint32_t *spec_values);
+static void Handlescan_ReloadSpeedStepMessage(uint8_t channel, ChannelrecognizeMessage_t *message);
 static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
                                            HandlescanToolSource tool_source,
                                            ChannelrecognizeMessage_t *message,
@@ -459,6 +475,41 @@ static HandlescanToolSource Handlescan_GetToolSource(uint8_t mapped_handle_type)
 }
 
 /*
+ * 函数功能：把 EEPROM 第三页旧刀具型号转换成业务刀具类型。
+ * 输入参数：raw_tool_type 为刀具表查到的旧内部型号。
+ * 返回参数：PLANER/GRINDH 或原值；PXP 归一为 PLANER，PXM 归一为 GRINDH。
+ */
+static uint8_t Handlescan_MapRawToolTypeToBusinessType(uint8_t raw_tool_type)
+{
+    if (raw_tool_type == PX_YIP_ONLINES)
+    {
+        return PLANER; /* PXP 一体刨按最新规则作为 PLANER，开放往复能力。 */
+    }
+
+    if (raw_tool_type == PX_YIM_ONLINES)
+    {
+        return GRINDH; /* PXM 一体磨按最新规则作为 GRINDH，关闭往复/开口定位。 */
+    }
+
+    return raw_tool_type; /* 其它 EEPROM 刀具暂时保持原值，避免扩大本次规则变更范围。 */
+}
+
+/*
+ * 函数功能：把 PXBA/PXBB 的 RFID USER 减速比字段转换成业务刀具类型。
+ * 输入参数：reduction_ratio 为 USER byte4 原始减速比。
+ * 返回参数：减速比为 2 时返回 GRINDH，其它值返回 PLANER。
+ */
+static uint8_t Handlescan_MapUserReductionRatioToBusinessType(uint8_t reduction_ratio)
+{
+    if (reduction_ratio == 2U)
+    {
+        return GRINDH; /* 用户确认 USER 减速比 2 表示磨头类刀具。 */
+    }
+
+    return PLANER; /* USER 减速比非 2 表示刨刀类刀具，支持往复和 PXBA/PXBB 开口定位。 */
+}
+
+/*
  * 函数功能：把 handlescan 的刀具来源转换成 RFID 读取来源。
  * 输入参数：tool_source 为手柄扫描判断出的刀具来源。
  * 返回参数：RFID EPC、RFID USER 或 NONE。
@@ -562,6 +613,10 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint32_t reduction_ratio = 0U; /* RFID 标签解析出的完整减速比，EPC 需要保留 32 位增/减速方向信息。 */
     uint8_t default_flow;        /* RFID 标签中的默认泵流量。 */
     uint8_t direction;           /* RFID 标签中的方向字段。 */
+    uint8_t business_tool_type = 0U; /* 业务层使用的刀具能力类型，和 RFID 原始型号分开保存。 */
+    uint16_t keep_speed_zzstep;  /* 保存基座阶段已从 Page6 读出的正转调速步进，防止 memset 后丢失。 */
+    uint16_t keep_speed_fzstep;  /* 保存基座阶段已从 Page6 读出的反转调速步进，RFID 标签不直接携带该参数。 */
+    uint16_t keep_speed_oscstep; /* 保存基座阶段已从 Page6 读出的往复调速步进，供新屏快慢调速键使用。 */
 
     if ((message == NULL) || (spec_values == NULL) || (rfid_result == NULL) || (rfid_result->valid == false))
     {
@@ -573,6 +628,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         return false; /* RFID 结果必须属于当前通道，避免 A/B 刀具头数据串用。 */
     }
 
+    keep_speed_zzstep = message->speed_zzstep; /* RFID 结果刷新前先暂存正转步进，避免清识别缓存时丢掉 EEPROM Page6 参数。 */
+    keep_speed_fzstep = message->speed_fzstep; /* RFID 结果刷新前先暂存反转步进，保证换刀具头后仍按基座配置调速。 */
+    keep_speed_oscstep = message->speed_oscstep; /* RFID 结果刷新前先暂存往复步进，PLANER 刀具切到往复后可继续用新屏调速。 */
     payload = rfid_result->payload; /* 后续按 EPC/USER 来源解释同一份原始标签数据。 */
     memset(message, 0, sizeof(*message)); /* RFID 刀具头重新识别时先清旧识别缓存，避免旧 EEPROM 字段残留。 */
 
@@ -599,6 +657,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
         direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
         reduction_ratio = Handlescan_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比字段，解析为工程内部 32 位增/减速比。 */
+        business_tool_type = GRINDH; /* 公共接头/GYJT EPC 默认按磨头类刀具处理，不开放往复和开口定位。 */
         message->meioticratio = (uint8_t)(reduction_ratio & 0xFFU); /* 旧 8 位字段继续保留低 8 位，兼容历史开口逻辑。 */
         message->overloadThresholdFor = payload[11]; /* EPC byte11：电流阈值，当前按原始值保存。 */
         message->overloadThresholdRev = payload[11]; /* 反转阈值沿用同一 RFID 电流阈值。 */
@@ -616,13 +675,30 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         diameter = payload[1]; /* USER byte1：刀头直径。 */
         length = payload[2]; /* USER byte2：刀具长度。 */
         angle = payload[3]; /* USER byte3：弯曲角度。 */
-        max_speed = Handlescan_RfidSpeedToWorkSpeed(payload[8]); /* USER byte8：转速，作为上限使用。 */
+        max_speed = (payload[8]*500); /* USER byte8：转速，作为上限使用。 */
         min_speed = 0U; /* USER 未提供最低速度，按 0 保存。 */
-        default_speed = Handlescan_RfidSpeedToWorkSpeed(payload[9]); /* USER byte9：默认转速。 */
+        default_speed = (payload[9]*500); /* USER byte9：默认转速。 */
         default_flow = payload[11]; /* USER byte11：泵速度。 */
         direction = Handlescan_ParseRfidDirection(payload[5]); /* USER byte5：方向。 */
         message->meioticratio = payload[4]; /* USER byte4：减速比，按原始 1 字节保存。 */
         reduction_ratio = (uint32_t)payload[4]; /* USER 只有 1 字节减速比，扩展为 32 位后统一进入通道记忆。 */
+        business_tool_type = Handlescan_MapUserReductionRatioToBusinessType(payload[4]); /* PXBA/PXBB USER 按减速比归一为 GRINDH/PLANER。 */
+        if(business_tool_type==PLANER)
+        {
+            min_speed=500;
+           // max_speed=6000;
+          //  default_speed=5000;
+          message->meioticratio=5;
+          reduction_ratio=5;
+        }
+        else if(business_tool_type==GRINDH)
+        {
+            min_speed=3000;
+             message->meioticratio=2;
+             reduction_ratio=2;
+           // max_speed=13000;
+           // default_speed=10000;
+        }
         message->freq_default = payload[10]; /* USER byte10：频率。 */
         message->overloadThresholdFor = 0U; /* USER 未定义电流阈值，保持 0。 */
         message->overloadThresholdRev = 0U; /* USER 未定义反转阈值，保持 0。 */
@@ -641,8 +717,14 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     {
         default_speed = min_speed; /* RFID 默认速度不能低于 RFID 下限。 */
     }
-
-    message->tool_type = tool_model; /* 保存 RFID 刀具型号，屏幕和上位机可以看到实际刀具头。 */
+    if(business_tool_type==PLANER)
+    message->run_direction=OSCDIR; /* 往复刀具默认方向先按 RFID 方向字段，后续开口定位逻辑会根据业务类型调整。 */
+    else
+    {
+        message->run_direction = ZZDIR;
+    }
+    message->tool_type = business_tool_type; /* 保存业务刀具类型，屏幕/方向/开口定位按 PLANER/GRINDH 判断。 */
+    message->raw_tool_type = tool_model; /* 保存 RFID 原始刀具型号，供上位机扩展和售后核对标签原值。 */
     message->diameter = diameter; /* 保存 RFID 直径。 */
     message->length = length; /* 保存 RFID 长度。 */
     message->draw = angle; /* 保存 RFID 弯曲角度。 */
@@ -659,12 +741,27 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->speed_zzdefault = default_speed; /* 正转默认速度来自 RFID。 */
     message->speed_fzdefault = default_speed; /* 反转默认速度来自 RFID。 */
     message->speed_oscdefault = default_speed; /* 往复默认速度来自 RFID。 */
-    message->run_direction = direction; /* 默认方向来自 RFID 标签。 */
+    message->speed_zzstep = keep_speed_zzstep; /* RFID 成功后恢复正转步进，优先使用基座 EEPROM Page6 的方向步进。 */
+    message->speed_fzstep = keep_speed_fzstep; /* RFID 成功后恢复反转步进，避免分体式刀具头上线后退回固定默认值。 */
+    message->speed_oscstep = keep_speed_oscstep; /* RFID 成功后恢复往复步进，保证 PLANER 往复调速和正反转同源。 */
+    if (message->speed_zzstep == 0U)
+    {
+        message->speed_zzstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，正转调速按 1000 兜底。 */
+    }
+    if (message->speed_fzstep == 0U)
+    {
+        message->speed_fzstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，反转调速按 1000 兜底。 */
+    }
+    if (message->speed_oscstep == 0U)
+    {
+        message->speed_oscstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，往复调速按 1000 兜底。 */
+    }
+    //message->run_direction = direction; /* 默认方向来自 RFID 标签。 */
 
     spec_values[0] = (uint32_t)((uint16_t)length * 2U); /* 屏幕规格缓存按 0.1 长度/5 保存，1 字节长度按实际值换算为 x10。 */
     spec_values[1] = (uint32_t)((uint16_t)diameter * 10U); /* 直径按 x10 保存，兼容原有规格显示入口。 */
     spec_values[2] = (uint32_t)((uint16_t)angle * 10U); /* 角度按 x10 保存，兼容原有规格显示入口。 */
-    spec_values[3] = (uint32_t)tool_model; /* 保存 RFID 刀具型号，供屏幕/上位机区分。 */
+    spec_values[3] = (uint32_t)business_tool_type; /* 保存业务刀具类型，屏幕掉线/能力判断不再直接使用 RFID 原始代号。 */
 
     return true; /* RFID 刀具头信息已经写入识别缓存。 */
 }
@@ -690,6 +787,22 @@ static void Handlescan_PrepareRfidBaseRecognizeMessage(ChannelrecognizeMessage_t
     message->hand_type_raw_minor = raw_type_minor; /* 保存 EEPROM 第二页原始子类型，便于区分 PXBA、PXBB 和公共接头。 */
     message->freq_min = FreqMin; /* 基座阶段仍保留工程频率下限，避免后续结构字段完全为空。 */
     message->freq_max = FreqMax; /* 基座阶段仍保留工程频率上限，真实 RFID 到达后会覆盖刀具参数。 */
+    message->speed_fzdefault=60000;
+    message->speed_oscdefault=60000;
+    message->speed_zzdefault=60000;
+    message->speed_zzmin=10000;
+    message->speed_zzmax=60000;
+    message->speed_fzmin=10000;
+    message->speed_fzmax=60000;
+    message->speed_oscmin=10000;
+    message->speed_oscmax=60000;
+    message->run_direction = ZZDIR;//未接刀具刚插入，默认正转
+    message->speed_zzstep=1000;
+    message->speed_fzstep=1000;
+    message->speed_oscstep=1000;
+    message->tool_reduction_ratio=1;
+    message->default_injection_flow=20;
+    message->freq_default=40;
 }
 
 /*
@@ -725,23 +838,24 @@ static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
         return; /* 已经离线时不重复清 MemoryMsg、不重复发插拔事件，也不重复蜂鸣。 */
     }
 
-    if (tool_source == HANDLESCAN_TOOL_SOURCE_RFID_EPC)
+    if (tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
     {
         Handlescan_PrepareRfidBaseRecognizeMessage(message,
                                                    mapped_model,
                                                    raw_type_major,
-                                                   raw_type_minor); /* 公共接头离线必须清刀具字段，让运行 gate 重新等待 EPC 刀具头。 */
-        Handlescan_ClearToolSpecValues(spec_values); /* 公共接头刀具头移开后清屏幕规格，避免继续显示旧刀具。 */
-        Rfid_ClearChannelResult(channel); /* 只清 EPC 公共接头缓存，下一次刀具头上线必须重新解析。 */
-        Pubinterface_ClearRfidToolMemory(channel); /* 公共接头无刀具头时同步清通道记忆，保证上位机心跳不再带旧刀具。 */
-        SendKeyBehMessage(PLUGunPLUG, plug_key); /* 公共接头复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
+                                                   raw_type_minor); /* RFID 刀具头离线时保留基座信息，只清刀具字段等待下一次标签。 */
+        Handlescan_ClearToolSpecValues(spec_values); /* RFID 刀具头移开后清屏幕规格，避免继续显示旧刀具 0x4200。 */
+        Rfid_ClearChannelResult(channel); /* 清当前 RFID 结果但保留历史 payload，下一次同标签重新上线也能发布业务序号。 */
+        Pubinterface_ClearRfidToolMemory(channel); /* RFID 无刀具头时同步清通道记忆，屏幕显示 61/62 或等待图。 */
+        Handlescan_ReloadSpeedStepMessage(channel, message); /* 清刀具头后重新装回基座 Page6 步进，等待下一次 RFID 上线继承。 */
+        //SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
     }
     *tool_online = 0U; /* 先把边沿状态切到离线，后续周期继续读不到标签时不会再次进入离线提示。 */
     Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头离线确认时单响一次，让使用者知道刀具头已移开。 */
-    if (tool_source == HANDLESCAN_TOOL_SOURCE_RFID_EPC)
+    if (tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
     {
-        *last_sequence = 0U; /* EPC 公共接头刀具头已被清除，后续读到任意有效标签都需要重新消费。 */
-        *last_presence_sequence = 0U; /* EPC 公共接头清掉存在序号，避免旧 presence 继续挡住下一次上线。 */
+        *last_sequence = 0U; /* RFID 刀具头已被清除，后续读到任意有效标签都需要重新消费。 */
+        *last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 继续挡住下一次上线。 */
     }
     *miss_count = 0U; /* 清掉缺失次数，当前这次状态变化已经处理完成。 */
     *monitor_pending = 0U; /* 清掉未完成监测标志，等待下一轮 1 秒周期重新读取。 */
@@ -914,7 +1028,7 @@ static void Handlescan_RequestOnlineRfidMonitor(uint8_t channel,
     }
 
     (*monitor_ticks)++; /* 空闲时累计在线监测周期。 */
-    if (*monitor_ticks >= HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)
+    if (*monitor_ticks >= HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)//大于100
     {
         *monitor_ticks = 0U; /* 到周期后清零，避免连续投递请求。 */
         if (*monitor_pending != 0U)
@@ -1223,17 +1337,20 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     default_speed = Handlescan_ClampDefaultSpeed(default_speed, min_speed, max_speed); /* 默认速度按同页上下限钳位，保证上线速度合法。 */
 
     message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* 解析默认注水流量并转换到泵业务单位。 */
-    message->speed_min = min_speed;                         /* 保存通用最小速度，供后续 UI/外控边界逻辑复用。 */
+    message->speed_min = 10000;                         /* 保存通用最小速度，供后续 UI/外控边界逻辑复用。 */
     message->speed_max = max_speed;                         /* 保存通用最大速度，供后续 UI/外控边界逻辑复用。 */
-    message->speed_zzmin = min_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
+    message->speed_zzmin = 10000;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
     message->speed_zzmax = max_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最大速度。 */
-    message->speed_fzmin = min_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最小速度。 */
+    message->speed_fzmin = 10000;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最小速度。 */
     message->speed_fzmax = max_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最大速度。 */
-    message->speed_oscmin = min_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最小速度。 */
+    message->speed_oscmin = 10000;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最小速度。 */
     message->speed_oscmax = max_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最大速度。 */
-    message->speed_zzdefault = default_speed;                /* Page4 默认速度作为正转上线初始速度。 */
-    message->speed_fzdefault = default_speed;                /* Page4 默认速度作为反转上线初始速度。 */
-    message->speed_oscdefault = default_speed;               /* Page4 默认速度作为往复上线初始速度。 */
+    message->speed_zzdefault = 60000;                /* Page4 默认速度作为正转上线初始速度。 */
+    message->speed_fzdefault = 60000;                /* Page4 默认速度作为反转上线初始速度。 */
+    message->speed_oscdefault = 60000;               /* Page4 默认速度作为往复上线初始速度。 */
+
+    
+
     message->run_direction = Handlescan_ParseInitialDirection(initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 解析默认方向，当前按业务确认使用正转。 */
     message->freq_default = initial_info_buf[HANDLESCAN_INITIAL_FREQ_OFFSET]; /* 保存 Page4 默认频率，往复模式启动时直接装载。 */
     message->freq_min = FreqMin;                             /* Page4 未提供频率下限，沿用现有 UI 频率下限宏保持调节边界。 */
@@ -1241,6 +1358,153 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     message->speed_alarm_for = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_FOR_ALARM_OFFSET); /* 保存正转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
     message->speed_alarm_rev = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_REV_ALARM_OFFSET); /* 保存反转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
     message->freq_alarm_osc = initial_info_buf[HANDLESCAN_INITIAL_OSC_ALARM_OFFSET]; /* 保存往复频率报警值，只用于蜂鸣阈值。 */
+}
+
+/*
+ * 函数功能：从 Page6 多档位速度区读取指定序号的速度步进。
+ * 输入参数：speed_step_buf 为 Page6 整页缓存；gear_index 为需要读取的第几组速度，1/2/3 分别对应正转、反转、往复步进槽。
+ * 返回参数：可直接写入 ChannelrecognizeMessage 的 16 位步进值，读不到或为 0 时返回 1000。
+ */
+static uint16_t Handlescan_ReadPage6SpeedStep(const uint8_t *speed_step_buf, uint8_t gear_index)
+{
+    uint8_t gear_count;                                      /* 保存 Page6[0] 声明的有效档位数量。 */
+    uint8_t effective_gear;                                  /* 保存本次实际读取的档位序号，避免访问未配置档位。 */
+    uint8_t speed_offset;                                    /* 保存所选档位速度字段的 Page6 偏移。 */
+    uint16_t speed_step;                                     /* 保存从 EEPROM Page6 读取出的调速步进。 */
+
+    if (speed_step_buf == NULL)
+    {
+        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* Page6 读取失败时不影响上线，调速步进使用 1000 兜底。 */
+    }
+
+    gear_count = speed_step_buf[HANDLESCAN_SPEED_STEP_GEAR_COUNT_OFFSET]; /* Page6 第 0 字节表示已配置几组速度档位。 */
+    if (gear_count == 0U)
+    {
+        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* 未配置档位时使用固定兜底，避免速度按键按下无变化。 */
+    }
+    if (gear_count > HANDLESCAN_SPEED_STEP_MAX_GEAR)
+    {
+        gear_count = HANDLESCAN_SPEED_STEP_MAX_GEAR;         /* 固件当前只解析前三组速度，超过三组先按前三组处理。 */
+    }
+
+    effective_gear = (gear_index == 0U) ? 1U : gear_index;   /* 调用方传 0 时按第一组处理，防止异常参数返回 0 步进。 */
+    if (effective_gear > gear_count)
+    {
+        effective_gear = gear_count;                         /* 缺少对应方向速度时沿用最后一组有效档位，保持三方向都可调速。 */
+    }
+
+    switch (effective_gear)
+    {
+    case 1U:
+        speed_offset = HANDLESCAN_SPEED_STEP_GEAR1_OFFSET;   /* 第一组速度写入正转慢档步进。 */
+        break;
+    case 2U:
+        speed_offset = HANDLESCAN_SPEED_STEP_GEAR2_OFFSET;   /* 第二组速度写入反转慢档步进。 */
+        break;
+    default:
+        speed_offset = HANDLESCAN_SPEED_STEP_GEAR3_OFFSET;   /* 第三组速度写入往复慢档步进。 */
+        break;
+    }
+
+    speed_step = Handlescan_ReadUint16BE(speed_step_buf, speed_offset); /* Page6 速度字段按上位机布局使用大端 16 位。 */
+    if (speed_step == 0U)
+    {
+        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* 已配置档位但速度为 0 时仍使用兜底，避免 UI 操作无反馈。 */
+    }
+
+    return speed_step;                                       /* 返回当前方向可用的慢档调速步进。 */
+}
+
+/*
+ * 函数功能：把 Page6 多档位速度区同步到识别缓存的正转、反转、往复调速步进字段。
+ * 输入参数：message 为目标通道识别缓存；speed_step_buf 为已读取并校验过页尾的 Page6 缓存，读取失败时可传 NULL。
+ * 返回参数：无。
+ */
+static void Handlescan_UpdateSpeedStepMessage(ChannelrecognizeMessage_t *message, const uint8_t *speed_step_buf)
+{
+    if (message == NULL)
+    {
+        return;                                              /* 识别缓存为空时不写全局状态，避免异常路径破坏另一通道参数。 */
+    }
+    if(message->handle_type==PXBA_ONLINE||message->handle_type==PXBB_ONLINE)
+    {
+         // message->speed_min=500;
+        message->speed_zzstep=500;
+        message->speed_fzstep=500;
+        message->speed_oscstep=500;
+        message->speed_zzmin=3000;
+        message->speed_fzmin=3000;
+        message->speed_oscmin=3000;
+        message->speed_oscmax=30000;
+    }
+    else
+    {
+        message->speed_zzstep=2000;
+        message->speed_fzstep=2000;
+        message->speed_oscstep=2000;
+    }
+    // message->speed_zzstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 1U); /* 正转慢档步进来自 Page6 第一组速度，失败时回退 1000。 */
+    // message->speed_fzstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 2U); /* 反转慢档步进来自 Page6 第二组速度，缺项时沿用最后有效档。 */
+    // message->speed_oscstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 3U); /* 往复慢档步进来自 Page6 第三组速度，配合新屏快档翻倍。 */
+}
+
+/*
+ * 函数功能：读取指定通道 EEPROM Page6 多档位速度页，并写入通道识别缓存的三方向调速步进。
+ * 输入参数：channel 为 A/B 通道；message 为目标通道识别缓存。
+ * 返回参数：无。
+ */
+static void Handlescan_LoadPage6SpeedStep(uint8_t channel, ChannelrecognizeMessage_t *message)
+{
+    uint8_t read_status = 0U;                                 /* 保存 Page6 读取状态，1 表示读页和页尾校验通过。 */
+
+    if (message == NULL)
+    {
+        return;                                               /* 识别缓存为空时不访问 EEPROM，避免异常路径误写全局参数。 */
+    }
+
+    AT24CS32_ClearLastDebugInfo();                            /* 读取 Page6 前清掉上一次 I2C 调试信息，便于现场需要时定位失败页。 */
+    if (channel == CHANNEL_A)
+    {
+        read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_SPEED_STEP_PAGE_INDEX, s_a_speed_step_buf); /* A 通道从 I2C2 读取 Page6 多档位速度页。 */
+        if (read_status == 0U)
+        {
+            memset(s_a_speed_step_buf, 0, sizeof(s_a_speed_step_buf)); /* Page6 失败不影响上线，只清缓存并让步进走 1000 兜底。 */
+        }
+        Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? s_a_speed_step_buf : NULL); /* 把 A 通道 Page6 转成正反往复三组步进。 */
+        return;                                               /* A 通道 Page6 处理完成，本轮不再落入 B 通道。 */
+    }
+
+    if (channel == CHANNEL_B)
+    {
+        read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_SPEED_STEP_PAGE_INDEX, s_b_speed_step_buf); /* B 通道从 I2C3 读取 Page6 多档位速度页。 */
+        if (read_status == 0U)
+        {
+            memset(s_b_speed_step_buf, 0, sizeof(s_b_speed_step_buf)); /* B 通道 Page6 失败同样不阻断手柄上线，避免现场旧 EEPROM 无 Page6 时报错。 */
+        }
+        Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? s_b_speed_step_buf : NULL); /* 把 B 通道 Page6 转成正反往复三组步进。 */
+    }
+}
+
+/*
+ * 函数功能：不重新访问 EEPROM，仅把当前通道已经缓存的 Page6 步进重新写回识别缓存。
+ * 输入参数：channel 为 A/B 通道；message 为目标通道识别缓存。
+ * 返回参数：无。
+ */
+static void Handlescan_ReloadSpeedStepMessage(uint8_t channel, ChannelrecognizeMessage_t *message)
+{
+    if (message == NULL)
+    {
+        return;                                               /* 识别缓存为空时不写字段，避免 RFID 掉线清理路径误操作。 */
+    }
+
+    if (channel == CHANNEL_A)
+    {
+        Handlescan_UpdateSpeedStepMessage(message, s_a_speed_step_buf); /* A 通道复用最近一次 Page6 缓存，支持不拔基座直接换刀具头。 */
+    }
+    else if (channel == CHANNEL_B)
+    {
+        Handlescan_UpdateSpeedStepMessage(message, s_b_speed_step_buf); /* B 通道复用自己的 Page6 缓存，避免 A/B 步进串用。 */
+    }
 }
 
 /*
@@ -1308,6 +1572,7 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     message->hand_type_raw_major = 0U;                       /* 清掉 Page2 原始主类型，避免下一次上线前外部通信读到旧手柄编码。 */
     message->hand_type_raw_minor = 0U;                       /* 清掉 Page2 原始子类型，保持识别缓存和当前插拔状态一致。 */
     message->tool_type = 0U;
+    message->raw_tool_type = 0U;                              /* 清掉刀具原始型号，避免下次上线前驱动或上位机读取旧 PXM/PXP/RFID 代号。 */
     message->diameter = 0U;
     message->length = 0U;
     message->draw = 0U;
@@ -1324,6 +1589,9 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     message->speed_zzdefault = 0U;                           /* 清掉正转默认速度，避免插拔后沿用旧 Page4 默认值。 */
     message->speed_fzdefault = 0U;                           /* 清掉反转默认速度，避免插拔后沿用旧 Page4 默认值。 */
     message->speed_oscdefault = 0U;                          /* 清掉往复默认速度，避免插拔后沿用旧 Page4 默认值。 */
+    message->speed_zzstep = 0U;                              /* 清掉正转调速步进，下一次上线重新从 Page6 或 RFID 兜底写入。 */
+    message->speed_fzstep = 0U;                              /* 清掉反转调速步进，避免换手柄后沿用旧步进。 */
+    message->speed_oscstep = 0U;                             /* 清掉往复调速步进，保持离线态没有可用调速参数。 */
     message->freq_min = 0U;                                  /* 清掉频率下限缓存，避免下一次调频沿用旧手柄边界。 */
     message->freq_max = 0U;                                  /* 清掉频率上限缓存，避免下一次调频沿用旧手柄边界。 */
     message->freq_default = 0U;                              /* 清掉默认频率，避免往复模式沿用旧 Page4 默认频率。 */
@@ -1577,10 +1845,12 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
         return;
     }
 
+   
     message->handle_type = mapped_model;
     message->hand_type_raw_major = raw_type_major;            /* 原始主类型先保存在识别缓存，等待 PlugORunPLUGActive 统一搬到 MemoryMsg。 */
     message->hand_type_raw_minor = raw_type_minor;            /* 原始子类型先保存在识别缓存，避免扫描任务直接写通道记忆。 */
-    message->tool_type = mapped_tool_model;
+    message->tool_type = Handlescan_MapRawToolTypeToBusinessType(mapped_tool_model); /* 业务刀具类型按 PXM/PXP 归一，屏幕和开口定位都看这个字段。 */
+    message->raw_tool_type = mapped_tool_model;               /* 原始刀具型号保留给上位机和驱动兼容判断。 */
     message->diameter = Handlescan_TenthToUint8(diameter_tenth);
     message->length = (uint16_t)(length_tenth / 10U);
     message->draw = Handlescan_TenthToUint8(angle_tenth);
@@ -1770,6 +2040,8 @@ static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
  */
 void HandlescanA_Fun_SSC(void)
 {
+    static  uint8_t XUYAOrfid_flag=0;
+    
     uint8_t is_inserted;                                      /* 当前采样到的 A 通道插入状态，1 表示短接成立，0 表示短接断开。 */
     AT24CS32_CRC_Result verify_result;                       /* 保存 EEPROM 认证函数输出的中间结果，便于底层后续扩展。 */
     AT24CS32_CRC_Status verify_status;                       /* 保存当前这次 EEPROM 认证返回的状态码。 */
@@ -1827,10 +2099,11 @@ void HandlescanA_Fun_SSC(void)
             s_a_rfid_monitor_ticks = 0U;                      /* 清掉 A 通道 RFID 低频监测计数。 */
             Handlescan_ClearChannelState(CHANNEL_A);         /* 清空 A 通道新的在线与识别状态容器。 */
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 同步清空 A 通道刀具规格缓存，避免 UI 残留旧值。 */
+            XUYAOrfid_flag=0;
             SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_A); /* 通知新按键行为模块：A 手柄已拔出。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出“离线完成”报文。 */
-            (void)Handlescan_HandleRunningPlugAlarm(1U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
+          //  (void)Handlescan_HandleRunningPlugAlarm(1U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
             Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 A 通道拔出确认单响。 */
             return;                                          /* A 通道离线处理完成，本轮到此结束。 */
         }
@@ -1984,8 +2257,9 @@ void HandlescanA_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
         s_a_tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 A 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_a_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+        if (s_a_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3&&XUYAOrfid_flag==0)
         {
+            XUYAOrfid_flag=1;
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
             if (Handlescan_StartRfidWait(CHANNEL_A,
                                          &s_a_stage,
@@ -1998,7 +2272,9 @@ void HandlescanA_Fun_SSC(void)
                                                            mapped_model,
                                                            raw_type_major,
                                                            raw_type_minor); /* 只写基座字段，刀具字段等待 RFID 真实结果。 */
+                Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* 可拆式 A 基座先装入 Page6 步进，后续 RFID 刀具头成功时继承。 */
                 SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A); /* 先上报 RFID 基座在线，刀具头数据到达后再二次刷新通道记忆。 */
+                SendKeyBeepMessage(1);
             }
             return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
         }
@@ -2038,14 +2314,14 @@ void HandlescanA_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_stage,
-                                         &s_a_verify_retry_count,
-                                         &s_a_verify_retry_wait_ticks,
-                                         &s_a_last_alarm,
-                                         0U);                /* 刀具页读到异常值时允许后续重试。 */
-            return;                                         /* 等待重新插拔。 */
+            // Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
+            // // Handlescan_EnterRetryOrFail(CHANNEL_A,
+            //                              &s_a_stage,
+            //                              &s_a_verify_retry_count,
+            //                              &s_a_verify_retry_wait_ticks,
+            //                              &s_a_last_alarm,
+            //                              0U);                /* 刀具页读到异常值时允许后续重试。 */
+            // return;                                         /* 等待重新插拔。 */
         }
 
         tool_diameter_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
@@ -2061,13 +2337,16 @@ void HandlescanA_Fun_SSC(void)
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 A 通道识别结果。 */
+                                          WorkMessage.auto_identify= MemoryMsgA.auto_identify=1;
         Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
                                             s_a_initial_info_buf); /* 同步更新 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+        Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* A 通道普通 EEPROM 刀具上线后读取 Page6，供新屏快慢调速键使用。 */
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
-                                        mapped_tool_model); /* 按当前 UI 使用的数组格式更新 A 通道刀具规格缓存。 */
+                                        Handlescan_MapRawToolTypeToBusinessType(mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP 不再直接暴露旧码给 UI。 */
+                                        WorkMessage.auto_identify=0;
         SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
         Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
         Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
@@ -2184,6 +2463,7 @@ void HandlescanA_Fun_SSC(void)
  */
 void HandlescanB_Fun_SSC(void)
 {
+     static  uint8_t XUYAOrfid_flag=0;
     uint8_t is_inserted;                                      /* 当前采样到的 B 通道插入状态，1 表示短接成立，0 表示短接断开。 */
     AT24CS32_CRC_Result verify_result;                       /* 保存 B 通道 EEPROM 认证输出结果。 */
     AT24CS32_CRC_Status verify_status;                       /* 保存 B 通道当前这次认证返回的状态码。 */
@@ -2241,10 +2521,11 @@ void HandlescanB_Fun_SSC(void)
             s_b_rfid_monitor_ticks = 0U;                      /* 清掉 B 通道 RFID 低频监测计数。 */
             Handlescan_ClearChannelState(CHANNEL_B);         /* 清空 B 通道新的在线与识别状态容器。 */
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 同步清空 B 通道刀具规格缓存。 */
+            XUYAOrfid_flag=0;
             SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_B); /* 通知新按键行为模块：B 手柄已拔出。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
             Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
-            (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
+         //   (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
             Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 B 通道拔出确认单响。 */
             return;                                          /* B 通道离线处理结束。 */
         }
@@ -2395,8 +2676,9 @@ void HandlescanB_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
         s_b_tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 B 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_b_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+        if (s_b_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3&&XUYAOrfid_flag==0)
         {
+            XUYAOrfid_flag=1;
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
             if (Handlescan_StartRfidWait(CHANNEL_B,
                                          &s_b_stage,
@@ -2409,7 +2691,9 @@ void HandlescanB_Fun_SSC(void)
                                                            mapped_model,
                                                            raw_type_major,
                                                            raw_type_minor); /* 只写基座字段，刀具字段等待 RFID 真实结果。 */
+                Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* 可拆式 B 基座先装入 Page6 步进，避免 B 通道沿用固定默认步进。 */
                 SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B); /* 先上报 RFID 基座在线，刀具头数据到达后再二次刷新通道记忆。 */
+                  SendKeyBeepMessage(1);
             }
             return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
         }
@@ -2449,14 +2733,14 @@ void HandlescanB_Fun_SSC(void)
         tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
         if (tool_type_cfg == NULL)
         {
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_stage,
-                                         &s_b_verify_retry_count,
-                                         &s_b_verify_retry_wait_ticks,
-                                         &s_b_last_alarm,
-                                         0U);                /* 刀具页读到异常值时允许后续重试。 */
-            return;                                         /* 等待重新插拔。 */
+            // Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
+            // Handlescan_EnterRetryOrFail(CHANNEL_B,
+            //                              &s_b_stage,
+            //                              &s_b_verify_retry_count,
+            //                              &s_b_verify_retry_wait_ticks,
+            //                              &s_b_last_alarm,
+            //                              0U);                /* 刀具页读到异常值时允许后续重试。 */
+            // return;                                         /* 等待重新插拔。 */
         }
 
         tool_diameter_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
@@ -2472,14 +2756,17 @@ void HandlescanB_Fun_SSC(void)
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 B 通道识别结果。 */
+                                            WorkMessage.auto_identify= MemoryMsgB.auto_identify=1;
         Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
                                             s_b_initial_info_buf); /* 同步更新 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+        Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* B 通道普通 EEPROM 刀具上线后读取 Page6，保证 A/B 调速步进独立。 */
         Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
                                         tool_diameter_tenth,
                                         tool_length_tenth,
                                         tool_angle_tenth,
-                                        mapped_tool_model); /* 按当前 UI 使用的数组格式更新 B 通道刀具规格缓存。 */
+                                        Handlescan_MapRawToolTypeToBusinessType(mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP 不再直接暴露旧码给 UI。 */
         SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
+        WorkMessage.auto_identify=0;
         Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
         Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
         s_b_last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */

@@ -81,6 +81,7 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 
 static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 {
+	if(WorkMessage.alarm_value ==WORK_ALARM_HANDLE_NOT_CONNECTED)return;
 	uint8_t alarm_value = MotorUart_MapDriverErrorToAlarm(driver_error); /* 把参考驱动 Err 编码转换为主控统一报警码。 */
 
 	if (alarm_value == 0U)
@@ -119,14 +120,12 @@ static void MotorUart_ClearDriverAlarmIfOwned(void)
 static void MotorUart_StopAllWork(void)
 {
 	WorkMessage.runflag_work = false;
+
 	ControlSignalMessage.handle_control_flag = false;
 	ControlSignalMessage.HMI_control_flag = false;
 	ControlSignalMessage.jtL_control_flag = false;
 	ControlSignalMessage.jtR_control_flag = false;
-	pumpMessageA.run_flag = false;
-	pumpMessageA.speed_work = 0U;
-	pumpMessageB.run_flag = false;
-	pumpMessageB.speed_work = 0U;
+	
 }
 
 //============================================================================
@@ -135,6 +134,7 @@ static void MotorUart_StopAllWork(void)
 //============================================================================
 void BrushlessMotorUartData_ReceiveData(void)
 {
+	static uint8_t clean_huic=0;
   uint8_t rlen = 0, i = 0;
   uint8_t dat[UART1_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
   uint16_t CRC_Check_Vaule=0;
@@ -157,14 +157,25 @@ void BrushlessMotorUartData_ReceiveData(void)
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是 App.FB.Prot.AllCur * 100，单位 0.01A，只上传给上位机显示。 */
 					if (dat1[7] == MOTOR_UART_DRIVER_ERR_NONE)
 					{
+						if(clean_huic==1){
+							clean_huic=0;
+						MotorUart_StopAllWork();
+						}
 						MotorUart_ClearDriverAlarmIfOwned();
+						
 					}
 					else
 					{
+						
+						clean_huic=1;
 						MotorUart_SetDriverAlarm(dat1[7]);
 						Pump_SetSpeed_A(0);//泵停止运行
 						//Pump_SetSpeed_B(0);//泵停止运行
-						MotorUart_StopAllWork();
+						pumpMessageA.run_flag = false;
+						//pumpMessageA.speed_work = 0U;
+						pumpMessageB.run_flag = false;
+						//pumpMessageB.speed_work = 0U;
+						// MotorUart_StopAllWork();
 					}	
 				switch (dat1[1])
 				{
