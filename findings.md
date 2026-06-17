@@ -54,3 +54,24 @@
 - 外控短超时 1000ms 只停输出并保留授权，长超时 5000ms 释放外控；源码注释仍写 30s。
 - 步进泵板 `USER\logic.c` 支持 `BB AA` 绕过 CRC；`USER\motor.h` 实际 `PWM_FRE=8000` 但注释写 10K。
 - 压力传感器工程 200ms 主循环同时处理标定协议和周期上报，标定写 Flash 时需要验证是否打断或穿插上报帧。
+
+## 2026-06-17 电机驱动风险专项发现
+
+- 无刷/有刷工程根路径：`D:\EH_main\soft\Temp_save\GE2433_WSYS_2026_4_24\GE2433_WSYS_2026_4_24\0`。
+- 无刷/有刷工程关键目录初步定位：`UserCode\logic.c`、`UserCode\mcuart.c`、`UserCode\interrupt.c`、`UserCode\fangbo_nohall.c`、`MotorCode\mcfoc.c`、`MotorCode\mcbrush.c`、`MotorCode\hallfoc.c`、`YouShua\YSlogic.c`。
+- 步进工程根路径：`D:\EH_main\reference\shima_waixie\small_2026_3_31\small_2026_3_31`。
+- 步进工程关键文件初步定位：`USER\logic.c`、`USER\motor.c`、`USER\motor.h`、`Core\Src\usart.c`、`Core\Src\tim.c`。
+- 无刷私有协议在 `UserCode\mcuart.c:443-446` 接受 `seruart->RxCRC == 0xAABB` 的旁路条件；停止命令在 `UserCode\mcuart.c:532-544` 只设置 `Brake_Sign=1`、`Brake_Kind=1`、必要时 `Motor_Stop_StartFlag=1`，没有在收包处直接关闭 PWM。
+- 无刷停止完成依赖 `UserCode\interrupt.c:207-245` 的 1ms 刹车递减和 `UserCode\fangbo.c:1104-1113` 的 `VBusNowPWM < MCPara[45]` 判定；如果递减步进、下限或阈值配置异常，停止命令会停留在刹车链路而不是立即硬停。
+- B 通道 1ms 刹车分支 `UserCode\interrupt.c:260-297` 存在明显通道变量风险：`Brake_Kind==0` 时写 `App.FB.Status = HS_STOP`，不是 `App.FB2.Status`，可能导致 B 通道刹车状态不能按预期退出。
+- 无刷 A/B 共用 `App.Logic.VBusNowPWM`，`UserCode\fangbo.c:394-438` 和 `453-496` 分别按 A/B PI 更新同一个 PWM 变量，停止、开环和 B 通道刹车都复用该变量；双通道或快速切换时存在状态互相覆盖风险。
+- 无刷 B 通道电压环初始化 `UserCode\fangbo.c:1715-1718` 疑似写错结构体：无 Hall 时把 `MCPara2[27/28]` 写到 `mcApp_VoltageP_PIParam`，不是 `mcApp_VoltageP_PIParam2`，会影响 B 通道刹车/闭环下限判断。
+- 有刷停止命令在 `UserCode\mcuart.c:601-609` 只把 `App2.Log.u32SetSpd` 装载为 0 并清 `BreakSta`；实际停止由 `YouShua\YSlogic.c:20-25/120-125` 清 `Start`，再由 `YouShua\YSstatemachine.c:174-240` 进入 `BreakSta` 刹车计时，达到 `YSPara1/2[59]` 后才关 PWM 和 Buck。
+- 有刷刹车 PWM 下降在 `YouShua\YSmcctl.c:219-256` 执行，通道 1/2 同样共用 `App2.Log.VbusNowPWM` 和 `TMR2` 的 Buck 输出；如果 `YSPara[56]` 被写成 0 或刹车计时标志异常，停止会依赖通讯/错误保护兜底。
+- 步进串口接收在 `Core\Src\stm32l4xx_it.c:327-342` 通过 UART3 IDLE + DMA 写 `SerUart3.RxLen`，但解析函数 `USER\logic.c:35-73` 不检查 `RxLen >= 6`，固定读取 `R_DATA[0..5]`，短包或粘包残留有机会参与速度解析。
+- 步进协议在 `USER\logic.c:49-57` 接受 `R_DATA[4]==0xBB && R_DATA[5]==0xAA` 的 CRC 旁路，速度直接由 `R_DATA[2]*256+R_DATA[3]` 写入 `App.Log.Set_Speed`，没有最大速度钳位；异常字节可形成很大的目标速度。
+- 步进启动条件 `USER\logic.c:20-27` 只判断电压、`abs(Set_Speed)>MCPara[35]` 和无错误；默认 `MCPara[35]=0`，意味着任意非 0 速度都能触发启动。
+- 步进初始化 `USER\logic.c:185-201` 使用 `MCPara[25]` 计算 `RampUpTime`、`PoweUpUnit` 和 `RampUpInc`；默认 `MCPara[25]=3000`，但若被写成 0 或很小，会出现除 0 或启动相位增量过大，符合“启动速度异常快”的软件风险。
+- 步进 PWM 中断 `USER\bujing.c:47-82` 在开环 Stage0 每周期执行 `RampUpTemp += RampUpInc`、`Step_Temp += RampUpTemp`；Stage1 在 `USER\bujing.c:83-109` 直接按 `Step_Unit` 推进相位。`Step_Unit/RampUpInc` 均由 `App.Log.Set_Speed` 直接换算，缺少速度上限防线。
+- 无刷/有刷失停建议断点：`UserCode\mcuart.c:453-545` 确认停止帧是否被接收并解析为 `Set_Spd=0`；`UserCode\fangbo.c:1104-1138` 确认 `Brake_StopPwmOK` 是否置位；`UserCode\interrupt.c:207-297` 观察 `VBusNowPWM`、`qOutMin`、`MCPara[44]`、`MCPara[45]`、`MCPara2[44]`、`MCPara2[45]`；`YouShua\YSstatemachine.c:174-240` 观察有刷 `BreakSta`、`StopTimCnt`、`AllowRun` 和 `Status`。
+- 步进异常快启动建议断点：`USER\logic.c:43-57` 观察 `RxLen`、`R_DATA[0..5]`、`RxCRC/CalcCRC`、`App.Log.Set_Speed`；`USER\logic.c:185-201` 观察 `MCPara[25]`、`RampUpTime`、`Step_Unit`、`RampUpInc`；`USER\bujing.c:47-82` 观察启动前 50 个 PWM 周期内 `RampUpTemp` 和 `Step_Temp` 是否跳变过快。

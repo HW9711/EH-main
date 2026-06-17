@@ -523,18 +523,12 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
       
         return false; /* 队列未初始化时不能接受请求。 */
     }
-    if(WorkMessage.auto_identify==false||WorkMessage.hand_model!=PXBA_ONLINES)
-    {
-      if(channel == CHANNEL_A)
-        {
-            SendKeyRFIDMessageAdown();
-        }
-        else if(channel == CHANNEL_B)
-        {
-            SendKeyRFIDMessageBdown();
-        }
-        return false; /* 非自动识别模式不接受请求，避免误发 RFID 命令。 */;
-    }
+    /*
+     * RFID 来源已经由 handlescan 按 EEPROM 第二页和协议选择：
+     * 公共接头 COMMON_SOCKET_ONLINES 走 EPC，PXBA/PXBB 分体式走 USER。
+     * 这里不能再用当前 WorkMessage.hand_model 做 PXBA-only 门禁，
+     * 因为公共接头基座刚上线时当前工作通道可能尚未装载到 WorkMessage。
+     */
     if ((Rfid_ChannelToIndex(channel, &index) == false) || (Rfid_IsSourceValid(source) == false))
     {
        if(channel == CHANNEL_A)

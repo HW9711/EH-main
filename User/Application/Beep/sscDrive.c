@@ -169,7 +169,7 @@ void MOTORRUN(void)
                  msg.run_type=0x04;
             }
         }
-        WorkMessage.current_work=0x1ff;
+      WorkMessage.current_work=0xffff;
       msg.speed_h=ssc_speed_value/256;
       msg.speed_l=(ssc_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256;

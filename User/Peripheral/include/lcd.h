@@ -94,6 +94,18 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data);
 void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
 
 //============================================================================
+// 函数名称: LCD_IntegratedCutterRawData_Update()
+// 功能描述: 公共接头 EPC 刀具参数按原始整数格式更新
+// 输　  入: Addr：数据参数的显示地址
+//           Length：长度原始整数
+//           Diameter：直径原始整数
+//           Angle：角度原始整数
+// 输    出: 无
+// 函数说明: 仅用于公共接头 EPC，直径 0x10 显示为 Φ16，避免复用一体式小数直径格式。
+//============================================================================
+void LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
+
+//============================================================================
 // 函数名称: LCD_HostModel_Update()
 // 功能描述: 一体式(3号接口)刀具参数更新
 // 输　  入: Addr：字符显示地址

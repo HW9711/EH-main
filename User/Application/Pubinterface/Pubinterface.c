@@ -163,6 +163,17 @@ static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 }
 
 /*
+ * 函数功能：判断当前手柄型号是否允许使用屏幕刀具规格窗口显示 RFID/EPC 解析出的长度、直径和角度。
+ * 输入参数：hand_model EEPROM 识别出的手柄型号。
+ * 返回参数：true 表示当前型号允许打开 UI_TOOLSPEC_ID；false 表示当前型号必须隐藏规格窗口。
+ */
+static bool Pubinterface_IsRfidToolSpecDisplayModel(uint8_t hand_model)
+{
+	return ((Pubinterface_IsSplitToolSpecDisplayModel(hand_model) == true) ||
+			(hand_model == COMMON_SOCKET_ONLINES)); /* 公共接头按 EPC 读取刀具规格，只加入规格显示 gate，不加入 PXBA/PXBB 识别按钮 gate。 */
+}
+
+/*
  * 函数功能：判断当前刀具字段是否代表支持往复的刨刀能力。
  * 输入参数：tool_type 当前通道识别或手动选择得到的刀具类型字段。
  * 返回参数：true 表示该刀具按刨刀能力开放往复；false 表示按普通磨头/未知刀具处理。
@@ -280,6 +291,7 @@ static bool Pubinterface_GetToolSpecForChannel(uint8_t channel, uint8_t *display
 	uint32_t tool_length = 0U;
 	uint32_t tool_diameter = 0U;
 	uint32_t tool_angle = 0U;
+	bool raw_spec_display = (WorkMessage.hand_model == COMMON_SOCKET_ONLINES); /* 公共接头 EPC 标签字段按原始十六进制整数显示，不能复用 PXBA/PXBB 的倍率显示单位。 */
 
 	if (channel == CHANNEL_A)
 	{
@@ -294,9 +306,18 @@ static bool Pubinterface_GetToolSpecForChannel(uint8_t channel, uint8_t *display
 		return false;
 	}
 
-	tool_length = spec_values[0] * 5U; /* 扫描缓存 [0] 保存长度基值，屏幕显示前恢复成实际长度值。 */
-	tool_diameter = spec_values[1];
-	tool_angle = spec_values[2];
+	if (raw_spec_display)
+	{
+		tool_length = spec_values[0]; /* 公共接头 EPC 长度缓存就是原始整数值，0x60 直接显示为 96mm。 */
+		tool_diameter = spec_values[1]; /* 公共接头 EPC 直径缓存就是原始整数值，0x10 直接显示为 16。 */
+		tool_angle = spec_values[2]; /* 公共接头 EPC 角度缓存就是原始整数值，0x10 直接显示为 16°。 */
+	}
+	else
+	{
+		tool_length = spec_values[0] * 5U; /* PXBA/PXBB USER 扫描缓存 [0] 保存长度基值，屏幕显示前恢复成实际长度值。 */
+		tool_diameter = spec_values[1]; /* PXBA/PXBB USER 直径仍按 x10 单位交给旧 LCD 格式化路径。 */
+		tool_angle = spec_values[2]; /* PXBA/PXBB USER 角度仍按历史缓存单位交给旧屏幕格式化路径。 */
+	}
 
 	if ((tool_length == 0U) || (tool_diameter == 0U))
 	{
@@ -320,6 +341,7 @@ static bool Pubinterface_GetToolSpecForChannel(uint8_t channel, uint8_t *display
 	display_value[1] = (uint8_t)(tool_length & 0xFFU);
 	display_value[2] = (uint8_t)tool_diameter;
 	display_value[3] = (uint8_t)tool_angle;
+	display_value[4] = raw_spec_display ? 1U : 0U; /* Value[4] 通知 UIDP 本次规格为公共接头 EPC 原始整数格式。 */
 	return true;
 }
 
@@ -348,13 +370,16 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
 	bool show_tool_spec = false;
 	bool auto_identify = (WorkMessage.auto_identify != 0U); /* 自动识别模式下，未读到 RFID 规格前不显示手动磨/刨按钮。 */
 	bool split_tool_spec_handle = Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model); /* 当前通道是否为 PXBA/PXBB 分体 RFID 手柄，普通 EEPROM 手柄不显示刀具识别区。 */
+	bool rfid_spec_handle = Pubinterface_IsRfidToolSpecDisplayModel(WorkMessage.hand_model); /* 当前通道是否具备 RFID/EPC 规格显示能力，公共接头也要显示刀具规格。 */
+	bool common_socket_spec_handle = (WorkMessage.hand_model == COMMON_SOCKET_ONLINES); /* 公共接头没有 PXBA/PXBB 识别按钮，但 EPC 规格有效时必须打开规格窗口。 */
 	bool rfid_display_enabled = (auto_identify && split_tool_spec_handle); /* 当前选中通道必须是 PXBA/PXBB 才允许显示 RFID 规格和自动识别图标，避免普通手柄继承另一通道残留。 */
+	bool rfid_spec_window_enabled = (rfid_display_enabled || common_socket_spec_handle); /* PXBA/PXBB 仍按自动识别状态显示规格，公共接头按 EPC 规格缓存直接显示。 */
 	bool open_position_enabled = Pubinterface_IsOpenPositionEnabledTool(WorkMessage.hand_model, WorkMessage.tool_type); /* 开口定位必须同时满足 PXBA/PXBB 和 PLANER。 */
 	uint8_t result_tool_type = WorkMessage.tool_type; /* 自动识别等待/掉线图标优先看当前刀具类型，没有当前刀具时再看历史识别。 */
 
 	manual_display_value[0] = planer_selected ? 1U : 0U; /* 手动按钮 Value[0] 继续表示磨/刨选择，1 为刨刀、0 为磨头。 */
 	manual_display_value[1] = rfid_display_enabled ? 1U : 0U; /* 只有当前通道确认为 RFID 手柄时才写自动识别图 51，普通手柄保持 0 供隐藏分支清掉识别区。 */
-	if (split_tool_spec_handle == false)
+	if (rfid_spec_handle == false)
 	{
 		SendUIDSMessage(UI_TOOL_ID, false, manual_display_value); /* 普通 EEPROM 手柄不使用 EX8 刀具识别图，切通道时先关闭旧通道刀具图入口。 */
 		SendUIDSMessage(UI_TOOLSPEC_ID, false, display_value); /* 普通 EEPROM 手柄没有 RFID 规格窗口，必须清掉 A 通道 PXBA/PXBB 残留规格。 */
@@ -368,9 +393,9 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
 	}
 	manual_display_value[2] = rfid_display_enabled ? Pubinterface_MapToolTypeToResultPicture(result_tool_type) : 63U; /* Value[2] 只给 RFID 自动识别区驱动 61/62/63，普通手柄始终刷默认值清残留。 */
 
-	if (rfid_display_enabled)
+	if (rfid_spec_window_enabled)
 	{
-		show_tool_spec = Pubinterface_GetToolSpecForChannel(channel, display_value); /* 当前通道同时满足自动识别和 RFID 手柄型号时才读取规格，普通手柄不碰规格窗口。 */
+		show_tool_spec = Pubinterface_GetToolSpecForChannel(channel, display_value); /* PXBA/PXBB 自动识别和公共接头 EPC 都从通道规格缓存读取长度、直径和角度。 */
 	}
 
 	if (show_tool_spec)
@@ -387,6 +412,11 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
 		{
 			SendUIDSMessage(UI_TOOL_ID, true, manual_display_value); /* 自动识别等待 RFID 时隐藏普通刀具图，避免误以为当前是手动磨/刨模式。 */
 			SendUIDSMessage(UI_MANUALBUTTON_ID, true, manual_display_value); /* 自动识别模式下隐藏手动磨/刨按钮，同时把 0x1407 刷成自动识别图 51。 */
+		}
+		else if (common_socket_spec_handle)
+		{
+			SendUIDSMessage(UI_TOOL_ID, false, manual_display_value); /* 公共接头没有有效 EPC 规格时隐藏刀具图，避免误显示 PXBA/PXBB 或普通手柄残留。 */
+			SendUIDSMessage(UI_MANUALBUTTON_ID, false, manual_display_value); /* 公共接头没有手动识别按钮，未读到 EPC 前整块识别按钮区保持关闭。 */
 		}
 		else
 		{
@@ -1262,10 +1292,10 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层通道识别缓存，用于清掉心跳有效性判断会读取的刀具字段。 */
-	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向通道记忆，避免上位机心跳在事件排队期间继续读到旧刀具参数。 */
+	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时仍要保留上次可运行参数，供切回通道继续使用。 */
 	uint8_t keep_drive_type = WorkMessage.drivetype_work; /* 保留原控制方式记忆，刀具头移开不应把脚控/触控/外控显示重置。 */
-	uint8_t keep_auto_identify = WorkMessage.auto_identify; /* 保留用户选择的自动/手动识别模式，刀具掉线不应改模式。 */
-	uint8_t keep_raw_tool_type = 0U; /* 保留最近一次原始刀具型号，用于掉线后 0x1404 显示 61/62。 */
+	uint8_t keep_auto_identify = WorkMessage.auto_identify; /* 保留用户选择的自动/手动识别模式，刀具掉线不应改模式或清通道记忆。 */
+	uint8_t keep_raw_tool_type = 0U; /* 保留最近一次原始刀具型号，避免扫描层清零后通道记忆丢失驱动兼容字段。 */
 	uint8_t keep_display_tool_type = 0U; /* 保留最近一次业务刀具类型，显示 61/62 必须使用 PLANER/GRINDH 语义。 */
 
 	if (channel == CHANNEL_A)
@@ -1305,35 +1335,26 @@ void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 	recognize->draw = 0U;					   /* 清扫描层角度，刀具头缺失时角度无效。 */
 	recognize->meioticratio = 0U;			   /* 清旧 8 位减速比，避免开口定位继续按旧刀具比例判断。 */
 	recognize->tool_reduction_ratio = 0U;	   /* 清完整 32 位减速比，确保 PXBA/PXBB 工具参数不再残留。 */
-	recognize->speed_zzdefault = 0U;			   /* 清正转默认速度，刀具头缺失时不应保留可运行速度。 */
-	recognize->speed_fzdefault = 0U;			   /* 清反转默认速度，避免用户切方向后看到旧速度。 */
-	recognize->speed_oscdefault = 0U;		   /* 清往复默认速度，避免往复界面保留旧刀具参数。 */
-	recognize->speed_zzstep = 0U;			   /* 清正转调速步进，RFID 刀具头离线后不再保留旧刀具 Page6 参数。 */
-	recognize->speed_fzstep = 0U;			   /* 清反转调速步进，下一次识别成功后重新装载。 */
-	recognize->speed_oscstep = 0U;			   /* 清往复调速步进，避免离线状态继续按旧刀具步进调速。 */
-	recognize->speed_min = 0U;				   /* 清速度下限，上位机无刀具时应显示等待 RFID 而不是旧范围。 */
-	recognize->speed_max = 0U;				   /* 清速度上限，避免旧刀具限速继续参与显示。 */
-	recognize->default_injection_flow = 0U;	   /* 清刀具相关默认泵流量，避免刀具头缺失后继续显示旧流量。 */
+	recognize->speed_zzdefault = 0U;			   /* 只清扫描层正转默认速度，让心跳知道刀具头已离线；MemoryMsg 正转速度继续保留。 */
+	recognize->speed_fzdefault = 0U;			   /* 只清扫描层反转默认速度，避免上位机把离线刀具头当作当前在线参数。 */
+	recognize->speed_oscdefault = 0U;		   /* 只清扫描层往复默认速度；切回通道时仍从 MemoryMsg 恢复上次 RFID 速度。 */
+	recognize->speed_zzstep = 0U;			   /* 清扫描层正转调速步进，下一次识别成功后再由 RFID/Page6 刷新。 */
+	recognize->speed_fzstep = 0U;			   /* 清扫描层反转调速步进，避免离线刀具头继续作为在线规格上报。 */
+	recognize->speed_oscstep = 0U;			   /* 清扫描层往复调速步进，通道运行记忆不在这里清。 */
+	recognize->speed_min = 0U;				   /* 清扫描层速度下限，上位机无当前刀具头时不显示在线限速范围。 */
+	recognize->speed_max = 0U;				   /* 清扫描层速度上限，下一次 RFID 成功后重新写入。 */
+	recognize->default_injection_flow = 0U;	   /* 清扫描层刀具默认泵流量，MemoryMsg 中上次运行泵流量继续保留。 */
 
-	memset(memory, 0, sizeof(*memory));		   /* 先清整份通道记忆，确保旧 RFID 刀具字段不会被心跳或切通道逻辑读到。 */
-	memory->hand_model = recognize->handle_type; /* 重新写回基座型号，刀具头缺失不代表手柄基座离线。 */
+	memory->hand_model = recognize->handle_type; /* 只刷新基座型号，刀具头缺失不代表手柄基座离线，也不能清上次刀具运行参数。 */
 	memory->hand_type_raw_major = recognize->hand_type_raw_major; /* 保留 EEPROM Page2 原始主类型，上位机仍能显示 PXBA/PXBB 基座。 */
 	memory->hand_type_raw_minor = recognize->hand_type_raw_minor; /* 保留 EEPROM Page2 原始子类型，避免基座类型在心跳中消失。 */
-	memory->drive_type = keep_drive_type;		   /* 恢复该通道控制方式记忆，只清刀具头参数，不改变用户控制来源。 */
+	memory->drive_type = keep_drive_type;		   /* 恢复该通道控制方式记忆，只清扫描层刀具头在线状态，不改变用户控制来源。 */
 	memory->auto_identify = keep_auto_identify;	   /* 保留原有自动识别记忆状态，掉线后继续沿用用户选中的模式。 */
-	memory->raw_tool_type = keep_raw_tool_type;	   /* 保留最近一次识别到的原始刀具型号，供掉线图标和驱动兼容判断使用。 */
+	memory->raw_tool_type = keep_raw_tool_type;	   /* 通道记忆继续保留最近一次原始刀具型号，切回通道和驱动兼容判断仍可使用。 */
 
 	if (WorkMessage.channel_work == channel)
 	{
-		// WorkMessage.hand_model = recognize->handle_type; /* 当前选中通道仍保持基座型号，界面显示为基座在线等待刀具头。 */
-		// WorkMessage.tool_type = 0U;					   /* 当前通道刀具类型清零，屏幕和上位机不再显示旧刀具类型。 */
-		// WorkMessage.raw_tool_type = 0U;				   /* 当前通道原始刀具型号也清零，避免驱动侧误把掉线刀头当成仍在线。 */
-		// WorkMessage.tool_reduction_ratio = 0U;		   /* 当前通道减速比清零，防止开口定位和速度换算读取旧比例。 */
-		// WorkMessage.current_work = 0U;				   /* 刀具头缺失时保护电流参数失效，避免旧刀具阈值残留。 */
-		// WorkMessage.speed_set_work = 0U;				   /* 当前设定速度清零，让屏幕速度区不再显示旧刀具速度。 */
-		// WorkMessage.speed_work = 0U;					   /* 当前实际目标速度同步清零，避免停止态残留旧速度。 */
-		// WorkMessage.freq_work = 0U;					   /* 当前往复频率清零，刀具头缺失时频率参数无效。 */
-		// WorkMessage.dir_work = 0U;					   /* 当前方向清零，避免方向按钮继续表现为旧刀具已选中。 */
+		/* 当前工作快照继续保留上次 RFID 刀具参数，保证不切通道时仍可按上次识别速度运行。 */
 		Pubinterface_RefreshSelectedChannelDisplay(channel); /* 立即刷新选中通道参数区，事件队列延迟时屏幕也先清旧刀具。 */
 	}
 

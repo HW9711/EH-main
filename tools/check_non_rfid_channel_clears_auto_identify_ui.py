@@ -48,8 +48,9 @@ def main() -> int:
 
     require(
         "split_tool_spec_handle=Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model);" in compact and
+        "rfid_spec_handle=Pubinterface_IsRfidToolSpecDisplayModel(WorkMessage.hand_model);" in compact and
         "rfid_display_enabled=(auto_identify&&split_tool_spec_handle);" in compact,
-        "必须用当前通道 hand_model 二次确认 RFID 显示能力，不能只看 WorkMessage.auto_identify。",
+        "必须用当前通道 hand_model 二次确认 RFID 按钮能力和规格显示能力，不能只看 WorkMessage.auto_identify。",
         errors,
     )
     require(
@@ -58,7 +59,7 @@ def main() -> int:
         errors,
     )
     require(
-        "if(split_tool_spec_handle==false)" in compact and
+        "if(rfid_spec_handle==false)" in compact and
         "SendUIDSMessage(UI_MANUALBUTTON_ID,false,manual_display_value);" in compact,
         "普通 EEPROM 手柄必须主动隐藏 0x1404/0x1405/0x1406/0x1407 整块识别区。",
         errors,
@@ -80,8 +81,10 @@ def main() -> int:
         errors,
     )
     require(
-        "if(rfid_display_enabled)" in compact and "Pubinterface_GetToolSpecForChannel(channel,display_value)" in compact,
-        "刀具规格窗口只能在当前 RFID 手柄自动识别显示允许时读取并打开。",
+        "rfid_spec_window_enabled=(rfid_display_enabled||common_socket_spec_handle);" in compact and
+        "if(rfid_spec_window_enabled)" in compact and
+        "Pubinterface_GetToolSpecForChannel(channel,display_value)" in compact,
+        "刀具规格窗口只能在当前 RFID 分体自动识别或公共接头 EPC 显示允许时读取并打开。",
         errors,
     )
     require(

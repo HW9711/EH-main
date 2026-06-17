@@ -229,19 +229,19 @@ def main() -> None:
     require("Pubinterface_ClearRfidToolMemory" in pubinterface_h and
             "Pubinterface_ClearRfidToolMemory" in pubinterface_c and
             "Pubinterface_ClearRfidToolMemory(channel);" in handlescan_c,
-            "online RFID miss clear must directly clear MemoryMsg/WorkMessage tool fields before heartbeat can resend stale tool info")
+            "online RFID miss clear must update scan/display state while preserving last runnable channel memory")
     require("recognize->tool_type = 0U;" in pubinterface_clear_rfid and
             "recognize->tool_reduction_ratio = 0U;" in pubinterface_clear_rfid and
-            "memset(memory, 0, sizeof(*memory));" in pubinterface_clear_rfid,
-            "Pubinterface_ClearRfidToolMemory must clear scan tool fields and channel memory")
+            "memset(memory, 0, sizeof(*memory));" not in pubinterface_clear_rfid,
+            "Pubinterface_ClearRfidToolMemory must clear scan tool fields but preserve channel memory")
     require("memory->hand_model = recognize->handle_type;" in pubinterface_clear_rfid and
             "memory->hand_type_raw_major = recognize->hand_type_raw_major;" in pubinterface_clear_rfid and
             "memory->hand_type_raw_minor = recognize->hand_type_raw_minor;" in pubinterface_clear_rfid,
             "Pubinterface_ClearRfidToolMemory must keep the RFID base handle online while clearing only the tool head")
-    require("WorkMessage.tool_type = 0U;" in pubinterface_clear_rfid and
-            "WorkMessage.tool_reduction_ratio = 0U;" in pubinterface_clear_rfid and
-            "WorkMessage.speed_set_work = 0U;" in pubinterface_clear_rfid,
-            "Pubinterface_ClearRfidToolMemory must clear selected WorkMessage tool parameters")
+    require("WorkMessage.tool_type = 0U;" not in pubinterface_clear_rfid and
+            "WorkMessage.tool_reduction_ratio = 0U;" not in pubinterface_clear_rfid and
+            "WorkMessage.speed_set_work = 0U;" not in pubinterface_clear_rfid,
+            "Pubinterface_ClearRfidToolMemory must preserve selected WorkMessage tool parameters until next RFID recognition")
     require("Pubinterface_RefreshSelectedChannelDisplay(channel);" in pubinterface_clear_rfid and
             "Pubinterface_RefreshOnlineHandleDisplay();" in pubinterface_clear_rfid,
             "Pubinterface_ClearRfidToolMemory must refresh selected display and keep online handle display coherent")

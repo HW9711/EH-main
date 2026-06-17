@@ -391,6 +391,8 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data)
   Uart6_SendPacket(dat, 10);
 }
 
+static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 公共接头 EPC 本次下发的原始整数显示开关，只在 lcd.c 内部临时使用。 */
+
 //============================================================================
 // 函数名称: LCD_IntegratedCutterData_Update()
 // 功能描述: 一体式(3号接口)刀具参数更新
@@ -405,19 +407,22 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data)
 //============================================================================
 void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
 {
-  uint8_t LengthTemp[3] = { 0 }, DiameterTemp[2] = { 0 }, AngleTemp[3] = { 0 };
+  uint8_t LengthTemp[3] = { 0 }, DiameterTemp[3] = { 0 }, AngleTemp[3] = { 0 };
 
   uint8_t dat[64] = {0x5A, 0xA5, 0x1E, 0x82};
 
   static uint16_t LengthLast = 0xff;
   static uint8_t DiameterLast = 0xff, AngleLast = 0xff;
+  static uint8_t ModeLast = 0xff;
+  uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 记录本次下发是否为公共接头 EPC 原始整数格式，避免影响旧小数直径路径。 */
 
-  if ((Length == LengthLast) && (Diameter == DiameterLast) && (Angle == AngleLast))
+  if ((Length == LengthLast) && (Diameter == DiameterLast) && (Angle == AngleLast) && (raw_integer_mode == ModeLast))
     return ;
 
   LengthLast = Length;
   DiameterLast = Diameter;
   AngleLast = Angle;
+  ModeLast = raw_integer_mode;
 
   dat[4] = (Addr >> 8) & 0x00ff ;
   dat[5] = Addr & 0x00ff ;
@@ -426,6 +431,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   LengthTemp[1] = Length / 10 % 10;
   LengthTemp[0] = Length % 10;
 
+  DiameterTemp[2] = Diameter / 100;
   DiameterTemp[1] = Diameter / 10 % 10;
   DiameterTemp[0] = Diameter % 10;
 
@@ -461,9 +467,33 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  dat[12] = 0xA6;
 	  dat[13] = 0xD5; //φ
 
-	  dat[14] = DiameterTemp[1] + 0x30; //直径十位
-	  dat[15] = 0x2E;  //.
-	  dat[16] = DiameterTemp[0] + 0x30; //直径个位
+	  if(raw_integer_mode != 0U)
+	  {
+		  if(DiameterTemp[2] > 0U)
+		  {
+			  dat[14] = DiameterTemp[2] + 0x30; //公共接头 EPC 直径百位不为 0 时占满三位整数显示。
+			  dat[15] = DiameterTemp[1] + 0x30; //公共接头 EPC 直径十位跟随百位显示，保留原始整数。
+			  dat[16] = DiameterTemp[0] + 0x30; //公共接头 EPC 直径个位跟随百位显示，支持 100~255 范围。
+		  }
+		  else if(DiameterTemp[1] > 0U)
+		  {
+			  dat[14] = DiameterTemp[1] + 0x30; //公共接头 EPC 直径十位，0x10 解析后的 16 显示为字符 '1'。
+			  dat[15] = DiameterTemp[0] + 0x30; //公共接头 EPC 直径个位，0x10 解析后的 16 显示为字符 '6'。
+			  dat[16] = 0x20; //公共接头 EPC 两位直径不显示小数点，第三个字符用空格擦掉旧小数位。
+		  }
+		  else
+		  {
+			  dat[14] = DiameterTemp[0] + 0x30; //公共接头 EPC 一位直径直接显示原始整数。
+			  dat[15] = 0x20; //公共接头 EPC 一位直径后清空旧小数点位置。
+			  dat[16] = 0x20; //公共接头 EPC 一位直径后清空旧小数位位置。
+		  }
+	  }
+	  else
+	  {
+		  dat[14] = DiameterTemp[1] + 0x30; //直径十位
+		  dat[15] = 0x2E;  //.
+		  dat[16] = DiameterTemp[0] + 0x30; //直径个位
+	  }
 	  dat[17] = 0xA1;
 	  dat[18] = 0xA2;  //、
 	  dat[19] = 0x20;  //空格
@@ -508,6 +538,18 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 
   Uart6_SendPacket(dat, 34);
 
+}
+
+/*
+ * 函数功能：按公共接头 EPC 原始整数格式刷新主界面刀具规格。
+ * 输入参数：Addr 为 DWIN 规格文本地址；Length 为长度原始整数；Diameter 为直径原始整数；Angle 为角度原始整数。
+ * 返回参数：无。
+ */
+void LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
+{
+  s_lcd_integrated_cutter_raw_integer_mode = 1U; /* 本次下发启用公共接头 EPC 原始直径格式，直径 16 显示为 Φ16。 */
+  LCD_IntegratedCutterData_Update(Addr, Length, Diameter, Angle); /* 复用同一条 DWIN 文本组包路径，只切换直径字符格式。 */
+  s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 下发完成立即恢复旧格式，避免 PXBA/PXBB 下一次刷新误用整数直径。 */
 }
 
 //============================================================================

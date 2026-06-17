@@ -758,9 +758,18 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     }
     //message->run_direction = direction; /* 默认方向来自 RFID 标签。 */
 
-    spec_values[0] = (uint32_t)((uint16_t)length * 2U); /* 屏幕规格缓存按 0.1 长度/5 保存，1 字节长度按实际值换算为 x10。 */
-    spec_values[1] = (uint32_t)((uint16_t)diameter * 10U); /* 直径按 x10 保存，兼容原有规格显示入口。 */
-    spec_values[2] = (uint32_t)((uint16_t)angle * 10U); /* 角度按 x10 保存，兼容原有规格显示入口。 */
+    if (rfid_result->source == RFID_READ_SOURCE_EPC)
+    {
+        spec_values[0] = (uint32_t)length; /* 公共接头 EPC 规格按标签原始字节保存，0x60 后续直接显示为 96mm。 */
+        spec_values[1] = (uint32_t)diameter; /* 公共接头 EPC 直径不再乘 10，确保 0x10 在屏幕规格区显示为整数 16。 */
+        spec_values[2] = (uint32_t)angle; /* 公共接头 EPC 角度不再乘 10，确保 0x10 在屏幕规格区显示为整数 16°。 */
+    }
+    else
+    {
+        spec_values[0] = (uint32_t)((uint16_t)length * 2U); /* PXBA/PXBB USER 继续沿用旧缓存单位，屏幕显示前再恢复到原有长度格式。 */
+        spec_values[1] = (uint32_t)((uint16_t)diameter * 10U); /* PXBA/PXBB USER 继续按 x10 保存直径，保持原有 Φ2.0 类显示不变。 */
+        spec_values[2] = (uint32_t)((uint16_t)angle * 10U); /* PXBA/PXBB USER 继续按 x10 保存角度，避免旧分体式显示逻辑被公共接头改动影响。 */
+    }
     spec_values[3] = (uint32_t)business_tool_type; /* 保存业务刀具类型，屏幕掉线/能力判断不再直接使用 RFID 原始代号。 */
 
     return true; /* RFID 刀具头信息已经写入识别缓存。 */

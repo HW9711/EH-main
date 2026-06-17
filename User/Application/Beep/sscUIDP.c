@@ -607,14 +607,25 @@ void UITOOLDP(bool enable_flag,bool tool_type)
 	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//刀具区禁用时刨刀回到暗态
 	// }
 }
-//刀具规格 长度，直径、角度
-void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,uint8_t tool_angle )
+/*
+ * 函数功能：刷新主界面刀具规格文本。
+ * 输入参数：enable_flag 表示规格区是否显示；tool_length/tool_Diameter/tool_angle 为屏幕规格值；raw_display_flag 为公共接头 EPC 原始整数显示标志。
+ * 返回参数：无。
+ */
+void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
 {
 	if(enable_flag)
 	{
 		LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,34);
-			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, 30, 20, 10); 
-		//LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //刀具参数
+		//LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, 30, 20, 10); 
+		if(raw_display_flag != 0U)
+		{
+			LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //公共接头 EPC 按原始整数显示，避免 0x10 被格式化成 1.6。
+		}
+		else
+		{
+			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //PXBA/PXBB 保持原有 x10 小数直径格式。
+		}
 	}
 	else
 	{
@@ -997,7 +1008,7 @@ void UIDISPLAYBehavior()
 					UITOOLDP(msg.enable_flag,msg.Value[0]);
 					break;
 					case UI_TOOLSPEC_ID:
-					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3]);
+					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3],msg.Value[4]);
 					break;
 					case UI_ORAL_ID:
 					UIORALDP(msg.enable_flag);
@@ -1033,7 +1044,7 @@ void UIDISPLAYBehavior()
 					UIHANDLEDP(0,0,1,0);//上电未插手柄时先画出 A 通道未连接状态，避免空白区域
 					UIHANDLEDP(0,0,2,0);//上电未插手柄时先画出 B 通道未连接状态，后续插拔事件再覆盖
 					UITOOLDP(0,0);
-					UITOOLSPECDP(0,30,20,10);
+					UITOOLSPECDP(0,30,20,10,0);
 					UIORALDP(0);
 					UIFREQDP(0,0,0);
 					UISPEEDDP(0,0,0,0);
