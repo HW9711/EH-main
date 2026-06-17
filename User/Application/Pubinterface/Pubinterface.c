@@ -2335,10 +2335,10 @@ void ControlTypeActive(uint8_t key_value)
  */
 void SpeedActive(uint8_t key_value)
 {
-	uint16_t speed_value = WorkMessage.speed_set_work; /* 以当前设定速度为基准，避免运行反馈速度影响用户设置。 */
-	uint16_t speed_step = 0U;                          /* 本次实际步进，先取通道识别步进，新屏快档再按两倍换算。 */
-	uint16_t speed_max = 0U;                           /* 当前通道、当前方向允许的最大设定速度。 */
-	uint16_t speed_min = 0U;                           /* 当前通道、当前方向允许的最小设定速度。 */
+	uint32_t speed_value = WorkMessage.speed_set_work; /* 以当前设定速度为基准，Page4 24位最大速度可能超过16位，调速过程必须保留32位。 */
+	uint32_t speed_step = 0U;                          /* 本次实际步进，先取通道识别步进，新屏快档再按两倍换算。 */
+	uint32_t speed_max = 0U;                           /* 当前通道、当前方向允许的最大设定速度，支持 Page4 24位上限。 */
+	uint32_t speed_min = 0U;                           /* 当前通道、当前方向允许的最小设定速度。 */
 	bool add_key = false;                              /* true 表示本次按键为增加速度。 */
 	bool sub_key = false;                              /* true 表示本次按键为减少速度。 */
 	uint8_t display_value[10] = {0U};                  /* 速度键生效后立即刷新屏幕速度数值，避免用户按键后无反馈。 */
@@ -2428,14 +2428,14 @@ void SpeedActive(uint8_t key_value)
 		add_key = true; /* 新屏慢加直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Add_Large:
-		speed_step = (speed_step > (UINT16_MAX / SCREEN_SPEED_STEP_DOUBLE_FACTOR)) ? UINT16_MAX : (uint16_t)(speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR); /* 新屏快加为慢加步进两倍，并防止 16 位溢出。 */
+		speed_step = speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR; /* 新屏快加为慢加步进两倍，使用32位避免24位速度上限被16位逻辑误截断。 */
 		add_key = true; /* 本次按键方向为增加。 */
 		break;
 	case SCREENKey_SPEED_Sub_Small:
 		sub_key = true; /* 新屏慢减直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Sub_Large:
-		speed_step = (speed_step > (UINT16_MAX / SCREEN_SPEED_STEP_DOUBLE_FACTOR)) ? UINT16_MAX : (uint16_t)(speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR); /* 新屏快减为慢减步进两倍，并防止 16 位溢出。 */
+		speed_step = speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR; /* 新屏快减为慢减步进两倍，使用32位保持与24位速度边界一致。 */
 		sub_key = true; /* 本次按键方向为减少。 */
 		break;
 	case HANDLEKey_greaI:
@@ -2455,7 +2455,7 @@ void SpeedActive(uint8_t key_value)
 		}
 		else
 		{
-			speed_value = (uint16_t)(speed_value + speed_step); /* 未越界时按本次步进增加。 */
+			speed_value = speed_value + speed_step; /* 未越界时按本次步进增加，保持32位避免超过16位的目标速度回绕。 */
 		}
 	}
 	else if (sub_key == true)
@@ -2467,7 +2467,7 @@ void SpeedActive(uint8_t key_value)
 		}
 		else
 		{
-			speed_value = (uint16_t)(speed_value - speed_step); /* 未越界时按本次步进减少。 */
+			speed_value = speed_value - speed_step; /* 未越界时按本次步进减少，保持 32 位与 WorkMessage 速度单位一致。 */
 		}
 	}
 	else
@@ -2494,7 +2494,7 @@ void SpeedActive(uint8_t key_value)
 		else if (WorkMessage.dir_work == OSCDIR)
 			MemoryMsgB.osc_speed = speed_value; /* B 通道往复速度记忆同步更新。 */
 	}
-	display_value[0] = (uint8_t)(speed_value >> 16); /* 速度高字节按 UI_SPEED_ID 协议传输，确保 16 位速度完整显示。 */
+	display_value[0] = (uint8_t)(speed_value >> 16); /* 速度高字节按 UI_SPEED_ID 协议传输，Page4 24位最大速度会用到该高字节。 */
 	display_value[1] = (uint8_t)((speed_value>>8) & 0xFFU); /* 速度低字节按 UI_SPEED_ID 协议传输，和切通道刷新保持一致。 */
 	display_value[2] = (uint8_t)(speed_value & 0xFFU);
 	display_value[3] = 1U; /* 1 表示只刷新速度数值，不重绘整个速度框，按键响应更快。 */

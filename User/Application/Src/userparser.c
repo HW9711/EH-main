@@ -92,6 +92,8 @@ void Userparser_Init(void)
   Delay_ms(500);
 	Iwdg_Reset();
 	Delay_ms(500);
+  	Delay_ms(500);
+    	Delay_ms(500);
   Userparser_PubinterfaceInit();
 	SscRadioFreq_Init();  //150ms射频初始化...串口3
   Iwdg_Reset();

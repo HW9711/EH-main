@@ -329,6 +329,9 @@ extern "C" {
 #define R200_K8_5ON()    (R200_K8_Port->BSRR = ((uint32_t)R200_K8_Pin << 16))
 #define R200_K8_2ON()    (R200_K8_Port->BSRR = R200_K8_Pin)
 
+#define R200_K8_SELECT_A() (R200_K8_Port->BSRR = R200_K8_Pin) /* R200-K8 高电平选择 A 通道，供 RFID 模拟开关按业务通道切换。 */
+#define R200_K8_SELECT_B() (R200_K8_Port->BSRR = ((uint32_t)R200_K8_Pin << 16U)) /* R200-K8 低电平选择 B 通道，供 RFID 模拟开关按业务通道切换。 */
+
 /*----------------- IIC AT24C02 -----------------*/
 #define IIC_SCL_Pin       BOARD_IIC_SCL_PIN
 #define IIC_SDA_Pin       BOARD_IIC_SDA_PIN

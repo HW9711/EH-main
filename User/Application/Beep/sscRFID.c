@@ -2,6 +2,7 @@
 
 #include "FreeRTOS.h"
 #include "Pubinterface.h"
+#include "board.h"
 #include "kernel_scheduler.h"
 #include "queue.h"
 #include "sscBEEP.h"
@@ -48,7 +49,14 @@ static uint8_t NO_MASK3_READ_USER[16] = {0xBB, 0x00, 0x39, 0x00, 0x09, 0x00, 0x0
                                          0x00, 0x03, 0x00, 0x00, 0x00, 0x08, 0x4d, 0x7E}; /* 无掩码读取 USER 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
 static unsigned char pa_gain0[] = {0XBB, 0X00, 0XB6, 0X00, 0X02, 0X00, 0X00, 0XB8, 0X7E}; /* 发射功率设为 0。 */
-static unsigned char region_set_CHAIN[] = {0XBB, 0x00, 0x07, 0x00, 0x01, 0x01, 0x09, 0x7E}; /* 中国频段 920.125-924.875M。 */
+static unsigned char  pa_gain15[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X05, 0XDC, 0Xea, 0X7E};//发射功率
+static unsigned char  pa_gain10[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X03, 0Xe8, 0Xa3, 0X7E};//发射功率
+static unsigned char  pa_gain13[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X05, 0X14, 0XE5, 0X7E}; //发射功率
+static unsigned char region_set_europe[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x03 ,0x0B ,0x7E};//欧洲频段865.1-867.9M
+static unsigned char region_set_us[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x02 ,0x0A ,0x7E};//美国频段902.25-927.75M
+static unsigned char region_set_CHAIN[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x01 ,0x09 ,0x7E};//中国1-920.125-924.875M
+static unsigned char region_set_CHAINS[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x04 ,0x0C ,0x7E};//中国2-840.125-844.875M
+static unsigned char region_set_K[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x06 ,0x0E ,0x7E};//韩国-917.1-923.3M
 
 static kernel_task_t AUTOMODEGETDATATaskHandle;     /* RFID 轮询任务句柄，任务实际按请求工作。 */
 static kernel_task_t CUTTERSCANTaskHandle;          /* 预留旧句柄，不启动，避免破坏工程外部引用假设。 */
@@ -99,6 +107,65 @@ static bool Rfid_ChannelToIndex(uint8_t channel, uint8_t *index)
 static bool Rfid_IsSourceValid(RfidReadSource_t source)
 {
     return ((source == RFID_READ_SOURCE_EPC) || (source == RFID_READ_SOURCE_USER)); /* 只允许两种协议来源参与识别。 */
+}
+
+/*
+ * 函数功能：根据业务通道切换 R200-K8 模拟开关。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+static void Rfid_SelectHardwareChannel(uint8_t channel)
+{
+    if (channel == CHANNEL_A)
+    {
+        R200_K8_SELECT_A(); /* A 通道 RFID 识别前把模拟开关切到高电平，确保 UART3 读到 A 手柄射频模块。 */
+        return; /* A 通道已经完成硬件切换，本次不再访问 B 通道。 */
+    }
+
+    if (channel == CHANNEL_B)
+    {
+        R200_K8_SELECT_B(); /* B 通道 RFID 识别前把模拟开关切到低电平，确保 UART3 读到 B 手柄射频模块。 */
+    }
+}
+
+/*
+ * 函数功能：判断本次 RFID 请求是否允许按当前通道状态执行。
+ * 输入参数：channel 为请求读取的业务通道。
+ * 返回参数：true 表示允许切换模拟开关并读取；false 表示当前状态禁止读取。
+ */
+static bool Rfid_IsRequestAllowedForCurrentSelection(uint8_t channel)
+{
+    bool requested_channel_online = false; /* 记录请求通道是否已经完成插入事件，用于区分后插入手柄上线前的 RFID 预读。 */
+
+    if (WorkMessage.runflag_work == true)
+    {
+        return false; /* 电机运行中不允许切换模拟开关或刷新 RFID 参数，避免运行状态被识别流程打断。 */
+    }
+
+    if (channel == CHANNEL_A)
+    {
+        requested_channel_online = WorkMessage.Channel_Aonline; /* A 通道在线标志决定它是已在线监测还是刚插入预读。 */
+    }
+    else if (channel == CHANNEL_B)
+    {
+        requested_channel_online = WorkMessage.Channel_Bonline; /* B 通道在线标志决定它是已在线监测还是刚插入预读。 */
+    }
+    else
+    {
+        return false; /* 非 A/B 通道没有对应模拟开关位置，不能发起 RFID 读取。 */
+    }
+
+    if (requested_channel_online == false)
+    {
+        return true; /* 后插入 RFID 手柄在插入事件正式选中前需要先读刀具信息，因此允许上线前预读。 */
+    }
+
+    if ((WorkMessage.Channel_Aonline == true) && (WorkMessage.Channel_Bonline == true))
+    {
+        return (WorkMessage.channel_work == channel); /* 双手柄都在线后只允许当前选中通道继续读 RFID，避免非选中通道残留刷新屏幕。 */
+    }
+
+    return true; /* 单手柄在线时允许该通道继续在线监测 RFID，保持刀具头拔插检测能力。 */
 }
 
 /*
@@ -350,6 +417,17 @@ static void Rfid_ReceiveRequestMessage(void)
         return; /* 清刀具前排队的旧代次请求直接丢弃，避免旧读命令重新复活刀具信息。 */
     }
 
+    if (Rfid_IsRequestAllowedForCurrentSelection(msg.channel) == false)
+    {
+        s_request_active = false; /* 当前运行状态或选中通道不允许读取时，取消本次出队请求。 */
+        s_request_channel = CHANNEL_NONE; /* 清掉请求通道，避免后续 UART3 回包被误认为属于旧通道。 */
+        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下周期按旧协议发命令。 */
+        s_request_attempts_left = 0U; /* 禁止请求继续消耗 RFID 发送次数。 */
+        s_request_fast_mode = false; /* 清掉快速识别状态，避免影响下一次合法请求。 */
+        return; /* 非法状态下不切换 R200-K8，也不启动 RFID 读取。 */
+    }
+
+    Rfid_SelectHardwareChannel(msg.channel); /* 出队后按请求通道切 R200-K8，保证后续读命令进入正确手柄通道。 */
     s_request_channel = msg.channel; /* 保存请求通道，解析成功后写回同通道缓存。 */
     s_request_source = msg.source; /* 保存本次应读取 EPC 还是 USER。 */
     s_request_attempts_left = msg.fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* 快速/普通识别使用不同尝试次数。 */
@@ -431,6 +509,17 @@ static void SplitType_AutoModeGetData_Task(void)
         return; /* 运行态禁止继续访问 RFID 模块。 */
     }
 
+    if (Rfid_IsRequestAllowedForCurrentSelection(s_request_channel) == false)
+    {
+        s_request_active = false; /* 通道选择变化后当前请求失效，停止识别以免非选中通道刷新刀具信息。 */
+        s_request_channel = CHANNEL_NONE; /* 清掉活动通道，避免晚到回包写入错误 A/B 缓存。 */
+        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下一周期误按旧来源解析。 */
+        s_request_attempts_left = 0U; /* 禁止继续发送 RFID 命令，等待扫描层按当前通道重新发起请求。 */
+        s_request_fast_mode = false; /* 清掉快速识别标志，避免后续合法请求继承旧状态。 */
+        Uart3_ClearRecvData(); /* 丢弃可能属于旧模拟开关通道的回包，避免屏幕出现残留刀具信息。 */
+        return; /* 当前选中通道不允许读取时直接退出。 */
+    }
+
     rlen = Uart3_DMARecvDataPeek(dat); /* 电机未运行时才取 DMA 数据，避免运行态处理新 RFID 结果。 */
     if (rlen >= RFID_FRAME_MIN_SIZE)
     {
@@ -455,6 +544,7 @@ static void SplitType_AutoModeGetData_Task(void)
         return; /* 本次请求超时结束。 */
     }
 
+    Rfid_SelectHardwareChannel(s_request_channel); /* 发读命令前再次确认 R200-K8 指向目标通道，避免排队期间通道被切走。 */
     Rfid_SendReadCommand(s_request_source); /* 未读到有效帧时发送下一次读命令。 */
     //s_request_attempts_left--; /* 记录已消耗一次命令发送机会。 */
 }
@@ -477,7 +567,7 @@ static void AUTOMODEGETDATATaskFunc(uint32_t event)
  */
 void SscRadioFreq_Init(void)
 {
-    Uart3_SendPacket(pa_gain0, (uint16_t)sizeof(pa_gain0)); /* 设置发射功率，保持原工程默认值。 */
+    Uart3_SendPacket(pa_gain13, (uint16_t)sizeof(pa_gain13)); /* 设置发射功率，保持原工程默认值。 */
     Delay_ms(50); /* 等待模块处理功率设置命令。 */
 
     Uart3_SendPacket(region_set_CHAIN, (uint16_t)sizeof(region_set_CHAIN)); /* 设置中国频段。 */
@@ -544,15 +634,12 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
 
     if (WorkMessage.runflag_work == true)
     {
-        if(channel == CHANNEL_A)
-        {
-            SendKeyRFIDMessageAdown();
-        }
-        else if(channel == CHANNEL_B)
-        {
-            SendKeyRFIDMessageBdown();
-        }
-        return false; /* 电机运行中不发起 RFID 请求，防止运行参数被新刀具头改变。 */
+        return false; /* 电机运行中禁止新 RFID 请求入队，避免运行参数被新刀具信息覆盖。 */
+    }
+
+    if (Rfid_IsRequestAllowedForCurrentSelection(channel) == false)
+    {
+        return false; /* 当前运行状态或双手柄选中状态不允许读取，避免非目标通道刷新 RFID 刀具参数。 */
     }
 
     msg.channel = channel; /* 保存请求通道。 */

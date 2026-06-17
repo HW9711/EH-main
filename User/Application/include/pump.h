@@ -11,7 +11,7 @@
  * 这样脚踏、上位机、屏幕、手柄按键仍然操作逻辑 A/B，只有最后一层硬件出口做位置修正。
  */
 #ifndef PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE
-#define PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE 1U
+#define PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE 0U
 #endif
 
 /*

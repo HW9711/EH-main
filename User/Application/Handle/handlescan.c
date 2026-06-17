@@ -104,6 +104,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET 2U
 #define HANDLESCAN_INITIAL_MIN_SPEED_OFFSET   4U
 #define HANDLESCAN_INITIAL_MAX_SPEED_OFFSET   6U
+#define HANDLESCAN_INITIAL_MAX_SPEED_HIGH_OFFSET 19U /* Page4[19] 保存最大速度高8位，用于和[6-7]组合成24位速度上限。 */
 #define HANDLESCAN_INITIAL_DIRECTION_OFFSET   8U
 #define HANDLESCAN_INITIAL_FREQ_OFFSET        9U
 #define HANDLESCAN_INITIAL_FOR_ALARM_OFFSET   10U
@@ -209,7 +210,7 @@ typedef struct
 
 /*
  * 当前已支持的手柄类型映射表。
- * 手柄信息来自 EEPROM 第 2 页，类型码固定以 `0x6B` 开头。
+ * 手柄信息来自 EEPROM 第 2 页，0x6B 为普通基座码，0x7C/01..06 为一体式手柄型号码。
  */
 static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
 {
@@ -219,6 +220,12 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
     {0x6B, 0x04, EMBB_ONLINES,  "EMBB"},
     {0x6B, 0x05, PXBA_ONLINES,  "PXBA"},
     {0x6B, 0x06, PXBB_ONLINES,  "PXBB"},
+    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},
+    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},
+    {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},
+    {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},
+    {0x7C, 0x05, JMB_ONLINES,      "JMB"},
+    {0x7C, 0x06, MX_YIM16_ONLINES, "MXYTM16"},
     {0x6B, 0x07, LGZ_I_ONLINES, "LGZ_I"},                 /* 颅骨钻一型预留，先按 Page2 顺序占位。 */
     {0x6B, 0x08, LGZ_II_ONLINES, "LGZ_II"},               /* 颅骨钻二型预留，后续如协议变更只改本表。 */
     {0x6B, 0x09, KSZ_I_ONLINES, "KSZ_I"},                 /* 克氏针一型预留，识别后供 UI 显示。 */
@@ -237,12 +244,6 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
  */
 static const HandlescanHandleTypeConfig s_tool_type_config_table[] =
 {
-    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},
-    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},
-    {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},
-    {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},
-    {0x7C, 0x05, JMB_ONLINES,      "JMB"},
-    {0x7C, 0x06, MX_YIM16_ONLINES, "MXYTM16"},
     {0x7C, 0x07, LGZ_I_ONLINES, "LGZ_I_TOOL"},                 /* 刀具类型预留，先按 Page3 顺序占位。 */
     {0x7C, 0x08, LGZ_II_ONLINES, "LGZ_II_TOOL"},               /* 颅骨钻二型刀具预留，后续协议变更只改本表。 */
     {0x7C, 0x09, KSZ_I_ONLINES, "KSZ_I_TOOL"},                 /* 克氏针一型刀具预留，识别后供 UI 和上位机读取。 */
@@ -492,6 +493,21 @@ static uint8_t Handlescan_MapRawToolTypeToBusinessType(uint8_t raw_tool_type)
     }
 
     return raw_tool_type; /* 其它 EEPROM 刀具暂时保持原值，避免扩大本次规则变更范围。 */
+}
+
+/*
+ * 函数功能：判断 EEPROM 第二页识别出的手柄型号是否自带刀具能力。
+ * 输入参数：mapped_model 为手柄表映射后的系统内部型号。
+ * 返回参数：true 表示该型号本身就是手柄型号和刀具能力来源；false 表示仍需按 Page3 或 RFID 读取刀具信息。
+ */
+static bool Handlescan_IsSelfTypedHandleModel(uint8_t mapped_model)
+{
+    return ((mapped_model == MX_YIM_ONLINES) ||     /* MXYTM 是一体式手柄型号，不再作为 Page3 刀具型号解析。 */
+            (mapped_model == MX_YIP_ONLINES) ||     /* MXYTP 是一体式手柄型号，业务能力沿用该型号自身。 */
+            (mapped_model == PX_YIM_ONLINES) ||     /* PXYTM 是一体式手柄型号，后续由映射函数转成磨头能力。 */
+            (mapped_model == PX_YIP_ONLINES) ||     /* PXYTP 是一体式手柄型号，后续由映射函数转成刨刀能力。 */
+            (mapped_model == JMB_ONLINES) ||        /* JMB 是手柄型号，不能再挂在刀具 Page3 表中。 */
+            (mapped_model == MX_YIM16_ONLINES));    /* MXYTM16 是手柄型号，按手柄编号顺序接在 MXYTM 后。 */
 }
 
 /*
@@ -1268,6 +1284,18 @@ static uint16_t Handlescan_ReadUint16LE(const uint8_t *buffer, uint32_t offset)
 }
 
 /*
+ * 函数功能：按 Page4 扩展格式读取 24 位最大速度。
+ * 输入参数：buffer 指向已通过页校验的 Page4 缓存。
+ * 返回参数：最大速度，单位沿用 EEPROM x10。
+ */
+static uint32_t Handlescan_ReadPage4MaxSpeed(const uint8_t *buffer)
+{
+    uint32_t max_speed = Handlescan_ReadUint16LE(buffer, HANDLESCAN_INITIAL_MAX_SPEED_OFFSET); /* 读取 Page4[6-7] 的低16位最大速度，兼容旧 EEPROM。 */
+    max_speed |= ((uint32_t)buffer[HANDLESCAN_INITIAL_MAX_SPEED_HIGH_OFFSET] << 16); /* Page4[19] 是新增高8位，旧数据为0时仍保持原16位解析。 */
+    return max_speed; /* 返回组合后的24位速度上限，供通道记忆、屏幕调速和默认速度钳位共用。 */
+}
+
+/*
  * 函数功能：把 EEPROM Page4 默认注水流量从 0.1 单位转换为泵业务流量并限制在 0~70。
  * 输入参数：flow_x10 Page4 中按 0.1 单位保存的默认注水流量。
  * 返回参数：现有 pumpMessage.speed_work 使用的整数流量值。
@@ -1289,7 +1317,7 @@ static uint16_t Handlescan_BuildDefaultInjectionFlow(uint16_t flow_x10)
  * 输入参数：default_speed 默认速度，min_speed 最小速度，max_speed 最大速度，三者均保持 EEPROM x10 原始单位。
  * 返回参数：限制后的默认速度。
  */
-static uint16_t Handlescan_ClampDefaultSpeed(uint16_t default_speed, uint16_t min_speed, uint16_t max_speed)
+static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t min_speed, uint32_t max_speed)
 {
     if (max_speed < min_speed)
     {
@@ -1327,9 +1355,9 @@ static uint8_t Handlescan_ParseInitialDirection(uint8_t raw_direction)
  */
 static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *message, const uint8_t *initial_info_buf)
 {
-    uint16_t default_speed;                                  /* 保存 Page4 默认速度，单位沿用 EEPROM x10，驱动下发时再 /10。 */
-    uint16_t min_speed;                                      /* 保存 Page4 最小速度，单位沿用 EEPROM x10。 */
-    uint16_t max_speed;                                      /* 保存 Page4 最大速度，单位沿用 EEPROM x10。 */
+    uint32_t default_speed;                                  /* 保存 Page4 默认速度，单位沿用 EEPROM x10，驱动下发时再 /10。 */
+    uint32_t min_speed;                                      /* 保存 Page4 最小速度，单位沿用 EEPROM x10。 */
+    uint32_t max_speed;                                      /* 保存 Page4 最大速度，单位沿用 EEPROM x10。 */
 
     if ((message == NULL) || (initial_info_buf == NULL))
     {
@@ -1338,7 +1366,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 
     default_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET); /* 读取 Page4 默认速度，小端 x10。 */
     min_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_MIN_SPEED_OFFSET); /* 读取 Page4 最小速度，小端 x10。 */
-    max_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_MAX_SPEED_OFFSET); /* 读取 Page4 最大速度，小端 x10。 */
+    max_speed = Handlescan_ReadPage4MaxSpeed(initial_info_buf); /* 读取 Page4 24位最大速度，支持 70000 这类超过16位的上限。 */
     if (max_speed < min_speed)
     {
         max_speed = min_speed;                               /* 上下限异常时同步修正保存值，避免后续 SpeedActive 读到反向边界。 */
@@ -1346,17 +1374,17 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     default_speed = Handlescan_ClampDefaultSpeed(default_speed, min_speed, max_speed); /* 默认速度按同页上下限钳位，保证上线速度合法。 */
 
     message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* 解析默认注水流量并转换到泵业务单位。 */
-    message->speed_min = 10000;                         /* 保存通用最小速度，供后续 UI/外控边界逻辑复用。 */
+    message->speed_min = min_speed;                         /* 保存 Page4 最小速度，屏幕和外控调速边界必须跟随 EEPROM 配置。 */
     message->speed_max = max_speed;                         /* 保存通用最大速度，供后续 UI/外控边界逻辑复用。 */
-    message->speed_zzmin = 10000;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
+    message->speed_zzmin = min_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
     message->speed_zzmax = max_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最大速度。 */
-    message->speed_fzmin = 10000;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最小速度。 */
+    message->speed_fzmin = min_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最小速度。 */
     message->speed_fzmax = max_speed;                       /* Page4 当前只有一组速度上下限，反转方向使用同一最大速度。 */
-    message->speed_oscmin = 10000;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最小速度。 */
+    message->speed_oscmin = min_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最小速度。 */
     message->speed_oscmax = max_speed;                      /* Page4 当前只有一组速度上下限，往复方向使用同一最大速度。 */
-    message->speed_zzdefault = 60000;                /* Page4 默认速度作为正转上线初始速度。 */
-    message->speed_fzdefault = 60000;                /* Page4 默认速度作为反转上线初始速度。 */
-    message->speed_oscdefault = 60000;               /* Page4 默认速度作为往复上线初始速度。 */
+    message->speed_zzdefault = default_speed;                /* Page4 默认速度作为正转上线初始速度，避免 EEPROM 写 4000 却被固定显示 60000。 */
+    message->speed_fzdefault = default_speed;                /* 反转上线初始速度同样来自 Page4，保证 A/B 通道切换后仍保持手柄自身配置。 */
+    message->speed_oscdefault = default_speed;               /* 往复上线初始速度同样来自 Page4，后续往复调速只在该基准上变化。 */
 
     
 
@@ -1865,6 +1893,26 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
     message->draw = Handlescan_TenthToUint8(angle_tenth);
 }
 
+/*
+ * 函数功能：把自带刀具能力的一体式手柄型号写入通道识别缓存。
+ * 输入参数：message 目标通道识别缓存；mapped_model 为手柄表映射后的型号；raw_type_major/raw_type_minor 为 Page2 原始手柄类型字节。
+ * 返回参数：无。
+ */
+static void Handlescan_UpdateSelfTypedHandleRecognizeMessage(ChannelrecognizeMessage_t *message,
+                                                             uint8_t mapped_model,
+                                                             uint8_t raw_type_major,
+                                                             uint8_t raw_type_minor)
+{
+    Handlescan_UpdateRecognizeMessage(message,
+                                      mapped_model,
+                                      raw_type_major,
+                                      raw_type_minor,
+                                      mapped_model,
+                                      0U,
+                                      0U,
+                                      0U); /* 这类 0x7C 型号自身就是手柄和刀具能力来源，规格字段没有 Page3 来源时保持 0。 */
+}
+
 static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 {
     uint8_t report_alarm = alarm_value;                      /* 默认按当前通道报警码上报。 */
@@ -2288,6 +2336,43 @@ void HandlescanA_Fun_SSC(void)
             return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
         }
 
+        if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
+        {
+            AT24CS32_ClearLastDebugInfo();                       /* 自带刀具能力手柄不读 Page3，但仍要读取 Page4 运行初始值。 */
+            read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_initial_info_buf); /* A 通道读取 Page4 默认速度、频率、方向和泵流量。 */
+            if (read_status == 0U)
+            {
+                Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 A 通道 Page4 读取或页校验失败报文。 */
+                Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+                Handlescan_EnterRetryOrFail(CHANNEL_A,
+                                             &s_a_stage,
+                                             &s_a_verify_retry_count,
+                                             &s_a_verify_retry_wait_ticks,
+                                             &s_a_last_alarm,
+                                             0U);                /* Page4 瞬时读取失败只重试，不立刻锁死一体式手柄。 */
+                return;                                         /* 本轮停止后续处理，等待下一次重新读取 Page4。 */
+            }
+
+            Handlescan_UpdateSelfTypedHandleRecognizeMessage(&ChannelrecognizeMessageA,
+                                                             mapped_model,
+                                                             raw_type_major,
+                                                             raw_type_minor); /* 0x7C 一体式型号直接写入 A 通道手柄和刀具能力字段。 */
+            Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
+                                                s_a_initial_info_buf); /* 同步 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+            Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* A 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
+            Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 这类手柄没有独立 Page3 规格，本次上线清掉旧刀具规格显示缓存。 */
+            MemoryMsgA.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
+            SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道按手柄型号上线并装载到通道记忆。 */
+            Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* 自恢复成功时清掉 A 通道历史手柄校验报警。 */
+            Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 上线成功后清空 A 通道失败重试状态。 */
+            s_a_last_alarm = 0U;                                /* 上线成功后清掉 A 通道最近一次报警缓存。 */
+            s_a_stage = HANDLESCAN_STAGE_ONLINE;                /* A 通道切到在线保持态，后续只做拔出和 RFID 在线监测判断。 */
+            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文，值为手柄型号。 */
+            Handlescan_DebugTraceHandleName(1U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 A 通道 0x7C 手柄名称报文。 */
+            Handlescan_BeepOnceIfNoAlarm();                     /* A 通道认证并上线成功后，给使用者一个确认单响。 */
+            return;                                             /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
+        }
+
         AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到当前这一次访问。 */
         read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 A 通道 EEPROM 读出第 3 页刀具信息区。 */
         if (read_status == 0U)
@@ -2705,6 +2790,43 @@ void HandlescanB_Fun_SSC(void)
                   SendKeyBeepMessage(1);
             }
             return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
+        }
+
+        if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
+        {
+            AT24CS32_ClearLastDebugInfo();                       /* 自带刀具能力手柄不读 Page3，但仍要读取 Page4 运行初始值。 */
+            read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_initial_info_buf); /* B 通道读取 Page4 默认速度、频率、方向和泵流量。 */
+            if (read_status == 0U)
+            {
+                Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道 Page4 读取或页校验失败报文。 */
+                Handlescan_DebugTraceI2cDetail(2U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+                Handlescan_EnterRetryOrFail(CHANNEL_B,
+                                             &s_b_stage,
+                                             &s_b_verify_retry_count,
+                                             &s_b_verify_retry_wait_ticks,
+                                             &s_b_last_alarm,
+                                             0U);                /* Page4 瞬时读取失败只重试，不立刻锁死一体式手柄。 */
+                return;                                         /* 本轮停止后续处理，等待下一次重新读取 Page4。 */
+            }
+
+            Handlescan_UpdateSelfTypedHandleRecognizeMessage(&ChannelrecognizeMessageB,
+                                                             mapped_model,
+                                                             raw_type_major,
+                                                             raw_type_minor); /* 0x7C 一体式型号直接写入 B 通道手柄和刀具能力字段。 */
+            Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
+                                                s_b_initial_info_buf); /* 同步 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+            Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* B 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
+            Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 这类手柄没有独立 Page3 规格，本次上线清掉旧刀具规格显示缓存。 */
+            MemoryMsgB.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
+            SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道按手柄型号上线并装载到通道记忆。 */
+            Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* 自恢复成功时清掉 B 通道历史手柄校验报警。 */
+            Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 上线成功后清空 B 通道失败重试状态。 */
+            s_b_last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
+            s_b_stage = HANDLESCAN_STAGE_ONLINE;                /* B 通道切到在线保持态，后续只做拔出和 RFID 在线监测判断。 */
+            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文，值为手柄型号。 */
+            Handlescan_DebugTraceHandleName(2U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 B 通道 0x7C 手柄名称报文。 */
+            Handlescan_BeepOnceIfNoAlarm();                     /* B 通道认证并上线成功后，给使用者一个确认单响。 */
+            return;                                             /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
         }
 
         AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到这一次访问。 */

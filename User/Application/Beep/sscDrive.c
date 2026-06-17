@@ -87,7 +87,9 @@ void MotorStart()
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
-         ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
+      ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
+    // uint8_t motor_startcode[motor_frem_length]={0xAA ,0x03 ,0x28 ,0x03\
+    //      ,0x01 ,0x90 ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};    
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
 /*
@@ -102,6 +104,14 @@ void MOTORRUN(void)
     if(WorkMessage.tool_reduction_ratio==0)WorkMessage.tool_reduction_ratio=1;
     if(WorkMessage.auto_identify==0)WorkMessage.tool_reduction_ratio=1;
     uint32_t ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
+    // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
+    // {
+    //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
+    //     if(ssc_speed_value>0xFFFFU) /* 电机驱动协议速度只有高低 2 字节，临时放大后必须避免回绕成异常低速。 */
+    //     {
+    //         ssc_speed_value=0xFFFFU; /* 超过驱动帧可表达范围时按最大值下发，保证验证过程不会因溢出误判。 */
+    //     }
+    // }
     if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)
     {
         if(WorkMessage.tool_type==PLANER)
