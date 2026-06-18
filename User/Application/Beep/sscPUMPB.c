@@ -9,6 +9,7 @@
 #include "pump.h"
 #include "uart5.h"
 #include "uart7.h"
+#include "lcd.h"
 #include "screen_address.h"
 
 static QueueHandle_t PUMPBMsgQueue = NULL;
@@ -71,12 +72,16 @@ static void PUMPB_PauseByPressureLimit(void)
 	 */
 }
 
-
+/*
+ * 函数功能：按 B 泵业务速度和方向组装泵驱动 UART 帧并发送到当前物理 B 泵出口。
+ * 输入参数：value 为已经换算好的泵驱动速度字段；pump_dir 为业务方向，1/0 由 B 泵类型分支给出。
+ * 返回参数：无。
+ */
 static void Pump_SetSpeedS_B(uint16_t value,uint8_t pump_dir)
 {
 		uint8_t dat[6] = {0xAA, 0x00, 0x00, 0x00, 0x00, 0x00};
 		dat[0] = 0xAA;
-		pump_dir?(dat[1] = 0x00):(dat[1]=0x01);
+		pump_dir?(dat[1] = 0x01):(dat[1]=0x00); /* B 泵现场电机方向与驱动协议相反，只在最终 UART 帧取反，不改业务层注水/灌注类型判断。 */
 		dat[2] = ((value & 0xFF00) >> 8);//0x03;
 		dat[3] = (value & 0x00FF);//0xE8;
 		dat[4] = 0xBB;

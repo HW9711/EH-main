@@ -567,10 +567,10 @@ static void AUTOMODEGETDATATaskFunc(uint32_t event)
  */
 void SscRadioFreq_Init(void)
 {
-    Uart3_SendPacket(pa_gain13, (uint16_t)sizeof(pa_gain13)); /* 设置发射功率，保持原工程默认值。 */
+    Uart3_SendPacket(pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 设置发射功率，保持原工程默认值。 */
     Delay_ms(50); /* 等待模块处理功率设置命令。 */
 
-    Uart3_SendPacket(region_set_CHAIN, (uint16_t)sizeof(region_set_CHAIN)); /* 设置中国频段。 */
+    Uart3_SendPacket(region_set_us, (uint16_t)sizeof(region_set_us)); /* 设置中国频段。 */
     Delay_ms(50); /* 等待模块处理区域设置命令。 */
 
     Uart3_SendPacket(hop_ch, (uint16_t)sizeof(hop_ch)); /* 开启跳频，保持原工程射频初始化行为。 */

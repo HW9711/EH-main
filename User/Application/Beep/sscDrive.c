@@ -11,9 +11,11 @@
 #include "lcd.h"
 #include "uart1.h"
 #include "Pubinterface.h"
+#include "sscUIDP.h"
 
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
+#define MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO 2U /* 临时补丁：公共接头刀具自带 2 倍增速，电机端下发速度需要除以 2。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -68,6 +70,22 @@ static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
     return 0x01U; /* 其他手柄默认按无霍尔方式下发，保持旧工程的兼容行为。 */
 }
 
+/*
+ * 函数功能：公共接头 EPC 临时补丁下，把屏幕目标速度折算成电机驱动板速度。
+ * 输入参数：speed_value 为已从 WorkMessage x10 单位换算到驱动帧单位的目标速度。
+ * 返回参数：需要写入 UART1 电机启动帧的速度值。
+ */
+static uint32_t MotorDrive_ApplyCommonSocketSpeedPatch(uint32_t speed_value)
+{
+    if ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) &&
+        ((WorkMessage.tool_reduction_ratio >> 16) == MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO))
+    {
+        return speed_value / 2U; /* 公共接头刀具自带 2 倍增速，电机转速减半后刀具端显示速度才对得上。 */
+    }
+
+    return speed_value; /* 非公共接头或未识别到 2 倍增速比时保持原有驱动速度。 */
+}
+
 /// 开口定位
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)//通道，方向，角度
 {
@@ -101,9 +119,19 @@ void MOTORRUN(void)
 {
     static uint8_t huci=0;
     uint8_t display_value[10]={0};
+    uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
     if(WorkMessage.tool_reduction_ratio==0)WorkMessage.tool_reduction_ratio=1;
-    if(WorkMessage.auto_identify==0)WorkMessage.tool_reduction_ratio=1;
-    uint32_t ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
+    if((WorkMessage.auto_identify==0) && (WorkMessage.hand_model != COMMON_SOCKET_ONLINES))WorkMessage.tool_reduction_ratio=1;
+    uint32_t ssc_speed_value=0U; /* 电机驱动帧速度，公共接头临时补丁需要绕开原有比例乘法，避免高16位增速比被当成普通乘数。 */
+    if ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) &&
+        ((WorkMessage.tool_reduction_ratio >> 16) == MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO))
+    {
+        ssc_speed_value = MotorDrive_ApplyCommonSocketSpeedPatch(WorkMessage.speed_set_work / 10U); /* 公共接头显示速度仍按 x10 存储，先转驱动单位再按 2 倍增速折半。 */
+    }
+    else
+    {
+        ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
+    }
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
     //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
@@ -137,7 +165,19 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        switch(WorkMessage.dir_work)
+        effective_dir_work=(uint8_t)WorkMessage.dir_work; /* 默认按当前工作方向下发，保证其它手柄完全沿用原方向逻辑。 */
+        if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
+        {
+            if(effective_dir_work==ZZDIR) /* 屏幕/记忆认为正转时，EMBD 实际需要向驱动板发送反转。 */
+            {
+                effective_dir_work=FZDIR; /* 只改本次局部下发方向，不回写 WorkMessage.dir_work。 */
+            }
+            else if(effective_dir_work==FZDIR) /* 屏幕/记忆认为反转时，EMBD 实际需要向驱动板发送正转。 */
+            {
+                effective_dir_work=ZZDIR; /* 只互换正反转，往复方向不在 EMBD 正常能力范围内，保持原值。 */
+            }
+        }
+        switch(effective_dir_work)
         {
              case ZZDIR: 
              msg.control_mode=0x01;

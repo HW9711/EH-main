@@ -63,9 +63,13 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       900U
 #define HANDLESCAN_RFID_MONITOR_PERIOD_MS     200U  /* RFID 在线监测按 1 秒一轮执行，发读后下一轮仍未确认即可把用户可见清除时间压到约 2 秒。 */
-#define HANDLESCAN_RFID_MISS_MAX              5U
+#define HANDLESCAN_RFID_MISS_MAX              10U
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS    (HANDLESCAN_RFID_WAIT_TIMEOUT_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_MONITOR_PERIOD_TICKS  (HANDLESCAN_RFID_MONITOR_PERIOD_MS / HANDLESCAN_TASK_PERIOD_MS)
+#define COMMON_SOCKET_TEMP_SPEED_MIN          20000U  /* 临时补丁：公共接头 EPC 成功后，屏幕和通道记忆固定最小速度为 20000。 */
+#define COMMON_SOCKET_TEMP_SPEED_MAX          120000U /* 临时补丁：公共接头 EPC 成功后，屏幕和通道记忆固定最大速度为 120000。 */
+#define COMMON_SOCKET_TEMP_SPEED_DEFAULT      100000U /* 临时补丁：公共接头 EPC 成功后，屏幕默认速度固定为 100000。 */
+#define COMMON_SOCKET_TEMP_SPEED_UP_RATIO     2U      /* 临时补丁：公共接头刀具自带 2 倍增速，高16位写入增速比供驱动下发折算。 */
 
 /*
  * EEPROM 中手柄信息区定义。
@@ -566,46 +570,6 @@ static uint8_t Handlescan_ParseRfidDirection(uint8_t raw_direction)
 }
 
 /*
- * 函数功能：把 RFID 1 字节速度转换为当前工程速度单位。
- * 输入参数：speed_k 表示以 k rpm 保存的速度，例如 0x8C 表示 140k。
- * 返回参数：工程内部速度值，按 1000 rpm 递增。
- */
-static uint16_t Handlescan_RfidSpeedToWorkSpeed(uint8_t speed_k)
-{
-    uint32_t speed = (uint32_t)speed_k * 1000UL; /* RFID 协议示例说明 0x8C 表示 140k，换算为 140000。 */
-
-    if (speed > 0xFFFFUL)
-    {
-        speed = 0xFFFFUL; /* 通道识别结构速度字段为 16 位，超过范围时钳位。 */
-    }
-
-    return (uint16_t)speed; /* 返回可写入 speed_xxxdefault/speed_xxxmax 的速度值。 */
-}
-
-/*
- * 函数功能：把 RFID 齿轮比/减速比字段转换为工程内部 tool_reduction_ratio。
- * 输入参数：ratio_hi 和 ratio_lo 为 EPC 2 字节齿轮比，单字节模式时 ratio_lo 传 0。
- * 返回参数：高 16 位表示增速，低 16 位表示减速。
- */
-static uint32_t Handlescan_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
-{
-    uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 保存 EPC 原始两字节齿轮比。 */
-    uint16_t ratio_value = (uint16_t)(raw_ratio & 0x0FFFU); /* 去掉高位方向标记后保留比例数值。 */
-
-    if ((ratio_hi & 0xF0U) == 0xF0U)
-    {
-        return (uint32_t)ratio_value; /* 高位 F 表示减速，写入低 16 位。 */
-    }
-
-    if ((ratio_hi & 0xF0U) == 0x00U)
-    {
-        return ((uint32_t)ratio_value << 16); /* 高位 0 表示增速，写入高 16 位。 */
-    }
-
-    return (uint32_t)raw_ratio; /* 未知格式保留原始值到低 16 位，便于上位机和售后判断。 */
-}
-
-/*
  * 函数功能：把 RFID 读取结果解析成通道识别缓存和屏幕刀具规格缓存。
  * 输入参数：channel 为 A/B 通道；message 为通道识别缓存；spec_values 为屏幕规格缓存；mapped_model 和 raw_type_* 来自 EEPROM 第二页；rfid_result 为 RFID 原始标签结果。
  * 返回参数：true 表示已写入识别缓存，false 表示 RFID 数据不符合当前来源。
@@ -623,9 +587,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint8_t diameter;            /* RFID 标签中的直径字段。 */
     uint8_t length;              /* RFID 标签中的长度字段。 */
     uint8_t angle;               /* RFID 标签中的弯曲角度字段。 */
-    uint16_t default_speed;      /* RFID 标签转换后的默认速度。 */
-    uint16_t max_speed;          /* RFID 标签转换后的最大速度。 */
-    uint16_t min_speed;          /* RFID 标签转换后的最小速度。 */
+    uint32_t default_speed;      /* RFID 标签转换后的默认速度；公共接头临时上限会超过16位，必须保留32位。 */
+    uint32_t max_speed;          /* RFID 标签转换后的最大速度；公共接头临时上限会超过16位，必须保留32位。 */
+    uint32_t min_speed;          /* RFID 标签转换后的最小速度；统一用32位避免和默认速度比较时截断。 */
     uint32_t reduction_ratio = 0U; /* RFID 标签解析出的完整减速比，EPC 需要保留 32 位增/减速方向信息。 */
     uint8_t default_flow;        /* RFID 标签中的默认泵流量。 */
     uint8_t direction;           /* RFID 标签中的方向字段。 */
@@ -667,12 +631,12 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         diameter = payload[1]; /* EPC byte1：刀头直径。 */
         length = payload[2]; /* EPC byte2：刀具长度。 */
         angle = payload[3]; /* EPC byte3：弯曲角度。 */
-        max_speed = Handlescan_RfidSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，按 k rpm 转工程速度。 */
-        min_speed = Handlescan_RfidSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，按 k rpm 转工程速度。 */
-        default_speed = Handlescan_RfidSpeedToWorkSpeed(payload[8]); /* EPC byte8：上电默认速度。 */
+        max_speed = COMMON_SOCKET_TEMP_SPEED_MAX; /* 临时补丁：公共接头 EPC 速度范围不再取标签速度字节，固定上限 120000 便于现场验证。 */
+        min_speed = COMMON_SOCKET_TEMP_SPEED_MIN; /* 临时补丁：公共接头 EPC 速度范围不再取标签速度字节，固定下限 20000 便于现场验证。 */
+        default_speed = COMMON_SOCKET_TEMP_SPEED_DEFAULT; /* 临时补丁：公共接头 EPC 识别成功后默认显示速度固定 100000。 */
         default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
         direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
-        reduction_ratio = Handlescan_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比字段，解析为工程内部 32 位增/减速比。 */
+        reduction_ratio = ((uint32_t)COMMON_SOCKET_TEMP_SPEED_UP_RATIO << 16); /* 临时补丁：公共接头刀具自带 2 倍增速，高16位表示增速比。 */
         business_tool_type = GRINDH; /* 公共接头/GYJT EPC 默认按磨头类刀具处理，不开放往复和开口定位。 */
         message->meioticratio = (uint8_t)(reduction_ratio & 0xFFU); /* 旧 8 位字段继续保留低 8 位，兼容历史开口逻辑。 */
         message->overloadThresholdFor = payload[11]; /* EPC byte11：电流阈值，当前按原始值保存。 */
@@ -828,6 +792,18 @@ static void Handlescan_PrepareRfidBaseRecognizeMessage(ChannelrecognizeMessage_t
     message->tool_reduction_ratio=1;
     message->default_injection_flow=20;
     message->freq_default=40;
+    if (mapped_model == COMMON_SOCKET_ONLINES)
+    {
+        message->speed_fzdefault = 0U; /* 临时补丁：公共接头无 EPC 刀具头时没有可运行电机，反转默认速度显示 0。 */
+        message->speed_oscdefault = 0U; /* 临时补丁：公共接头无 EPC 刀具头时没有可运行电机，往复默认速度显示 0。 */
+        message->speed_zzdefault = 0U; /* 临时补丁：公共接头无 EPC 刀具头时没有可运行电机，正转默认速度显示 0。 */
+        message->speed_zzmin = 0U; /* 临时补丁：公共接头基座阶段不开放正转调速范围，等待 EPC 成功后再写固定范围。 */
+        message->speed_zzmax = 0U; /* 临时补丁：公共接头基座阶段不开放正转调速范围，避免无刀具时按键调出旧速度。 */
+        message->speed_fzmin = 0U; /* 临时补丁：公共接头基座阶段不开放反转调速范围，等待 EPC 成功后再写固定范围。 */
+        message->speed_fzmax = 0U; /* 临时补丁：公共接头基座阶段不开放反转调速范围，避免无刀具时按键调出旧速度。 */
+        message->speed_oscmin = 0U; /* 临时补丁：公共接头基座阶段不开放往复调速范围，等待 EPC 成功后再写固定范围。 */
+        message->speed_oscmax = 0U; /* 临时补丁：公共接头基座阶段不开放往复调速范围，避免无刀具时按键调出旧速度。 */
+    }
 }
 
 /*
