@@ -10,6 +10,8 @@ void Uart3_Init(void);
 
 void Uart3_SendPacket(uint8_t *pData, uint16_t Length);
 
+void Uart3_ClearRecvData(void);
+
 uint16_t Uart3_DMARecvDataPeek(uint8_t *data);
 
 void Uart3_DeInit(void);

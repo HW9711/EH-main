@@ -7,6 +7,7 @@
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
 #include "sscDRIVE.h"
+#include "sscRFID.h"
 #include "uart2.h"
 
 #include <string.h>
@@ -14,15 +15,9 @@
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
 #define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
 #define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 1000U  /* 外控链路静默 1s 后只停电机和泵输出，保留外控授权；上位机需按 300ms 周期下发保活。 */
-#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     5000U /* 外控链路静默 30s 后才释放外控授权，避免短暂上行/ACK 抖动把上位机踢出外控。 */
+#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     2000U /* 外控链路静默 2s 后释放外控授权并熄灭在线图标，避免 6s 级保持时间影响现场反馈。 */
 #define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
-#define EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE 1U /* UART5 A 泵固定识别开关：1 表示按交付配置识别为注水泵，0 表示使用真实识别结果。 */
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
-#define EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE    INJECTWATER /* 固定识别打开时，UART5 A 泵类型固定成注水泵，PUMPA 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED 30U  /* 固定注水泵且上位机未设置 A 泵速度时，给 UART5 注水泵补一个可转动的默认速度。 */
-#define EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE 1U /* B 泵固定识别开关：1 表示按交付配置识别为注水泵，便于无 CS1237 霍尔识别时保持 B 通道可控。 */
-#define EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE    INJECTWATER /* B 泵固定识别打开时，业务类型固定成注水泵，PUMPB 任务按注水方向和流量公式输出。 */
-#define EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED 30U  /* B 泵固定注水泵且上位机未设置 B 泵速度时，补一个可转动的默认速度。 */
 #define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
 #define EXTERNAL_COMM_FRAME_HEAD_SIZE    4U      /* 外部通信帧头固定 4 字节：D7 CA F8 F1。 */
 #define EXTERNAL_COMM_FRAME_LENGTH_OFFSET 5U     /* Length_H 在帧内偏移 5，Length_L 在偏移 6。 */
@@ -39,7 +34,17 @@
 #define EXTERNAL_COMM_HANDLE_MODE_REVERSE   0x02U   /* 心跳手柄工作模式：当前手柄反转。 */
 #define EXTERNAL_COMM_HANDLE_MODE_OSC       0x03U   /* 心跳手柄工作模式：当前手柄往复。 */
 #define EXTERNAL_COMM_HANDLE_MODE_UNKNOWN   0xFFU   /* 心跳手柄工作模式：当前没有可识别方向。 */
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 44U    /* 新版心跳 InforArea 最大长度：43 字节旧状态 + 1 字节当前手柄工作模式。 */
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 新版心跳 InforArea 最大长度：44 字节旧状态 + 最多 43 字节 A/B 刀具扩展，仍小于协议 134 字节上限。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 心跳刀具扩展魔术字，放在泵字段之后，旧上位机可把它当尾部剩余字节忽略。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x01U /* 心跳刀具扩展版本，当前固定为 1，便于后续扩字段时区分。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN 20U /* 单通道刀具扩展块长度：通道/来源/规格/速度/方向/减速比共 20 字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_EEPROM_PAGE3 0x00U /* 普通不可拆手柄，刀具信息来自 EEPROM 第三页。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC 0x01U /* 公共接头式可拆手柄，刀具信息来自 RFID EPC。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER 0x02U /* PXBA/PXBB 分体式手柄，刀具信息来自 RFID USER。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD 0x00U /* 刀具扩展方向字段：正转。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE 0x01U /* 刀具扩展方向字段：反转。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC 0x02U /* 刀具扩展方向字段：往复。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_UNKNOWN 0xFFU /* 刀具扩展方向字段：当前方向无效或未识别。 */
 #define EXTERNAL_COMM_RUNNING_INFO_ALARM    0x05U   /* 主机运行内容上传的信息码：0x05 表示报警信息，InforArea[0] 放 WorkMessage.alarm_value。 */
 
 #define EXTERNAL_COMM_REASON_BAD_LENGTH     0x01U   /* 失败原因：InforArea 长度不符合命令要求。 */
@@ -73,10 +78,14 @@ static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
 static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外控期间每收到一帧合法下行命令都会清零。 */
 static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
+static uint16_t s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 非外控在线图标计时，合法帧刷新后超时熄灭。 */
+static uint8_t s_external_comm_display_online = 0U;  /* 小电脑图标在线锁存，避免未收到合法外部帧时误显示在线。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
 static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
+static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄校验失败时临时上传的报警码，不写入 WorkMessage。 */
+static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持时间，递减到 0 后自动上传无报警关闭上位机弹窗。 */
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
-static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 手柄运行触发的注水泵冷却跟随请求，手柄停止或急停时清零。 */
+static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
 static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收 FIFO 句柄，保存读写指针和初始化状态。 */
@@ -87,6 +96,7 @@ static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 �
 static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
 
 static void ExternalComm_ResetLinkWatchdog(void);    /* 外控保活计时清零入口，申请外控和收到合法下行帧时复用。 */
+static void ExternalComm_RefreshIdleLinkDisplay(void); /* 非外控状态下维护小电脑在线图标超时。 */
 
 static uint16_t ExternalComm_ReadBE16(const uint8_t *data)
 {
@@ -163,16 +173,28 @@ static void ExternalComm_SendAlarmInfoIfChanged(void)
     /* alarm_value 是协议 InforArea[0]，0 表示无报警，非 0 表示固件当前 WorkMessage 报警码。 */
     uint8_t alarm_value;
 
-    /* 全局报警标志为 false 时强制上传 0，用于通知上位机关闭已弹出的故障窗口。 */
-    if (WorkMessage.alarm_flag == false)
+    /* 全局报警优先级最高，一旦存在真实系统报警，临时报警必须让位，避免覆盖持续故障。 */
+    if (WorkMessage.alarm_flag == true)
     {
-        /* 无报警时协议报警码固定为 0x00。 */
-        alarm_value = 0U;
+        s_transient_alarm_value = 0U;                 /* 清掉临时报警值，后续只以上报真实报警为准。 */
+        s_transient_alarm_remaining_ms = 0U;          /* 清掉临时报警计时，防止真实报警解除后旧弹窗再次出现。 */
+        alarm_value = WorkMessage.alarm_value;        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机一致。 */
+    }
+    else if (s_transient_alarm_remaining_ms > 0U)
+    {
+        alarm_value = s_transient_alarm_value;        /* 无真实报警但临时报警未超时，继续让上位机显示本次提示。 */
+        if (s_transient_alarm_remaining_ms > EXTERNAL_COMM_TASK_PERIOD_MS)
+        {
+            s_transient_alarm_remaining_ms = (uint16_t)(s_transient_alarm_remaining_ms - EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个通信周期扣减 10ms。 */
+        }
+        else
+        {
+            s_transient_alarm_remaining_ms = 0U;      /* 最后一个周期扣到 0，下个周期会上传 0 关闭弹窗。 */
+        }
     }
     else
     {
-        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机看到同一故障来源。 */
-        alarm_value = WorkMessage.alarm_value;
+        alarm_value = 0U;                             /* 无真实报警且无临时报警时，协议报警码固定为 0。 */
     }
 
     /* 状态未变化时不重复刷报警帧，避免串口日志被同一个报警码持续淹没。 */
@@ -192,6 +214,23 @@ static void ExternalComm_SendAlarmInfoIfChanged(void)
                            EXTERNAL_COMM_RUNNING_INFO_ALARM,
                            &alarm_value,
                            1U);
+}
+
+/*
+ * 函数功能：上传一个不写入 WorkMessage 的限时报警码，用于运行中另一路手柄校验失败提示。
+ * 输入参数：alarm_value 需要上位机显示的报警码；hold_ms 保持时间，单位毫秒。
+ * 返回参数：无。
+ */
+void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms)
+{
+    if ((alarm_value == 0U) || (hold_ms == 0U))
+    {
+        return;                                      /* 空报警或 0 时长没有意义，保持当前通信报警状态不变。 */
+    }
+
+    s_transient_alarm_value = alarm_value;           /* 记录临时报警码，通信任务下一周期会上传给上位机。 */
+    s_transient_alarm_remaining_ms = hold_ms;        /* 记录保持时间，到期后由 ExternalComm_SendAlarmInfoIfChanged 自动发 0。 */
+    s_alarm_report_ready = 0U;                       /* 强制下一周期立即重发，避免同码临时报警被变化检测吞掉。 */
 }
 
 static uint8_t ExternalComm_IsAuthorizedCode(const uint8_t *code, uint16_t code_len)
@@ -339,50 +378,6 @@ static uint8_t ExternalComm_MapNavPageToIndex(uint8_t page_code, uint16_t *page_
     *page_index = (uint16_t)(page_no - 1U);
     /* 导航页码映射成功。 */
     return 1U;
-}
-
-static void ExternalComm_LoadChannelMemory(uint8_t channel)
-{
-    /* memory 指向当前通道保存的 EEPROM/识别结果缓存。 */
-    ChannelMemoryMessagr_t *memory;
-
-    /* A 通道取 MemoryMsgA，B 通道取 MemoryMsgB。 */
-    memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB;
-    /* 同步保护电流。 */
-    WorkMessage.current_work = memory->current_work;
-    /* 同步工具减速比。 */
-    WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio;
-    /* 同步运行方向。 */
-    WorkMessage.dir_work = memory->dir;
-    /* 同步控制模式。 */
-    WorkMessage.drivetype_work = memory->drive_type;
-    /* 同步往复频率。 */
-    WorkMessage.freq_work = memory->freq;
-    /* 同步刨/磨工具类型。 */
-    WorkMessage.tool_type = memory->tool_type;
-    /* 同步手柄模型。 */
-    WorkMessage.hand_model = memory->hand_model;
-    /* 最后切换当前工作通道，后续启动命令会使用这个通道。 */
-    WorkMessage.channel_work = channel;
-
-    /* 正转方向使用该通道保存的正转速度。 */
-    if (WorkMessage.dir_work == ZZDIR)
-    {
-        WorkMessage.speed_set_work = memory->zz_speed;
-    }
-    /* 反转方向使用该通道保存的反转速度。 */
-    else if (WorkMessage.dir_work == FZDIR)
-    {
-        WorkMessage.speed_set_work = memory->fz_speed;
-    }
-    /* 其他方向当前按往复处理，使用往复速度。 */
-    else
-    {
-        WorkMessage.speed_set_work = memory->osc_speed;
-    }
-
-    /* 实际输出速度同步为当前设置速度，避免切换通道后保留旧速度。 */
-    WorkMessage.speed_work = WorkMessage.speed_set_work;
 }
 
 static void ExternalComm_SaveCurrentSpeed(uint16_t speed)
@@ -565,11 +560,14 @@ static uint8_t ExternalComm_ApplyPermission(const ExternalCommFrame_t *frame)
     return 1U;
 }
 
-/* A/B 泵固定注水泵识别逻辑同时服务设置帧、控制帧和心跳帧，提前声明用于后面的入口调用。 */
-static void ExternalComm_ApplyFixedPumpIdentity(void);
 /* 当前选中手柄在线状态在心跳和启动前置检查中复用，提前声明避免启动逻辑只看通道号。 */
 static uint8_t ExternalComm_SelectedHandleOnline(void);
 
+/*
+ * 函数功能：处理上位机运行参数设置命令，并把速度/频率/泵速度写入主工程运行状态。
+ * 输入参数：frame 指向已通过协议校验的外部通信下行帧。
+ * 返回参数：无。
+ */
 static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
 {
     /* value 保存外部设备下发的速度、频率或泵速度。 */
@@ -599,7 +597,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 速度、A 泵速度、B 泵速度按 2 字节大端值解析。 */
+    /* 手柄速度按 WorkMessage.speed_work 的内部 x10 单位解析；A/B 泵速度仍按泵业务流量值解析，三者协议字段都是 2 字节大端。 */
     if ((frame->area_code == 0x01U) || (frame->area_code == 0x03U) || (frame->area_code == 0x04U))
     {
         /* 2 字节参数不足时不能解析。 */
@@ -656,16 +654,16 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             ExternalComm_SaveCurrentFreq(value);
             break;
         case 0x03U:
-            /* 固定识别打开时，设置 A 泵速度会同步补齐 UART5 注水泵在线状态和业务类型。 */
-            ExternalComm_ApplyFixedPumpIdentity();
             /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
             pumpMessageA.speed_work = value;
+            /* 上位机改 A 泵速度后立即刷新屏幕，避免泵已按新速度输出但数值区仍显示旧值。 */
+            Pubinterface_RefreshPumpADisplay();
             break;
         case 0x04U:
-            /* 固定识别打开时，设置 B 泵速度会同步补齐 B 泵在线状态和注水泵业务类型。 */
-            ExternalComm_ApplyFixedPumpIdentity();
             /* 设置 B 泵速度，不切换泵启停状态。 */
             pumpMessageB.speed_work = value;
+            /* 上位机改 B 泵速度后立即刷新屏幕，解决 B 泵已转但屏幕仍显示 0 的问题。 */
+            Pubinterface_RefreshPumpBDisplay();
             break;
         default:
             /* 前面已过滤非法 AreaCode，这里只保留防御分支。 */
@@ -720,7 +718,7 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
                 return;
             }
             /* 把 A 通道记忆状态装载到当前工作状态。 */
-            ExternalComm_LoadChannelMemory(CHANNEL_A);
+            Pubinterface_LoadChannelMemory(CHANNEL_A);
             break;
         case 0x02U:
             /* 切换到 B 通道前必须确认 B 通道在线。 */
@@ -732,7 +730,7 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
                 return;
             }
             /* 把 B 通道记忆状态装载到当前工作状态。 */
-            ExternalComm_LoadChannelMemory(CHANNEL_B);
+            Pubinterface_LoadChannelMemory(CHANNEL_B);
             break;
         case 0x03U:
             /* 方向切换需要至少 1 字节方向值，并且必须能映射到内部方向。 */
@@ -828,45 +826,71 @@ static uint8_t ExternalComm_EnsureActiveForRun(uint8_t allow_emergency_stop)
     return 1U;
 }
 
+/*
+ * 函数功能：判断当前上位机手柄跟随请求是否应该继续保持 A 泵运行。
+ * 输入参数：无。
+ * 返回参数：true 表示 A 泵是公共 A/B 跟随逻辑选中的冷却泵；false 表示 A 泵不应由手柄跟随保持。
+ */
+static bool ExternalComm_ShouldKeepPumpAForHandleFollow(void)
+{
+    bool a_is_injection = (pumpMessageA.type == INJECTWATER); /* 读取 A 泵设备码识别结果，只有注水泵才能作为冷却泵。 */
+    bool b_is_injection = (pumpMessageB.type == INJECTWATER); /* 读取 B 泵设备码识别结果，用于判断双注水泵时是否应按通道让位给 B。 */
+
+    if (s_uart5_inject_pump_follow_run_request == 0U)
+    {
+        return false; /* 上位机当前没有手柄跟随请求时，A 泵不能因为旧跟随状态继续保持运行。 */
+    }
+
+    if (a_is_injection && b_is_injection)
+    {
+        return (WorkMessage.channel_work == CHANNEL_A); /* 两个泵都是注水泵时，只有当前 A 手柄运行才保持 A 泵跟随。 */
+    }
+
+    if (a_is_injection)
+    {
+        return true; /* 只有 A 是注水泵时，A/B 任一手柄运行都由 A 泵负责冷却。 */
+    }
+
+    return false; /* B 是唯一注水泵或没有注水泵时，A 泵不参与手柄冷却跟随。 */
+}
+
+/*
+ * 函数功能：刷新上位机独立 A 泵请求和手柄跟随 A 泵目标合并后的 A 泵运行状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_RefreshUart5PumpRunState(void)
 {
     /*
-	 * A 泵现在有两个运行来源：
-	 * 1. 上位机独立启动 A 泵，用于单独调试注水泵；
-	 * 2. 手柄运行时，如果 A 泵是注水泵，则跟随手柄运行给手柄降温。
-	 * 本函数只维护请求并集，不直接发送 UART5 泵帧；压力限速和 0 速硬停统一在 PUMPAehaviors() 内输出。
+	 * A 泵现在有两个可能来源：
+	 * 1. 上位机独立启动 A 泵，用于单独调试 A 泵；
+	 * 2. 公共手柄冷却逻辑在“只有 A 注水泵”或“双注水泵且 A 通道运行”时选择 A 泵。
+	 * B 泵跟随不在这里直接处理，统一由 Pubinterface_SetHandleInjectionPumpRun() 写 pumpMessageB。
 	 */
     uint8_t manual_request = s_uart5_pump_manual_run_request; /* 保存上位机独立控制请求，避免后续表达式重复读全局变量。 */
-    uint8_t follow_request = 0U;                              /* 保存手柄冷却跟随请求，只有注水泵类型才允许置 1。 */
+    bool follow_request_a = ExternalComm_ShouldKeepPumpAForHandleFollow(); /* 判断当前手柄冷却目标是否正好是 A 泵。 */
 
-    if ((s_uart5_inject_pump_follow_run_request != 0U) &&
-        (pumpMessageA.type == INJECTWATER))
-    {
-        follow_request = 1U; /* 当前 A 泵确认为注水泵，手柄运行时才允许它进入冷却跟随运行。 */
-    }
-
-	if ((manual_request != 0U) || (follow_request != 0U))
+	if ((manual_request != 0U) || follow_request_a)
 	{
-#if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
-		if ((pumpMessageA.type == INJECTWATER) && (pumpMessageA.speed_work == 0U))
+		if (pumpMessageA.speed_work == 0U)
 		{
-            pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED; /* 固定注水泵识别时补默认速度，避免已启动但输出仍为 0。 */
+            pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* A 泵按业务类型补非零启动速度，避免只置运行标志。 */
         }
-#endif
-        pumpMessageA.run_flag = true;         /* 任一来源请求运行时，A 泵最终运行标志置位。 */
-        pumpMessageA.timingDrainage_flag = false; /* 上位机启动和手柄跟随都不是排空模式，必须清掉排空计时。 */
+        pumpMessageA.run_flag = true;             /* 任一来源请求 A 泵运行时，A 泵最终运行标志置位。 */
+        pumpMessageA.timingDrainage_flag = false; /* 上位机独立启动和手柄跟随都不是排空模式，必须清掉排空计时。 */
     }
     else
     {
-        pumpMessageA.run_flag = false;        /* 两个来源都不请求运行时，才真正停止 A 泵。 */
+        pumpMessageA.run_flag = false;            /* 上位机独立请求和 A 目标跟随都不存在时，才真正停止 A 泵。 */
         pumpMessageA.timingDrainage_flag = false; /* 停止时同步取消排空状态，保证下一周期发送停泵帧。 */
     }
+    Pubinterface_RefreshPumpADisplay();           /* A 泵最终 run_flag/speed_work 重算后同步屏幕按钮和数值。 */
 }
 
 static void ExternalComm_SetUart5PumpManualRun(uint8_t enable)
 {
     s_uart5_pump_manual_run_request = (enable != 0U) ? 1U : 0U; /* 只改上位机独立运行请求，不直接覆盖手柄冷却跟随请求。 */
-    ExternalComm_RefreshUart5PumpRunState();                    /* 按“独立请求 OR 跟随请求”重新计算 A 泵最终 run_flag。 */
+    ExternalComm_RefreshUart5PumpRunState();                    /* 按“独立请求 OR 公共规则选中 A 泵的跟随请求”重新计算 A 泵最终 run_flag。 */
 }
 
 static void ExternalComm_ClearUart5PumpRunRequests(void)
@@ -895,8 +919,52 @@ static void ExternalComm_ResetLinkWatchdog(void)
     s_external_link_elapsed_ms = 0U;
     /* 链路恢复后允许下一次静默重新触发停输出动作。 */
     s_external_link_output_stopped = 0U;
+    /* 合法外部帧到达后点亮小电脑在线图标，非外控状态下由独立计时负责超时熄灭。 */
+    s_external_comm_display_online = 1U;
+    /* 在线图标从最新合法帧重新计时，避免上位机只读取状态时图标立即消失。 */
+    s_external_comm_display_elapsed_ms = 0U;
+    /* 外控持有时显示黄色，只有合法帧在线但未取得控制权时显示白色。 */
+    Pubinterface_RefreshExternalCommDisplay(true, ControlArbitration_IsExternalActive());
 }
 
+/*
+ * 函数功能：非外控状态下维护外部通信在线图标的超时熄灭。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_RefreshIdleLinkDisplay(void)
+{
+    /* 外控有效时由原外控保活计时负责安全停机和释放，不在这里熄灭图标。 */
+    if (ControlArbitration_IsExternalActive())
+    {
+        return;
+    }
+
+    /* 没有合法帧点亮过小电脑图标时无需累计，避免上电后无外设时反复刷新屏幕。 */
+    if (s_external_comm_display_online == 0U)
+    {
+        return;
+    }
+
+    /* 在线图标未到超时阈值前按 10ms 任务周期累计。 */
+    if (s_external_comm_display_elapsed_ms < EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
+    {
+        s_external_comm_display_elapsed_ms = (uint16_t)(s_external_comm_display_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
+    }
+
+    /* 非外控状态下长时间没有合法外部帧，认为链路已断开并熄灭小电脑图标。 */
+    if (s_external_comm_display_elapsed_ms >= EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
+    {
+        s_external_comm_display_online = 0U;
+        Pubinterface_RefreshExternalCommDisplay(false, false);
+    }
+}
+
+/*
+ * 函数功能：外控链路短时静默时只停止电机和 A/B 泵输出，但保留外控授权等待链路恢复。
+ * 输入参数：无，函数读取并清理外部通信运行锁存状态。
+ * 返回参数：无。
+ */
 static void ExternalComm_StopOutputForLinkSilent(void)
 {
     /* 短超时只处理安全输出，不改变 WorkMessage.hmiactive_work，避免上位机外控状态被误释放。 */
@@ -929,6 +997,10 @@ static void ExternalComm_StopOutputForLinkSilent(void)
     pumpMessageB.timingDrainage_times = 0U;
     /* 清零 B 泵输出速度，避免运行标志恢复前仍保留旧速度。 */
     pumpMessageB.speed_work = 0U;
+    /* 静默停输出后刷新 A 泵屏幕，避免实际已停但屏幕仍显示旧速度。 */
+    Pubinterface_RefreshPumpADisplay();
+    /* 静默停输出后刷新 B 泵屏幕，避免实际已停但屏幕仍显示旧速度。 */
+    Pubinterface_RefreshPumpBDisplay();
 }
 
 static void ExternalComm_HandleLinkReleaseTimeout(void)
@@ -937,6 +1009,12 @@ static void ExternalComm_HandleLinkReleaseTimeout(void)
     ExternalComm_ClearUart5PumpRunRequests();
     /* 释放外控仲裁锁，并由公共释放函数统一停止电机、A/B 泵和外控显示标志。 */
     ControlArbitration_ReleaseExternalControl();
+    /* 长时间没有合法外部帧后才认为链路离线，小电脑图标从在线/外控状态熄灭。 */
+    Pubinterface_RefreshExternalCommDisplay(false, false);
+    /* 同步清除外部通信在线锁存，避免释放后空闲状态继续保持白色图标。 */
+    s_external_comm_display_online = 0U;
+    /* 计时钉到阈值，下一次合法帧到来前不再重复发送离线显示。 */
+    s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS;
     /* 超时处理完成后清零计时，避免释放后的空闲状态继续重复进入本函数。 */
     s_external_link_elapsed_ms = 0U;
     /* 外控已经释放，短超时停输出锁存也同步复位。 */
@@ -945,6 +1023,9 @@ static void ExternalComm_HandleLinkReleaseTimeout(void)
 
 static void ExternalComm_CheckLinkWatchdog(void)
 {
+    /* 非外控状态下也要维护“合法外部帧在线”的白色小电脑图标，超时后自动熄灭。 */
+    ExternalComm_RefreshIdleLinkDisplay();
+
     /* 只有外部控制权有效时才监控链路；本机脚踏/屏幕/手柄控制不受该超时影响。 */
     if (ControlArbitration_IsExternalActive() == false)
     {
@@ -979,6 +1060,11 @@ static void ExternalComm_CheckLinkWatchdog(void)
     }
 }
 
+/*
+ * 函数功能：急停/全停时强制停止当前手柄、电机、脚踏标志和 A/B 泵输出。
+ * 输入参数：无，函数直接清理全局运行状态并释放控制仲裁。
+ * 返回参数：无。
+ */
 static void ExternalComm_StopAllWork(void)
 {
     /* 清除当前手柄运行标志。 */
@@ -1011,67 +1097,34 @@ static void ExternalComm_StopAllWork(void)
     pumpMessageB.timingDrainage_flag = false;
     /* 清零 B 泵速度输出。 */
     pumpMessageB.speed_work = 0U;
+    /* 急停清零 A 泵后同步刷新屏幕，避免安全停机后仍显示旧速度。 */
+    Pubinterface_RefreshPumpADisplay();
+    /* 急停清零 B 泵后同步刷新屏幕，避免安全停机后仍显示旧速度。 */
+    Pubinterface_RefreshPumpBDisplay();
     /* 急停是安全例外，允许强制释放当前任意控制来源。 */
     ControlArbitration_ForceRelease();
-}
-
-static void ExternalComm_ApplyFixedPumpIdentity(void)
-{
-#if (EXTERNAL_COMM_UART5_INJECT_PUMP_FIXED_ENABLE == 1U)
-    /* 固定识别打开时，固定 UART5 对应的 A 泵在线状态，避免单独测泵或手柄联调被 CS1237 霍尔设备码卡住。 */
-    pumpMessageA.online_flag = true;
-    /* 固定识别打开时固定 A 泵为注水泵，PUMPAehaviors() 后续按注水泵方向和公式换算 UART5 驱动数据。 */
-    pumpMessageA.type = EXTERNAL_COMM_UART5_PUMP_FIXED_TYPE;
-    /* 如果上位机还没有单独下发 A 泵速度，则补默认速度，避免手柄跟随或单独启动时 UART5 输出仍为 0。 */
-    if (pumpMessageA.speed_work == 0U)
-    {
-        /* 默认速度只在 0 时写入；已经通过 AreaCode=03 设置过速度时，不覆盖用户下发值。 */
-        pumpMessageA.speed_work = EXTERNAL_COMM_UART5_PUMP_DEFAULT_SPEED;
-    }
-    /* 清零识别丢失计数，让心跳和后续控制都看到 A 泵处于稳定识别状态。 */
-    pumpMessageA.losses_times = 0U;
-#endif
-
-#if (EXTERNAL_COMM_PUMPB_INJECT_PUMP_FIXED_ENABLE == 1U)
-    /* 固定识别打开时，固定 B 泵在线状态，便于没有接入 B 路 CS1237 霍尔识别时保持 B 泵通道可控。 */
-    pumpMessageB.online_flag = true;
-    /* 固定识别打开时固定 B 泵为注水泵，PUMPBBehaviors() 后续按注水泵方向和公式换算输出。 */
-    pumpMessageB.type = EXTERNAL_COMM_PUMPB_PUMP_FIXED_TYPE;
-    /* 如果上位机还没有单独下发 B 泵速度，则补默认速度，避免已启动但输出仍为 0。 */
-    if (pumpMessageB.speed_work == 0U)
-    {
-        /* 默认速度只在 0 时写入；已经通过 AreaCode=04 设置过速度时，不覆盖用户下发值。 */
-        pumpMessageB.speed_work = EXTERNAL_COMM_PUMPB_PUMP_DEFAULT_SPEED;
-    }
-    /* 清零识别丢失计数，让心跳和后续控制都看到 B 泵处于稳定识别状态。 */
-    pumpMessageB.losses_times = 0U;
-#endif
 }
 
 static void ExternalComm_SetUart5InjectPumpFollow(uint8_t enable)
 {
 #if (EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE == 1U)
-    /* 跟随手柄开关打开时，先按固定识别开关补齐 A 泵身份；固定识别关闭时该函数不改真实识别结果。 */
-    ExternalComm_ApplyFixedPumpIdentity();
-
-    /* 只有注水泵需要跟随手柄；抽水泵和灌注泵即使在线，也不参与当前手柄启停联动。 */
-    if (pumpMessageA.type != INJECTWATER)
-    {
-        s_uart5_inject_pump_follow_run_request = 0U; /* 当前不是注水泵时清掉跟随请求，避免后续类型变化后误启动。 */
-        ExternalComm_RefreshUart5PumpRunState();     /* 刷新最终运行状态；若上位机独立启动仍有效，则 A 泵继续按独立请求运行。 */
-        return;
-    }
-
-    s_uart5_inject_pump_follow_run_request = (enable != 0U) ? 1U : 0U; /* 只改手柄冷却跟随请求，不直接覆盖上位机独立启动请求。 */
-    ExternalComm_RefreshUart5PumpRunState();                          /* 按两个来源的并集刷新最终运行状态。 */
+    s_uart5_inject_pump_follow_run_request = (enable != 0U) ? 1U : 0U; /* 锁存上位机手柄启停带来的冷却请求，实际 A/B 目标由公共函数按泵类型和通道选择。 */
+    Pubinterface_SetHandleInjectionPumpRun(enable != 0U);              /* 外控手柄启动/停止复用本地手柄的 A/B 注水泵跟随规则，支持 B 唯一注水泵和双注水泵按通道对应。 */
+    ExternalComm_RefreshUart5PumpRunState();                           /* 重新合并 A 泵独立调试请求，避免外控停止手柄时误清仍由上位机独立启动的 A 泵。 */
 #else
     s_uart5_inject_pump_follow_run_request = 0U; /* 跟随开关关闭时强制清掉手柄跟随请求，A 泵是否运行只看独立控制。 */
+    Pubinterface_SetHandleInjectionPumpRun(false); /* 关闭跟随开关时同步释放公共 A/B 冷却跟随，防止旧跟随泵继续出水。 */
     ExternalComm_RefreshUart5PumpRunState();     /* 刷新后不会影响仍然存在的上位机独立启动请求。 */
     /* 跟随开关关闭时保留入参消耗，避免编译器因未使用参数产生告警。 */
     (void)enable;
 #endif
 }
 
+/*
+ * 函数功能：处理上位机控制命令，包括 A/B 泵启停、手柄启停、急停和退出外控。
+ * 输入参数：frame 指向已解析的外部通信控制帧，area_code 表示具体控制动作。
+ * 返回参数：无。
+ */
 static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
 {
     /* 控制成功应答只回显 1 字节控制代号。 */
@@ -1090,9 +1143,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     switch (frame->area_code)
     {
         case 0x01U:
-            /* UART5 是 A 泵输出口；固定识别打开时，先补齐 A 泵在线和注水类型，再执行启动判断。 */
-            ExternalComm_ApplyFixedPumpIdentity();
-            /* A 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
+            /* A 泵启动前要求模拟串口已经上报可识别设备码，泵类型由该设备码决定。 */
             if (pumpMessageA.online_flag == false)
             {
                 ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
@@ -1104,13 +1155,11 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             ExternalComm_SetUart5PumpManualRun(1U);
             break;
         case 0x02U:
-            /* 上位机单独停止 A 泵时，只清除“独立运行请求”；如果手柄仍在转动且 A 泵是注水泵，冷却跟随会继续保持。 */
+            /* 上位机单独停止 A 泵时，只清除“独立运行请求”；如果公共 A/B 跟随规则仍选中 A 泵，冷却跟随会继续保持。 */
             ExternalComm_SetUart5PumpManualRun(0U);
             break;
         case 0x03U:
-            /* 固定识别打开时，先补齐 B 泵在线和注水类型，再执行启动判断。 */
-            ExternalComm_ApplyFixedPumpIdentity();
-            /* B 泵启动前要求 CS1237 上报过合法霍尔设备类型码。 */
+            /* B 泵启动前要求模拟串口已经上报可识别设备码，泵类型由该设备码决定。 */
             if (pumpMessageB.online_flag == false)
             {
                 ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
@@ -1118,16 +1167,24 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
                                          EXTERNAL_COMM_REASON_DEVICE_FAIL);
                 return;
             }
+            if (pumpMessageB.speed_work == 0U)
+            {
+                pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 泵 0 速启动时按灌注/注水/抽吸类型补默认速度。 */
+            }
             /* 置位 B 泵运行标志。 */
             pumpMessageB.run_flag = true;
             /* 外部普通启动不进入排空计时模式。 */
             pumpMessageB.timingDrainage_flag = false;
+            /* 上位机启动 B 泵后同步屏幕数值和按钮黄/黑状态。 */
+            Pubinterface_RefreshPumpBDisplay();
             break;
         case 0x04U:
             /* 清除 B 泵运行标志。 */
             pumpMessageB.run_flag = false;
             /* 同时清除 B 泵排空计时。 */
             pumpMessageB.timingDrainage_flag = false;
+            /* 上位机停止 B 泵后立即刷新屏幕按钮状态，避免仍显示运行。 */
+            Pubinterface_RefreshPumpBDisplay();
             break;
         case 0x05U:
             /* 当前手柄启动必须有选中通道且该通道已经识别在线，避免无手柄时误启动电机和联动注水泵。 */
@@ -1138,13 +1195,20 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
                                          EXTERNAL_COMM_REASON_NO_CHANNEL);
                 return;
             }
+            if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+            {
+                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                         frame->area_code,
+                                         EXTERNAL_COMM_REASON_NOT_SUPPORT);
+                return; /* 公共接头基座在线但 EPC 刀具头未识别时，外控真正启动电机才报警并拒绝运行。 */
+            }
             /* 恢复实际速度为已设置速度。 */
             WorkMessage.speed_work = WorkMessage.speed_set_work;
             /* 置位运行标志，驱动任务会发送启动帧。 */
             WorkMessage.runflag_work = true;
             /* 置位外部控制启动标志，UI/状态层可区分外部启动来源。 */
             ControlSignalMessage.HMI_control_flag = true;
-            /* 当前手柄启动成功后，按调试开关同步启动 UART5 对应的注水泵。 */
+            /* 当前手柄启动成功后，按调试开关同步启动公共 A/B 规则选中的注水冷却泵。 */
             ExternalComm_SetUart5InjectPumpFollow(1U);
             break;
         case 0x06U:
@@ -1154,7 +1218,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             WorkMessage.speed_work = 0U;
             /* 清除外部控制启动标志。 */
             ControlSignalMessage.HMI_control_flag = false;
-            /* 当前手柄停止时，同步停止由手柄带动的 UART5 注水泵。 */
+            /* 当前手柄停止时，同步停止由手柄带动的 A/B 注水冷却泵。 */
             ExternalComm_SetUart5InjectPumpFollow(0U);
             break;
         case 0x07U:
@@ -1447,6 +1511,36 @@ static void ExternalComm_HeartbeatAppendBE16(uint8_t *info_area, uint16_t *info_
     }
 }
 
+/*
+ * 函数功能：按大端格式向心跳 InforArea 追加 32 位字段。
+ * 输入参数：info_area 为心跳载荷缓冲区，info_len 为当前已写入长度，value 为需要追加的 32 位值。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendDWordBE(uint8_t *info_area, uint16_t *info_len, uint32_t value)
+{
+    /* info_area/info_len 由心跳发送函数传入，异常时直接跳过，避免任务因空指针崩溃。 */
+    if ((info_area == NULL) || (info_len == NULL))
+    {
+        /* 参数无效时不写入扩展字段，保持本轮心跳已写入内容不被破坏。 */
+        return;
+    }
+
+    /* 32 位字段必须一次写满 4 字节，空间不足时不写半截，避免上位机错位解析。 */
+    if ((uint16_t)(*info_len + 4U) <= EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN)
+    {
+        /* 按协议大端顺序写入最高字节，便于上位机直接按 readDWord 解析。 */
+        info_area[*info_len] = (uint8_t)((value >> 24U) & 0xFFU);
+        /* 写入次高字节，保持 RFID 完整减速比顺序不被主控大小端影响。 */
+        info_area[(uint16_t)(*info_len + 1U)] = (uint8_t)((value >> 16U) & 0xFFU);
+        /* 写入次低字节。 */
+        info_area[(uint16_t)(*info_len + 2U)] = (uint8_t)((value >> 8U) & 0xFFU);
+        /* 写入最低字节。 */
+        info_area[(uint16_t)(*info_len + 3U)] = (uint8_t)(value & 0xFFU);
+        /* 记录本次 32 位字段已经完整追加。 */
+        *info_len = (uint16_t)(*info_len + 4U);
+    }
+}
+
 static void ExternalComm_HeartbeatAppendPumpPressure(uint8_t *info_area,
                                                      uint16_t *info_len,
                                                      const pumpMessage_t *pump_message)
@@ -1609,6 +1703,659 @@ static uint8_t ExternalComm_CurrentHandleMode(void)
     return EXTERNAL_COMM_HANDLE_MODE_UNKNOWN;
 }
 
+/*
+ * 函数功能：根据手柄基座类型换算心跳刀具信息来源。
+ * 输入参数：hand_model 为 MemoryMsgA/B 中保存的手柄基座型号。
+ * 返回参数：0 表示 EEPROM Page3，1 表示 RFID EPC，2 表示 RFID USER。
+ */
+static uint8_t ExternalComm_GetHandleToolSource(uint8_t hand_model)
+{
+    /* 公共接头式手柄的刀具头可更换，实际刀具信息来自 RFID EPC。 */
+    if (hand_model == COMMON_SOCKET_ONLINES)
+    {
+        /* 上位机据此显示“RFID EPC”，避免把公共接头基座误当成刀具。 */
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC;
+    }
+
+    /* PXBA/PXBB 是当前确认的分体式手柄，刀具头信息来自 RFID USER 区。 */
+    if ((hand_model == PXBA_ONLINES) || (hand_model == PXBB_ONLINES))
+    {
+        /* 上位机据此显示“RFID USER”，便于和普通 EEPROM 手柄区分。 */
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER;
+    }
+
+    /* 其它不可拆手柄继续使用 EEPROM 第三页刀具信息。 */
+    return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_EEPROM_PAGE3;
+}
+
+/*
+ * 函数功能：把 RFID 标签中的 k rpm 速度字节转换成工程内部速度单位。
+ * 输入参数：speed_k 为 RFID 标签保存的速度字节，例如 10 表示 10000 rpm。
+ * 返回参数：转换后的 16 位速度值，超过 16 位上限时钳位。
+ */
+static uint16_t ExternalComm_RfidSpeedToWorkSpeed(uint8_t speed_k)
+{
+    uint32_t speed = (uint32_t)speed_k * 1000UL; /* RFID 标签按 k rpm 保存速度，心跳兜底显示要和 handlescan 正式解析后的单位一致。 */
+
+    if (speed > 0xFFFFUL)
+    {
+        speed = 0xFFFFUL; /* 心跳扩展速度字段只有 16 位，异常大值钳位后再上报，避免高位截断。 */
+    }
+
+    return (uint16_t)speed; /* 返回可直接写入心跳 16 位速度字段的值。 */
+}
+
+/*
+ * 函数功能：把 RFID 齿轮比字段转换为心跳使用的 32 位减速比。
+ * 输入参数：ratio_hi/ratio_lo 为 EPC 两字节齿轮比；USER 单字节时 ratio_lo 传 0。
+ * 返回参数：高 16 位表示增速，低 16 位表示减速；未知格式保留原始低 16 位。
+ */
+static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
+{
+    uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 保留 EPC 原始齿轮比，便于未知格式仍能追溯。 */
+    uint16_t ratio_value = (uint16_t)(raw_ratio & 0x0FFFU); /* 去掉高 4 位方向标记，剩余 12 位是比例数值。 */
+
+    if ((ratio_hi & 0xF0U) == 0xF0U)
+    {
+        return (uint32_t)ratio_value; /* 高 4 位为 F 时表示减速，写入低 16 位，和 handlescan 解析一致。 */
+    }
+
+    if ((ratio_hi & 0xF0U) == 0x00U)
+    {
+        return ((uint32_t)ratio_value << 16); /* 高 4 位为 0 时表示增速，写入高 16 位。 */
+    }
+
+    return (uint32_t)raw_ratio; /* 未知方向标记不强行解释，原样放在低 16 位供上位机和售后判断。 */
+}
+
+/*
+ * 函数功能：把 RFID 标签方向字段转换成心跳刀具扩展方向字段。
+ * 输入参数：raw_direction 为 RFID 标签方向字节，1 正转、2 反转、3 往复。
+ * 返回参数：心跳扩展方向编码，0 正转、1 反转、2 往复。
+ */
+static uint8_t ExternalComm_RfidDirectionToHeartbeat(uint8_t raw_direction)
+{
+    if (raw_direction == 2U)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE; /* RFID 协议 2 表示反转，心跳扩展使用 1。 */
+    }
+
+    if (raw_direction == 3U)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC; /* RFID 协议 3 表示往复，心跳扩展使用 2。 */
+    }
+
+    return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD; /* RFID 协议 1 或异常值按正转处理，保持和 handlescan 默认方向一致。 */
+}
+
+/*
+ * 函数功能：判断 RFID 缓存结果是否匹配当前通道和当前手柄基座类型。
+ * 输入参数：channel 为 A/B 通道，handle_model 为 EEPROM Page2 识别出的基座类型，rfid_result 为 RFID 最新缓存。
+ * 返回参数：true 表示可以作为心跳兜底刀具块，false 表示来源或通道不匹配。
+ */
+static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
+                                                 uint8_t handle_model,
+                                                 const RfidToolResult_t *rfid_result)
+{
+    if ((rfid_result == NULL) || (rfid_result->valid == false))
+    {
+        return false; /* 没有有效 RFID 结果时不能生成刀具块，避免上位机看到假数据。 */
+    }
+
+    if (rfid_result->channel != channel)
+    {
+        return false; /* RFID 缓存必须属于当前 A/B 通道，防止两路手柄刀具信息串用。 */
+    }
+
+    if (handle_model == COMMON_SOCKET_ONLINES)
+    {
+        return (bool)((rfid_result->source == RFID_READ_SOURCE_EPC) &&
+                      (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)); /* 公共接头只接受 EPC 12 字节标签。 */
+    }
+
+    if ((handle_model == PXBA_ONLINES) || (handle_model == PXBB_ONLINES))
+    {
+        return (bool)((rfid_result->source == RFID_READ_SOURCE_USER) &&
+                      (rfid_result->payload_length == RFID_PAYLOAD_USER_LENGTH)); /* PXBA/PXBB 分体式只接受 USER 16 字节标签。 */
+    }
+
+    return false; /* 普通不可拆手柄仍走 EEPROM Page3，不使用 RFID 缓存兜底。 */
+}
+
+/*
+ * 函数功能：判断扫描层是否已经拿到有效的手柄基座类型。
+ * 输入参数：recognize 为 A/B 通道扫描识别缓存。
+ * 返回参数：1 表示扫描缓存有有效基座，0 表示没有。
+ */
+static uint8_t ExternalComm_HeartbeatRecognizeHasBase(const ChannelrecognizeMessage_t *recognize)
+{
+    /* 识别缓存为空时不能作为心跳兜底来源。 */
+    if (recognize == NULL)
+    {
+        return 0U;
+    }
+
+    /* handle_type 和原始 Page2 双字节都有效时，才认为扫描层已经完成基座认证。 */
+    if ((recognize->handle_type != 0U) &&
+        (recognize->hand_type_raw_major != 0U) &&
+        (recognize->hand_type_raw_minor != 0U))
+    {
+        return 1U;
+    }
+
+    /* 任一关键字段缺失时不提前上报，避免把半截扫描状态显示成在线。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：解析心跳中当前通道应使用的在线状态。
+ * 输入参数：work_online 为 WorkMessage 在线位，recognize 为扫描识别缓存。
+ * 返回参数：1 表示心跳可上报在线，0 表示离线。
+ */
+static uint8_t ExternalComm_HeartbeatResolveOnline(uint8_t work_online, const ChannelrecognizeMessage_t *recognize)
+{
+    /* 事件链已经置在线时，以 WorkMessage 为准。 */
+    if (work_online != 0U)
+    {
+        return 1U;
+    }
+
+    /* 插拔事件仍在队列中时，用扫描层已校验通过的基座做显示兜底。 */
+    return ExternalComm_HeartbeatRecognizeHasBase(recognize);
+}
+
+/*
+ * 函数功能：解析心跳中当前通道应使用的手柄型号。
+ * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
+ * 返回参数：手柄型号枚举，0 表示未知。
+ */
+static uint8_t ExternalComm_HeartbeatResolveHandleModel(const ChannelMemoryMessagr_t *memory,
+                                                        const ChannelrecognizeMessage_t *recognize)
+{
+    /* 通道记忆已经装载时优先使用 MemoryMsg，保持运行逻辑和上报一致。 */
+    if ((memory != NULL) && (memory->hand_model != 0U))
+    {
+        return memory->hand_model;
+    }
+
+    /* MemoryMsg 还未装载时，使用扫描层刚识别出的基座型号作为心跳显示来源。 */
+    if (ExternalComm_HeartbeatRecognizeHasBase(recognize) != 0U)
+    {
+        return recognize->handle_type;
+    }
+
+    /* 没有任何有效来源时返回未知。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：解析心跳中当前通道应使用的 Page2 原始主类型字节。
+ * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
+ * 返回参数：原始主类型字节，0 表示未知。
+ */
+static uint8_t ExternalComm_HeartbeatResolveRawMajor(const ChannelMemoryMessagr_t *memory,
+                                                     const ChannelrecognizeMessage_t *recognize)
+{
+    /* MemoryMsg 已经保存原始类型时优先使用它。 */
+    if ((memory != NULL) && (memory->hand_type_raw_major != 0U))
+    {
+        return memory->hand_type_raw_major;
+    }
+
+    /* MemoryMsg 尚未更新时，用扫描缓存补齐上位机手柄类型显示。 */
+    if (ExternalComm_HeartbeatRecognizeHasBase(recognize) != 0U)
+    {
+        return recognize->hand_type_raw_major;
+    }
+
+    /* 未识别时返回 0，调用方只有在线时才会追加该字节。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：解析心跳中当前通道应使用的 Page2 原始子类型字节。
+ * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
+ * 返回参数：原始子类型字节，0 表示未知。
+ */
+static uint8_t ExternalComm_HeartbeatResolveRawMinor(const ChannelMemoryMessagr_t *memory,
+                                                     const ChannelrecognizeMessage_t *recognize)
+{
+    /* MemoryMsg 已经保存原始类型时优先使用它。 */
+    if ((memory != NULL) && (memory->hand_type_raw_minor != 0U))
+    {
+        return memory->hand_type_raw_minor;
+    }
+
+    /* MemoryMsg 尚未更新时，用扫描缓存补齐上位机手柄类型显示。 */
+    if (ExternalComm_HeartbeatRecognizeHasBase(recognize) != 0U)
+    {
+        return recognize->hand_type_raw_minor;
+    }
+
+    /* 未识别时返回 0，调用方只有在线时才会追加该字节。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：把工程内部方向值转换为心跳刀具扩展方向字段。
+ * 输入参数：dir 为 MemoryMsgA/B 保存的 ZZDIR/FZDIR/OSCDIR。
+ * 返回参数：0 正转、1 反转、2 往复、0xFF 未知。
+ */
+static uint8_t ExternalComm_HeartbeatToolDirection(uint16_t dir)
+{
+    /* ZZDIR 是工程内部正转方向，扩展协议固定编码为 0。 */
+    if (dir == ZZDIR)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD;
+    }
+
+    /* FZDIR 是工程内部反转方向，扩展协议固定编码为 1。 */
+    if (dir == FZDIR)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE;
+    }
+
+    /* OSCDIR 是工程内部往复方向，扩展协议固定编码为 2。 */
+    if (dir == OSCDIR)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC;
+    }
+
+    /* 异常方向不上报为正反转，交给上位机显示未知。 */
+    return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_UNKNOWN;
+}
+
+/*
+ * 函数功能：按当前通道记忆方向取本通道默认/设定速度。
+ * 输入参数：memory 指向 A/B 通道记忆。
+ * 返回参数：当前方向对应的速度值，无法判断时返回 0。
+ */
+static uint16_t ExternalComm_HeartbeatToolDefaultSpeed(const ChannelMemoryMessagr_t *memory)
+{
+    /* 通道记忆为空时不能读取速度，返回 0 表示无有效默认速度。 */
+    if (memory == NULL)
+    {
+        return 0U;
+    }
+
+    /* 当前方向为正转时，上报本通道正转速度记忆。 */
+    if (memory->dir == ZZDIR)
+    {
+        return memory->zz_speed;
+    }
+
+    /* 当前方向为反转时，上报本通道反转速度记忆。 */
+    if (memory->dir == FZDIR)
+    {
+        return memory->fz_speed;
+    }
+
+    /* 当前方向为往复时，上报本通道往复速度记忆。 */
+    if (memory->dir == OSCDIR)
+    {
+        return memory->osc_speed;
+    }
+
+    /* 方向无效时不给上位机编造速度。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：按扫描层 RFID/EEPROM 识别缓存方向取默认速度。
+ * 输入参数：recognize 为 A/B 通道扫描识别缓存。
+ * 返回参数：当前方向对应的默认速度，无法判断时返回 0。
+ */
+static uint16_t ExternalComm_HeartbeatRecognizeDefaultSpeed(const ChannelrecognizeMessage_t *recognize)
+{
+    /* 识别缓存为空时不能读取速度，返回 0 表示无有效默认速度。 */
+    if (recognize == NULL)
+    {
+        return 0U;
+    }
+
+    /* 扫描层默认方向为正转时，上报正转默认速度。 */
+    if (recognize->run_direction == ZZDIR)
+    {
+        return recognize->speed_zzdefault;
+    }
+
+    /* 扫描层默认方向为反转时，上报反转默认速度。 */
+    if (recognize->run_direction == FZDIR)
+    {
+        return recognize->speed_fzdefault;
+    }
+
+    /* 扫描层默认方向为往复时，上报往复默认速度。 */
+    if (recognize->run_direction == OSCDIR)
+    {
+        return recognize->speed_oscdefault;
+    }
+
+    /* 方向无效时不给上位机编造速度。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：判断指定通道是否具备可上报的刀具扩展信息。
+ * 输入参数：online 为通道在线状态，memory 为通道记忆，recognize 为扫描层识别缓存。
+ * 返回参数：true 表示可以上报刀具块，false 表示跳过。
+ */
+static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
+                                                const ChannelMemoryMessagr_t *memory,
+                                                const ChannelrecognizeMessage_t *recognize)
+{
+    bool is_rfid_source; /* true 表示该通道刀具信息来自 RFID，不能按普通 EEPROM 完整规格强过滤。 */
+    uint8_t handle_model; /* 保存心跳解析出的基座型号，允许 MemoryMsg 尚未装载时使用扫描缓存兜底。 */
+
+    /* 通道离线时不能上报历史刀具信息，避免上位机显示已拔出的刀具头。 */
+    if (online == 0U)
+    {
+        return false;
+    }
+
+    /* 通道记忆或识别缓存为空时直接跳过，防止异常指针读取。 */
+    if ((memory == NULL) || (recognize == NULL))
+    {
+        return false;
+    }
+
+    handle_model = ExternalComm_HeartbeatResolveHandleModel(memory, recognize); /* 取心跳可见的基座型号，避免 PLUG 事件排队时误判成普通 EEPROM。 */
+    is_rfid_source = (bool)((handle_model == COMMON_SOCKET_ONLINES) ||
+                            (handle_model == PXBA_ONLINES) ||
+                            (handle_model == PXBB_ONLINES)); /* 可拆式手柄基座在线后，规格字段可能允许为 0，但来源必须上报给上位机。 */
+
+    if (is_rfid_source != false)
+    {
+        return (recognize->tool_type != 0U); /* RFID 来源仍需先解析出刀具类型，避免基座刚上线时发送全 0 假刀具块。 */
+    }
+
+    /* 刀具类型、直径、长度都有效时才认为刀具信息完整。 */
+    return ((recognize->tool_type != 0U) &&
+            (recognize->diameter != 0U) &&
+            (recognize->length != 0U));
+}
+
+/*
+ * 函数功能：在扫描层尚未消费 RFID 结果时，从 RFID 最新缓存取心跳兜底数据。
+ * 输入参数：online 为通道在线状态，channel 为 A/B 通道，memory/recognize 为通道记忆和扫描缓存，rfid_result 保存取出的结果。
+ * 返回参数：true 表示 rfid_result 可直接拼心跳刀具块，false 表示不能兜底。
+ */
+static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
+                                                  uint8_t channel,
+                                                  const ChannelMemoryMessagr_t *memory,
+                                                  const ChannelrecognizeMessage_t *recognize,
+                                                  RfidToolResult_t *rfid_result)
+{
+    uint8_t handle_model; /* 保存心跳侧可见的基座类型，用来限定 EPC/USER 来源。 */
+
+    if (online == 0U)
+    {
+        return false; /* 基座不在线时不展示历史 RFID 缓存，避免拔出后仍显示旧刀具头。 */
+    }
+
+    if (rfid_result == NULL)
+    {
+        return false; /* 调用方没有提供结果缓存时无法把 RFID 数据带回去。 */
+    }
+
+    if ((recognize == NULL) || (recognize->tool_type == 0U))
+    {
+        return false; /* 扫描层已清刀具或尚未确认刀具时，禁止用 RFID 原始缓存兜底复活旧刀具显示。 */
+    }
+
+    memset(rfid_result, 0, sizeof(*rfid_result)); /* 先清空输出结构，保证失败路径不会残留上一次数据。 */
+    handle_model = ExternalComm_HeartbeatResolveHandleModel(memory, recognize); /* 取当前通道基座类型，支持 MemoryMsg 未装载时用扫描缓存兜底。 */
+    if (Rfid_CopyLastResult(channel, rfid_result) == false)
+    {
+        return false; /* RFID 任务还没有读到该通道有效标签，上位机继续显示等待 RFID。 */
+    }
+
+    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 只有通道和 EPC/USER 来源都匹配时才允许兜底上报。 */
+}
+
+/*
+ * 函数功能：把 RFID 最新缓存直接转换成一个 20 字节心跳刀具扩展块。
+ * 输入参数：info_area/info_len 为心跳缓存，channel 为 A/B 通道，rfid_result 为已校验匹配的 RFID 结果。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendRfidResultBlock(uint8_t *info_area,
+                                                        uint16_t *info_len,
+                                                        uint8_t channel,
+                                                        const RfidToolResult_t *rfid_result)
+{
+    const uint8_t *payload; /* 指向 RFID 原始 payload，按 EPC/USER 来源解释字段。 */
+    uint8_t source_code; /* 心跳 block byte1，区分 RFID EPC 和 RFID USER。 */
+    uint8_t tool_type; /* 心跳 block byte2，实际刀具型号来自 RFID 标签。 */
+    uint8_t diameter; /* 心跳 block byte3，刀具直径来自 RFID 标签。 */
+    uint16_t length; /* 心跳 block byte4~5，刀具长度按大端上报。 */
+    uint8_t angle; /* 心跳 block byte6，刀具角度来自 RFID 标签。 */
+    uint16_t default_speed; /* 心跳 block byte7~8，默认速度和 handlescan 正式解析保持同单位。 */
+    uint16_t min_speed; /* 心跳 block byte9~10，速度下限。 */
+    uint16_t max_speed; /* 心跳 block byte11~12，速度上限。 */
+    uint16_t default_flow; /* 心跳 block byte13~14，默认注水流量。 */
+    uint8_t direction; /* 心跳 block byte15，默认方向/能力。 */
+    uint32_t reduction_ratio; /* 心跳 block byte16~19，完整减速比。 */
+
+    if ((info_area == NULL) || (info_len == NULL) || (rfid_result == NULL) || (rfid_result->valid == false))
+    {
+        return; /* 异常参数不写半截 block，保持心跳扩展格式完整。 */
+    }
+
+    payload = rfid_result->payload; /* payload 长度已由调用方按来源检查，这里只做字段拆解。 */
+    if (rfid_result->source == RFID_READ_SOURCE_EPC)
+    {
+        if (rfid_result->payload_length != RFID_PAYLOAD_EPC_LENGTH)
+        {
+            return; /* EPC 必须是 12 字节，长度异常时不生成兜底块。 */
+        }
+
+        source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC; /* 公共接头刀具来源显示为 RFID EPC。 */
+        tool_type = payload[0]; /* EPC byte0：刀具型号。 */
+        diameter = payload[1]; /* EPC byte1：刀具直径。 */
+        length = payload[2]; /* EPC byte2：刀具长度。 */
+        angle = payload[3]; /* EPC byte3：刀具角度。 */
+        reduction_ratio = ExternalComm_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比/减速比。 */
+        max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，按 k rpm 转工程单位。 */
+        min_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，按 k rpm 转工程单位。 */
+        default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* EPC byte8：默认速度，按 k rpm 转工程单位。 */
+        default_flow = payload[9]; /* EPC byte9：默认注水泵流量。 */
+        direction = ExternalComm_RfidDirectionToHeartbeat(payload[10]); /* EPC byte10：方向字段。 */
+    }
+    else if (rfid_result->source == RFID_READ_SOURCE_USER)
+    {
+        if (rfid_result->payload_length != RFID_PAYLOAD_USER_LENGTH)
+        {
+            return; /* USER 必须是 16 字节，长度异常时不生成兜底块。 */
+        }
+
+        source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER; /* PXBA/PXBB 分体式刀具来源显示为 RFID USER。 */
+        tool_type = payload[0]; /* USER byte0：代号和结构字段。 */
+        diameter = payload[1]; /* USER byte1：刀具直径。 */
+        length = payload[2]; /* USER byte2：刀具长度。 */
+        angle = payload[3]; /* USER byte3：刀具角度。 */
+        reduction_ratio = (uint32_t)payload[4]; /* USER byte4：单字节减速比，扩展成 32 位后上报。 */
+        max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* USER byte8：转速上限。 */
+        min_speed = 0U; /* USER 当前未定义最低速度，和 handlescan 正式解析保持 0。 */
+        default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[9]); /* USER byte9：默认速度。 */
+        default_flow = payload[11]; /* USER byte11：泵流量。 */
+        direction = ExternalComm_RfidDirectionToHeartbeat(payload[5]); /* USER byte5：方向字段。 */
+    }
+    else
+    {
+        return; /* 只有 EPC/USER 两种来源允许进入心跳刀具扩展。 */
+    }
+
+    if ((max_speed != 0U) && (default_speed > max_speed))
+    {
+        default_speed = max_speed; /* 默认速度不能超过 RFID 上限，避免上位机看到不合法初值。 */
+    }
+    if (default_speed < min_speed)
+    {
+        default_speed = min_speed; /* 默认速度不能低于 RFID 下限。 */
+    }
+
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, channel); /* block byte0：通道号，1 为 A，2 为 B。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, source_code); /* block byte1：RFID 刀具来源。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, tool_type); /* block byte2：RFID 刀具型号。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, diameter); /* block byte3：RFID 直径。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, length); /* block byte4~5：RFID 长度。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, angle); /* block byte6：RFID 角度。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_speed); /* block byte7~8：默认速度。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, min_speed); /* block byte9~10：速度下限。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, max_speed); /* block byte11~12：速度上限。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_flow); /* block byte13~14：默认注水流量。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, direction); /* block byte15：方向字段。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, reduction_ratio); /* block byte16~19：完整减速比。 */
+}
+
+/*
+ * 函数功能：向心跳 InforArea 追加单个通道 20 字节刀具扩展块。
+ * 输入参数：info_area/info_len 为心跳缓冲区和长度，channel 为 A/B 通道号，memory/recognize 为该通道记忆和识别缓存。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendOneToolBlock(uint8_t *info_area,
+                                                     uint16_t *info_len,
+                                                     uint8_t channel,
+                                                     const ChannelMemoryMessagr_t *memory,
+                                                     const ChannelrecognizeMessage_t *recognize)
+{
+    uint8_t handle_model; /* 保存本块使用的基座型号，用于生成刀具来源字段。 */
+    uint16_t default_speed; /* 保存本块上报的默认速度，优先来自 MemoryMsg，必要时来自扫描缓存。 */
+    uint16_t default_flow; /* 保存本块上报的默认注水流量，避免 MemoryMsg 未刷新时显示 0。 */
+    uint8_t direction; /* 保存本块上报的默认方向字段。 */
+    uint32_t reduction_ratio; /* 保存本块上报的完整减速比。 */
+    bool use_recognize_tool_fields; /* true 表示 RFID 结果已到但 MemoryMsg 仍停在基座阶段。 */
+
+    /* 任一指针无效时不写块，保持心跳扩展整体字段不越界。 */
+    if ((info_area == NULL) || (info_len == NULL) || (memory == NULL) || (recognize == NULL))
+    {
+        return;
+    }
+
+    handle_model = ExternalComm_HeartbeatResolveHandleModel(memory, recognize); /* 先解析基座型号，后续来源字段依赖它。 */
+    use_recognize_tool_fields = (bool)((recognize->tool_type != 0U) &&
+                                       ((memory->tool_type == 0U) ||
+                                        (memory->tool_reduction_ratio == 0U))); /* RFID 已解析而通道记忆未装载时，刀具参数用扫描缓存兜底。 */
+    default_speed = ExternalComm_HeartbeatToolDefaultSpeed(memory); /* 默认优先使用已装载的通道记忆速度。 */
+    default_flow = memory->default_injection_flow; /* 默认优先使用已装载的通道记忆流量。 */
+    direction = ExternalComm_HeartbeatToolDirection(memory->dir); /* 默认优先使用已装载的通道记忆方向。 */
+    reduction_ratio = memory->tool_reduction_ratio; /* 默认优先使用已装载的通道记忆减速比。 */
+    if (use_recognize_tool_fields != false)
+    {
+        default_speed = ExternalComm_HeartbeatRecognizeDefaultSpeed(recognize); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认速度先给上位机显示。 */
+        default_flow = recognize->default_injection_flow; /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的泵流量先给上位机显示。 */
+        direction = ExternalComm_HeartbeatToolDirection(recognize->run_direction); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认方向先给上位机显示。 */
+        reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* RFID 结果优先使用完整减速比，旧字段作为兼容兜底。 */
+    }
+
+    /* block byte0：通道号，1 为 A，2 为 B。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, channel);
+    /* block byte1：刀具信息来源，区分 EEPROM、RFID EPC、RFID USER。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_GetHandleToolSource(handle_model));
+    /* block byte2：实际刀具类型，RFID 手柄来自标签，普通手柄来自 EEPROM 第三页。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->tool_type);
+    /* block byte3：刀具直径，沿用扫描层已解析单位。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->diameter);
+    /* block byte4~5：刀具长度，按大端 16 位上报。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->length);
+    /* block byte6：刀具角度。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->draw);
+    /* block byte7~8：当前方向对应速度记忆，便于上位机看到该通道速度参数。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_speed);
+    /* block byte9~10：识别出的速度下限。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->speed_min);
+    /* block byte11~12：识别出的速度上限。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->speed_max);
+    /* block byte13~14：默认注水流量，跟随通道记忆，避免 A/B 串用。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_flow);
+    /* block byte15：当前方向能力/默认方向。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, direction);
+    /* block byte16~19：完整刀具减速比，RFID EPC 可保留 32 位。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, reduction_ratio);
+}
+
+/*
+ * 函数功能：在旧心跳字段末尾追加 A/B 刀具扩展信息。
+ * 输入参数：info_area 为心跳载荷缓冲区，info_len 为当前已写入长度。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *info_len)
+{
+    uint8_t count = 0U; /* 本轮实际要追加的通道数量。 */
+    bool append_a;      /* A 通道刀具信息是否有效。 */
+    bool append_b;      /* B 通道刀具信息是否有效。 */
+    bool append_a_rfid; /* A 通道扫描缓存未完成时，是否可以用 RFID 最新结果兜底。 */
+    bool append_b_rfid; /* B 通道扫描缓存未完成时，是否可以用 RFID 最新结果兜底。 */
+    uint8_t online_a;   /* A 通道心跳在线状态，避免同一轮重复解析造成前后不一致。 */
+    uint8_t online_b;   /* B 通道心跳在线状态，避免同一轮重复解析造成前后不一致。 */
+    RfidToolResult_t rfid_a_result; /* A 通道 RFID 兜底结果，只用于本轮心跳显示。 */
+    RfidToolResult_t rfid_b_result; /* B 通道 RFID 兜底结果，只用于本轮心跳显示。 */
+
+    /* 参数无效时不追加扩展，保持旧心跳字段可正常发送。 */
+    if ((info_area == NULL) || (info_len == NULL))
+    {
+        return;
+    }
+
+    online_a = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已识别但事件未装载时，也允许上位机先显示在线。 */
+    online_b = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已识别但事件未装载时，也允许上位机先显示在线。 */
+    /* 先判断 A 通道是否在线且已完成刀具识别，插拔事件排队期间允许扫描缓存兜底。 */
+    append_a = ExternalComm_HeartbeatToolInfoValid(online_a, &MemoryMsgA, &ChannelrecognizeMessageA);
+    /* 再判断 B 通道是否在线且已完成刀具识别，插拔事件排队期间允许扫描缓存兜底。 */
+    append_b = ExternalComm_HeartbeatToolInfoValid(online_b, &MemoryMsgB, &ChannelrecognizeMessageB);
+    append_a_rfid = (append_a == false) ? ExternalComm_HeartbeatGetRfidFallback(online_a, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA, &rfid_a_result) : false; /* 扫描层未写入 tool_type 时，用已解析 RFID 原始缓存兜底上报 A 刀具。 */
+    append_b_rfid = (append_b == false) ? ExternalComm_HeartbeatGetRfidFallback(online_b, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB, &rfid_b_result) : false; /* 扫描层未写入 tool_type 时，用已解析 RFID 原始缓存兜底上报 B 刀具。 */
+
+    /* 按有效通道数量计算扩展块 count。 */
+    if ((append_a != false) || (append_a_rfid != false))
+    {
+        ++count;
+    }
+    if ((append_b != false) || (append_b_rfid != false))
+    {
+        ++count;
+    }
+
+    /* 没有任何有效刀具时不发 A5 01 00，保持旧上位机完全兼容。 */
+    if (count == 0U)
+    {
+        return;
+    }
+
+    /* 先整体检查空间，避免 header 写入后 block 写不完整。 */
+    if ((uint16_t)(*info_len + 3U + ((uint16_t)count * EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN)) > EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN)
+    {
+        return;
+    }
+
+    /* 扩展头 byte0：魔术字 A5。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC);
+    /* 扩展头 byte1：版本号 1。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION);
+    /* 扩展头 byte2：后续 20 字节 block 数量。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, count);
+
+    /* A 通道有效时先追加 A 块，保持上位机显示顺序稳定。 */
+    if (append_a != false)
+    {
+        ExternalComm_HeartbeatAppendOneToolBlock(info_area, info_len, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA);
+    }
+    else if (append_a_rfid != false)
+    {
+        ExternalComm_HeartbeatAppendRfidResultBlock(info_area, info_len, CHANNEL_A, &rfid_a_result); /* A 扫描层消费延迟时，只为上位机显示追加 RFID 刀具块。 */
+    }
+
+    /* B 通道有效时再追加 B 块。 */
+    if (append_b != false)
+    {
+        ExternalComm_HeartbeatAppendOneToolBlock(info_area, info_len, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB);
+    }
+    else if (append_b_rfid != false)
+    {
+        ExternalComm_HeartbeatAppendRfidResultBlock(info_area, info_len, CHANNEL_B, &rfid_b_result); /* B 扫描层消费延迟时，只为上位机显示追加 RFID 刀具块。 */
+    }
+}
+
 static void ExternalComm_HeartbeatAppendHandle(uint8_t *info_area,
                                                uint16_t *info_len,
                                                uint8_t online,
@@ -1650,10 +2397,12 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
     /* 泵在线时才继续追加泵类型、泵速度和 CS1237 压力扩展字段，离线时省略这些字段。 */
     if (pump_message->online_flag)
     {
+        uint16_t display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 运行态上报压力闭环后的实际输出速度，停止态仍保留设定速度。 */
+
         /* 泵类型当前来自 CS1237 DeviceCode，协议线上按 1 字节设备类型码上传。 */
         ExternalComm_HeartbeatAppendU8(info_area, info_len, (uint8_t)(pump_message->type & 0xFFU));
-        /* 泵速度是业务数值，按 2 字节大端上传。 */
-        ExternalComm_HeartbeatAppendBE16(info_area, info_len, pump_message->speed_work);
+        /* 泵速度是业务显示数值，按 2 字节大端上传；闭环限速时跟随 speed_output 实时变化。 */
+        ExternalComm_HeartbeatAppendBE16(info_area, info_len, display_speed);
         /* 压力原始值和最终重量来自 SimUartTaskFunc 解析的 CS1237 21 字节下位机帧。 */
         ExternalComm_HeartbeatAppendPumpPressure(info_area, info_len, pump_message);
     }
@@ -1669,22 +2418,32 @@ static void ExternalComm_SendHeartbeat(void)
     uint8_t run_status;
     /* tx_len 接收心跳完整帧长度。 */
     uint16_t tx_len = 0U;
+    uint8_t handle_a_online; /* A 通道心跳在线位，允许插拔事件排队时使用扫描层兜底。 */
+    uint8_t handle_b_online; /* B 通道心跳在线位，允许插拔事件排队时使用扫描层兜底。 */
+    uint8_t handle_a_raw_major; /* A 通道心跳原始主类型，优先 MemoryMsg，必要时来自扫描缓存。 */
+    uint8_t handle_a_raw_minor; /* A 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
+    uint8_t handle_b_raw_major; /* B 通道心跳原始主类型，优先 MemoryMsg，必要时来自扫描缓存。 */
+    uint8_t handle_b_raw_minor; /* B 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
 
-    /* 固定识别打开时，心跳也显示 UART5 A 泵在线且类型为注水泵，方便上位机确认当前可控状态。 */
-    ExternalComm_ApplyFixedPumpIdentity();
+    handle_a_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
+    handle_b_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
+    handle_a_raw_major = ExternalComm_HeartbeatResolveRawMajor(&MemoryMsgA, &ChannelrecognizeMessageA); /* 解析 A 原始主类型，避免 MemoryMsg 暂空导致 PXBA 显示缺失。 */
+    handle_a_raw_minor = ExternalComm_HeartbeatResolveRawMinor(&MemoryMsgA, &ChannelrecognizeMessageA); /* 解析 A 原始子类型，避免 MemoryMsg 暂空导致 PXBA 显示缺失。 */
+    handle_b_raw_major = ExternalComm_HeartbeatResolveRawMajor(&MemoryMsgB, &ChannelrecognizeMessageB); /* 解析 B 原始主类型，避免 MemoryMsg 暂空导致 PXBB 显示缺失。 */
+    handle_b_raw_minor = ExternalComm_HeartbeatResolveRawMinor(&MemoryMsgB, &ChannelrecognizeMessageB); /* 解析 B 原始子类型，避免 MemoryMsg 暂空导致 PXBB 显示缺失。 */
 
     /* 追加 A 手柄插孔在线状态；若在线，紧跟 A 手柄类型。 */
     ExternalComm_HeartbeatAppendHandle(heartbeat_info,
                                        &heartbeat_len,
-                                       WorkMessage.Channel_Aonline ? 1U : 0U,
-                                       MemoryMsgA.hand_type_raw_major,
-                                       MemoryMsgA.hand_type_raw_minor);
+                                       handle_a_online,
+                                       handle_a_raw_major,
+                                       handle_a_raw_minor);
     /* 追加 B 手柄插孔在线状态；若在线，紧跟 B 手柄类型。 */
     ExternalComm_HeartbeatAppendHandle(heartbeat_info,
                                        &heartbeat_len,
-                                       WorkMessage.Channel_Bonline ? 1U : 0U,
-                                       MemoryMsgB.hand_type_raw_major,
-                                       MemoryMsgB.hand_type_raw_minor);
+                                       handle_b_online,
+                                       handle_b_raw_major,
+                                       handle_b_raw_minor);
     /* 追加当前选中的手柄插孔，未选中或选中通道离线时为 0xFF。 */
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, ExternalComm_SelectedHandleStatus());
     /* 读取当前手柄运行情况：待机 0x01、运行中 0x02、未接入 0x03。 */
@@ -1696,7 +2455,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
-        /* 当前通道手柄工作速度，2 字节大端。 */
+        /* 当前通道手柄工作速度，单位为 WorkMessage.speed_work 内部 x10，2 字节大端；上位机显示 rpm 时需要除以 10。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
         /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);
@@ -1707,6 +2466,8 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendPump(heartbeat_info, &heartbeat_len, &pumpMessageA);
     /* 追加 B 泵在线状态；若在线，紧跟 B 泵类型和 B 泵速度。 */
     ExternalComm_HeartbeatAppendPump(heartbeat_info, &heartbeat_len, &pumpMessageB);
+    /* 追加 A/B 刀具扩展信息；无有效刀具时不追加，保持旧心跳兼容。 */
+    ExternalComm_HeartbeatAppendToolInfo(heartbeat_info, &heartbeat_len);
 
     /* 按 0xAA 功能码构造心跳帧。 */
     if (ExternalCommProtocol_BuildHeartbeat(heartbeat_info,

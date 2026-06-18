@@ -43,10 +43,19 @@ static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
     return (uint8_t)freq_work; /* 参考驱动接收端会再执行 `R_DATA[2] * 2`，主控这里保持原始命令值，不再提前翻倍。 */
 }
 
-static uint8_t MotorDrive_IsBrushedTool(uint8_t tool_type)
+/*
+ * 函数功能：判断当前通道是否需要按有刷一体刨/一体磨协议下发驱动帧。
+ * 输入参数：hand_model 为 EEPROM 第二页识别出的手柄型号；tool_type 为归一后的业务刀具类型；raw_tool_type 为 EEPROM/RFID 原始刀具型号。
+ * 返回参数：1 表示按有刷电机通道下发；0 表示按无刷/霍尔通道下发。
+ */
+static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type, uint8_t raw_tool_type)
 {
-    return (uint8_t)((tool_type == PX_YIP_ONLINES) ||
-                     (tool_type == PX_YIM_ONLINES)); /* PX 一体刨/一体磨属于有刷刀具，必须用刀具类型判断，不能误用手柄型号。 */
+    return (uint8_t)((hand_model == PX_YIP_ONLINES) ||
+                     (hand_model == PX_YIM_ONLINES) ||
+                     (tool_type == PX_YIP_ONLINES) ||
+                     (tool_type == PX_YIM_ONLINES) ||
+                     (raw_tool_type == PX_YIP_ONLINES) ||
+                     (raw_tool_type == PX_YIM_ONLINES)); /* tool_type 归一为 PLANER/GRINDH 后，仍用 raw_tool_type 保留 PXM/PXP 有刷判定。 */
 }
 
 static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
@@ -78,14 +87,55 @@ void MotorStart()
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
-         ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
+      ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
+    // uint8_t motor_startcode[motor_frem_length]={0xAA ,0x03 ,0x28 ,0x03\
+    //      ,0x01 ,0x90 ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};    
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
+/*
+ * 函数功能：根据当前 WorkMessage 运行态组装电机驱动帧，向 UART1 电机驱动板下发启动或停止命令。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void MOTORRUN(void)
 {
-    
+    static uint8_t huci=0;
+    uint8_t display_value[10]={0};
+    if(WorkMessage.tool_reduction_ratio==0)WorkMessage.tool_reduction_ratio=1;
+    if(WorkMessage.auto_identify==0)WorkMessage.tool_reduction_ratio=1;
+    uint32_t ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
+    // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
+    // {
+    //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
+    //     if(ssc_speed_value>0xFFFFU) /* 电机驱动协议速度只有高低 2 字节，临时放大后必须避免回绕成异常低速。 */
+    //     {
+    //         ssc_speed_value=0xFFFFU; /* 超过驱动帧可表达范围时按最大值下发，保证验证过程不会因溢出误判。 */
+    //     }
+    // }
+    if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)
+    {
+        if(WorkMessage.tool_type==PLANER)
+        {
+            if(ssc_speed_value<1500)
+          ssc_speed_value=ssc_speed_value*1.3;
+          if(ssc_speed_value<500)
+          ssc_speed_value=500;
+        }
+    }
+   
     if(WorkMessage.runflag_work)
     {
+        if(huci==0)
+        {
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[1] = (uint8_t)((WorkMessage.speed_set_work >> 8)&0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
+         display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
+            display_value[3] = 1U;             
+            display_value[4] = 1U; 
+            huci=1;
+	SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+     LCD_Show_2byte_Number(0x9473,0xffE0);
+        }
         //msg的数据填充
         switch(WorkMessage.dir_work)
         {
@@ -106,7 +156,7 @@ void MOTORRUN(void)
         }
         if(WorkMessage.channel_work==1)//通道1
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x01;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
@@ -119,7 +169,7 @@ void MOTORRUN(void)
         }
         else if(WorkMessage.channel_work==2)//通道2
         {
-            if(MotorDrive_IsBrushedTool(WorkMessage.tool_type) == 0U)
+            if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x02;
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
@@ -129,14 +179,27 @@ void MOTORRUN(void)
                  msg.run_type=0x04;
             }
         }
-      msg.speed_h=WorkMessage.speed_work/2560;
-      msg.speed_l=(WorkMessage.speed_work/10)%256;//速度
+      WorkMessage.current_work=0xffff;
+      msg.speed_h=ssc_speed_value/256;
+      msg.speed_l=(ssc_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256;
       msg.pro_current_l=WorkMessage.current_work%256;//电流
       MotorStart();
     }
     else
     {
+         if(huci==1){
+            huci=0;
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[1] = (uint8_t)((WorkMessage.speed_set_work >>8)& 0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
+             display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
+            display_value[3] = 1U; 
+            display_value[4] = 0U; 
+            SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+       
+	        LCD_Show_2byte_Number(0x9473,0xffff);
+
+         }
        MotorStops();
     }
 
@@ -153,6 +216,8 @@ void MOTORRUNTask(uint32_t event)
     (void)event;
     /* 根据 runflag_work、方向、通道、速度和保护电流组帧，向 UART1 电机驱动板下发命令。 */
     MOTORRUN();
+    /* 每个电机输出周期检查 Page4 速度/频率阈值，只触发蜂鸣提示，不强制停止电机输出。 */
+    Pubinterface_CheckSpeedThresholdAlarm();
     /* 每个电机输出周期刷新本地控制权，确保停止命令和驱动反馈都归零后再允许其它模式接管。 */
     ControlArbitration_RefreshMotorOwner();
 }

@@ -14,6 +14,13 @@
 //============================================================================
 void LCD_Show_Which_Map(uint8_t MapAddr);
 
+/*
+ * 函数功能：强制刷新指定背景页，不使用普通背景页去重缓存。
+ * 输入参数：MapAddr 为屏幕背景页号。
+ * 返回参数：无。
+ */
+void LCD_ForceShow_Which_Map(uint8_t MapAddr);
+
 //============================================================================
 // 函数名称: LCD_Disappear_Number()
 // 功能描述: 隐藏某个数据
@@ -85,6 +92,18 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data);
 // B9E6   B8F1  3A 20  A6D5  34 2E 30 A1A2  31 31 30  6D  6D  A1A2  20    30   A1E3
 //============================================================================
 void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
+
+//============================================================================
+// 函数名称: LCD_IntegratedCutterRawData_Update()
+// 功能描述: 公共接头 EPC 刀具参数按原始整数格式更新
+// 输　  入: Addr：数据参数的显示地址
+//           Length：长度原始整数
+//           Diameter：直径原始整数
+//           Angle：角度原始整数
+// 输    出: 无
+// 函数说明: 仅用于公共接头 EPC，直径 0x10 显示为 Φ16，避免复用一体式小数直径格式。
+//============================================================================
+void LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
 
 //============================================================================
 // 函数名称: LCD_HostModel_Update()

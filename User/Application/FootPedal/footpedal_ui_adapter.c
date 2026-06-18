@@ -1,5 +1,4 @@
 #include "footpedal_ui_adapter.h"
-#include "screen.h"
 
 typedef struct
 {
@@ -23,15 +22,14 @@ void FootPedal_SelectWin(uint8_t num)
 
     if (num == 0xFFU)
     {
-        Screen_WindowSwitch_Update((int8_t)(s_foot_pedal_ui_state.select_window_num - 1U), 0xFFU);
+        /* 新屏主运行页没有旧脚踏选框 VP，这里只复位本地选框状态，不再写旧屏窗口接口。 */
         s_foot_pedal_ui_state.select_window_num_last = 0U;
         s_foot_pedal_ui_state.select_window_num = 0U;
     }
     else if (s_foot_pedal_ui_state.select_window_num != 1U)
     {
         s_foot_pedal_ui_state.select_window_num = 1U;
-        Screen_WindowSwitch_Update((int8_t)(s_foot_pedal_ui_state.select_window_num_last - 1U),
-                                   (uint8_t)(s_foot_pedal_ui_state.select_window_num - 1U));
+        /* 新屏脚踏选框由主运行页控制模式图标表达，旧窗口切换资源已删除。 */
         s_foot_pedal_ui_state.select_window_num_last = s_foot_pedal_ui_state.select_window_num;
     }
 

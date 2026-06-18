@@ -1,4 +1,4 @@
---cpu Cortex-M4.fp --scatter d:/EH_main/soft/F413EXOsSSCH_RTOSV1.5-EH_mainReconstructV1/F413EXOsSSCH_RTOSV1.5-EH_mainReconstruct/EIDE/build/MainCtrlF413MXOs/MainCtrlF413MXOs.sct --strict --summary_stderr --info summarysizes --map --xref --callgraph --symbols --info sizes --info totals --info unused --info veneers
+--cpu Cortex-M4.fp --scatter d:/EH_main/soft/soft_SSC1/F413EXOsSSCH_RTOSV1.5-EH_mainReconstructV1/F413EXOsSSCH_RTOSV1.5-EH_mainReconstruct/EIDE/build/MainCtrlF413MXOs/MainCtrlF413MXOs.sct --strict --summary_stderr --info summarysizes --map --xref --callgraph --symbols --info sizes --info totals --info unused --info veneers
 --list .\build\MainCtrlF413MXOs\MainCtrlF413MXOs.map
 .\build\MainCtrlF413MXOs\.obj\__\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal.o
 .\build\MainCtrlF413MXOs\.obj\__\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_cortex.o
@@ -54,8 +54,9 @@
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Common\common.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\DataHand\datahand.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\DriveCtrl\drivectrl_adapter.o
+.\build\MainCtrlF413MXOs\.obj\__\User\Application\ExternalComm\external_comm_protocol.o
+.\build\MainCtrlF413MXOs\.obj\__\User\Application\ExternalComm\external_comm_task.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\FootPedal\footpedal_ui_adapter.o
-.\build\MainCtrlF413MXOs\.obj\__\User\Application\Handle\handledata.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Handle\handlekey.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Handle\handlescan.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Led\led.o
@@ -66,12 +67,8 @@
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pubinterface\Pubinterface.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pump\pump.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Pump\pump_pressure_control.o
-.\build\MainCtrlF413MXOs\.obj\__\User\Application\Screen\screen_adapter.o
-.\build\MainCtrlF413MXOs\.obj\__\User\Application\ScreenKey\param.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\ScreenKey\screenkey.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Application\Src\userparser.o
-.\build\MainCtrlF413MXOs\.obj\__\User\Application\Warn\warn.o
-.\build\MainCtrlF413MXOs\.obj\__\User\Data\data.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Hardware\Bsp\bsp_uart.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Hardware\Bsp\hw_bootstrap.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Kernel\Scheduler\kernel_entry.o
@@ -125,8 +122,5 @@
 .\build\MainCtrlF413MXOs\.obj\__\User\Tracealyzer\TraceRecorder\trcTimestamp.o
 .\build\MainCtrlF413MXOs\.obj\__\User\Tracealyzer\tracealyzer_recorder.o
 .\build\MainCtrlF413MXOs\.obj\__\User\UI\src\UI_FootPedalCalibration.o
-.\build\MainCtrlF413MXOs\.obj\__\User\UI\src\UI_Main.o
-.\build\MainCtrlF413MXOs\.obj\__\User\UI\src\UI_ModelConfiguration.o
-.\build\MainCtrlF413MXOs\.obj\__\User\UI\src\UI_Password.o
 .\build\MainCtrlF413MXOs\.obj\__\User\UI\src\UI_Start.o
 .\build\MainCtrlF413MXOs\.obj\__\User\board\board.o -o .\build\MainCtrlF413MXOs\MainCtrlF413MXOs.axf

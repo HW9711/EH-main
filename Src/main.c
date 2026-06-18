@@ -116,23 +116,23 @@ int main(void)
   Tracealyzer_RecorderInit();
 
   Hardware_PostInit();
+
   App_Bootstrap_Init();
-
   /* USER CODE END 2 */
-
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
-
   /* Start scheduler */
   vTaskStartScheduler();
-
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
-
+    // uint8_t motor_startcode[11]={0xAA ,0x03 ,0x28 ,0x03\
+    //      ,0x08 ,0xCA ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};
+    // Uart1_SendPacket(motor_startcode, 11);
+    // HAL_Delay(500);
     /* USER CODE BEGIN 3 */
 
     /* USER CODE BEGIN 3 */

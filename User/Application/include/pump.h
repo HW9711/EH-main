@@ -11,7 +11,7 @@
  * 这样脚踏、上位机、屏幕、手柄按键仍然操作逻辑 A/B，只有最后一层硬件出口做位置修正。
  */
 #ifndef PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE
-#define PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE 1U
+#define PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE 0U
 #endif
 
 /*
@@ -20,7 +20,7 @@
  * 旧代码固定为 70，导致上位机设置 100 以上时最终仍按 70 输出；当前交付配置保留 100~300 区间的速度变化。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
-#define PUMP_INJECTWATER_SPEED_MAX 300U
+#define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
 extern uint8_t pum_close_flag_B; 

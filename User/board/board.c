@@ -5,6 +5,7 @@
  */
 #include "stm32f4xx_hal.h"
 #include "board.h"
+#include "board_resource_map.h"
 
 /*============================================================================
  * 串口外设句柄声明 (来自CubeMX生成的文件)
@@ -102,6 +103,12 @@ void Board_GPIOConfiguration(void)
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(BOARD_H_MD3_PORT, &GPIO_InitStruct);
+
+    /* A/B手柄实体运行键输入 - 上拉输入，按下时PE12/PE13被拉低，由手柄按键任务轮询控制启停 */
+    GPIO_InitStruct.Pin = BOARD_RES_HANDLE_RUN_KEY_A_PIN | BOARD_RES_HANDLE_RUN_KEY_B_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(BOARD_RES_HANDLE_RUN_KEY_A_PORT, &GPIO_InitStruct);
 
     /* LED指示灯初始化 - 输出 */
     GPIO_InitStruct.Pin = BOARD_LED_H1_PIN | BOARD_LED_H2_PIN;

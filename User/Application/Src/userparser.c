@@ -17,7 +17,7 @@
 
 //#include "adc.h"
 #include "lcd.h"
-#include "screen.h"
+#include "screen_address.h"
 #include "motor.h"
 #include "UI_Start.h"
 #include "common.h"
@@ -60,8 +60,6 @@ static void Userparser_PubinterfaceInit(void)
 
 void Userparser_Init(void)
 {
-  LCD_Show_Which_Map(0);  //开机页
-
   Iwdg_Reset();
 
   //1.GPIO
@@ -77,13 +75,14 @@ void Userparser_Init(void)
   Uart4_Init();  //脚踏
   Uart5_Init();  //步进1
 	Uart6_Init();  //屏
+  LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_STARTUP);  //串口6初始化后再强制切启动页，保证 EX8 实际收到 page0 切换帧
   Uart7_Init();  //步进2
 
 	//4.分体按键
 	//............	
   Iwdg_Reset();
 
-  Screen_TipInfo_Update(0);     //清除报警显示
+  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);     //清除新屏报警显示区，旧屏提示接口不再参与开机流程
 
   Motor_ErrorEmergencyStop_Ctrl();  //21ms 电机停止发送...
 
@@ -93,6 +92,8 @@ void Userparser_Init(void)
   Delay_ms(500);
 	Iwdg_Reset();
 	Delay_ms(500);
+  	Delay_ms(500);
+    	Delay_ms(500);
   Userparser_PubinterfaceInit();
 	SscRadioFreq_Init();  //150ms射频初始化...串口3
   Iwdg_Reset();
@@ -117,7 +118,6 @@ void Userparser_Init(void)
 	SscUIDisplayTask_Init();
 	SimUartTask_Init();
 
-	LCD_Show_Which_Map(4);
-	PoweronInit();
+	SendUIDSMessage(UI_POWERINIT_ID, false, NULL); //屏幕开机初始化由 UIDP 任务统一刷新，避免绕过统一 UI 入口
 
 }

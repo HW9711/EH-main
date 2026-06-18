@@ -1,14 +1,10 @@
 //UI_Start.c
 
 #include "UI_Start.h"
-#include "UI_FootPedalCalibration.h"
 #include "iwdg.h"
 #include "delay.h"
-#include "data.h"
-#include "screenkey.h"
 #include "lcd.h"
-#include "screen.h"
-#include "sscBEEP.h"
+#include "screen_address.h"
 
 #include <stdint.h>
 
@@ -19,6 +15,11 @@
 // 输    出: 0返回主界面 1下一页
 // 函数说明: 开机扫描”LOGO点击动作“ 进入厂家配置 4s等待...
 //============================================================================
+/*
+ * 函数功能：保持 EX8 启动页上电等待节奏，并周期性喂狗；旧屏 LOGO 连击入口已停用。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void UI_Start_Fun(void)
 {
   uint8_t TimeCnt = 0;
@@ -28,31 +29,13 @@ void UI_Start_Fun(void)
   {
     Delay_ms(2);
 
-    //按键扫描
-	  //....................
-    ScreenKey_Scan();
-
 	  if(++TimeCnt < 20)
 	    continue ;
 
 	  TimeCnt = 0;
 
 	  Iwdg_Reset();
-
-	  if (ScreenKey_LegacyEventTake() == KEY_CONTINUOUSCLICK)
-	  {
-	    // 启动页按键提示统一进入新蜂鸣队列，不再写旧蜂鸣时长状态。
-	    SendKeyBeepMessage(1U);
-
-			LCD_Show_Which_Map(3); 
-			LCD_Show_Which_Map(0); 
-			LCD_Show_Which_Map(3); 
-		
-      Delay_ms(5);
-
-			UI_FootPedalCalibration_Fun();
-			
-		}
+	  /* EX8 启动页不再保留旧 LOGO 连击入口；这里只保留启动页等待和喂狗节奏，标定页由新屏专用入口维护。 */
   }
 }
 
@@ -67,25 +50,9 @@ void UI_Start_Fun(void)
 //============================================================================
 void UI_Show_init(void)
 {
-  uint8_t temp[5] = { 0 };
+  LCD_Show_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);        //新屏开机后主运行页固定为 page4，保持老成功版启动页和运行页分离
+  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//清掉新屏报警提示区，后续完整区域刷新由 UIDP 任务统一接管
 
-  //先复位所有参数
-  Screen_InformationBarImage_Update(2, 4, 2, 4);  //	LCD_Show_Info(2,2,2);
-  Screen_IntegratedCutterPic_Update(0);  //	LCD_Show_Cutter(0);    //刀具连接图片  30ms
-  Screen_HandleConnectState_Update(temp, temp);  //  LCD_Show_Handle_Connect(0,0,0);  50ms
-  Screen_FootPedalConnectState_Update(1);  //  LCD_Show_FootPedal(1); //脚踏连接图片
-
-  Screen_ElectricalMachineryDirectionState_Update2(0);// 运行模式切换 单向，往复
-  Screen_TipInfo_Update(0);  // 	LCD_Show_Error(0);     //报警显示  5ms
-
-//  LCD_Show_Which_Map(2); //运行界面
-	LCD_Disappear_Picture(0x1410);
-	LCD_Disappear_Picture(0x1411);	
-	LCD_Disappear_Picture(0x1412);	
-//	LCD_Disappear_Picture(0x1413);	
-	LCD_Disappear_Picture(0x1414);
-	LCD_Disappear_Picture(0x1415);	
-	
 }
 
 

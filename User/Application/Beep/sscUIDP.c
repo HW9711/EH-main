@@ -6,164 +6,373 @@
 #include "sscUIDP.h"
 #include "lcd.h"
 #include "Pubinterface.h"
+#include "screen_address.h"
 
 uint8_t DisPlayData[10] = {0};
 
 QueueHandle_t UIDPMsgQueue = NULL;
 kernel_task_t UIDISPLAYBehaviorHandle;
 
-typedef struct 
+typedef struct
 {
 	uint8_t areaId;//a泵区域，B泵区域，速度区域，等等
-	
+
 	bool enable_flag;//激活
 	uint8_t Value[10];
 }UIDPMessage_t ;
 
-static void UIDPQueue_Init(void)  
+static UIDPMessage_t s_uidp_last_msg = {0};//记录上一次成功投递的 UI 消息，用于复用副工程的重复刷新过滤效果。
+static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
+/* 泵档位正常运行态固定使用每档渐隐组的第 0 帧，取消动画后续如需播放再传入 1~4 帧。 */
+#define UIDP_PUMP_GEAR_RUN_FRAME 0U
+/* 每个显示任务周期最多连续处理 12 条 UI 消息，压缩上电主运行页控件逐个加载的可见时间。 */
+#define UIDP_DISPLAY_BATCH_LIMIT 12U
+/* 泵档位表每档包含 5 张渐隐资源，0 档没有渐隐时 5 个槽位都保持同一张图。 */
+#define UIDP_PUMP_GEAR_FRAME_COUNT 5U
+/* 泵档位最多显示 0~10 共 11 档，和屏幕工程 249/349 起始资源保持一致。 */
+#define UIDP_PUMP_GEAR_COUNT 11U
+
+/* B 泵档位资源：249 为 0 档；250~254 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
+static const uint16_t s_uidp_pump_b_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
+{
+	{249U, 249U, 249U, 249U, 249U},
+	{250U, 251U, 252U, 253U, 254U},
+	{260U, 261U, 262U, 263U, 264U},
+	{270U, 271U, 272U, 273U, 274U},
+	{280U, 281U, 282U, 283U, 284U},
+	{290U, 291U, 292U, 293U, 294U},
+	{300U, 301U, 302U, 303U, 304U},
+	{310U, 311U, 312U, 313U, 314U},
+	{320U, 321U, 322U, 323U, 324U},
+	{330U, 331U, 332U, 333U, 334U},
+	{340U, 341U, 342U, 343U, 344U}
+};
+
+/* A 泵档位资源：349 为 0 档；350~354 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
+static const uint16_t s_uidp_pump_a_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
+{
+	{349U, 349U, 349U, 349U, 349U},
+	{350U, 351U, 352U, 353U, 354U},
+	{360U, 361U, 362U, 363U, 364U},
+	{370U, 371U, 372U, 373U, 374U},
+	{380U, 381U, 382U, 383U, 384U},
+	{390U, 391U, 392U, 393U, 394U},
+	{400U, 401U, 402U, 403U, 404U},
+	{410U, 411U, 412U, 413U, 414U},
+	{420U, 421U, 422U, 423U, 424U},
+	{430U, 431U, 432U, 433U, 434U},
+	{440U, 441U, 442U, 443U, 444U}
+};
+
+static void UIDPQueue_Init(void)
 {
     UIDPMsgQueue = Kernel_QueueCreate(20, sizeof(UIDPMessage_t), "UIDPMsgQueue");
 }
+
+/*
+ * 函数功能：按泵类型和流量值换算屏幕 0~10 档档位。
+ * 输入参数：pump_type 为 DRAWWATER/INJECTWATER/POURWATER；value 为当前泵流量/速度值。
+ * 返回参数：0~10 档位，超出范围时按 10 档钳位。
+ */
+static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
+{
+	uint8_t gear_value = 0U; /* 默认 0 档，保证未知类型或 0 流量时不误显示蓝色进度。 */
+
+	if(pump_type==INJECTWATER)//注水
+	{
+		if(value==0U)gear_value=0U;
+		else if(value<=5U)gear_value=1U;
+		else if(value<=10U)gear_value=2U;
+		else if(value<=15U)gear_value=3U;
+		else if(value<=20U)gear_value=4U;
+		else if(value<=25U)gear_value=5U;
+		else if(value<=30U)gear_value=6U;
+		else if(value<=40U)gear_value=7U;
+		else if(value<=50U)gear_value=8U;
+		else if(value<=60U)gear_value=9U;
+		else gear_value=10U;
+	}
+	else if(pump_type==DRAWWATER)//抽吸
+	{
+		if(value==8U)gear_value=7U;
+		else if(value==10U)gear_value=8U;
+		else if(value==12U)gear_value=9U;
+		else if(value>=15U)gear_value=10U;
+		else gear_value=(uint8_t)value;
+	}
+	else if(pump_type==POURWATER)//灌注
+	{
+		if(value==0U)gear_value=0U;
+		else if(value<=30U)gear_value=1U;
+		else if(value<=60U)gear_value=2U;
+		else if(value<=90U)gear_value=3U;
+		else if(value<=120U)gear_value=4U;
+		else if(value<=150U)gear_value=5U;
+		else if(value<=180U)gear_value=6U;
+		else if(value<=210U)gear_value=7U;
+		else if(value<=240U)gear_value=8U;
+		else if(value<=270U)gear_value=9U;
+		else gear_value=10U;
+	}
+
+	if(gear_value >= UIDP_PUMP_GEAR_COUNT)
+	{
+		gear_value = (uint8_t)(UIDP_PUMP_GEAR_COUNT - 1U); /* 防止抽吸泵直接传入异常大值越过图片表。 */
+	}
+
+	return gear_value;
+}
+
+/*
+ * 函数功能：按 A/B 泵、档位和渐隐帧号查找新屏泵区域图片资源。
+ * 输入参数：pump_id 为 1 表示 A 泵、2 表示 B 泵；gear_value 为 0~10 档；fade_frame 为 0~4 渐隐帧。
+ * 返回参数：屏幕图片资源号，异常参数返回对应泵 0 档图。
+ */
+static uint16_t UIDP_PumpGearPicture(uint8_t pump_id, uint8_t gear_value, uint8_t fade_frame)
+{
+	if(gear_value >= UIDP_PUMP_GEAR_COUNT)
+	{
+		gear_value = 0U; /* 异常档位回到 0 档，避免访问越界导致屏幕显示错图。 */
+	}
+	if(fade_frame >= UIDP_PUMP_GEAR_FRAME_COUNT)
+	{
+		fade_frame = UIDP_PUMP_GEAR_RUN_FRAME; /* 当前固件只刷新运行态，异常帧号回到第 0 帧。 */
+	}
+	if(pump_id == 1U)
+	{
+		return s_uidp_pump_a_gear_pic[gear_value][fade_frame]; /* A 泵使用 349~444 资源表。 */
+	}
+	if(pump_id == 2U)
+	{
+		return s_uidp_pump_b_gear_pic[gear_value][fade_frame]; /* B 泵使用 249~344 资源表。 */
+	}
+	return s_uidp_pump_b_gear_pic[0U][UIDP_PUMP_GEAR_RUN_FRAME]; /* 未知泵号按 B 泵 0 档兜底，避免返回 0 号图片。 */
+}
+
+/*
+ * 函数功能：按泵类型和启用状态选择泵类型标题图片。
+ * 输入参数：pump_type 为泵业务类型；enable_flag 表示该泵是否可用。
+ * 返回参数：210~215 范围内的新屏泵类型图片号。
+ */
+static uint16_t UIDP_PumpTypePicture(uint8_t pump_type, bool enable_flag)
+{
+	switch(pump_type)
+	{
+		case DRAWWATER:
+			return enable_flag ? 215U : 214U; /* 抽吸泵标题使用 214 灰色、215 黄色，和 EX8 屏幕表格保持一致。 */
+		case POURWATER:
+			return enable_flag ? 213U : 212U; /* 灌注泵标题使用 212/213 一组。 */
+		case INJECTWATER:
+			return enable_flag ? 211U : 210U; /* 注水泵识别后必须显示 211 黄色图标，停用态显示 210 灰色。 */
+		default:
+			return 0U; /* 未识别类型不再兜底为抽吸泵，调用侧负责隐藏类型标题。 */
+	}
+}
+
+/*
+ * 函数功能：判断泵类型是否已经由 CS1237 设备码识别为有效业务类型。
+ * 输入参数：pump_type 为 DRAWWATER、INJECTWATER、POURWATER 或 0。
+ * 返回参数：true 表示可显示泵类型标题，false 表示未知类型需要隐藏标题。
+ */
+static bool UIDP_IsPumpTypeKnown(uint8_t pump_type)
+{
+	switch(pump_type)
+	{
+		case DRAWWATER:
+		case POURWATER:
+		case INJECTWATER:
+			return true; /* 三种已确认泵类型都有对应标题资源，允许写入 A/B 类型 VP。 */
+		default:
+			return false; /* 未识别或备用设备码不能显示成抽吸泵，避免误导现场判断。 */
+	}
+}
+
+/*
+ * 函数功能：按泵类型、启用状态和运行状态选择 A/B 共用的启停按钮图片。
+ * 输入参数：button_type 为泵业务类型；enable_flag 表示按钮是否可点；run_flag 表示泵是否运行。
+ * 返回参数：200~205 范围内的新屏泵启停按钮图片号。
+ */
+static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bool run_flag)
+{
+	switch(button_type)
+	{
+		case DRAWWATER:
+		case POURWATER:
+			return enable_flag ? (run_flag ? 202U : 201U) : 200U; /* 抽吸泵和注水泵使用启动按钮组：200 禁用、201 停止、202 运行。 */
+		case INJECTWATER:
+			return enable_flag ? (run_flag ? 205U : 204U) : 203U; /* 灌注泵使用排空按钮组：203 禁用、204 停止、205 运行。 */
+		default:
+			return 200U; /* 未识别泵类型统一回到启动按钮禁用图，避免误显示为可操作状态。 */
+	}
+}
+
+/*
+ * 函数功能：向屏幕显示任务投递一个区域刷新消息。
+ * 输入参数：areaId 为 UI 区域编号；enable_flag 为显示开关；Value 为最多 10 字节的区域参数，允许为空。
+ * 返回参数：无。
+ */
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 {
 	if(UIDPMsgQueue == NULL) return;
     UIDPMessage_t msg;
     msg.areaId = areaId;
 	msg.enable_flag = enable_flag;
-	memcpy(msg.Value, Value, 10);
-    (void)Kernel_QueueSend(UIDPMsgQueue, &msg, 10);
+	if(Value != NULL)
+	{
+		memcpy(msg.Value, Value, 10);//调用方传入有效参数时完整复制，保证显示任务读取到稳定快照
+	}
+	else
+	{
+		memset(msg.Value, 0, sizeof(msg.Value));//开机初始化和清屏类消息不需要参数，统一补零避免空指针访问
+	}
+	if((s_uidp_last_valid != 0U) &&
+	   (s_uidp_last_msg.areaId == msg.areaId) &&
+	   (s_uidp_last_msg.enable_flag == msg.enable_flag) &&
+	   (memcmp(s_uidp_last_msg.Value, msg.Value, sizeof(msg.Value)) == 0))
+	{
+		return;//同一区域、同一开关状态和同一参数不重复入队，降低屏幕串口刷新压力。
+	}
+    if(Kernel_QueueSend(UIDPMsgQueue, &msg, 10) == pdPASS)
+	{
+		s_uidp_last_msg = msg;//只在投递成功后更新去重缓存，避免队列满时吞掉下一次有效刷新。
+		s_uidp_last_valid = 1U;//标记去重缓存已建立，后续重复 UI 消息才允许被过滤。
+	}
 }
 
+/*
+ * 函数功能：刷新 A/B 泵流量可视化区域，按新屏 5 帧渐隐资源表查图。
+ * 输入参数：pump_id 为 1 表示 A 泵、2 表示 B 泵；pump_type 为泵业务类型；value 为当前流量值。
+ * 返回参数：无。
+ */
 void PumpGeardisplay(uint8_t pump_id ,uint8_t pump_type,uint16_t value)
 {
-	uint8_t Gear_values=0;
-	if(pump_type==INJECTWATER)//注水
+	uint8_t gear_value = UIDP_PumpGearFromValue(pump_type, value); /* 先把不同泵类型的流量换算成统一 0~10 档。 */
+	uint16_t pic_value = UIDP_PumpGearPicture(pump_id, gear_value, UIDP_PUMP_GEAR_RUN_FRAME); /* 当前正常刷新使用每档第 0 帧运行态。 */
+
+	if(pump_id==1U)//A泵
 	{
-		if(value==0)Gear_values=0;
-		else if(value>0&&value<=5)Gear_values=1;
-		else if(value>5&&value<=10)Gear_values=2;
-		else if(value>10&&value<=15)Gear_values=3;
-		else if(value>15&&value<=20)Gear_values=4;
-		else if(value>20&&value<=25)Gear_values=5;
-		else if(value>25&&value<=30)Gear_values=6;
-		else if(value>30&&value<=40)Gear_values=7;
-		else if(value>40&&value<=50)Gear_values=8;
-		else if(value>50&&value<=60)Gear_values=9;
-		else if(value>60&&value<=70)Gear_values=10;
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_GEAR_AREA, pic_value); /* A 泵区域 VP 使用 UIDP_LCD_VP_PUMP_A_GEAR_AREA，资源号为 349~444。 */
 	}
-	else if(pump_type==DRAWWATER)//抽吸
+	else if(pump_id==2U)
 	{
-		if(value==8)Gear_values=7;
-		else if(value==10)Gear_values=8;
-		else if(value==12)Gear_values=9;
-		else if(value==15)Gear_values=10;
-		else
-		Gear_values=value;
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA, pic_value); /* B 泵区域 VP 使用 UIDP_LCD_VP_PUMP_B_GEAR_AREA，资源号为 249~344。 */
 	}
-	else if(pump_type==POURWATER)
-	{
-		if(value==0)Gear_values=0;
-		else if(value>0&&value<=30)Gear_values=1;
-		else	if(value>30&&value<=60)Gear_values=2;
-		else	if(value>60&&value<=90)Gear_values=3;
-		else	if(value>90&&value<=120)Gear_values=4;
-		else	if(value>120&&value<=150)Gear_values=5;
-		else	if(value>150&&value<=180)Gear_values=6;
-		else	if(value>180&&value<=210)Gear_values=7;
-		else	if(value>210&&value<=240)Gear_values=8;
-		else	if(value>240&&value<=270)Gear_values=9;
-		else	if(value>270&&value<=300)Gear_values=10;
-	}
-	if(pump_id==1)//A泵
-			LCD_Show_Picture(0x1602,Gear_values+487);
-			else if(pump_id==2)LCD_Show_Picture(0x1416,Gear_values+387);
 }
 
 //A泵区域显示，参数（是否激活，流量值，单位ml或者l）
+/*
+ * 函数功能：刷新 A 泵区域的可用状态、泵类型图标、档位和流量数值。
+ * 输入参数：enable_flag 表示 A 泵区域是否可用；pump_type 表示 DRAWWATER/INJECTWATER/POURWATER 业务类型；pump_value 表示当前显示流量。
+ * 返回参数：无。
+ */
 void UIPUMPADP(bool enable_flag,uint8_t pump_type,uint16_t pump_value )
 {
 
 	if(!enable_flag)//A区域暗灭
 	{
-         //共同点档位暗灭，按钮默认启动暗灭
-		LCD_Show_Picture(0x1601,482);//泵抬头
-		LCD_Show_Picture(0x1603,498);//+
-		LCD_Show_Picture(0x1604,500);//-
-		LCD_Show_Picture(0x1602,487);//档位
-		LCD_Show_Picture(0x1605,480);//ml
-		LCD_Show_Picture(0x1606,484);//按钮
-		LCD_Disappear_Number(0x9530);//流量值
+		if(UIDP_IsPumpTypeKnown(pump_type))
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE, UIDP_PumpTypePicture(pump_type, false));//A 泵类型已识别时才显示对应暗态标题
+		}
+		else
+		{
+			LCD_Disappear_Picture(UIDP_LCD_VP_PUMP_A_TYPE);//A 泵未知类型隐藏标题，避免开机默认显示为抽吸泵
+		}
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_GEAR_AREA, UIDP_PumpGearPicture(1U, 0U, UIDP_PUMP_GEAR_RUN_FRAME));//A 泵区域回到 0 档 349
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_UNIT, 220U);//A 泵单位暗态资源，当前导出资源中 220/221 为单位图
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(pump_type, false, false));//A 泵启动按钮暗态/停止图
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 222U);//A 泵加按钮暗态，使用 8 寸屏统一加号失能资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 223U);//A 泵减按钮暗态，使用 8 寸屏统一减号失能资源
+		LCD_Disappear_Number(UIDP_LCD_SP_PUMP_A_VALUE);//流量值
 	}
 	else
 	{
-		LCD_Show_Picture(0x1603,499);
-		LCD_Show_Picture(0x1604,501);
-		LCD_Show_Number (0x9530, 0x3530);//显示
-		LCD_Show_4byte_Number(0x3530,pump_value);
+		LCD_Show_Number (UIDP_LCD_SP_PUMP_A_VALUE, UIDP_LCD_VP_PUMP_A_VALUE);//显示
+		LCD_Show_4byte_Number(UIDP_LCD_VP_PUMP_A_VALUE,pump_value);
 		switch(pump_type)
 		{
 			case DRAWWATER://抽吸
-				LCD_Show_Picture(0x1601,483);//显示屏图片重新编号，包裹所以泵图片
-				LCD_Show_Picture(0x1605,481);
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE, UIDP_PumpTypePicture(DRAWWATER, true));//A 泵类型 VP 使用 UIDP_LCD_VP_PUMP_A_TYPE 显示抽吸亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_UNIT, 221U);//A 泵单位亮态资源
 				PumpGeardisplay(1,DRAWWATER,pump_value);
+			break;
 			case POURWATER://灌注
-			    LCD_Show_Picture(0x1601,483);
-				LCD_Show_Picture(0x1605,481);
+			    LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE, UIDP_PumpTypePicture(POURWATER, true));//A 泵类型 VP 使用 UIDP_LCD_VP_PUMP_A_TYPE 显示灌注亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_UNIT, 221U);//A 泵单位亮态资源
 				PumpGeardisplay(1,POURWATER,pump_value);
 			break;
 			case INJECTWATER://注水
-				LCD_Show_Picture(0x1601,483);
-				LCD_Show_Picture(0x1605,481);
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_TYPE, UIDP_PumpTypePicture(INJECTWATER, true));//A 泵类型 VP 使用 UIDP_LCD_VP_PUMP_A_TYPE 显示注水亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_UNIT, 221U);//A 泵单位亮态资源
 				PumpGeardisplay(1,INJECTWATER,pump_value);
 			//排空按钮黑色
 			break;
 		}
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(pump_type, true, false));//档位图写完后再补画 A 侧停止态按钮，防止按钮区域被泵区刷新盖住
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_PLUS, 225U);//A 泵加按钮亮态，泵区底图刷新后最后补画避免被覆盖
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_MINUS, 224U);//A 泵减按钮亮态，泵区底图刷新后最后补画避免方向反
 	}
 }
 //B泵区域显示，参数（是否激活，流量值，单位ml或者l）
+/*
+ * 函数功能：刷新 B 泵区域的可用状态、泵类型图标、档位和流量数值。
+ * 输入参数：enable_flag 表示 B 泵区域是否可用；pump_type 表示 DRAWWATER/INJECTWATER/POURWATER 业务类型；pump_value 表示当前显示流量。
+ * 返回参数：无。
+ */
 void UIPUMPBDP(bool enable_flag,uint8_t pump_type,uint16_t pump_value )
 {
-if(!enable_flag)//A区域暗灭
+if(!enable_flag)//B区域暗灭
 	{
-         //共同点档位暗灭，按钮默认启动暗灭
-		LCD_Show_Picture(0x1415,382);
-		LCD_Show_Picture(0x1417,498);
-		LCD_Show_Picture(0x1418,500);
-		LCD_Show_Picture(0x1419,480);
-		LCD_Show_Picture(0x1420,384);
-		LCD_Show_Picture(0x1416,387);
-		LCD_Disappear_Number(0x9550);
+		if(UIDP_IsPumpTypeKnown(pump_type ))
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE, UIDP_PumpTypePicture(pump_type, false));//B 泵类型已识别时才显示对应暗态标题
+		}
+		else
+		{
+			LCD_Disappear_Picture(UIDP_LCD_VP_PUMP_B_TYPE);//B 泵未知类型隐藏标题，避免开机默认显示为抽吸泵
+		}
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 220U);//B 泵单位暗态资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA, UIDP_PumpGearPicture(2U, 0U, UIDP_PUMP_GEAR_RUN_FRAME));//B 泵区域回到 0 档 249
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, false, false));//B 泵启动按钮暗态/停止图
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 222);//B 泵加按钮暗态，当前 EX8 导出 0x1422 绑定 498/499，不能再写 A 泵 222/225 资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 223);//B 泵减按钮暗态，当前 EX8 导出 0x1424 绑定 500/501，避免按钮触控有效但图标不显示
+		LCD_Disappear_Number(UIDP_LCD_SP_PUMP_B_VALUE);
 	}
 	else
 	{
-		
-		LCD_Show_Picture(0x1417,499);
-		LCD_Show_Picture(0x1418,501);
-		
-		LCD_Show_Number (0x9550, 0x3550);
-		LCD_Show_4byte_Number(0x3550,pump_value);
+
+		LCD_Show_Number (UIDP_LCD_SP_PUMP_B_VALUE, UIDP_LCD_VP_PUMP_B_VALUE);
+		LCD_Show_4byte_Number(UIDP_LCD_VP_PUMP_B_VALUE,pump_value);
 		switch(pump_type)
 		{
 			case DRAWWATER://抽吸
-				LCD_Show_Picture(0x1415,383);//显示屏图片重新编号，包裹所以泵图片
-				LCD_Show_Picture(0x1419,481);
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE, UIDP_PumpTypePicture(DRAWWATER, true));//B 泵类型 VP 使用 UIDP_LCD_VP_PUMP_B_TYPE 显示抽吸亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 221U);//B 泵单位亮态资源
 				PumpGeardisplay(2,DRAWWATER,pump_value);
+			break;
 			case POURWATER://灌注
-			    LCD_Show_Picture(0x1601,483);
-				LCD_Show_Picture(0x1605,481);
-				
+			    LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE, UIDP_PumpTypePicture(POURWATER, true));//B 泵类型 VP 使用 UIDP_LCD_VP_PUMP_B_TYPE 显示灌注亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 221U);//B 泵单位亮态资源
+
 				PumpGeardisplay(2,POURWATER,pump_value);
 			break;
 			case INJECTWATER://注水
-				LCD_Show_Picture(0x1601,483);
-				LCD_Show_Picture(0x1605,481);
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_TYPE, UIDP_PumpTypePicture(INJECTWATER, true));//B 泵类型 VP 使用 UIDP_LCD_VP_PUMP_B_TYPE 显示注水亮态
+				LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 221U);//B 泵单位亮态资源
 				PumpGeardisplay(2,INJECTWATER,pump_value);
 			//排空按钮黑色
 			break;
 		}
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, true, false));//档位图写完后再补画 B 侧停止态按钮，防止按钮区域被泵区刷新盖住
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 225);//B 泵加按钮亮态，对应 0x1422 当前导出的 499 号资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 224);//B 泵减按钮亮态，对应 0x1424 当前导出的 501 号资源
 	}
 }
-//控制模式显示，参数（是否激活，控制模式-脚控，手控，触控，外部控制）
+/*
+ * 函数功能：刷新主运行页控制方式图标。
+ * 输入参数：enable_flag 表示该控制方式是否可用；control_type 为 1 脚控、2 手控、3 触控、4 外控；light_flag 表示是否高亮。
+ * 返回参数：无。
+ */
 void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 {
 	if(enable_flag)
@@ -172,45 +381,64 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 		if(control_type==1)//脚踏
 		{
            if(light_flag)
-		   LCD_Show_Picture(0x1412,372);
+		   LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT,32U);
 		   else
-		   LCD_Show_Picture(0x1412,371);
+		   LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT,31U);
 		}
 		else if(control_type==2)//手控
 		{
 			if(light_flag)
-			LCD_Show_Picture(0x1413,375);
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,35U);
 			else
-			LCD_Show_Picture(0x1413,374);
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,34U);
 		}
 		else if(control_type==3)//触控，记得宏定义
 		{
-			LCD_Show_Picture(0x1414,377);
+			light_flag?LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U):LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U);//触控入口使用 36~38 资源组
 		}
 		else if(control_type==4)///外部控制
 		{
 			if(light_flag)
-			LCD_Show_Picture(0x1450,551);
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL,40U);
 			else
-			LCD_Show_Picture(0x1450,550);
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL,39U);
 
 		}
 	}
 	else
 	{
-		//暗灭
-		if(control_type==1)
-		LCD_Show_Picture(0x1412,370);
-		else if(control_type==2)
-		LCD_Show_Picture(0x1413,373);
-		else if(control_type==3)
-		LCD_Show_Picture(0x1414,376);
-		else if(control_type==4)
-		LCD_Disappear_Picture(0x1450);//这里HMI是否隐藏待考虑
+		// 暗灭；control_type 为 0 时用于开机或无当前通道的全量初始化。
+		if(control_type == 0U)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT, 30U);//脚控按钮暗态
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE, 33U);//手控按钮默认白色可选态，未选中时不能显示黄色高亮
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);//触控按钮默认白色可选态，按下进入触控后才显示黄色
+			LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL);//外部通信未接入时隐藏小电脑图标，避免误显示为在线
+		}
+		else if(control_type == 1U)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT, 30U);
+		}
+		else if(control_type == 2U)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE, 33U);
+		}
+		else if(control_type == 3U)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);
+		}
+		else if(control_type == 4U)
+		{
+			LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL);
+		}
 	}
 }
-//方向显示，参数（是否激活，方向-顺nawo han时针，逆时针，往复）
-void UIDIRDP(bool enable_flag,uint8_t dir_type, bool light_flag)
+/*
+ * 函数功能：刷新主运行页方向按钮。
+ * 输入参数：enable_flag 表示方向区是否可用；dir_type 为 1 正转、2 反转、3 往复；light_flag 为 1 高亮、2 暗态、其它普通态。
+ * 返回参数：无。
+ */
+void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 {
 	if(enable_flag)
 	{
@@ -218,46 +446,65 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, bool light_flag)
 		switch(dir_type)
 		{
 			case 1://顺时针
-			if(light_flag)
-			LCD_Show_Picture(0x1408,362);
+			if(light_flag == 1U)
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,22U);
+			else if(light_flag == 2U)
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,20U);
 			else
-			LCD_Show_Picture(0x1408,361);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,21U);
 			break;
 			case 2://逆时针
-			if(light_flag)
-				LCD_Show_Picture(0x1410,365);
+			if(light_flag == 1U)
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,25U);
+			else if(light_flag == 2U)
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
 			else
-			LCD_Show_Picture(0x1410,364);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,24U);
 			break;
 			case 3://往复
-			if(light_flag)
-			LCD_Show_Picture(0x1409,368);
+			if(light_flag == 1U)
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,28U);
+			else if(light_flag == 2U)
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
 			else
-			LCD_Show_Picture(0x1409,367);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,27U);
 			break;
 		}
 	}
 	else
 	{
-		switch(dir_type)
+		if(dir_type == 0U)
 		{
-			case 1://顺时针
-			LCD_Show_Picture(0x1408,360);
-			break;
-			case 2://逆时针
-			LCD_Show_Picture(0x1410,363);
-			break;
-			case 3://往复
-			LCD_Show_Picture(0x1409,366);
-			break;
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD, 20U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 26U);
+			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE, 23U);
+		}
+		else
+		{
+			switch(dir_type)
+			{
+				case 1://顺时针
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,20U);
+				break;
+				case 2://逆时针
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
+				break;
+				case 3://往复
+				LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
+				break;
+			}
 		}
 		//暗灭
 	}
 }
-//手柄显示区域（启）
+/*
+ * 函数功能：刷新 A/B 手柄连接和选中状态。
+ * 输入参数：enable_flag 表示手柄是否在线；handle_type 为 UI 图标类别；handle_channel 为 1/A 或 2/B；light_flag 表示当前通道是否选中。
+ * 返回参数：无。
+ */
 void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uint8_t light_flag)
 {
-	
+
 	if(enable_flag)
 	{
 		//传入工具，是否需要重写代码//AB通道分开显示，不互斥，防止未来双通道同时进行
@@ -265,44 +512,62 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 		{
           		switch(handle_type)
 				{
-					case 1://耳膜
-					light_flag?LCD_Show_Picture(0x1401,104):LCD_Show_Picture(0x1401,101);//耳膜连接
+					case 1://通用磨钻
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,102):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,101);//通用磨钻手柄，101为已连接，102为已选中
 					break;
-					case 2://
-					light_flag?LCD_Show_Picture(0x1401,105):LCD_Show_Picture(0x1401,102);//分体
+					case 2://分体手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,104):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,103);//分体手柄，103为已连接，104为已选中
 					break;
-					case 3://
-					light_flag?LCD_Show_Picture(0x1401,106):LCD_Show_Picture(0x1401,103);//一体
+					case 3://一体刨手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,106):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,105);//一体刨手柄，105为已连接，106为已选中
 					break;
-					case 4://
-					light_flag?LCD_Show_Picture(0x1401,108):LCD_Show_Picture(0x1401,107);//一体磨削
+					case 4://一体磨手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,110):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,109);//一体磨手柄，109为已连接，110为已选中
 					break;
-					case PXBA_ONLINES://空心钻 A 型手柄
-					case PXBB_ONLINES://空心钻 B 型手柄，屏幕图标和 PXBA 使用同一组资源
-					light_flag?LCD_Show_Picture(0x1401,110):LCD_Show_Picture(0x1401,109);//空心钻
+					case 5U://UI 类别 5，骨钻/空心钻等预留手柄共用骨钻资源
+					case 6U://UI 类别 6，克氏针等预留手柄暂时共用骨钻资源
+					case LGZ_I_ONLINES://颅骨钻一型预留，先复用新增手柄图标资源
+					case LGZ_II_ONLINES://颅骨钻二型预留，先复用新增手柄图标资源
+					case KSZ_I_ONLINES://克氏针一型预留，先复用新增手柄图标资源
+					case KSZ_II_ONLINES://克氏针二型预留，先复用新增手柄图标资源
+					case KXZ_I_ONLINES://空心钻一型预留，沿用空心钻图标资源
+					case KXZ_II_ONLINES://空心钻二型预留，沿用空心钻图标资源
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,108):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,107);//骨钻/预留手柄，107为已连接，108为已选中
+					break;
+					case COMMON_SOCKET_ONLINES:
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,112):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,111);//公共接头 A 通道使用 8 寸屏专用图标
 					break;
 				}
-			
+
 		}
 		else if(handle_channel==2)//B通道
 		{
 				switch(handle_type)
 				{
-					case 1://耳膜
-					light_flag?LCD_Show_Picture(0x1402,204):LCD_Show_Picture(0x1402,201);//耳膜连接
+					case 1://通用磨钻
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,132):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,131);//通用磨钻手柄，131为已连接，132为已选中
 					break;
-					case 2://
-					light_flag?LCD_Show_Picture(0x1402,205):LCD_Show_Picture(0x1402,202);//分体
+					case 2://分体手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,134):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,133);//分体手柄，133为已连接，134为已选中
 					break;
-					case 3://
-					light_flag?LCD_Show_Picture(0x1402,206):LCD_Show_Picture(0x1402,203);//一体
+					case 3://一体刨手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,136):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,135);//一体刨手柄，135为已连接，136为已选中
 					break;
-					case 4://
-					light_flag?LCD_Show_Picture(0x1402,208):LCD_Show_Picture(0x1402,207);//一体磨削
+					case 4://一体磨手柄
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,140):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,139);//一体磨手柄，139为已连接，140为已选中
 					break;
-					case PXBA_ONLINES://空心钻 A 型手柄
-					case PXBB_ONLINES://空心钻 B 型手柄，屏幕图标和 PXBA 使用同一组资源
-					light_flag?LCD_Show_Picture(0x1402,210):LCD_Show_Picture(0x1402,209);//空心钻
+					case 5U://UI 类别 5，骨钻/空心钻等预留手柄共用骨钻资源
+					case 6U://UI 类别 6，克氏针等预留手柄暂时共用骨钻资源
+					case LGZ_I_ONLINES://颅骨钻一型预留，先复用新增手柄图标资源
+					case LGZ_II_ONLINES://颅骨钻二型预留，先复用新增手柄图标资源
+					case KSZ_I_ONLINES://克氏针一型预留，先复用新增手柄图标资源
+					case KSZ_II_ONLINES://克氏针二型预留，先复用新增手柄图标资源
+					case KXZ_I_ONLINES://空心钻一型预留，沿用空心钻图标资源
+					case KXZ_II_ONLINES://空心钻二型预留，沿用空心钻图标资源
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,138):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,137);//骨钻/预留手柄，137为已连接，138为已选中
+					break;
+					case COMMON_SOCKET_ONLINES:
+					light_flag?LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,142):LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,141);//公共接头 B 通道使用 8 寸屏专用图标
 					break;
 				}
 		}
@@ -311,200 +576,398 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 	{
 		//暗灭
 		if(handle_channel==1)//A通道
-		LCD_Show_Picture(0x1401,100);//无
+		LCD_Show_Picture(UIDP_LCD_VP_HANDLE_A,100);//无
 		else if(handle_channel==2)//B通道
-		LCD_Show_Picture(0x1402,200);//无手柄
+		LCD_Show_Picture(UIDP_LCD_VP_HANDLE_B,130);//无手柄
 	}
 }
-//刀具显示（是否显示，刀具类型直刨刀，弯刨刀）
+/*
+ * 函数功能：刷新磨头/刨刀类型显示。
+ * 输入参数：enable_flag 表示刀具区是否可用；tool_type 为 1 表示刨刀、0 表示磨头。
+ * 返回参数：无。
+ */
 void UITOOLDP(bool enable_flag,bool tool_type)
 {
-	if(enable_flag)
-	{
-        if(tool_type==1)//wanpao
-		LCD_Show_Picture(0x1406,511);
-		else
-		LCD_Show_Picture(0x1406,512);//直刨
-	}
-	else
-	{
-		//消失
-		LCD_Disappear_Picture(0x1406);
-	}
+	// if(enable_flag)
+	// {
+    //     if(tool_type==1)//wanpao
+	// 	{
+	// 		LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//刨刀选中时磨头按钮显示未选中态
+	// 		LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,56U);//刨刀按钮显示选中态
+	// 	}
+	// 	else
+	// 	{
+	// 		LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,54U);//磨头按钮显示选中态
+	// 		LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//磨头选中时刨刀按钮显示未选中态
+	// 	}
+	// }
+	// else
+	// {
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//刀具区禁用时磨头回到暗态
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//刀具区禁用时刨刀回到暗态
+	// }
 }
-//刀具规格 长度，直径、角度
-void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,uint8_t tool_angle )
+/*
+ * 函数功能：刷新主界面刀具规格文本。
+ * 输入参数：enable_flag 表示规格区是否显示；tool_length/tool_Diameter/tool_angle 为屏幕规格值；raw_display_flag 为公共接头 EPC 原始整数显示标志。
+ * 返回参数：无。
+ */
+void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
 {
 	if(enable_flag)
 	{
-		LCD_Show_2byte_Number(0x8008,34);
-		LCD_IntegratedCutterData_Update(0x4200, tool_length, tool_Diameter, tool_angle); //刀具参数
+		LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,34);
+		//LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, 30, 20, 10); 
+		if(raw_display_flag != 0U)
+		{
+			LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //公共接头 EPC 按原始整数显示，避免 0x10 被格式化成 1.6。
+		}
+		else
+		{
+			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //PXBA/PXBB 保持原有 x10 小数直径格式。
+		}
 	}
 	else
 	{
 		//消失
-		LCD_Show_2byte_Number(0x8008,0);
+		LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,0);
 	}
 }
 
-//磨头还是刨刀（手动按钮）
-void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag)
+/*
+ * 函数功能：刷新手动刀具选择和自动识别按钮区域。
+ * 输入参数：enable_flag 表示手动磨/刨按钮是否显示；PAO_flag 为 true 表示刨刀选中、false 表示磨头选中；auto_identify_flag 为 true 表示当前处于 RFID 自动识别模式；tool_result_pic 为 0x1404 图片编号。
+ * 返回参数：无。
+ */
+void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,uint8_t tool_result_pic)
 {
 	if(enable_flag)
 	{
-      if(PAO_flag)
-	  {
-		LCD_Show_Picture(0x1404,420);//刨选中
-		LCD_Show_Picture(0x1403,423);
-	  }
-	  else
-	  {
-        LCD_Show_Picture(0x1404,421);
-		LCD_Show_Picture(0x1403,422);//磨选中
-	  }
+		if(auto_identify_flag)
+		{
+			//LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
+			LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,61U);//自动识别等待或掉线时显示“自动识别”图，63/61/62 由业务层决定
+			LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//自动按钮识别显示
+			LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
+			LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);
+		}
+		else
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);
+			LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”
+			if(PAO_flag)
+			{
+					LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//刨刀选中时磨头按钮回未选中态
+					LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,56U);//刨刀按钮显示选中态
+			}
+			else
+			{
+				LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,54U);//磨头按钮显示选中态
+				LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//磨头选中时刨刀按钮回未选中态
+			}
+		}
+    //   if(PAO_flag)
+	//   {
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);//手动刨刀模式下 0x1404 显示“手柄刨标”，和 EX8 按键表保持一致
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//刨刀选中时磨头按钮回未选中态
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,56U);//刨刀按钮显示选中态
+	// 	LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”，避免和自动识别状态混淆
+	//   }
+	//   else
+	//   {
+    //     LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);//手动磨头模式下仍显示“手柄刨标”，磨/刨状态由 0x1405/0x1406 按钮区表达
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,54U);//磨头按钮显示选中态
+	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//磨头选中时刨刀按钮回未选中态
+	// 	LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”，和 EX8 图号 52 对齐
+	//   }
 	}
 	else
 	{
-		//消失
-		LCD_Disappear_Picture(0x1403);//刨刀消失
-		LCD_Disappear_Picture(0x1404);//磨刀消失
-	}
+		if(auto_identify_flag){
+				LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//自动按钮识别显示
+		}
+		else
+		{
+			LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);
+		}
+	
+		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
+		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
+		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);
+	// 	if(auto_identify_flag)
+	// 	{
+	// 		if(tool_result_pic != 0U)
+	// 		{
+	// 			LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,tool_result_pic);//自动识别等待或掉线时显示最近一次刀具结果图，63/61/62 由业务层决定
+	// 		}
+	// 		else
+	// 		{
+	// 			LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);//自动识别已成功时隐藏 0x1404，避免和 0x4200 规格同时出现
+	// 		}
+	// 	}
+	// 	else
+	// 	{
+	// 		//LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,60U);//非自动识别且无有效规格时显示禁用态
+	// 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
+	// 	}
+	// 	LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
+	// 	LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);
+	// 	// LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//磨头按钮禁用态
+	// 	// LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//刨刀按钮禁用态
+	// 	if(auto_identify_flag)
+	// 	{
+	// 		LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//自动识别模式等待 RFID 或显示规格时，0x1407 保持“自动识别”图 51
+	// 	}
+	// 	else
+	// 	{
+	// 		LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);
+	// 		//LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//无有效当前通道时沿用自动识别默认图，避免上电空白
+	// 	}
+	 }
 }
-//开口定位
+/*
+ * 函数功能：刷新开口定位入口。
+ * 输入参数：enable_flag 表示当前刀具是否需要显示开口定位。
+ * 返回参数：无。
+ */
 void UIORALDP(bool enable_flag)
 {
-	enable_flag?LCD_Show_Picture(0x1405,400):LCD_Disappear_Picture(0x1405);
+	enable_flag?LCD_Show_Picture(UIDP_LCD_VP_OPEN_POSITION,50U):LCD_Disappear_Picture(UIDP_LCD_VP_OPEN_POSITION);//开口定位只使用 UIDP_LCD_VP_OPEN_POSITION 和 50 号资源
 }
 
+/*
+ * 函数功能：刷新频率显示区域。
+ * 输入参数：enable_flag 表示频率区是否可见；freq_value 为当前频率；update_value 表示是否只刷新数值。
+ * 返回参数：无。
+ */
 void UIFREQDP(bool enable_flag,uint8_t freq_value,bool update_value)
 {
+	
 	if(enable_flag)
 	{
        //显示频率值
 	   if(!update_value)//只更新数据
 	   {
-		LCD_Show_Picture(0x1411,351);//显示频率
-		LCD_Show_Number (0x9470, 0x3470);
+		LCD_Show_Picture(UIDP_LCD_VP_FREQ_AREA,12U);//显示频率
+		LCD_Show_Number (UIDP_LCD_SP_FREQ_VALUE, UIDP_LCD_VP_FREQ_VALUE);
 	   }
-	   LCD_Show_4byte_Number(0x3470,freq_value);
+	   LCD_Show_4byte_Number(UIDP_LCD_VP_FREQ_VALUE,freq_value);
+
 	}
 	else
 	{
 	   //消失或者暗黑
-	   LCD_Disappear_Picture(0x1411);//隐藏频率框
-	   LCD_Disappear_Number(0x9470);///隐藏数字
+	   LCD_Show_Picture(UIDP_LCD_VP_FREQ_AREA,11U);//频率区暗态
+	   LCD_Disappear_Number(UIDP_LCD_SP_FREQ_VALUE);///隐藏数字
 	}
 }
 
-void UISPEEDDP(bool enable_flag,uint16_t speed_value,bool update_value,bool run_flag)
+/*
+ * 函数功能：刷新主界面速度显示区，并在运行状态下切换速度字体颜色。
+ * 输入参数：enable_flag 为速度区显示开关；speed_value 为当前速度值；update_value 表示是否只刷新数值；run_flag 表示电机是否处于运行态。
+ * 返回参数：无。
+ */
+void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_flag)
 {
+	static uint8_t huchi=0U;//记录运行态黄色字体是否已经下发，避免副工程同类 UI 场景反复写屏。
 	if(enable_flag)
 	{
        //显示速度值
 	   if(!update_value)
 	   {
-			LCD_Show_Picture(0x1407,341);//速度激活
-			LCD_Show_Number (0x9420, 0x3420);
+			huchi=0U;//重新显示速度框时清掉颜色缓存，保证下一次运行态会重新下发字体颜色。
+			LCD_Show_Picture(UIDP_LCD_VP_SPEED_AREA,2U);//速度激活
+			LCD_Show_Number (UIDP_LCD_SP_SPEED_VALUE, UIDP_LCD_VP_SPEED_VALUE);
 	   }
 	   else//运行中更新数据
 	   {
 		 if(run_flag)
 		 {
 			//黄色字体
-			LCD_Show_2byte_Number(0x9423,0xffE0);
+			if(huchi==0U)
+			{
+				LCD_Show_2byte_Number(UIDP_LCD_SP_SPEED_UNIT_COLOR,0xffE0);
+				huchi=1U;//黄色字体已经写入，后续运行中只刷新速度值。
+			}
 		 }
 		 else
 		 {
 			//黑色字体
-			LCD_Show_2byte_Number(0x9423,0xffFF);
+			huchi=0U;//退出运行态后释放颜色缓存，下次启动仍会重新写黄色字体。
+			LCD_Show_2byte_Number(UIDP_LCD_SP_SPEED_UNIT_COLOR,0xffFF);
 		 }
 	   }
-	   LCD_Show_4byte_Number(0x3420,speed_value);
+	   LCD_Show_4byte_Number(UIDP_LCD_VP_SPEED_VALUE,speed_value);
 	}
 	else
 	{
 	   //消失或者暗黑
-	   	LCD_Show_Picture(0x1407,340);//速度暗黑
-			LCD_Disappear_Number(0x9420);
+	    huchi=0U;//速度区隐藏后清掉颜色状态，避免再次显示时沿用旧运行态。
+		LCD_Show_Picture(UIDP_LCD_VP_SPEED_AREA,1U);//速度暗黑
+			LCD_Disappear_Number(UIDP_LCD_SP_SPEED_VALUE);
 	}
 }
+/*
+ * 函数功能：刷新报警提示图片。
+ * 输入参数：enable_flag 表示是否显示报警；arm_value 为 WorkMessage 统一报警码。
+ * 返回参数：无。
+ */
 void UIAIARMDP(bool enable_flag,uint8_t arm_value)
 {
 	if(enable_flag)
 	{
       //根据报警值显示图片
+	  /* 报警图片号按 EX8 屏幕表格 80~88 绑定，避免旧屏图号导致报警文字错位。 */
 	  switch(arm_value)
 	  {
 		case WORK_ALARM_HANDLE_NOT_CONNECTED:
-		LCD_Show_Picture(0x1421,520);//手柄未连接，请链接手柄
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,80U);//手柄未连接，请链接手柄
 		break;
 		case WORK_ALARM_MANUAL_SELECTED:
-		LCD_Show_Picture(0x1421,521);//手控已选中，请用手控
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,81U);//手控已选中，请用手控
 		break;
 		case WORK_ALARM_FOOT_SELECTED:
-		LCD_Show_Picture(0x1421,525);//脚控已选中，请用脚控
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,82U);//脚控已选中，请用脚控
 		break;
 		case WORK_ALARM_MOTOR_OVERLOAD:
-		LCD_Show_Picture(0x1421,527);//电机过载，请松开脚踏
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,87U);//电机过载使用 EX8 87 号报警图
 		break;
 		case WORK_ALARM_FOOT_VALUE_ERROR:
-		LCD_Show_Picture(0x1421,530);//脚踏值错误，请联系售后
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,83U);//脚踏存储值错误使用 EX8 83 号报警图
 		break;
 		case WORK_ALARM_MOTOR_OVERLOAD_ALT:
-		LCD_Show_Picture(0x1421,531);//电机过载，请松开脚踏
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,87U);//兼容旧过载报警码，同样显示 EX8 87 号过载图
 		break;
 		case WORK_ALARM_UID_ERROR:
-		LCD_Show_Picture(0x1421,533);//英文UID错误
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,85U);//UID错误
 		break;
 		case WORK_ALARM_MOTOR_COMM_ERROR:
-		LCD_Show_Picture(0x1421,534);//英文电机通讯异常
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//当前 EX8 未提供通讯异常专图，先落到通用保护图 84
 		break;
 		case WORK_ALARM_HALL_ERROR:
-		LCD_Show_Picture(0x1421,535);//英文HALL值错误
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,86U);//HALL 值错误使用 EX8 86 号报警图
 		break;
-		case WORK_ALARM_HANDLE_MODEL_ERROR:
-		LCD_Show_Picture(0x1421,536);//英文手柄型号错误
+		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
+		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
+		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//手柄型号校验失败暂无专图，使用通用保护图，避免误显示外部控制
+		break;
+		case WORK_ALARM_MOTOR_DRIVER_BOARD:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//驱动板故障暂无专图，使用 EX8 84 号通用保护图
 		break;
 	  }
-	  
+
 	}
 	else
 	{
 		//消失
-		LCD_Disappear_Picture(0x1421);//无错隐藏
+		LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//无错隐藏
 	}
 }
+/*
+ * 函数功能：刷新 A 泵启停按钮图标，按泵业务类型选择注水按钮或灌注/抽吸按钮资源。
+ * 输入参数：enable_flag 表示按钮是否可用；button_type 表示当前泵业务类型；run_flag 表示泵是否处于运行态。
+ * 返回参数：无。
+ */
 void UIPUMPABUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)
 {
 	if(enable_flag)
 	{
        //显示泵A按钮
-	   if(button_type==1)//注水
-	  run_flag? LCD_Show_Picture(0x1606,486):LCD_Show_Picture(0x1606,485);//按钮
-	  else if(button_type==2||button_type==3)//灌注或者抽吸
-	  run_flag? LCD_Show_Picture(0x1606,386):LCD_Show_Picture(0x1606,385);//按钮,重新排序
+	  LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(button_type, true, run_flag));//A 泵启动按钮使用 UIDP_LCD_VP_PUMP_A_BUTTON，资源使用 200~205
 	}
 	else
 	{
 		//消失
-		LCD_Show_Picture(0x1606,484);//按钮
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_A_BUTTON, UIDP_PumpButtonPicture(button_type, false, false));//A 泵禁用时回停止底图
 	}
 }
 //b泵显示按钮
+/*
+ * 函数功能：刷新 B 泵启停按钮图标，按泵业务类型选择注水按钮或灌注/抽吸按钮资源。
+ * 输入参数：enable_flag 表示按钮是否可用；button_type 表示当前泵业务类型；run_flag 表示泵是否处于运行态。
+ * 返回参数：无。
+ */
 void UIPUMPBBUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)//自动识别按钮，欠缺字体变黄，或者变黑
 {
 	if(enable_flag)
 	{
-       //显示泵A按钮
-	   if(button_type==1)//注水
-	  run_flag? LCD_Show_Picture(0x1420,486):LCD_Show_Picture(0x1420,485);//按钮
-	  else if(button_type==2||button_type==3)//灌注或者抽吸
-	  run_flag? LCD_Show_Picture(0x1420,386):LCD_Show_Picture(0x1420,385);//按钮,重新排序
+       //显示泵B按钮
+	  LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(button_type, true, run_flag));//B 泵启动按钮使用 UIDP_LCD_VP_PUMP_B_BUTTON，避免和 UIDP_LCD_VP_PUMP_B_GEAR_AREA 重叠
 	}
 	else
 	{
 		//消失
-		LCD_Show_Picture(0x1420,484);//按钮
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(button_type, false, false));//B 泵禁用时回停止底图
+	}
+}
+
+/*
+ * 函数功能：按当前 pumpMessage 快照直接预绘 A/B 泵显示，不经过 UI 队列二次排队。
+ * 输入参数：pump_area_id 为 A/B 泵区域 UI 编号，button_area_id 为 A/B 泵启停按钮 UI 编号，pump_message 为当前泵状态快照。
+ * 返回参数：无。
+ */
+static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_area_id, const pumpMessage_t *pump_message)
+{
+	uint8_t display_value[10] = {0U}; /* 复用 UIDP 队列协议的 10 字节参数格式，保证直接预绘和运行期刷新解释一致。 */
+	bool pump_available = false; /* 泵类型为 0 时表示尚未识别，开机预绘要显示禁用态而不是误显示抽吸泵。 */
+	uint16_t display_speed = 0U; /* 显示速度使用 Pubinterface 的统一换算，运行态显示实际输出，停止态显示设定值。 */
+
+	if(pump_message == NULL)
+	{
+		return; /* 防御空指针，避免开机预绘阶段异常访问导致 UI 任务中断。 */
+	}
+
+	pump_available = (pump_message->type != 0U); /* 只有 CS1237 已识别出业务泵类型时，泵区才按可用态显示。 */
+	display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 保持与 Pubinterface_RefreshPumpADisplay/BDisplay 的速度口径一致。 */
+
+	display_value[0] = (uint8_t)pump_message->type; /* Value[0] 传泵类型，UIPUMPADP/UIPUMPBDP 用它选择注水、灌注或抽吸图标。 */
+	display_value[1] = (uint8_t)(display_speed >> 8); /* Value[1] 传显示速度高字节，保证 16 位流量值完整。 */
+	display_value[2] = (uint8_t)(display_speed & 0xFFU); /* Value[2] 传显示速度低字节，与队列刷新协议保持一致。 */
+	if(pump_area_id == UI_PUMPA_ID)
+	{
+		UIPUMPADP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* A 泵开机预绘直接写 VP，避免 page4 显示后再排队刷新。 */
+	}
+	else if(pump_area_id == UI_PUMPB_ID)
+	{
+		UIPUMPBDP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* B 泵同样直接预绘，解决 B 区按钮/流量区后加载的可见闪动。 */
+	}
+
+	display_value[1] = pump_message->run_flag ? 1U : 0U; /* 启停按钮参数改为运行标志，保持 UI_PUMPABUTTON_ID/UI_PUMPBBUTTON_ID 协议。 */
+	display_value[2] = 0U; /* 按钮刷新不使用速度低字节，清零避免复用上面的流量参数。 */
+	if(button_area_id == UI_PUMPABUTTON_ID)
+	{
+		UIPUMPABUTTONDP(pump_available, display_value[0], display_value[1]); /* A 泵按钮在切页前同步到禁用、停止或运行态。 */
+	}
+	else if(button_area_id == UI_PUMPBBUTTON_ID)
+	{
+		UIPUMPBBUTTONDP(pump_available, display_value[0], display_value[1]); /* B 泵按钮在切页前同步到禁用、停止或运行态。 */
+	}
+}
+
+/*
+ * 函数功能：显示或隐藏触控/外部控制弹窗入口。
+ * 输入参数：enable_flag 表示是否显示弹窗；run_flag 表示触控控制是否已经启动运行。
+ * 返回参数：无。
+ */
+void UITOUCHDP(bool enable_flag,bool run_flag)
+{
+	if(enable_flag)
+	{
+		LCD_Show_Picture(UIDP_LCD_VP_TOUCH_WORK,70U);//触控激活时显示 0x1430 触控工作界面，保持主图标和工作区同步
+		if(run_flag)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U);//触控运行中高亮主运行页触控图标
+		}
+		else
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U);//触控已激活但未运行时显示可用态
+		}
+	}
+	else
+	{
+		LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//触控退出时隐藏 0x1430 工作区，避免旧触控界面残留
+		LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,36U);//触控退出或外控释放时回到暗态，不再写旧弹窗 VP
 	}
 }
 void UIDISPLAYBehavior()
@@ -512,11 +975,20 @@ void UIDISPLAYBehavior()
 	if(UIDPMsgQueue != NULL)
 	{
 		UIDPMessage_t msg;
+		uint8_t processed_count = 0U; /* 单次调度内批量消费少量 UI 消息，减少主运行页控件陆续出现。 */
 		// 非阻塞方式接收消息
-		if(Kernel_QueueReceive(UIDPMsgQueue, &msg, 0) == pdTRUE)
+		while(processed_count < UIDP_DISPLAY_BATCH_LIMIT)
 		{
+			if(Kernel_QueueReceive(UIDPMsgQueue, &msg, 0) != pdTRUE)
+			{
+				break; /* 当前队列已空时立即让出任务周期，避免空转占用调度时间。 */
+			}
+			processed_count++; /* 记录本周期实际处理条数，用于限制 UART6 连续发送压力。 */
 			switch (msg.areaId)
 			{
+					case UI_TOUCH_ID:
+					UITOUCHDP(msg.enable_flag,msg.Value[0]);
+					break;
 					case UI_PUMPA_ID:
 					UIPUMPADP(msg.enable_flag,msg.Value[0],msg.Value[1]<<8|msg.Value[2]);
 					break;
@@ -536,7 +1008,7 @@ void UIDISPLAYBehavior()
 					UITOOLDP(msg.enable_flag,msg.Value[0]);
 					break;
 					case UI_TOOLSPEC_ID:
-					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3]);
+					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3],msg.Value[4]);
 					break;
 					case UI_ORAL_ID:
 					UIORALDP(msg.enable_flag);
@@ -545,13 +1017,13 @@ void UIDISPLAYBehavior()
 					UIFREQDP(msg.enable_flag,msg.Value[0],msg.Value[1]);
 					break;
 					case UI_SPEED_ID:
-					UISPEEDDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3]);
+					UISPEEDDP(msg.enable_flag,msg.Value[0]<<16|msg.Value[1]<<8|msg.Value[2],msg.Value[3],msg.Value[4]);
 					break;
 				    case UI_AIARM_ID:
 					UIAIARMDP(msg.enable_flag,msg.Value[0]);
 					break;
 					case UI_MANUALBUTTON_ID:
-					UIMANUALBUTTONDP(msg.enable_flag,msg.Value[0]);
+					UIMANUALBUTTONDP(msg.enable_flag,msg.Value[0],msg.Value[1],msg.Value[2]);
 					break;
 					case UI_PUMPAGEAR_ID:
 					break;
@@ -563,6 +1035,23 @@ void UIDISPLAYBehavior()
 					case UI_PUMPBBUTTON_ID:
 					UIPUMPBBUTTONDP(msg.enable_flag,msg.Value[0],msg.Value[1]);
 					break;
+					case UI_POWERINIT_ID:
+					UIDP_DrawPumpDisplaySnapshot(UI_PUMPA_ID, UI_PUMPABUTTON_ID, &pumpMessageA);//A 泵按当前 pumpMessageA 直接预绘，切到 page4 后不再肉眼看到泵区二次加载
+					UIDP_DrawPumpDisplaySnapshot(UI_PUMPB_ID, UI_PUMPBBUTTON_ID, &pumpMessageB);//B 泵同样按当前 pumpMessageB 直接预绘，保持左右泵区来源一致
+					UICONTROLDP(0,0,0);
+					LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//开机预绘时只隐藏 0x1430 触控工作区，不改触控主按钮白色可选态
+					UIDIRDP(0,0,0);
+					UIHANDLEDP(0,0,1,0);//上电未插手柄时先画出 A 通道未连接状态，避免空白区域
+					UIHANDLEDP(0,0,2,0);//上电未插手柄时先画出 B 通道未连接状态，后续插拔事件再覆盖
+					UITOOLDP(0,0);
+					UITOOLSPECDP(0,30,20,10,0);
+					UIORALDP(0);
+					UIFREQDP(0,0,0);
+					UISPEEDDP(0,0,0,0);
+					UIAIARMDP(0,0);
+					UIMANUALBUTTONDP(0,0,0,0);
+					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
+					break;
 					default:
 					break;
 			}
@@ -573,9 +1062,9 @@ void UIDISPLAYBehavior()
 void UIDISPLAYBehaviorTask(uint32_t event)
 {
 	(void)event;
-	
+
 	UIDISPLAYBehavior();
-	
+
 }
 
 void SscUIDisplayTask_Init(void)
@@ -583,4 +1072,4 @@ void SscUIDisplayTask_Init(void)
 	UIDPQueue_Init();
 	Kernel_TaskCreate(&UIDISPLAYBehaviorHandle, UIDISPLAYBehaviorTask);
 	Kernel_TaskStart(&UIDISPLAYBehaviorHandle, KERNEL_TASK_ALWAYS, 10);//10ms触发一次，更新及时
-} 
+}

@@ -135,7 +135,6 @@ virtualFolder:
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
             - path: ../User/Application/Pump/pump_pressure_control.c
-            - path: ../User/Application/Screen/screen_adapter.c
             - path: ../User/Application/ScreenKey/screenkey.c
             - path: ../User/Application/Led/sysrunled.c
             - path: ../User/Application/Led/led.c
