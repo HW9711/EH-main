@@ -2073,7 +2073,7 @@ static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
  */
 void HandlescanA_Fun_SSC(void)
 {
-    static  uint8_t XUYAOrfid_flag=0;
+    static  uint8_t XUYAOrfid_flag=0;//RFID标志位
     
     uint8_t is_inserted;                                      /* 当前采样到的 A 通道插入状态，1 表示短接成立，0 表示短接断开。 */
     AT24CS32_CRC_Result verify_result;                       /* 保存 EEPROM 认证函数输出的中间结果，便于底层后续扩展。 */
@@ -2290,8 +2290,31 @@ void HandlescanA_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
         s_a_tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 A 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_a_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3&&XUYAOrfid_flag==0)
+        if (s_a_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
         {
+            if ((XUYAOrfid_flag != 0U) && (s_a_verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX))
+            {
+                Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* RFID 两轮未读到刀具头时清空规格缓存，避免 PXBA/PXBB 继续落入 Page3 解析并把基座 EEPROM 当成刀具。 */
+                Rfid_ClearChannelResult(CHANNEL_A); /* 作废 A 通道当前 RFID 结果和晚到请求，保证后续在线监测从干净状态重新读取真实刀具头。 */
+                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageA,
+                                                           mapped_model,
+                                                           raw_type_major,
+                                                           raw_type_minor); /* 只保留 A 通道 RFID 基座信息，刀具类型和规格继续保持空状态。 */
+                Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* 重新装入 A 通道基座 Page6 步进，后续真正 RFID 刀具上线时继续继承。 */
+                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A); /* 刷新 A 通道基座在线状态，让屏幕关闭规格区并显示等待 RFID 刀具头。 */
+                Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* RFID 无刀具头不是坏手柄，退出等待后释放本通道历史认证报警。 */
+                Handlescan_ResetVerifyRetry(&s_a_verify_retry_count, &s_a_verify_retry_wait_ticks); /* 基座已按无刀具在线处理，清掉本轮 RFID 快速重试计数。 */
+                s_a_last_alarm = 0U; /* 清掉最近报警缓存，避免后续在线监测被旧报警状态阻塞。 */
+                s_a_rfid_wait_ticks = 0U; /* 清掉等待计数，进入在线监测后由低频监测重新计时。 */
+                s_a_rfid_last_sequence = 0U; /* 没有有效刀具头时清掉已消费结果序号，下一次真实标签必须重新装载。 */
+                s_a_rfid_last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 影响后续刀具头上线判断。 */
+                s_a_rfid_miss_count = 0U; /* 无刀具基座在线后从 0 开始做低频缺失监测，避免立刻触发掉线清理。 */
+                s_a_rfid_monitor_pending = 0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
+                s_a_rfid_tool_online = 0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
+                s_a_stage = HANDLESCAN_STAGE_ONLINE; /* A 通道进入基座在线保持态，后续只由 RFID 在线监测刷新真实刀具。 */
+                XUYAOrfid_flag = 0U; /* 本轮 RFID 上线等待结束，防止该临时标志影响下一次插拔识别。 */
+                return; /* RFID 来源手柄无论是否有刀具头，都不能继续执行普通 EEPROM Page3 解析。 */
+            }
             XUYAOrfid_flag=1;
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
             if (Handlescan_StartRfidWait(CHANNEL_A,
@@ -2746,8 +2769,31 @@ void HandlescanB_Fun_SSC(void)
 
         mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
         s_b_tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 B 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_b_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3&&XUYAOrfid_flag==0)
+        if (s_b_tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
         {
+            if ((XUYAOrfid_flag != 0U) && (s_b_verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX))
+            {
+                Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* RFID 两轮未读到刀具头时清空 B 通道规格缓存，避免可拆基座误走 Page3 刀具解析。 */
+                Rfid_ClearChannelResult(CHANNEL_B); /* 作废 B 通道当前 RFID 结果和晚到请求，后续只接受新一轮真实标签回包。 */
+                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageB,
+                                                           mapped_model,
+                                                           raw_type_major,
+                                                           raw_type_minor); /* 只保留 B 通道 RFID 基座信息，刀具字段保持 0 表示等待标签。 */
+                Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* 重新装入 B 通道基座 Page6 步进，等待真实 RFID 刀具上线继承。 */
+                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B); /* 刷新 B 通道基座在线状态，让屏幕关闭规格区并显示等待 RFID 刀具头。 */
+                Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* RFID 无刀具头不是坏手柄，退出等待后释放本通道历史认证报警。 */
+                Handlescan_ResetVerifyRetry(&s_b_verify_retry_count, &s_b_verify_retry_wait_ticks); /* 基座已按无刀具在线处理，清掉本轮 RFID 快速重试计数。 */
+                s_b_last_alarm = 0U; /* 清掉最近报警缓存，避免后续在线监测被旧报警状态阻塞。 */
+                s_b_rfid_wait_ticks = 0U; /* 清掉等待计数，进入在线监测后由低频监测重新计时。 */
+                s_b_rfid_last_sequence = 0U; /* 没有有效刀具头时清掉已消费结果序号，下一次真实标签必须重新装载。 */
+                s_b_rfid_last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 影响后续刀具头上线判断。 */
+                s_b_rfid_miss_count = 0U; /* 无刀具基座在线后从 0 开始做低频缺失监测，避免立刻触发掉线清理。 */
+                s_b_rfid_monitor_pending = 0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
+                s_b_rfid_tool_online = 0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
+                s_b_stage = HANDLESCAN_STAGE_ONLINE; /* B 通道进入基座在线保持态，后续只由 RFID 在线监测刷新真实刀具。 */
+                XUYAOrfid_flag = 0U; /* 本轮 RFID 上线等待结束，防止该临时标志影响下一次插拔识别。 */
+                return; /* RFID 来源手柄无论是否有刀具头，都不能继续执行普通 EEPROM Page3 解析。 */
+            }
             XUYAOrfid_flag=1;
             Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
             if (Handlescan_StartRfidWait(CHANNEL_B,
