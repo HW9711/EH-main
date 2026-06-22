@@ -94,6 +94,14 @@ static uint8_t ScreenKey_ShouldBlockTouchKeepAliveByAlarm(void)
 static void ScreenKey_ServiceTouchKeepAlive(void)
 {
 
+  if (WorkMessage.hmiactive_work != 0U)
+  {
+    s_touch_keepalive_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS; /* 外控占用时不维护本机触控保活计时，避免外控手柄运行被 0x5520 超时逻辑停止。 */
+    s_touch_alarm_release_required = 0U; /* 外控期间触控锁存直接视为空闲，退出外控后下一次触控重新开始计时。 */
+    s_touch_alarm_release_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS; /* 同步复位释放计数，避免外控结束后沿用旧触控长按状态。 */
+    return; /* 外控虽然复用 TOUCHWORK 互斥标志，但不能进入本机触控保活状态机。 */
+  }
+
   if ((WorkMessage.drivetype_work != TOUCHWORK) || (WorkMessage.touchactive_work != TOUCHWORK))
   {
     s_touch_keepalive_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS; /* 非触控模式不累计超时，避免脚踏/手控被误停。 */

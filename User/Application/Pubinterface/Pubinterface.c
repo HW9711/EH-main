@@ -668,7 +668,7 @@ void Pubinterface_RefreshControlModeDisplay(void)
 
 /*
  * 函数功能：刷新主运行页外部通信小电脑图标。
- * 输入参数：connected_flag 表示外部通信链路是否有合法帧；active_flag 表示外部通信是否正在占用控制权。
+ * 输入参数：connected_flag 表示外部通信链路是否有合法帧；active_flag 表示外部通信是否正在控制输出。
  * 返回参数：无。
  */
 void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag)
@@ -676,8 +676,8 @@ void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_fl
 	uint8_t display_value[10] = {0U}; /* UI_CONTROL_ID 的 Value[0]=4 固定代表外部通信图标，Value[1] 表示是否黄色高亮。 */
 
 	display_value[0] = 4U; /* 4 是新屏审查表中的外部通信/小电脑图标编号。 */
-	display_value[1] = active_flag ? 1U : 0U; /* 外控占用时显示黄色，只有链路在线但未占用时显示白色。 */
-	SendUIDSMessage(UI_CONTROL_ID, connected_flag, display_value); /* 未收到合法外部帧时熄灭图标，收到合法帧后按 active_flag 切白/黄。 */
+	display_value[1] = active_flag ? 1U : 0U; /* 申请成功但未输出时显示 39 白色，外控正在运行泵或手柄时显示 40 黄色。 */
+	SendUIDSMessage(UI_CONTROL_ID, connected_flag, display_value); /* 退出外部通信时熄灭图标，在线状态按 active_flag 切换 39/40。 */
 }
 
 /*
@@ -1527,12 +1527,12 @@ static void ControlArbitration_StopMotionOutput(void)
 	pumpMessageA.run_flag = false;
 	pumpMessageA.timingDrainage_flag = false;
 	pumpMessageA.timingDrainage_times = 0U;
-	pumpMessageA.speed_work = 0U;
+	/* 外控申请只停止 A 泵输出，不清除 speed_work 设定值，避免屏幕在外控授权后把泵速度显示成 0。 */
 	/* 停止 B 泵输出，并取消排空计时，保持两路泵的仲裁动作一致。 */
 	pumpMessageB.run_flag = false;
 	pumpMessageB.timingDrainage_flag = false;
 	pumpMessageB.timingDrainage_times = 0U;
-	pumpMessageB.speed_work = 0U;
+	/* 外控申请只停止 B 泵输出，不清除 speed_work 设定值，保证停止态仍显示原来的泵速度参数。 */
 	Pubinterface_RefreshPumpADisplay(); /* 仲裁停泵后刷新 A 泵数值和按钮，避免退出外控后屏幕保留旧速度。 */
 	Pubinterface_RefreshPumpBDisplay(); /* 仲裁停泵后刷新 B 泵数值和按钮，避免泵已停但屏幕仍显示运行。 */
 }
@@ -1987,7 +1987,6 @@ bool ControlArbitration_IsExternalActive(void)
 bool ControlArbitration_EnterExternalControl(void)
 {
 	bool already_external = ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL);
-	uint8_t data[10] = {0U}; /* UI_TOUCH_ID 只使用 Value[0] 表示是否运行，其余字节补零保持消息格式稳定。 */
 
 	/* 若脚踏、屏幕或手柄正在控制，上位机申请直接失败，不能抢停当前来源。 */
 	if (ControlArbitration_TryEnter(CONTROL_OWNER_EXTERNAL) == false)
@@ -2010,10 +2009,9 @@ bool ControlArbitration_EnterExternalControl(void)
 	/* 外部控制已使能，但申请阶段不直接启动电机。 */
 	ControlSignalMessage.HMI_enable_flag = true;
 	ControlSignalMessage.HMI_control_flag = false;
-	data[0] = 0U; /* 外控刚进入时只弹出触控/外控窗口，不点亮运行态。 */
-	SendUIDSMessage(UI_TOUCH_ID, true, data); /* 通知屏幕 UI 显示外部控制入口。 */
-	Pubinterface_RefreshControlModeDisplay(); /* 外控内部复用 TOUCHWORK 后立即暗掉触控按钮，避免外控被显示成触控。 */
-	Pubinterface_RefreshExternalCommDisplay(true, true); /* 外部通信已经取得控制权，小电脑图标切换为黄色高亮。 */
+	/* 申请成功只表示外控 owner 已取得，不能再打开 UI_TOUCH_ID，否则屏幕会弹出 70 号触控工作区。 */
+	Pubinterface_RefreshControlModeDisplay(); /* 外控内部复用 TOUCHWORK 做互斥，但显示层仍按小电脑图标表达外控状态。 */
+	Pubinterface_RefreshExternalCommDisplay(true, false); /* 外控申请成功但尚未控制输出时只显示 39 白色小电脑。 */
 	return true;
 }
 
@@ -2036,7 +2034,7 @@ void ControlArbitration_ReleaseExternalControl(void)
 			SendUIDSMessage(UI_TOUCH_ID, false, data); /* 未处于本机触控时才清理残留外控弹窗，避免误关本机触控工作区。 */
 		}
 		Pubinterface_RefreshControlModeDisplay(); /* UITOUCHDP(false) 会把触控主按钮置暗，这里重绘为当前本机白/黄状态。 */
-		Pubinterface_RefreshExternalCommDisplay(true, false); /* 收到退出命令说明链路仍在线，但当前不是外控，占用态恢复为白色小电脑。 */
+		Pubinterface_RefreshExternalCommDisplay(false, false); /* 退出外部通信后不再保留 39/40 小电脑图标，避免误提示仍在线。 */
 		return;
 	}
 
@@ -2054,7 +2052,7 @@ void ControlArbitration_ReleaseExternalControl(void)
 	ControlArbitration_Exit(CONTROL_OWNER_EXTERNAL);
 	SendUIDSMessage(UI_TOUCH_ID, false, data); /* 外控释放完成后关闭触控/外控窗口，UI 不再显示占用状态。 */
 	Pubinterface_RefreshControlModeDisplay(); /* 外控退出后按本机状态重绘脚控/手控/触控，清掉外控期间的残留高亮。 */
-	Pubinterface_RefreshExternalCommDisplay(true, false); /* 主动退出外控仅释放控制权，链路仍在线时小电脑恢复白色。 */
+	Pubinterface_RefreshExternalCommDisplay(false, false); /* 主动退出外控后按需求隐藏小电脑图标，不再显示白色在线态。 */
 }
 
 /*
@@ -2085,6 +2083,10 @@ bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t contro
 	{
 		if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && key_owner != CONTROL_OWNER_EXTERNAL)
 		{
+			if (control_type == SCREENKey)
+			{
+				return false; /* 外控 owner 期间允许屏幕修改速度/频率/泵流量参数，但屏幕启停键仍走后面的业务键拦截。 */
+			}
 			return true; /* 外部控制占用时只允许外部来源继续调参，防止本地按键改变外控运行设定。 */
 		}
 		return false; /* 非外控独占时放行到 SpeedActive/FreqActive/PUMPActive，由业务函数刷新设定值。 */
@@ -2192,6 +2194,10 @@ void Pubinterface_StopTouchKeepAliveRun(void)
 {
 	uint8_t data[10] = {0U}; /* UI_TOUCH_ID 使用 Value[0] 表示运行态，0 表示触控仍激活但电机停止。 */
 
+	if (WorkMessage.hmiactive_work != 0U)
+	{
+		return; /* 外控内部复用 TOUCHWORK 做互斥时，触控保活超时不能停外控手柄，也不能弹出 70 号触控窗口。 */
+	}
 	if ((WorkMessage.touchactive_work != TOUCHWORK) || (WorkMessage.drivetype_work != TOUCHWORK))
 	{
 		return; /* 当前不是本机触控模式时不处理，避免外控或脚踏被保活超时误停。 */
@@ -2278,6 +2284,10 @@ void ControlTypeActive(uint8_t key_value)
 		break;
 	}
 	case SCREENKey_TouchKeepAlive:
+		if (WorkMessage.hmiactive_work != 0U)
+		{
+			return; /* 外控模式下忽略屏幕 0x5520 触控保活帧，避免把外控误判成本机触控并弹出 70。 */
+		}
 		if ((WorkMessage.touchactive_work != TOUCHWORK) || (WorkMessage.drivetype_work != TOUCHWORK))
 		{
 			return; /* EX8 0x5520 运行保活必须在触控入口已打开后才有效，避免保活帧绕过 0x2404/key3 条件直接启动。 */

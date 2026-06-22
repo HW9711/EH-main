@@ -86,6 +86,7 @@ static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄
 static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持时间，递减到 0 后自动上传无报警关闭上位机弹窗。 */
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
+static uint8_t s_external_pump_b_manual_run_request = 0U; /* 上位机独立启动 B 泵的请求锁存，只用于判断小电脑图标是否应显示 40 黄色。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
 static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收 FIFO 句柄，保存读写指针和初始化状态。 */
@@ -97,6 +98,7 @@ static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] =
 
 static void ExternalComm_ResetLinkWatchdog(void);    /* 外控保活计时清零入口，申请外控和收到合法下行帧时复用。 */
 static void ExternalComm_RefreshIdleLinkDisplay(void); /* 非外控状态下维护小电脑在线图标超时。 */
+static void ExternalComm_RefreshExternalControlRunDisplay(void); /* 按外控输出请求刷新 39/40 小电脑图标。 */
 
 static uint16_t ExternalComm_ReadBE16(const uint8_t *data)
 {
@@ -897,6 +899,16 @@ static void ExternalComm_ClearUart5PumpRunRequests(void)
 {
     s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
     s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
+    s_external_pump_b_manual_run_request = 0U;   /* 同步清除 B 泵外控运行请求，避免退出后小电脑图标继续显示 40。 */
+}
+
+static void ExternalComm_RefreshExternalControlRunDisplay(void)
+{
+    bool external_output_active = ((ControlSignalMessage.HMI_control_flag == true) ||
+                                   (s_uart5_pump_manual_run_request != 0U) ||
+                                   (s_external_pump_b_manual_run_request != 0U)); /* 任一路外控输出仍在请求时，小电脑保持 40 黄色。 */
+
+    Pubinterface_RefreshExternalCommDisplay(true, external_output_active); /* owner 仍有效时保持图标显示，按输出请求选择 39 或 40。 */
 }
 
 static void ExternalComm_ApplyHostExit(void)
@@ -923,8 +935,14 @@ static void ExternalComm_ResetLinkWatchdog(void)
     s_external_comm_display_online = 1U;
     /* 在线图标从最新合法帧重新计时，避免上位机只读取状态时图标立即消失。 */
     s_external_comm_display_elapsed_ms = 0U;
-    /* 外控持有时显示黄色，只有合法帧在线但未取得控制权时显示白色。 */
-    Pubinterface_RefreshExternalCommDisplay(true, ControlArbitration_IsExternalActive());
+    if (ControlArbitration_IsExternalActive())
+    {
+        ExternalComm_RefreshExternalControlRunDisplay(); /* 外控 owner 已取得时，按泵/手柄输出请求决定显示 39 还是 40。 */
+    }
+    else
+    {
+        Pubinterface_RefreshExternalCommDisplay(true, false); /* 只有合法帧在线但未进入外控 owner 时显示 39 白色小电脑。 */
+    }
 }
 
 /*
@@ -1001,6 +1019,7 @@ static void ExternalComm_StopOutputForLinkSilent(void)
     Pubinterface_RefreshPumpADisplay();
     /* 静默停输出后刷新 B 泵屏幕，避免实际已停但屏幕仍显示旧速度。 */
     Pubinterface_RefreshPumpBDisplay();
+    ExternalComm_RefreshExternalControlRunDisplay(); /* 短超时只停止输出不释放 owner，小电脑从 40 黄色回到 39 白色等待链路恢复。 */
 }
 
 static void ExternalComm_HandleLinkReleaseTimeout(void)
@@ -1103,6 +1122,7 @@ static void ExternalComm_StopAllWork(void)
     Pubinterface_RefreshPumpBDisplay();
     /* 急停是安全例外，允许强制释放当前任意控制来源。 */
     ControlArbitration_ForceRelease();
+    Pubinterface_RefreshExternalCommDisplay(false, false); /* 急停/全停后外控不再保持在线提示，避免小电脑图标残留。 */
 }
 
 static void ExternalComm_SetUart5InjectPumpFollow(uint8_t enable)
@@ -1153,10 +1173,12 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             }
             /* 上位机单独启动 A 泵时，只置位“独立运行请求”，不改变手柄冷却跟随请求。 */
             ExternalComm_SetUart5PumpManualRun(1U);
+            ExternalComm_RefreshExternalControlRunDisplay(); /* A 泵已经进入外控输出请求，小电脑切到 40 黄色。 */
             break;
         case 0x02U:
             /* 上位机单独停止 A 泵时，只清除“独立运行请求”；如果公共 A/B 跟随规则仍选中 A 泵，冷却跟随会继续保持。 */
             ExternalComm_SetUart5PumpManualRun(0U);
+            ExternalComm_RefreshExternalControlRunDisplay(); /* A 泵外控请求清除后，按其它输出请求决定回 39 或保持 40。 */
             break;
         case 0x03U:
             /* B 泵启动前要求模拟串口已经上报可识别设备码，泵类型由该设备码决定。 */
@@ -1171,20 +1193,24 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             {
                 pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 泵 0 速启动时按灌注/注水/抽吸类型补默认速度。 */
             }
+            s_external_pump_b_manual_run_request = 1U; /* B 泵没有复用 UART5 A 泵锁存，这里单独记录外控 B 泵正在请求输出。 */
             /* 置位 B 泵运行标志。 */
             pumpMessageB.run_flag = true;
             /* 外部普通启动不进入排空计时模式。 */
             pumpMessageB.timingDrainage_flag = false;
             /* 上位机启动 B 泵后同步屏幕数值和按钮黄/黑状态。 */
             Pubinterface_RefreshPumpBDisplay();
+            ExternalComm_RefreshExternalControlRunDisplay(); /* B 泵启动属于外控输出中，小电脑切到 40 黄色。 */
             break;
         case 0x04U:
+            s_external_pump_b_manual_run_request = 0U; /* B 泵停止时清除图标用的外控输出锁存，避免图标继续高亮。 */
             /* 清除 B 泵运行标志。 */
             pumpMessageB.run_flag = false;
             /* 同时清除 B 泵排空计时。 */
             pumpMessageB.timingDrainage_flag = false;
             /* 上位机停止 B 泵后立即刷新屏幕按钮状态，避免仍显示运行。 */
             Pubinterface_RefreshPumpBDisplay();
+            ExternalComm_RefreshExternalControlRunDisplay(); /* B 泵外控请求清除后，按手柄或 A 泵是否仍在输出决定 39/40。 */
             break;
         case 0x05U:
             /* 当前手柄启动必须有选中通道且该通道已经识别在线，避免无手柄时误启动电机和联动注水泵。 */
@@ -1210,6 +1236,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             ControlSignalMessage.HMI_control_flag = true;
             /* 当前手柄启动成功后，按调试开关同步启动公共 A/B 规则选中的注水冷却泵。 */
             ExternalComm_SetUart5InjectPumpFollow(1U);
+            ExternalComm_RefreshExternalControlRunDisplay(); /* 手柄已由外控启动，小电脑切到 40 黄色。 */
             break;
         case 0x06U:
             /* 停止当前手柄运行。 */
@@ -1220,6 +1247,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             ControlSignalMessage.HMI_control_flag = false;
             /* 当前手柄停止时，同步停止由手柄带动的 A/B 注水冷却泵。 */
             ExternalComm_SetUart5InjectPumpFollow(0U);
+            ExternalComm_RefreshExternalControlRunDisplay(); /* 手柄外控停止后，按泵输出请求决定回 39 或保持 40。 */
             break;
         case 0x07U:
             /* 开口定位左动作必须有当前通道。 */
