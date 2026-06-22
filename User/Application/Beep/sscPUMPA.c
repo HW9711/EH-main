@@ -146,7 +146,8 @@ static uint8_t huici=0;//互斥
 				/* 高压硬停时只暂停本周期输出，不清运行请求，压力恢复后可自动继续转动。 */
 				PUMPA_PauseByPressureLimit();
 			}
-			uart_data=(pump_speed*0.02+2.1)*pump_speed;//
+			// uart_data=(pump_speed*0.02+2.1)*pump_speed;//
+			uart_data=pump_speed/1.6;
 				break;
 			case POURWATER://灌
 			pump_dir=1;
@@ -158,7 +159,8 @@ static uint8_t huici=0;//互斥
 				/* 高压硬停时只暂停本周期输出，不清运行请求，压力恢复后可自动继续转动。 */
 				PUMPA_PauseByPressureLimit();
 			}
-			uart_data=pump_speed*0.62;
+			//uart_data=pump_speed*0.62;
+			uart_data=pump_speed/1.51;
 				break;
 			default:
 				break;
