@@ -1998,6 +1998,7 @@ bool ControlArbitration_EnterExternalControl(void)
 	if (already_external == false)
 	{
 		ControlArbitration_StopMotionOutput();
+		ControlSignalMessage.HMI_control_flag = false; /* 首次进入外控时确认电机未启动；重复保活申请不能清运行标志，否则小电脑会从 40 退回 39。 */
 	}
 
 	/* 置位外部控制权锁，脚踏、屏幕、手柄按键会在各自入口被拦截。 */
@@ -2008,10 +2009,12 @@ bool ControlArbitration_EnterExternalControl(void)
 	WorkMessage.drivetype_work = TOUCHWORK;
 	/* 外部控制已使能，但申请阶段不直接启动电机。 */
 	ControlSignalMessage.HMI_enable_flag = true;
-	ControlSignalMessage.HMI_control_flag = false;
 	/* 申请成功只表示外控 owner 已取得，不能再打开 UI_TOUCH_ID，否则屏幕会弹出 70 号触控工作区。 */
 	Pubinterface_RefreshControlModeDisplay(); /* 外控内部复用 TOUCHWORK 做互斥，但显示层仍按小电脑图标表达外控状态。 */
-	Pubinterface_RefreshExternalCommDisplay(true, false); /* 外控申请成功但尚未控制输出时只显示 39 白色小电脑。 */
+	if (already_external == false)
+	{
+		Pubinterface_RefreshExternalCommDisplay(true, false); /* 首次申请外控成功但尚未控制输出时只显示 39 白色小电脑。 */
+	}
 	return true;
 }
 

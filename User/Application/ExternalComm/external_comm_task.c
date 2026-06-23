@@ -14,8 +14,8 @@
 
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
 #define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
-#define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 1000U  /* 外控链路静默 1s 后只停电机和泵输出，保留外控授权；上位机需按 300ms 周期下发保活。 */
-#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     2000U /* 外控链路静默 2s 后释放外控授权并熄灭在线图标，避免 6s 级保持时间影响现场反馈。 */
+#define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 2000U  /* 外控链路静默 2s 后只停电机和泵输出，保留外控授权，避免短时串口抖动直接退出外控。 */
+#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     10000U /* 外控链路静默 10s 后才释放外控授权并熄灭在线图标，上位机仍需按 200ms 周期下发保活。 */
 #define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
 #define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
