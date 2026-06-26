@@ -960,6 +960,68 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 }
 
 /*
+ * 函数功能：清除可恢复的“手柄未连接”报警，供重新插入、触控退出等用户确认动作复用。
+ * 输入参数：无。
+ * 返回参数：true 表示本次确实清除了手柄未连接报警；false 表示当前不是该报警。
+ */
+static bool Pubinterface_ClearHandleNotConnectedAlarm(void)
+{
+	if (WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED))
+	{
+		WorkAlarm_Clear();                 /* 用户已经通过重新插入或退出动作确认掉线故障，清除运行中拔手柄留下的报警锁存。 */
+		SendAlarmMessage(WORK_ALARM_NONE); /* 报警状态清零后同步关闭蜂鸣，避免故障确认后仍持续报警。 */
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 屏幕报警弹窗随报警状态一起关闭，后续由插入事件刷新手柄和参数区。 */
+		return true;					   /* 告诉调用方本次恢复动作确实关闭了手柄掉线报警。 */
+	}
+	return false;						   /* 当前没有手柄未连接报警，调用方不需要做额外恢复处理。 */
+}
+
+/*
+ * 函数功能：运行中当前工作手柄掉线时，统一停止电机和手柄联动注水泵，并锁存屏幕报警。
+ * 输入参数：无，函数读取当前 WorkMessage、ControlSignalMessage 和 A/B 泵状态。
+ * 返回参数：无。
+ */
+static void Pubinterface_StopRunningHandleOnUnplug(void)
+{
+	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0] 保存报警码，其余字节清零避免旧值残留。 */
+
+	WorkMessage.runflag_work = false;             /* 当前手柄物理掉线后必须撤销电机运行命令，驱动任务下一周期发送停止帧。 */
+	WorkMessage.speed_work = 0U;                   /* 实际输出速度同步清零，避免停止帧前继续沿用掉线手柄的目标速度。 */
+	WorkMessage.touchactive_work = 0U;             /* 屏幕触控运行态随手柄掉线退出，后续 0x5520 保活不能继续维持运行。 */
+	WorkMessage.hmiactive_work = 0U;               /* 外控运行态随当前手柄掉线撤销，外部需要重新申请后才能再次控制。 */
+	ControlSignalMessage.handle_control_flag = false; /* 手柄实体键来源掉线后不再占用运行状态，避免实体键状态残留。 */
+	ControlSignalMessage.HMI_control_flag = false;    /* 外控手柄运行请求失效，避免小电脑图标继续显示运行输出。 */
+	ControlSignalMessage.HMI_enable_flag = false;     /* 当前外控运行被故障打断，重新控制必须重新申请外控授权。 */
+	ControlSignalMessage.jtL_control_flag = false;    /* 左脚踏运行状态随当前手柄掉线清除，防止脚踏任务继续认为电机在转。 */
+	ControlSignalMessage.jtR_control_flag = false;    /* 右脚踏运行状态同样清除，保证双脚踏任一路都不会残留运行。 */
+	ControlSignalMessage.jtL_gentlypump_flag = false; /* 脚踏轻排联动标志清零，避免掉线后释放脚踏时再次处理旧泵状态。 */
+	ControlSignalMessage.jtR_gentlypump_flag = false; /* 右脚踏轻排联动标志清零，保证 B 通道脚踏场景也能停净。 */
+	ControlSignalMessage.HMI_gentlypump_flag = false; /* 外控轻排联动标志清零，避免上位机旧状态继续保持泵输出。 */
+	ExternalComm_ClearHandleInjectionPumpFollow();    /* 释放外控保存的手柄冷却跟随请求，防止后续外控刷新重新启动注水泵。 */
+	Pubinterface_SetHandleInjectionPumpRun(false);     /* 关闭由手柄运行触发的 A/B 注水泵冷却跟随。 */
+	if (pumpMessageA.type == INJECTWATER)
+	{
+		pumpMessageA.run_flag = false;           /* A 为注水泵时强制停泵，手柄已经掉线不再需要冷却供水。 */
+		pumpMessageA.timingDrainage_flag = false; /* 掉线停泵优先级高于排空，必须同步退出排空计时。 */
+		pumpMessageA.timingDrainage_times = 0U;  /* 清掉 A 排空计数，避免下次启动继承掉线前的排空时间。 */
+	}
+	if (pumpMessageB.type == INJECTWATER)
+	{
+		pumpMessageB.run_flag = false;           /* B 为注水泵时同样强制停泵，覆盖 B 唯一注水泵和双注水泵场景。 */
+		pumpMessageB.timingDrainage_flag = false; /* B 注水泵掉线停泵时退出排空模式，防止泵任务继续输出。 */
+		pumpMessageB.timingDrainage_times = 0U;  /* 清掉 B 排空计数，保证下次运行从干净状态开始。 */
+	}
+	Pubinterface_RefreshPumpADisplay();          /* A 泵实际运行状态已改变，立即刷新屏幕显示，保证显示值和输出一致。 */
+	Pubinterface_RefreshPumpBDisplay();          /* B 泵实际运行状态已改变，立即刷新屏幕显示，避免用户看到泵仍在运行。 */
+	ControlArbitration_ForceRelease();           /* 手柄掉线属于故障停机，释放当前 owner，避免外控/触控/脚踏占用残留。 */
+	WorkAlarm_Set(WORK_ALARM_HANDLE_NOT_CONNECTED); /* 使用现有 1 号报警图“手柄未连接”，保证屏幕和上位机报警码一致。 */
+	SendAlarmMessage(WORK_ALARM_HANDLE_NOT_CONNECTED); /* 持续蜂鸣直到报警被重新插入或用户恢复流程清除。 */
+	display_value[0] = WORK_ALARM_HANDLE_NOT_CONNECTED; /* 报警码写入 UI 队列 Value[0]，驱动 UIAIARMDP 显示 80 号报警图。 */
+	SendUIDSMessage(UI_AIARM_ID, true, display_value);  /* 立即弹出屏幕报警，避免外控和触控模式下只停机但无可见提示。 */
+	Pubinterface_RefreshControlModeDisplay();     /* 控制来源状态已被清除，刷新脚控/手控/触控高亮，避免界面残留运行态。 */
+}
+
+/*
  * 函数功能：读取指定通道从 EEPROM Page4 解析出的默认注水流量，供手柄上线、脚踏和外控默认启动注水泵共用。
  * 输入参数：channel 通道号，CHANNEL_A 读取 A 通道记忆，CHANNEL_B 读取 B 通道记忆。
  * 返回参数：默认注水流量，单位为当前泵业务流量值；通道无效时返回 0。
@@ -2270,8 +2332,11 @@ void ControlTypeActive(uint8_t key_value)
 {
 	uint8_t data[10] = {0U}; /* 控制方式 UI 消息的临时缓冲，触控弹窗只使用 data[0] 表示运行态。 */
 
-	if (WorkMessage.alarm_flag == true)
-		return;
+	if ((WorkMessage.alarm_flag == true) &&
+		((key_value != SCREENKey_TouchEXIT) || (WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED) == false)))
+	{
+		return; /* 报警态仍阻止启动、切换和保活；只有手柄掉线报警允许触控退出键作为用户确认入口。 */
+	}
 	switch (key_value)
 	{
 	case SCREENKey_JTActi:
@@ -2370,16 +2435,19 @@ void ControlTypeActive(uint8_t key_value)
 		Pubinterface_RefreshControlModeDisplay(); /* 同步主运行页触控高亮，避免其它刷新把触控误刷白。 */
 		break;
 	case SCREENKey_TouchEXIT: // 停止
-		if (WorkMessage.touchactive_work != TOUCHWORK)
+		if ((WorkMessage.touchactive_work != TOUCHWORK) &&
+			(WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED) == false))
 		{
-			return; /* 只有屏幕触控模式已经进入时才允许退出，避免未进入触控态时误清控制状态。 */
+			return; /* 非触控状态且不是运行手柄掉线报警时不处理，避免误清其它控制来源。 */
 		}
 		/* 屏幕触控退出时先停电机，再清触控占用，控制权释放要继续等待驱动反馈归零。 */
+		Pubinterface_SetHandleInjectionPumpRun(false); /* 触控退出属于用户确认停机，必须再次关闭手柄联动注水泵，防止故障恢复后泵状态残留。 */
 		WorkMessage.runflag_work = false;
 			
 		WorkMessage.speed_work = 0U;
 		WorkMessage.touchactive_work = 0U;
 		WorkMessage.drivetype_work = ControlArbitration_GetLocalDriveTypeAfterExit(); /* 触控退出后恢复本机可接管控制方式，避免图标继续停在黄色触控。 */
+		(void)Pubinterface_ClearHandleNotConnectedAlarm(); /* 运行中拔手柄后的触控退出键视为用户确认故障，允许关闭报警弹窗并恢复后续操作。 */
 		SendUIDSMessage(UI_TOUCH_ID, false, data); /* 触控退出时立即隐藏弹窗，控制权释放由驱动停稳后完成。 */
 		/* 这里不能直接 Exit，否则刚下发停止但电机尚未停稳时其它来源会提前接管。 */
 		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_SCREEN);
@@ -3002,6 +3070,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 	case SCREENKey_PLUG_A: // 插入A
 		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 先保存 A 原在线态，只有离线到在线这一跳才允许装载 Page4 默认流量。 */
 		WorkMessage.Channel_Aonline = true;					   /* A 通道校验通过后才置在线，后续心跳和显示都读取这个标志。 */
+		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* A 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_A);		   /* 扫描结果只先进入 MemoryMsgA，运行中不会直接覆盖 WorkMessage。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_A))
 		{
@@ -3019,6 +3088,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 	case SCREENKey_PLUG_B: // 插入B
 		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 先保存 B 原在线态，防止 RFID/识别重复刷新覆盖用户手动调节的泵流量。 */
 		WorkMessage.Channel_Bonline = true;					   /* B 通道校验通过后才置在线，坏手柄不会进入在线态。 */
+		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* B 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_B);		   /* 扫描结果只先进入 MemoryMsgB，避免运行中插入 B 抢占 A。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_B))
 		{
@@ -3049,6 +3119,10 @@ void PlugORunPLUGActive(uint8_t key_value)
 			}
 			else
 			{
+				if (WorkMessage.runflag_work == true)
+				{
+					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 A 手柄时，立即停电机、停联动注水泵并锁存报警。 */
+				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
@@ -3077,6 +3151,10 @@ void PlugORunPLUGActive(uint8_t key_value)
 			}
 			else
 			{
+				if (WorkMessage.runflag_work == true)
+				{
+					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 B 手柄时，立即停电机、停联动注水泵并锁存报警。 */
+				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */

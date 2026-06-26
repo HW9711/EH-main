@@ -6,7 +6,9 @@
 #include "bsp_uart.h"
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
+#include "sscBEEP.h"
 #include "sscDRIVE.h"
+#include "sscUIDP.h"
 #include "sscRFID.h"
 #include "uart2.h"
 
@@ -804,17 +806,21 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_RUN_SET_OK, info, sizeof(info));
 }
 
-static uint8_t ExternalComm_EnsureActiveForRun(uint8_t allow_emergency_stop)
+static uint8_t ExternalComm_EnsureActiveForRun(uint8_t area_code)
 {
     /* 急停是安全例外，报警中也必须允许执行全停和控制权释放。 */
-    if (allow_emergency_stop != 0U)
+    if (area_code == 0xFFU)
     {
         return 1U;
     }
 
-    /* 报警状态下禁止外部启动或继续动作，停止类命令也让上层走急停分支。 */
+    /* 报警状态下禁止外部启动或继续动作，但运行手柄掉线后的“停止当前手柄”允许作为故障确认入口。 */
     if (WorkMessage.alarm_flag)
     {
+        if ((area_code == 0x06U) && WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED))
+        {
+            return 1U; /* 0x06 只撤销手柄运行请求和联动泵请求，不会重新启动电机，因此可用于关闭本次掉线报警。 */
+        }
         return 0U;
     }
 
@@ -911,6 +917,21 @@ static void ExternalComm_RefreshExternalControlRunDisplay(void)
     Pubinterface_RefreshExternalCommDisplay(true, external_output_active); /* owner 仍有效时保持图标显示，按输出请求选择 39 或 40。 */
 }
 
+/*
+ * 函数功能：外控停止或退出确认运行手柄掉线故障时，清除“手柄未连接”报警。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ClearHandleNotConnectedAlarmForRecovery(void)
+{
+    if (WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED))
+    {
+        WorkAlarm_Clear();                 /* 上位机已经下发停止或退出，视为确认本次运行手柄掉线故障。 */
+        SendAlarmMessage(WORK_ALARM_NONE); /* 报警状态清零后同步关闭蜂鸣，避免上位机停止后主机仍持续报警。 */
+        SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 同步关闭屏幕报警弹窗，保证屏幕显示状态和实际报警状态一致。 */
+    }
+}
+
 static void ExternalComm_ApplyHostExit(void)
 {
     uint8_t info[1];
@@ -919,6 +940,7 @@ static void ExternalComm_ApplyHostExit(void)
     ExternalComm_ClearUart5PumpRunRequests();
     /* 释放公共仲裁锁，并停止外控遗留的电机、脚踏标志和 A/B 泵输出。 */
     ControlArbitration_ReleaseExternalControl();
+    ExternalComm_ClearHandleNotConnectedAlarmForRecovery(); /* 上位机主动退出也作为故障确认入口，避免运行中拔手柄报警无法关闭。 */
     /* ACK 回显 0xBB，Tools 可据此把“已取得外部控制权”状态清掉。 */
     info[0] = EXTERNAL_COMM_DOWN_HOST_EXIT;
     /* 退出动作本身按控制成功返回，表示 MCU 已经释放外部控制权。 */
@@ -1141,7 +1163,19 @@ static void ExternalComm_SetUart5InjectPumpFollow(uint8_t enable)
 }
 
 /*
- * 函数功能：处理上位机控制命令，包括 A/B 泵启停、手柄启停、急停和退出外控。
+ * 函数功能：当前运行手柄掉线时，释放外控层保存的手柄注水冷却跟随请求。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void ExternalComm_ClearHandleInjectionPumpFollow(void)
+{
+    s_uart5_inject_pump_follow_run_request = 0U; /* 手柄已掉线，外控手柄启动带来的注水冷却请求必须立即失效，防止后续刷新重新拉起 A 泵。 */
+    ExternalComm_RefreshUart5PumpRunState();     /* 重新合并 A 泵独立请求和手柄跟随请求，只保留上位机明确独立启动的泵输出。 */
+    ExternalComm_RefreshExternalControlRunDisplay(); /* 外控运行标志被撤销后，同步小电脑图标，避免继续显示手柄外控运行。 */
+}
+
+/*
+ * 函数功能：处理上位机控制命令，包括 A/B 泵启停、当前手柄启停、开口定位、急停和退出外控。
  * 输入参数：frame 指向已解析的外部通信控制帧，area_code 表示具体控制动作。
  * 返回参数：无。
  */
@@ -1151,7 +1185,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     uint8_t info[1];
 
     /* 只有急停允许跨来源强制全停，其它启停命令都必须先取得外部控制权。 */
-    if (ExternalComm_EnsureActiveForRun(frame->area_code == 0xFFU) == 0U)
+    if (ExternalComm_EnsureActiveForRun(frame->area_code) == 0U)
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                  frame->area_code,
@@ -1247,6 +1281,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
             ControlSignalMessage.HMI_control_flag = false;
             /* 当前手柄停止时，同步停止由手柄带动的 A/B 注水冷却泵。 */
             ExternalComm_SetUart5InjectPumpFollow(0U);
+            ExternalComm_ClearHandleNotConnectedAlarmForRecovery(); /* 上位机停止当前手柄时确认掉线故障，允许报警弹窗关闭。 */
             ExternalComm_RefreshExternalControlRunDisplay(); /* 手柄外控停止后，按泵输出请求决定回 39 或保持 40。 */
             break;
         case 0x07U:

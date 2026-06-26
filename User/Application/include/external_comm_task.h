@@ -11,6 +11,8 @@ extern "C" {
 void ExternalComm_Init(void);
 /* 临时上传一个报警码，保持 hold_ms 后通信任务自动上传 0，供运行中另一路手柄校验失败弹窗限时显示。 */
 void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms);
+/* 手柄运行中掉线时清除外控层保存的注水泵跟随请求，避免后续外控刷新重新拉起联动泵。 */
+void ExternalComm_ClearHandleInjectionPumpFollow(void);
 
 #ifdef __cplusplus
 }
