@@ -97,11 +97,15 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_TOOL_DIAMETER_OFFSET       2U
 #define HANDLESCAN_TOOL_LENGTH_OFFSET         4U
 #define HANDLESCAN_TOOL_ANGLE_OFFSET          6U
+#define HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET 8U  /* Page3[8] 保存手柄机械减速比，0/1 都按无减速处理。 */
+#define HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET 9U   /* Page3[9] 保存手柄机械增速比，0/1 都按无增速处理。 */
+#define HANDLESCAN_TOOL_RATIO_UNIT            1U   /* 运行换算的等效 1 倍倍率，用于保护异常 EEPROM 数据。 */
+#define HANDLESCAN_TOOL_SPEED_UP_SHIFT        16U  /* tool_reduction_ratio 高 16 位表示增速比，低 16 位表示减速比。 */
 
 /*
  * EEPROM 中 Page4 初始值信息区定义。
  * Page4 对应 AT24CS32 驱动页下标 3，读取整页可以同步校验页尾，避免默认速度、流量和报警阈值读到损坏数据。
- * Page4 的 16 位字段按业务说明使用小端格式，默认注水流量按 0.1 存储，写入泵业务流量前需要除以 10。
+ * Page4 默认注水流量按大端直接保存 1~70；速度和报警阈值字段仍按小端保存。
  */
 #define HANDLESCAN_INITIAL_INFO_PAGE_INDEX    3U
 #define HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET 0U
@@ -114,21 +118,24 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_FOR_ALARM_OFFSET   10U
 #define HANDLESCAN_INITIAL_REV_ALARM_OFFSET   12U
 #define HANDLESCAN_INITIAL_OSC_ALARM_OFFSET   14U
-#define HANDLESCAN_INITIAL_FLOW_SCALE         10U
+#define HANDLESCAN_INITIAL_FLOW_MIN           1U
 #define HANDLESCAN_INITIAL_FLOW_MAX           70U
+#define HANDLESCAN_INITIAL_FLOW_DEFAULT       30U
+#define HANDLESCAN_INITIAL_DIRECTION_FORWARD  0x01U /* Page4[8]=0x01 表示默认正转。 */
+#define HANDLESCAN_INITIAL_DIRECTION_REVERSE  0x02U /* Page4[8]=0x02 表示默认反转。 */
+#define HANDLESCAN_INITIAL_DIRECTION_OSC      0x03U /* Page4[8]=0x03 表示默认往复，写入前必须确认型号支持。 */
 
 /*
- * EEPROM 中 Page6 多档位速度区定义。
- * Page6 对应 AT24CS32 驱动页下标 5，当前只读取三组 16 位速度字段作为正转、反转、往复的按键慢档步进。
- * Page6 的速度字段按上位机布局使用大端格式；读不到或字段为 0 时，步进回退到 1000，避免新屏速度按键无响应。
+ * EEPROM 中 Page6 速度调节区定义。
+ * Page6 对应 AT24CS32 驱动页下标 5，前 4 字节分别保存小步进和大步进。
+ * Page6 的速度字段按协议使用大端格式；读不到或字段为 0 时，使用本地兜底值避免屏幕速度键无响应。
  */
 #define HANDLESCAN_SPEED_STEP_PAGE_INDEX      5U
-#define HANDLESCAN_SPEED_STEP_GEAR_COUNT_OFFSET 0U
-#define HANDLESCAN_SPEED_STEP_GEAR1_OFFSET    1U
-#define HANDLESCAN_SPEED_STEP_GEAR2_OFFSET    5U
-#define HANDLESCAN_SPEED_STEP_GEAR3_OFFSET    9U
-#define HANDLESCAN_SPEED_STEP_MAX_GEAR        3U
-#define HANDLESCAN_SPEED_STEP_FALLBACK        1000U
+#define HANDLESCAN_SPEED_STEP_SMALL_OFFSET    0U   /* Page6[0..1] 大端保存屏幕小步进速度。 */
+#define HANDLESCAN_SPEED_STEP_LARGE_OFFSET    2U   /* Page6[2..3] 大端保存屏幕大步进速度。 */
+#define HANDLESCAN_SPEED_STEP_FALLBACK        1000U /* 兼容旧代码的默认小步进兜底。 */
+#define HANDLESCAN_SPEED_STEP_SMALL_FALLBACK  1000U /* Page6 小步进无效时按 1000 处理。 */
+#define HANDLESCAN_SPEED_STEP_LARGE_FALLBACK  2000U /* Page6 大步进无效时保持旧快键约两倍体感。 */
 
 /*
  * 手柄扫描报警码定义。
@@ -218,27 +225,27 @@ typedef struct
  */
 static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
 {
-    {0x6B, 0x01, TMBB_ONLINES, "TMBB"},
-    {0x6B, 0x02, TMBA_ONLINES,  "TMBA"},
-    {0x6B, 0x03, EMBA_ONLINES, "EMBA"},
-    {0x6B, 0x04, EMBB_ONLINES,  "EMBB"},
-    {0x6B, 0x05, PXBA_ONLINES,  "PXBA"},
-    {0x6B, 0x06, PXBB_ONLINES,  "PXBB"},
-    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},
-    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},
-    {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},
-    {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},
-    {0x7C, 0x05, JMB_ONLINES,      "JMB"},
-    {0x7C, 0x06, MX_YIM16_ONLINES, "MXYTM16"},
-    {0x6B, 0x07, LGZ_I_ONLINES, "LGZ_I"},                 /* 颅骨钻一型预留，先按 Page2 顺序占位。 */
-    {0x6B, 0x08, LGZ_II_ONLINES, "LGZ_II"},               /* 颅骨钻二型预留，后续如协议变更只改本表。 */
-    {0x6B, 0x09, KSZ_I_ONLINES, "KSZ_I"},                 /* 克氏针一型预留，识别后供 UI 显示。 */
-    {0x6B, 0x0A, KSZ_II_ONLINES, "KSZ_II"},               /* 克氏针二型预留，识别后供 UI 显示。 */
-    {0x6B, 0x0B, KXZ_I_ONLINES, "KXZ_I"},                 /* 空心钻一型预留，沿用当前扫描状态机。 */
-    {0x6B, 0x0C, KXZ_II_ONLINES, "KXZ_II"},               /* 空心钻二型预留，沿用当前扫描状态机。 */
-    {0x6B, 0x0D, COMMON_SOCKET_ONLINES, "COMMON_SOCKET"}, /* 公共接头没有实体键，只作为在线类型和 UI 占位。 */
-    {0x6B, 0x0E, EMBD_ONLINES, "EMBD"},                   /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。 */
-    {0x6B, 0x0F, EMBC_ONLINES, "EMBC"}                    /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。 */
+    {0x6B, 0x01, TMBB_ONLINES, "TMBB"},//无刷，单向
+    {0x6B, 0x02, TMBA_ONLINES,  "TMBA"},//无刷，单向
+    {0x6B, 0x03, EMBA_ONLINES, "EMBA"},//无刷，单向
+    {0x6B, 0x04, EMBB_ONLINES,  "EMBB"},//无刷，单向
+    {0x6B, 0x05, PXBA_ONLINES,  "PXBA"},//无刷，往复，默认4Hz，转速默认30000
+    {0x6B, 0x06, PXBB_ONLINES,  "PXBB"},//无刷，往复，默认4Hz，转速默认30000
+    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},//无刷
+    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},//无刷，靠机械结构实现往复。屏幕只显示往复按钮，但不显示正反转按钮，和频率显示，单机还是按照单项协议处理。
+    {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},//有刷，单向
+    {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},//有刷，往复
+    {0x7C, 0x05, JMB_ONLINES,      "JMB"},//无刷，单向
+    {0x7C, 0x06, MX_YIM16_ONLINES, "MXYTM16"},//无刷，单向
+    {0x6B, 0x07, LGZ_I_ONLINES, "LGZ_I"},                 /* 颅骨钻一型预留，先按 Page2 顺序占位。无刷，单向 */
+    {0x6B, 0x08, LGZ_II_ONLINES, "LGZ_II"},               /* 颅骨钻二型预留，后续如协议变更只改本表。无刷，单向 */
+    {0x6B, 0x09, KSZ_I_ONLINES, "KSZ_I"},                 /* 克氏针一型预留，识别后供 UI 显示。无刷，单向 */
+    {0x6B, 0x0A, KSZ_II_ONLINES, "KSZ_II"},               /* 克氏针二型预留，识别后供 UI 显示。无刷，单向 */
+    {0x6B, 0x0B, KXZ_I_ONLINES, "KXZ_I"},                 /* 空心钻一型预留，沿用当前扫描状态机。无刷，单向 */
+    {0x6B, 0x0C, KXZ_II_ONLINES, "KXZ_II"},               /* 空心钻二型预留，沿用当前扫描状态机。无刷，单向 */
+    {0x6B, 0x0D, COMMON_SOCKET_ONLINES, "COMMON_SOCKET"}, /* 公共接头没有实体键，只作为在线类型和 UI 占位。无刷，单向 */
+    {0x6B, 0x0E, EMBD_ONLINES, "EMBD"},                   /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。无刷，单向 */
+    {0x6B, 0x0F, EMBC_ONLINES, "EMBC"}                    /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。无刷，单向 */
 };
 
 /*
@@ -480,20 +487,98 @@ static HandlescanToolSource Handlescan_GetToolSource(uint8_t mapped_handle_type)
 }
 
 /*
- * 函数功能：把 EEPROM 第三页旧刀具型号转换成业务刀具类型。
- * 输入参数：raw_tool_type 为刀具表查到的旧内部型号。
- * 返回参数：PLANER/GRINDH 或原值；PXP 归一为 PLANER，PXM 归一为 GRINDH。
+ * 函数功能：根据手柄/刀具能力判断 Page4 默认方向是否允许直接进入往复。
+ * 输入参数：message 为已经写入手柄型号和刀具能力的通道识别缓存。
+ * 返回参数：true 表示允许把 Page4[8]=0x03 装载为 OSCDIR；false 表示必须保护回正转。
+ */
+static bool Handlescan_IsOscInitialDirectionSupported(const ChannelrecognizeMessage_t *message)
+{
+    bool handle_supported = false;                            /* 记录手柄本体是否具备往复硬件基础，屏幕往复入口必须先满足这一层。 */
+    bool tool_supported = false;                              /* 记录当前刀具能力是否为刨刀，避免磨头或未知刀具误进入往复。 */
+
+    if (message == NULL)
+    {
+        return false; /* 识别缓存不存在时不能确认往复能力，默认按单向手柄保护。 */
+    }
+
+    handle_supported = ((message->handle_type == PXBA_ONLINES) ||
+                        (message->handle_type == PXBB_ONLINES) ||
+                        (message->handle_type == MX_YIP_ONLINES) ||
+                        (message->handle_type == PX_YIP_ONLINES)); /* 只有表中明确支持往复的手柄才允许 Page4 默认往复生效。 */
+
+    tool_supported = (message->tool_type == PLANER);          /* 当前刀具能力必须已经归一为刨刀，MXYTP/PXYTP 不再作为旧刀具码兼容。 */
+
+    return (handle_supported && tool_supported);              /* 同时满足手柄和刀具两层能力时，才把默认方向装载为 OSCDIR。 */
+}
+
+/*
+ * 函数功能：把 Page3 的减速比和增速比构造成运行链路使用的 32 位倍率字段。
+ * 输入参数：reduction_ratio 为 Page3[8] 减速比；speed_up_ratio 为 Page3[9] 增速比。
+ * 返回参数：低 16 位为减速比，高 16 位为增速比；异常或未配置时返回 1。
+ */
+static uint32_t Handlescan_BuildToolReductionRatio(uint8_t reduction_ratio, uint8_t speed_up_ratio)
+{
+    if ((reduction_ratio > HANDLESCAN_TOOL_RATIO_UNIT) &&
+        (speed_up_ratio > HANDLESCAN_TOOL_RATIO_UNIT))
+    {
+        return HANDLESCAN_TOOL_RATIO_UNIT; /* 两个倍率同时有效说明 EEPROM 写入矛盾，为保护电机按无变速处理。 */
+    }
+
+    if (speed_up_ratio > HANDLESCAN_TOOL_RATIO_UNIT)
+    {
+        return ((uint32_t)speed_up_ratio << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构用高 16 位保存，驱动下发时做除法。 */
+    }
+
+    if (reduction_ratio > HANDLESCAN_TOOL_RATIO_UNIT)
+    {
+        return (uint32_t)reduction_ratio; /* 减速机构用低 16 位保存，驱动下发时做乘法。 */
+    }
+
+    return HANDLESCAN_TOOL_RATIO_UNIT; /* 0 或 1 都表示无机械变速，运行链路保持屏幕速度。 */
+}
+
+/*
+ * 函数功能：把 Page3 的减速/增速比写入通道识别缓存。
+ * 输入参数：message 为目标识别缓存；tool_info_buf 为已读出的 Page3 缓存，读取失败可传 NULL。
+ * 返回参数：无。
+ */
+static void Handlescan_UpdateToolRatioMessage(ChannelrecognizeMessage_t *message, const uint8_t *tool_info_buf)
+{
+    uint32_t ratio = HANDLESCAN_TOOL_RATIO_UNIT;              /* 默认无变速，避免 Page3 读取失败时沿用旧倍率。 */
+
+    if (message == NULL)
+    {
+        return;                                               /* 识别缓存为空时不写全局状态，防止异常路径串改另一通道。 */
+    }
+
+    if (tool_info_buf != NULL)
+    {
+        ratio = Handlescan_BuildToolReductionRatio(tool_info_buf[HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET],
+                                                   tool_info_buf[HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET]); /* 按 Page3[8]/[9] 构造完整倍率。 */
+    }
+
+    message->tool_reduction_ratio = ratio;                    /* 保存完整倍率，后续通道记忆和驱动下发都读取该字段。 */
+    message->meioticratio = (uint8_t)(ratio & 0xFFU);          /* 旧 8 位字段只保留低位减速比，增速机构下该字段为 0。 */
+}
+
+/*
+ * 函数功能：把查表后的型号值转换成业务刀具能力。
+ * 输入参数：raw_tool_type 为 Page3 刀具型号或 0x7C 自带能力手柄型号。
+ * 返回参数：PLANER/GRINDH 或原值；YIP 后缀归一为 PLANER，YIM 后缀归一为 GRINDH。
  */
 static uint8_t Handlescan_MapRawToolTypeToBusinessType(uint8_t raw_tool_type)
 {
-    if (raw_tool_type == PX_YIP_ONLINES)
+    if ((raw_tool_type == PX_YIP_ONLINES) ||
+        (raw_tool_type == MX_YIP_ONLINES))
     {
-        return PLANER; /* PXP 一体刨按最新规则作为 PLANER，开放往复能力。 */
+        return PLANER; /* YIP 后缀表示刨削能力，按 PLANER 开放往复和频率显示入口。 */
     }
 
-    if (raw_tool_type == PX_YIM_ONLINES)
+    if ((raw_tool_type == PX_YIM_ONLINES) ||
+        (raw_tool_type == MX_YIM_ONLINES) ||
+        (raw_tool_type == MX_YIM16_ONLINES))
     {
-        return GRINDH; /* PXM 一体磨按最新规则作为 GRINDH，关闭往复/开口定位。 */
+        return GRINDH; /* YIM 后缀表示磨削能力，按 GRINDH 关闭往复能力。 */
     }
 
     return raw_tool_type; /* 其它 EEPROM 刀具暂时保持原值，避免扩大本次规则变更范围。 */
@@ -512,6 +597,19 @@ static bool Handlescan_IsSelfTypedHandleModel(uint8_t mapped_model)
             (mapped_model == PX_YIP_ONLINES) ||     /* PXYTP 是一体式手柄型号，后续由映射函数转成刨刀能力。 */
             (mapped_model == JMB_ONLINES) ||        /* JMB 是手柄型号，不能再挂在刀具 Page3 表中。 */
             (mapped_model == MX_YIM16_ONLINES));    /* MXYTM16 是手柄型号，按手柄编号顺序接在 MXYTM 后。 */
+}
+
+/*
+ * 函数功能：判断一体式手柄是否需要从手柄自身 EEPROM Page3 显示刀具规格。
+ * 输入参数：mapped_model 为 EEPROM Page2 映射后的手柄型号。
+ * 返回参数：true 表示 MXYTM/MXYTP/PXYTM/PXYTP 需要显示直径、长度、角度；false 表示其它自带型号不显示规格。
+ */
+static bool Handlescan_IsIntegratedToolSpecHandleModel(uint8_t mapped_model)
+{
+    return ((mapped_model == MX_YIM_ONLINES) ||  /* MXYTM：规格来自手柄 EEPROM Page3。 */
+            (mapped_model == MX_YIP_ONLINES) ||  /* MXYTP：规格来自手柄 EEPROM Page3。 */
+            (mapped_model == PX_YIM_ONLINES) ||  /* PXYTM：规格来自手柄 EEPROM Page3。 */
+            (mapped_model == PX_YIP_ONLINES));   /* PXYTP：规格来自手柄 EEPROM Page3。 */
 }
 
 /*
@@ -597,6 +695,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint16_t keep_speed_zzstep;  /* 保存基座阶段已从 Page6 读出的正转调速步进，防止 memset 后丢失。 */
     uint16_t keep_speed_fzstep;  /* 保存基座阶段已从 Page6 读出的反转调速步进，RFID 标签不直接携带该参数。 */
     uint16_t keep_speed_oscstep; /* 保存基座阶段已从 Page6 读出的往复调速步进，供新屏快慢调速键使用。 */
+    uint16_t keep_speed_zzstep_large;  /* 保存基座阶段已从 Page6 读出的大步进，避免 RFID 刷新后快键退回旧乘 2 逻辑。 */
+    uint16_t keep_speed_fzstep_large;  /* 保存反转大步进，保证 A/B 通道和方向切换后仍使用 EEPROM Page6 配置。 */
+    uint16_t keep_speed_oscstep_large; /* 保存往复大步进，只有进入往复方向时才由 SpeedActive 使用。 */
 
     if ((message == NULL) || (spec_values == NULL) || (rfid_result == NULL) || (rfid_result->valid == false))
     {
@@ -611,6 +712,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     keep_speed_zzstep = message->speed_zzstep; /* RFID 结果刷新前先暂存正转步进，避免清识别缓存时丢掉 EEPROM Page6 参数。 */
     keep_speed_fzstep = message->speed_fzstep; /* RFID 结果刷新前先暂存反转步进，保证换刀具头后仍按基座配置调速。 */
     keep_speed_oscstep = message->speed_oscstep; /* RFID 结果刷新前先暂存往复步进，PLANER 刀具切到往复后可继续用新屏调速。 */
+    keep_speed_zzstep_large = message->speed_zzstep_large; /* RFID 结果刷新前同步暂存正转大步进，避免大加/大减键丢配置。 */
+    keep_speed_fzstep_large = message->speed_fzstep_large; /* 暂存反转大步进，保持 Page6 大步进和方向状态解耦。 */
+    keep_speed_oscstep_large = message->speed_oscstep_large; /* 暂存往复大步进，等待刀具能力确认后继续使用。 */
     payload = rfid_result->payload; /* 后续按 EPC/USER 来源解释同一份原始标签数据。 */
     memset(message, 0, sizeof(*message)); /* RFID 刀具头重新识别时先清旧识别缓存，避免旧 EEPROM 字段残留。 */
 
@@ -724,6 +828,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->speed_zzstep = keep_speed_zzstep; /* RFID 成功后恢复正转步进，优先使用基座 EEPROM Page6 的方向步进。 */
     message->speed_fzstep = keep_speed_fzstep; /* RFID 成功后恢复反转步进，避免分体式刀具头上线后退回固定默认值。 */
     message->speed_oscstep = keep_speed_oscstep; /* RFID 成功后恢复往复步进，保证 PLANER 往复调速和正反转同源。 */
+    message->speed_zzstep_large = keep_speed_zzstep_large; /* RFID 成功后恢复正转大步进，让屏幕快加/快减使用 Page6 大步进。 */
+    message->speed_fzstep_large = keep_speed_fzstep_large; /* RFID 成功后恢复反转大步进，避免反转快键回退为小步进。 */
+    message->speed_oscstep_large = keep_speed_oscstep_large; /* RFID 成功后恢复往复大步进，保证往复调速两档均来自 EEPROM。 */
     if (message->speed_zzstep == 0U)
     {
         message->speed_zzstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，正转调速按 1000 兜底。 */
@@ -735,6 +842,18 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     if (message->speed_oscstep == 0U)
     {
         message->speed_oscstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，往复调速按 1000 兜底。 */
+    }
+    if (message->speed_zzstep_large == 0U)
+    {
+        message->speed_zzstep_large = HANDLESCAN_SPEED_STEP_LARGE_FALLBACK; /* 大步进缺失时使用快键兜底，保证屏幕大加/大减仍有反馈。 */
+    }
+    if (message->speed_fzstep_large == 0U)
+    {
+        message->speed_fzstep_large = HANDLESCAN_SPEED_STEP_LARGE_FALLBACK; /* 反转大步进缺失时同样兜底，避免方向切换后快键无效。 */
+    }
+    if (message->speed_oscstep_large == 0U)
+    {
+        message->speed_oscstep_large = HANDLESCAN_SPEED_STEP_LARGE_FALLBACK; /* 往复大步进缺失时兜底，频率显示逻辑不受影响。 */
     }
     //message->run_direction = direction; /* 默认方向来自 RFID 标签。 */
 
@@ -789,6 +908,9 @@ static void Handlescan_PrepareRfidBaseRecognizeMessage(ChannelrecognizeMessage_t
     message->speed_zzstep=1000;
     message->speed_fzstep=1000;
     message->speed_oscstep=1000;
+    message->speed_zzstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
+    message->speed_fzstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
+    message->speed_oscstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
     message->tool_reduction_ratio=1;
     message->default_injection_flow=20;
     message->freq_default=40;
@@ -1272,20 +1394,19 @@ static uint32_t Handlescan_ReadPage4MaxSpeed(const uint8_t *buffer)
 }
 
 /*
- * 函数功能：把 EEPROM Page4 默认注水流量从 0.1 单位转换为泵业务流量并限制在 0~70。
- * 输入参数：flow_x10 Page4 中按 0.1 单位保存的默认注水流量。
+ * 函数功能：把 EEPROM Page4 默认注水流量限制到 1~70，异常时使用程序默认值。
+ * 输入参数：flow_value Page4 中直接保存的默认注水泵流量。
  * 返回参数：现有 pumpMessage.speed_work 使用的整数流量值。
  */
-static uint16_t Handlescan_BuildDefaultInjectionFlow(uint16_t flow_x10)
+static uint16_t Handlescan_BuildDefaultInjectionFlow(uint16_t flow_value)
 {
-    uint16_t flow = (uint16_t)(flow_x10 / HANDLESCAN_INITIAL_FLOW_SCALE); /* Page4 默认流量按 x10 存储，泵任务当前使用整数流量。 */
-
-    if (flow > HANDLESCAN_INITIAL_FLOW_MAX)
+    if ((flow_value < HANDLESCAN_INITIAL_FLOW_MIN) ||
+        (flow_value > HANDLESCAN_INITIAL_FLOW_MAX))
     {
-        flow = HANDLESCAN_INITIAL_FLOW_MAX; /* 业务范围明确为 0~70，超过上限时钳位，避免异常 EEPROM 值让注水泵过量输出。 */
+        return HANDLESCAN_INITIAL_FLOW_DEFAULT; /* EEPROM 写 0 或超过 70 时统一回退 30，避免注水泵 0 速或异常过量输出。 */
     }
 
-    return flow; /* 返回已经适配现有注水泵速度单位的默认流量。 */
+    return flow_value; /* EEPROM 写入 1~70 时直接作为注水泵业务流量使用，方便生产端按实际 ml/min 写值。 */
 }
 
 /*
@@ -1318,10 +1439,24 @@ static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t mi
  * 输入参数：raw_direction EEPROM Page4 方向字节，当前业务确认初始方向按正转使用。
  * 返回参数：项目内部方向值，当前固定返回 ZZDIR。
  */
-static uint8_t Handlescan_ParseInitialDirection(uint8_t raw_direction)
+static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t *message, uint8_t raw_direction)
 {
-    (void)raw_direction; /* 当前业务确认 Page4 默认方向为正转，保留原始字节入口便于后续扩展编码表。 */
-    return ZZDIR;        /* WorkMessage/MemoryMsg 内部使用 ZZDIR 表示正转。 */
+    if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_REVERSE)
+    {
+        return FZDIR; /* Page4[8]=0x02 表示默认反转，所有有效手柄都允许正/反方向切换。 */
+    }
+
+    if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_OSC)
+    {
+        if (Handlescan_IsOscInitialDirectionSupported(message))
+        {
+            return OSCDIR; /* Page4[8]=0x03 且当前手柄/刀具支持往复时，默认进入往复方向。 */
+        }
+
+        return ZZDIR; /* EEPROM 写了往复但型号不支持时保护回正转，避免屏幕误亮频率窗口。 */
+    }
+
+    return ZZDIR; /* Page4[8]=0x01 或异常值都按正转处理，保持旧手柄安全默认。 */
 }
 
 /*
@@ -1349,7 +1484,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     }
     default_speed = Handlescan_ClampDefaultSpeed(default_speed, min_speed, max_speed); /* 默认速度按同页上下限钳位，保证上线速度合法。 */
 
-    message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* 解析默认注水流量并转换到泵业务单位。 */
+    message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16BE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* Page4 默认注水流量按大端直接保存，读出后只做 1~70 范围保护。 */
     message->speed_min = min_speed;                         /* 保存 Page4 最小速度，屏幕和外控调速边界必须跟随 EEPROM 配置。 */
     message->speed_max = max_speed;                         /* 保存通用最大速度，供后续 UI/外控边界逻辑复用。 */
     message->speed_zzmin = min_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */
@@ -1364,7 +1499,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 
     
 
-    message->run_direction = Handlescan_ParseInitialDirection(initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 解析默认方向，当前按业务确认使用正转。 */
+    message->run_direction = Handlescan_ParseInitialDirection(message, initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 按 Page4 默认方向解析，往复方向会先校验手柄能力。 */
     message->freq_default = initial_info_buf[HANDLESCAN_INITIAL_FREQ_OFFSET]; /* 保存 Page4 默认频率，往复模式启动时直接装载。 */
     message->freq_min = FreqMin;                             /* Page4 未提供频率下限，沿用现有 UI 频率下限宏保持调节边界。 */
     message->freq_max = FreqMax;                             /* Page4 未提供频率上限，沿用现有 UI 频率上限宏保持调节边界。 */
@@ -1374,91 +1509,56 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 }
 
 /*
- * 函数功能：从 Page6 多档位速度区读取指定序号的速度步进。
- * 输入参数：speed_step_buf 为 Page6 整页缓存；gear_index 为需要读取的第几组速度，1/2/3 分别对应正转、反转、往复步进槽。
- * 返回参数：可直接写入 ChannelrecognizeMessage 的 16 位步进值，读不到或为 0 时返回 1000。
+ * 函数功能：从 Page6 速度调节区读取指定偏移的 16 位步进。
+ * 输入参数：speed_step_buf 为 Page6 整页缓存；speed_offset 为字段偏移；fallback_step 为字段无效时的兜底步进。
+ * 返回参数：可直接写入 ChannelrecognizeMessage 的 16 位步进值。
  */
-static uint16_t Handlescan_ReadPage6SpeedStep(const uint8_t *speed_step_buf, uint8_t gear_index)
+static uint16_t Handlescan_ReadPage6SpeedStep(const uint8_t *speed_step_buf, uint8_t speed_offset, uint16_t fallback_step)
 {
-    uint8_t gear_count;                                      /* 保存 Page6[0] 声明的有效档位数量。 */
-    uint8_t effective_gear;                                  /* 保存本次实际读取的档位序号，避免访问未配置档位。 */
-    uint8_t speed_offset;                                    /* 保存所选档位速度字段的 Page6 偏移。 */
     uint16_t speed_step;                                     /* 保存从 EEPROM Page6 读取出的调速步进。 */
 
     if (speed_step_buf == NULL)
     {
-        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* Page6 读取失败时不影响上线，调速步进使用 1000 兜底。 */
-    }
-
-    gear_count = speed_step_buf[HANDLESCAN_SPEED_STEP_GEAR_COUNT_OFFSET]; /* Page6 第 0 字节表示已配置几组速度档位。 */
-    if (gear_count == 0U)
-    {
-        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* 未配置档位时使用固定兜底，避免速度按键按下无变化。 */
-    }
-    if (gear_count > HANDLESCAN_SPEED_STEP_MAX_GEAR)
-    {
-        gear_count = HANDLESCAN_SPEED_STEP_MAX_GEAR;         /* 固件当前只解析前三组速度，超过三组先按前三组处理。 */
-    }
-
-    effective_gear = (gear_index == 0U) ? 1U : gear_index;   /* 调用方传 0 时按第一组处理，防止异常参数返回 0 步进。 */
-    if (effective_gear > gear_count)
-    {
-        effective_gear = gear_count;                         /* 缺少对应方向速度时沿用最后一组有效档位，保持三方向都可调速。 */
-    }
-
-    switch (effective_gear)
-    {
-    case 1U:
-        speed_offset = HANDLESCAN_SPEED_STEP_GEAR1_OFFSET;   /* 第一组速度写入正转慢档步进。 */
-        break;
-    case 2U:
-        speed_offset = HANDLESCAN_SPEED_STEP_GEAR2_OFFSET;   /* 第二组速度写入反转慢档步进。 */
-        break;
-    default:
-        speed_offset = HANDLESCAN_SPEED_STEP_GEAR3_OFFSET;   /* 第三组速度写入往复慢档步进。 */
-        break;
+        return fallback_step;                                /* Page6 读取失败时不影响上线，调速步进使用对应兜底。 */
     }
 
     speed_step = Handlescan_ReadUint16BE(speed_step_buf, speed_offset); /* Page6 速度字段按上位机布局使用大端 16 位。 */
     if (speed_step == 0U)
     {
-        return HANDLESCAN_SPEED_STEP_FALLBACK;               /* 已配置档位但速度为 0 时仍使用兜底，避免 UI 操作无反馈。 */
+        return fallback_step;                                /* EEPROM 写 0 表示字段无效，使用兜底避免 UI 操作无反馈。 */
     }
 
-    return speed_step;                                       /* 返回当前方向可用的慢档调速步进。 */
+    return speed_step;                                       /* 返回当前按钮档位可用的调速步进。 */
 }
 
 /*
- * 函数功能：把 Page6 多档位速度区同步到识别缓存的正转、反转、往复调速步进字段。
+ * 函数功能：把 Page6 速度调节区同步到识别缓存的小步进和大步进字段。
  * 输入参数：message 为目标通道识别缓存；speed_step_buf 为已读取并校验过页尾的 Page6 缓存，读取失败时可传 NULL。
  * 返回参数：无。
  */
 static void Handlescan_UpdateSpeedStepMessage(ChannelrecognizeMessage_t *message, const uint8_t *speed_step_buf)
 {
+    uint16_t small_step;                                     /* 保存 Page6[0..1] 小步进，供普通加减和小步进键使用。 */
+    uint16_t large_step;                                     /* 保存 Page6[2..3] 大步进，供屏幕大加/大减键使用。 */
+
     if (message == NULL)
     {
         return;                                              /* 识别缓存为空时不写全局状态，避免异常路径破坏另一通道参数。 */
     }
-    if(message->handle_type==PXBA_ONLINE||message->handle_type==PXBB_ONLINE)
-    {
-         // message->speed_min=500;
-        message->speed_zzstep=500;
-        message->speed_fzstep=500;
-        message->speed_oscstep=500;
-        message->speed_zzmin=3000;
-        message->speed_fzmin=3000;
-        message->speed_oscmin=3000;
-        message->speed_oscmax=30000;
-    }
-    else
-    {
-        message->speed_zzstep=2000;
-        message->speed_fzstep=2000;
-        message->speed_oscstep=2000;
-    }
-    // message->speed_zzstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 1U); /* 正转慢档步进来自 Page6 第一组速度，失败时回退 1000。 */
-    // message->speed_fzstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 2U); /* 反转慢档步进来自 Page6 第二组速度，缺项时沿用最后有效档。 */
-    // message->speed_oscstep = Handlescan_ReadPage6SpeedStep(speed_step_buf, 3U); /* 往复慢档步进来自 Page6 第三组速度，配合新屏快档翻倍。 */
+
+    small_step = Handlescan_ReadPage6SpeedStep(speed_step_buf,
+                                               HANDLESCAN_SPEED_STEP_SMALL_OFFSET,
+                                               HANDLESCAN_SPEED_STEP_SMALL_FALLBACK); /* 小步进直接来自 Page6[0..1]，不再按手柄型号硬编码。 */
+    large_step = Handlescan_ReadPage6SpeedStep(speed_step_buf,
+                                               HANDLESCAN_SPEED_STEP_LARGE_OFFSET,
+                                               HANDLESCAN_SPEED_STEP_LARGE_FALLBACK); /* 大步进直接来自 Page6[2..3]，屏幕快键不再用小步进乘 2。 */
+
+    message->speed_zzstep = small_step;                      /* 正转小步进使用 Page6 小步进，保证三方向按钮体感一致。 */
+    message->speed_fzstep = small_step;                      /* 反转小步进同源 Page6[0..1]，避免继续读取旧三档位偏移。 */
+    message->speed_oscstep = small_step;                     /* 往复小步进同源 Page6[0..1]，只有选中往复时才会使用。 */
+    message->speed_zzstep_large = large_step;                /* 正转大步进使用 Page6 大步进，供 SCREENKey_SPEED_Add/Sub_Large 使用。 */
+    message->speed_fzstep_large = large_step;                /* 反转大步进同源 Page6[2..3]，保持 A/B 通道独立。 */
+    message->speed_oscstep_large = large_step;               /* 往复大步进同源 Page6[2..3]，不改变频率显示逻辑。 */
 }
 
 /*
@@ -1605,6 +1705,9 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     message->speed_zzstep = 0U;                              /* 清掉正转调速步进，下一次上线重新从 Page6 或 RFID 兜底写入。 */
     message->speed_fzstep = 0U;                              /* 清掉反转调速步进，避免换手柄后沿用旧步进。 */
     message->speed_oscstep = 0U;                             /* 清掉往复调速步进，保持离线态没有可用调速参数。 */
+    message->speed_zzstep_large = 0U;                        /* 清掉正转大步进，避免下一支手柄误用旧 Page6 快键步进。 */
+    message->speed_fzstep_large = 0U;                        /* 清掉反转大步进，保证 B/A 通道重新上线后按本通道 EEPROM 装载。 */
+    message->speed_oscstep_large = 0U;                       /* 清掉往复大步进，防止不支持往复的手柄残留快键配置。 */
     message->freq_min = 0U;                                  /* 清掉频率下限缓存，避免下一次调频沿用旧手柄边界。 */
     message->freq_max = 0U;                                  /* 清掉频率上限缓存，避免下一次调频沿用旧手柄边界。 */
     message->freq_default = 0U;                              /* 清掉默认频率，避免往复模式沿用旧 Page4 默认频率。 */
@@ -2337,7 +2440,7 @@ void HandlescanA_Fun_SSC(void)
 
         if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
         {
-            AT24CS32_ClearLastDebugInfo();                       /* 自带刀具能力手柄不读 Page3，但仍要读取 Page4 运行初始值。 */
+            AT24CS32_ClearLastDebugInfo();                       /* 一体式手柄不再用 Page3 识别刀具类型，但仍要读取 Page4 运行初始值。 */
             read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_initial_info_buf); /* A 通道读取 Page4 默认速度、频率、方向和泵流量。 */
             if (read_status == 0U)
             {
@@ -2356,10 +2459,28 @@ void HandlescanA_Fun_SSC(void)
                                                              mapped_model,
                                                              raw_type_major,
                                                              raw_type_minor); /* 0x7C 一体式型号直接写入 A 通道手柄和刀具能力字段。 */
+            read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 一体式手柄仍读取 Page3 规格和 Page3[8]/[9] 倍率字段，失败不影响上线。 */
+            Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageA,
+                                              (read_status != 0U) ? s_a_tool_info_buf : NULL); /* Page3 倍率无效时按 1 倍保护，避免机械变速字段写错导致超速。 */
             Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
                                                 s_a_initial_info_buf); /* 同步 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
             Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* A 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 这类手柄没有独立 Page3 规格，本次上线清掉旧刀具规格显示缓存。 */
+            if ((read_status != 0U) &&
+                (Handlescan_IsIntegratedToolSpecHandleModel(mapped_model) != false))
+            {
+                tool_diameter_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* A 一体式手柄 Page3[2..3] 保存刀具直径，单位沿用 0.1。 */
+                tool_length_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* A 一体式手柄 Page3[4..5] 保存刀具长度，按现有规格窗口格式缓存。 */
+                tool_angle_tenth = Handlescan_ReadUint16BE(s_a_tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* A 一体式手柄 Page3[6..7] 保存刀具角度，屏幕规格区直接显示角度值。 */
+                Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
+                                                tool_diameter_tenth,
+                                                tool_length_tenth,
+                                                tool_angle_tenth,
+                                                Handlescan_MapRawToolTypeToBusinessType(mapped_model)); /* 一体式手柄规格来自自身 EEPROM Page3，不再清掉直径、长度、角度显示缓存。 */
+            }
+            else
+            {
+                Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 非四类一体式或 Page3 读取失败时清空 A 规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
+            }
             MemoryMsgA.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
             SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道按手柄型号上线并装载到通道记忆。 */
             Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_last_alarm); /* 自恢复成功时清掉 A 通道历史手柄校验报警。 */
@@ -2430,6 +2551,7 @@ void HandlescanA_Fun_SSC(void)
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 A 通道识别结果。 */
+        Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageA, s_a_tool_info_buf); /* A 通道按 Page3[8]/[9] 装入减速/增速比，供驱动统一换算。 */
                                           WorkMessage.auto_identify= MemoryMsgA.auto_identify=1;
         Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
                                             s_a_initial_info_buf); /* 同步更新 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
@@ -2816,7 +2938,7 @@ void HandlescanB_Fun_SSC(void)
 
         if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
         {
-            AT24CS32_ClearLastDebugInfo();                       /* 自带刀具能力手柄不读 Page3，但仍要读取 Page4 运行初始值。 */
+            AT24CS32_ClearLastDebugInfo();                       /* 一体式手柄不再用 Page3 识别刀具类型，但仍要读取 Page4 运行初始值。 */
             read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_initial_info_buf); /* B 通道读取 Page4 默认速度、频率、方向和泵流量。 */
             if (read_status == 0U)
             {
@@ -2835,10 +2957,28 @@ void HandlescanB_Fun_SSC(void)
                                                              mapped_model,
                                                              raw_type_major,
                                                              raw_type_minor); /* 0x7C 一体式型号直接写入 B 通道手柄和刀具能力字段。 */
+            read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 一体式 B 手柄同样读取 Page3 规格和倍率字段，读不到则只按 1 倍并清规格。 */
+            Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageB,
+                                              (read_status != 0U) ? s_b_tool_info_buf : NULL); /* Page3 同时写减速和增速时 helper 会保护为无变速。 */
             Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
                                                 s_b_initial_info_buf); /* 同步 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
             Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* B 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 这类手柄没有独立 Page3 规格，本次上线清掉旧刀具规格显示缓存。 */
+            if ((read_status != 0U) &&
+                (Handlescan_IsIntegratedToolSpecHandleModel(mapped_model) != false))
+            {
+                tool_diameter_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* B 一体式手柄 Page3[2..3] 保存刀具直径，单位沿用 0.1。 */
+                tool_length_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* B 一体式手柄 Page3[4..5] 保存刀具长度，按现有规格窗口格式缓存。 */
+                tool_angle_tenth = Handlescan_ReadUint16BE(s_b_tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* B 一体式手柄 Page3[6..7] 保存刀具角度，屏幕规格区直接显示角度值。 */
+                Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
+                                                tool_diameter_tenth,
+                                                tool_length_tenth,
+                                                tool_angle_tenth,
+                                                Handlescan_MapRawToolTypeToBusinessType(mapped_model)); /* 一体式手柄规格来自自身 EEPROM Page3，不再清掉直径、长度、角度显示缓存。 */
+            }
+            else
+            {
+                Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 非四类一体式或 Page3 读取失败时清空 B 规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
+            }
             MemoryMsgB.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
             SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道按手柄型号上线并装载到通道记忆。 */
             Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_last_alarm); /* 自恢复成功时清掉 B 通道历史手柄校验报警。 */
@@ -2909,6 +3049,7 @@ void HandlescanB_Fun_SSC(void)
                                           tool_diameter_tenth,
                                           tool_length_tenth,
                                           tool_angle_tenth); /* 同步更新 B 通道识别结果。 */
+        Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageB, s_b_tool_info_buf); /* B 通道按 Page3[8]/[9] 装入减速/增速比，避免继续按型号写死。 */
                                             WorkMessage.auto_identify= MemoryMsgB.auto_identify=1;
         Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
                                             s_b_initial_info_buf); /* 同步更新 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */

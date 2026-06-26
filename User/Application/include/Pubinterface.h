@@ -289,7 +289,7 @@ typedef struct {
   volatile uint16_t  dir;///工作方向
   
   volatile uint16_t  current_work;
-  volatile uint16_t  default_injection_flow;//Page4默认注水流量，解析后按泵业务流量保存
+  volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
   volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
   volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
@@ -320,9 +320,12 @@ typedef struct
     volatile uint32_t  speed_fzmin;
       volatile uint32_t  speed_oscmax;
     volatile uint32_t  speed_oscmin;
-   volatile uint16_t speed_zzstep;//正向步进速度
-    volatile uint16_t speed_fzstep;//反步进速度
-   volatile uint16_t speed_oscstep;//往复步进速度
+   volatile uint16_t speed_zzstep;//正向小步进速度，来自 EEPROM Page6[0..1]
+    volatile uint16_t speed_fzstep;//反向小步进速度，来自 EEPROM Page6[0..1]
+   volatile uint16_t speed_oscstep;//往复小步进速度，来自 EEPROM Page6[0..1]
+   volatile uint16_t speed_zzstep_large;//正向大步进速度，来自 EEPROM Page6[2..3]，供屏幕大加/大减键使用
+   volatile uint16_t speed_fzstep_large;//反向大步进速度，来自 EEPROM Page6[2..3]，避免继续用小步进乘 2
+   volatile uint16_t speed_oscstep_large;//往复大步进速度，来自 EEPROM Page6[2..3]，只影响往复方向调速
   volatile uint32_t speed_zzdefault;//速度
   volatile uint32_t speed_fzdefault;//速度
   volatile uint32_t speed_oscdefault;//速度
@@ -332,7 +335,7 @@ typedef struct
 	volatile uint16_t  overloadThresholdFor;//过载阀值（正）
 	volatile uint16_t  overloadThresholdRev;//过载阀值（反）
 	volatile uint16_t  overloadThresholdOSC;//过载阀值（往复）
-	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM按0.1保存，解析后按泵业务流量保存
+	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM大端直接写1~70，0或越界由业务层回退30
 	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
 	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
 	volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值，只用于蜂鸣阈值

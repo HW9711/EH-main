@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-/* PUMP_PRESSURE_CONTROL_ENABLE 控制压力闭环总开关，默认 1 让所有控制来源都经过 1.5 倍阈值硬停保护。 */
+/* PUMP_PRESSURE_CONTROL_ENABLE 控制压力闭环总开关，默认 1 让所有控制来源都经过按泵速变化的压力闭环保护。 */
 #ifndef PUMP_PRESSURE_CONTROL_ENABLE
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
 #endif
@@ -21,18 +21,44 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE 0U
 #endif
 
-/*
- * PUMP_PRESSURE_CONTROL_STOP_RATIO_NUM / DEN 配置硬停倍率，默认 3/2 = 1.5 倍阈值。
- * 例如想改成 1.3 倍时，可设 NUM=13U、DEN=10U；想改成 2.0 倍时，可设 NUM=2U、DEN=1U。
- */
-#ifndef PUMP_PRESSURE_CONTROL_STOP_RATIO_NUM
-#define PUMP_PRESSURE_CONTROL_STOP_RATIO_NUM 3U
-#endif
+/* PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN 表示 50 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN 50U
+/* PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN 表示 110 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN 110U
+/* PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN 表示 140 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN 140U
+/* PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN 表示 200 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN 200U
+/* PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN 表示 260 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN 260U
+/* PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 表示 300 ml/min 实测堵管阈值标定点。 */
+#define PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 300U
 
-/* 分母必须非 0；如果误配置为 0，pump_pressure_control.c 会退化为 1.0 倍阈值保护，避免除 0。 */
-#ifndef PUMP_PRESSURE_CONTROL_STOP_RATIO_DEN
-#define PUMP_PRESSURE_CONTROL_STOP_RATIO_DEN 2U
-#endif
+/* PUMP_PRESSURE_CONTROL_REDUCE_50_G 表示 50 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_50_G 80U
+/* PUMP_PRESSURE_CONTROL_REDUCE_110_G 表示 110 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_110_G 1700U
+/* PUMP_PRESSURE_CONTROL_REDUCE_140_G 表示 140 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_140_G 220U
+/* PUMP_PRESSURE_CONTROL_REDUCE_200_G 表示 200 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_200_G 220U
+/* PUMP_PRESSURE_CONTROL_REDUCE_260_G 表示 260 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_260_G 280U
+/* PUMP_PRESSURE_CONTROL_REDUCE_300_G 表示 300 ml/min 开始限速的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_REDUCE_300_G 280U
+
+/* PUMP_PRESSURE_CONTROL_STOP_50_G 表示 50 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_50_G 125U
+/* PUMP_PRESSURE_CONTROL_STOP_110_G 表示 110 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_110_G 245U
+/* PUMP_PRESSURE_CONTROL_STOP_140_G 表示 140 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_140_G 285U
+/* PUMP_PRESSURE_CONTROL_STOP_200_G 表示 200 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_200_G 320U
+/* PUMP_PRESSURE_CONTROL_STOP_260_G 表示 260 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_260_G 350U
+/* PUMP_PRESSURE_CONTROL_STOP_300_G 表示 300 ml/min 输出压到 0 的压力，单位 g。 */
+#define PUMP_PRESSURE_CONTROL_STOP_300_G 370U
 
 /* PUMP_PRESSURE_CONTROL_SOURCE_AUTO 仅保留旧宏值兼容，当前默认配置不再使用自动回退。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_AUTO 0U
@@ -58,14 +84,14 @@ extern "C" {
 #endif
 
 /*
- * PumpPressureControl_Apply 根据压力阈值对目标泵速做闭环限速。
- * target_speed 是上层业务原本准备输出的泵速，weight_x10 是压力模块换算重量 0.1g，threshold_g 是阈值 g。
+ * PumpPressureControl_Apply 根据当前泵速对应的压力阈值对目标泵速做闭环限速。
+ * target_speed 是上层业务原本准备输出的泵速，weight_x10 是压力模块换算重量 0.1g，threshold_g 仅作为压力上报有效性标志。
  */
 uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
 
 /*
- * PumpPressureControl_ShouldForceStop 判断压力是否已经到达硬停泵区间。
- * 返回 1 表示 WeightX10 >= ThresholdG * 硬停倍率，需要把本周期输出压到 0；返回 0 表示只做普通限速或保持原速。
+ * PumpPressureControl_ShouldForceStop 判断压力是否已经到达绝对硬停泵区间。
+ * 该接口没有泵速参数，因此只使用 300 ml/min 的硬停阈值做兜底锁存；随泵速变化的停泵输出由 PumpPressureControl_Apply 完成。
  */
 uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t threshold_g);
 

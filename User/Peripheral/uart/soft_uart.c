@@ -714,7 +714,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     {
         if(pump_message->type==INJECTWATER)
         {
-        pump_message->speed_work=30;
+        pump_message->speed_work = Pubinterface_GetInjectionPumpStartFlow(); /* 注水泵上线时先按当前手柄 Page4 默认流量装载，未选中手柄或非法值则回退 30。 */
         }
         else if(pump_message->type==POURWATER)
         {

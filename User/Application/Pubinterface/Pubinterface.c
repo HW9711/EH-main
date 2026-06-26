@@ -53,8 +53,12 @@ static uint8_t s_handle_injection_pump_follow_mask = 0U;
 
 /* 电机反馈小于等于该阈值时认为机械输出已停止；0 表示必须等驱动反馈真实归零。 */
 #define CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD 0U
-/* 手柄运行联动注水泵的默认冷却流量；仅在设备码已识别为注水泵时使用，避免沿用 Page4 或上位机留下的过大速度。 */
-#define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 70U
+/* 手柄运行联动注水泵的默认冷却流量；Page4 写 0、越界或未装载时统一回退到 30。 */
+#define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 30U
+/* 注水泵默认流量最小有效值，0 表示 EEPROM 未配置或非法，不能直接启动泵。 */
+#define HANDLE_INJECTION_PUMP_FLOW_MIN 1U
+/* 注水泵默认流量最大有效值，保持和注水泵业务 0~70ml 范围一致。 */
+#define HANDLE_INJECTION_PUMP_FLOW_MAX 70U
 /* 抽吸泵业务最大显示/设定速度，和 sscPUMPA/B.c 中最终输出限幅保持一致。 */
 #define PUMP_DRAWWATER_SPEED_MAX 15U
 /* 灌注泵业务最大显示/设定速度，和 sscPUMPA/B.c 中最终输出限幅保持一致。 */
@@ -65,8 +69,8 @@ static uint8_t s_handle_injection_pump_follow_mask = 0U;
 #define PUMP_POURWATER_START_SPEED 50U
 /* 新屏速度按键在旧通道记忆无步进时的兜底步进，避免初次插入或旧参数为空时按键无效。 */
 #define SCREEN_SPEED_STEP_FALLBACK 1000U
-/* 新屏速度大步进使用小步进的两倍，和 EX8 表里快减/快加的用户体感保持一致。 */
-#define SCREEN_SPEED_STEP_DOUBLE_FACTOR 2U
+/* 新屏速度大步进缺省值，只有 EEPROM Page6[2..3] 无效时才使用，正常情况直接用手柄配置。 */
+#define SCREEN_SPEED_LARGE_STEP_FALLBACK 2000U
 /* 屏幕外部控制退出要求 1 秒内连续两次点击，防止主运行页小电脑图标被误触后直接释放外控。 */
 #define SCREEN_EXTERNAL_EXIT_DOUBLE_CLICK_MS 1000U
 
@@ -163,6 +167,19 @@ static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 }
 
 /*
+ * 函数功能：判断当前手柄是否为规格来自手柄自身 EEPROM Page3 的一体式刀具头手柄。
+ * 输入参数：hand_model EEPROM Page2 识别出的手柄型号。
+ * 返回参数：true 表示 MXYTM/MXYTP/PXYTM/PXYTP，需要显示手柄 EEPROM 内的直径、长度、角度；false 表示不是该类手柄。
+ */
+static bool Pubinterface_IsIntegratedToolSpecDisplayModel(uint8_t hand_model)
+{
+	return ((hand_model == MX_YIM_ONLINES) ||  /* MXYTM：一体式磨头，刀具规格来自手柄自身 EEPROM。 */
+			(hand_model == MX_YIP_ONLINES) ||  /* MXYTP：一体式刨刀，刀具规格来自手柄自身 EEPROM。 */
+			(hand_model == PX_YIM_ONLINES) ||  /* PXYTM：一体式磨头，刀具规格来自手柄自身 EEPROM。 */
+			(hand_model == PX_YIP_ONLINES));   /* PXYTP：一体式刨刀，刀具规格来自手柄自身 EEPROM。 */
+}
+
+/*
  * 函数功能：判断当前手柄型号是否允许使用屏幕刀具规格窗口显示 RFID/EPC 解析出的长度、直径和角度。
  * 输入参数：hand_model EEPROM 识别出的手柄型号。
  * 返回参数：true 表示当前型号允许打开 UI_TOOLSPEC_ID；false 表示当前型号必须隐藏规格窗口。
@@ -170,7 +187,8 @@ static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 static bool Pubinterface_IsRfidToolSpecDisplayModel(uint8_t hand_model)
 {
 	return ((Pubinterface_IsSplitToolSpecDisplayModel(hand_model) == true) ||
-			(hand_model == COMMON_SOCKET_ONLINES)); /* 公共接头按 EPC 读取刀具规格，只加入规格显示 gate，不加入 PXBA/PXBB 识别按钮 gate。 */
+			(Pubinterface_IsIntegratedToolSpecDisplayModel(hand_model) == true) ||
+			(hand_model == COMMON_SOCKET_ONLINES)); /* PXBA/PXBB 和公共接头显示 RFID 刀具头标签规格；四类一体式显示手柄 EEPROM Page3 规格。 */
 }
 
 /*
@@ -180,8 +198,7 @@ static bool Pubinterface_IsRfidToolSpecDisplayModel(uint8_t hand_model)
  */
 static bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
 {
-	return ((tool_type == PLANER) ||
-			(tool_type == PX_YIP_ONLINES)); /* PLANER 是新业务确认的刨刀能力标志，PXP 老型号值兼容为刨刀能力，PXM 按 GRINDH 处理。 */
+	return (tool_type == PLANER); /* 刀具能力只看归一后的 PLANER，MXYTP/PXYTP 只作为手柄型号参与往复能力判断。 */
 }
 
 /*
@@ -193,7 +210,8 @@ static bool Pubinterface_IsOscDirectionSupportedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||
 			(hand_model == PXBB_ONLINES) ||
-			(hand_model == PX_YIP_ONLINES)); /* PXBA/PXBB 和 PXP 兼容型号具备往复硬件基础，PXM 按磨头能力不再开放往复。 */
+			(hand_model == MX_YIP_ONLINES) ||
+			(hand_model == PX_YIP_ONLINES)); /* PXBA/PXBB、MXYTP/PXYTP 具备往复硬件基础，PXM 按磨头能力不再开放往复。 */
 }
 
 /*
@@ -203,17 +221,17 @@ static bool Pubinterface_IsOscDirectionSupportedModel(uint8_t hand_model)
  */
 static bool Pubinterface_IsOscDirectionSupported(uint8_t hand_model, uint8_t tool_type)
 {
-	(void)hand_model; /* 最新规则把往复能力收敛到 tool_type=PLANER，手柄型号只影响开口定位范围。 */
-	if ((false != false) && Pubinterface_IsOscDirectionSupportedModel(hand_model))
+	if (Pubinterface_IsOscDirectionSupportedModel(hand_model) == false)
 	{
-		return true; /* 死引用旧型号判定函数，只为压住静态未引用告警，实际结果仍由 tool_type 决定。 */
-	}
-	if (Pubinterface_IsPlanerCapabilityTool(tool_type))
-	{
-		return true; /* tool_type=PLANER 或兼容 PXP 旧码时才允许往复，GRINDH/PXM 不再进入 OSCDIR。 */
+		return false; /* 手柄本体不支持往复时，屏幕不能开放往复方向按钮，避免普通手柄被刨刀字段误带入 OSCDIR。 */
 	}
 
-	return false; /* GRINDH 或未知刀具不支持往复，避免 PXBA/PXBB 基座在磨头刀具下误亮往复按钮。 */
+	if (Pubinterface_IsPlanerCapabilityTool(tool_type) == false)
+	{
+		return false; /* 手柄支持往复但当前刀具不是刨刀能力时，继续隐藏往复按钮和频率窗口。 */
+	}
+
+	return true; /* 只有手柄本体支持往复且当前刀具为刨刀能力时，才允许屏幕进入 OSCDIR。 */
 }
 
 /*
@@ -370,10 +388,11 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
 	bool show_tool_spec = false;
 	bool auto_identify = (WorkMessage.auto_identify != 0U); /* 自动识别模式下，未读到 RFID 规格前不显示手动磨/刨按钮。 */
 	bool split_tool_spec_handle = Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model); /* 当前通道是否为 PXBA/PXBB 分体 RFID 手柄，普通 EEPROM 手柄不显示刀具识别区。 */
+	bool integrated_tool_spec_handle = Pubinterface_IsIntegratedToolSpecDisplayModel(WorkMessage.hand_model); /* MXYTM/MXYTP/PXYTM/PXYTP 不走 RFID，规格直接来自手柄 EEPROM Page3。 */
 	bool rfid_spec_handle = Pubinterface_IsRfidToolSpecDisplayModel(WorkMessage.hand_model); /* 当前通道是否具备 RFID/EPC 规格显示能力，公共接头也要显示刀具规格。 */
 	bool common_socket_spec_handle = (WorkMessage.hand_model == COMMON_SOCKET_ONLINES); /* 公共接头没有 PXBA/PXBB 识别按钮，但 EPC 规格有效时必须打开规格窗口。 */
 	bool rfid_display_enabled = (auto_identify && split_tool_spec_handle); /* 当前选中通道必须是 PXBA/PXBB 才允许显示 RFID 规格和自动识别图标，避免普通手柄继承另一通道残留。 */
-	bool rfid_spec_window_enabled = (rfid_display_enabled || common_socket_spec_handle); /* PXBA/PXBB 仍按自动识别状态显示规格，公共接头按 EPC 规格缓存直接显示。 */
+	bool rfid_spec_window_enabled = (rfid_display_enabled || common_socket_spec_handle || integrated_tool_spec_handle); /* PXBA/PXBB/公共接头用 RFID 标签规格；一体式四类用手柄 EEPROM Page3 规格。 */
 	bool open_position_enabled = Pubinterface_IsOpenPositionEnabledTool(WorkMessage.hand_model, WorkMessage.tool_type); /* 开口定位必须同时满足 PXBA/PXBB 和 PLANER。 */
 	uint8_t result_tool_type = WorkMessage.tool_type; /* 自动识别等待/掉线图标优先看当前刀具类型，没有当前刀具时再看历史识别。 */
 
@@ -417,6 +436,11 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
 		{
 			SendUIDSMessage(UI_TOOL_ID, false, manual_display_value); /* 公共接头没有有效 EPC 规格时隐藏刀具图，避免误显示 PXBA/PXBB 或普通手柄残留。 */
 			SendUIDSMessage(UI_MANUALBUTTON_ID, false, manual_display_value); /* 公共接头没有手动识别按钮，未读到 EPC 前整块识别按钮区保持关闭。 */
+		}
+		else if (integrated_tool_spec_handle)
+		{
+			SendUIDSMessage(UI_TOOL_ID, false, manual_display_value); /* 一体式手柄没有独立 RFID 刀具头，Page3 规格无效时隐藏普通刀具图，避免误显示旧规格。 */
+			SendUIDSMessage(UI_MANUALBUTTON_ID, false, manual_display_value); /* 一体式手柄不显示手动/自动识别按钮，只保留有效 EEPROM 规格窗口。 */
 		}
 		else
 		{
@@ -793,8 +817,8 @@ static void Pubinterface_SendDirectionDisplay(uint8_t ui_dir_id, bool enable_fla
 static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 {
 	uint8_t display_value[10] = {0U}; /* 所有 UI 消息都使用 10 字节缓冲，保持 UIDP 队列拷贝格式稳定。 */
-	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* PLANER 或兼容 PXP 旧码才按刨刀能力显示往复相关入口。 */
-	bool osc_supported = Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向只看刀具能力，磨头刀具不再因为基座支持就误亮往复。 */
+	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* 只有归一后的 PLANER 才按刨刀能力显示往复相关入口。 */
+	bool osc_supported = Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向同时看手柄硬件和刨刀能力，普通手柄或磨头刀具都不误亮往复。 */
 	bool foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 切通道刷新时脚踏图标也按实际在线状态显示。 */
 	bool external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控占用时内部驱动方式也可能是 TOUCHWORK，但屏幕不能显示为触控。 */
 	bool handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 切换 A/B 后也按当前手柄型号决定手控是否可用，避免通道刷新把禁用手控刷白。 */
@@ -908,7 +932,6 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		pumpMessageA.timingDrainage_flag = false; /* 手柄运行联动不是定时排空，先清 A 排空标志，避免后台排空计时抢写输出。 */
 		pumpMessageA.timingDrainage_times = 0U;   /* A 排空计数清零，保证后续真正进入排空时从完整周期开始。 */
 
-		//pumpMessageA.speed_work = HANDLE_INJECTION_PUMP_DEFAULT_FLOW; /* A 冷却流量每次手柄启动都重装固定值，避免继承上次调泵速度。 */
 		pumpMessageA.run_flag = true;			   /* 打开 A 泵任务运行门控，下一周期按注水公式和压力闭环输出。 */
 		s_handle_injection_pump_follow_mask |= HANDLE_INJECTION_FOLLOW_PUMP_A; /* 记录 A 泵由手柄冷却跟随启动，停止时才允许本函数释放。 */
 	}
@@ -924,7 +947,6 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 	{
 		pumpMessageB.timingDrainage_flag = false; /* 手柄运行联动不是定时排空，先清 B 排空标志，避免后台排空计时抢写输出。 */
 		pumpMessageB.timingDrainage_times = 0U;   /* B 排空计数清零，保证后续真正进入排空时从完整周期开始。 */
-		//pumpMessageB.speed_work = HANDLE_INJECTION_PUMP_DEFAULT_FLOW; /* B 冷却流量每次手柄启动都重装固定值，保证 B 注水泵跨通道跟随时不为 0。 */
 		pumpMessageB.run_flag = true;			   /* 打开 B 泵任务运行门控，下一周期按注水公式和压力闭环输出。 */
 		s_handle_injection_pump_follow_mask |= HANDLE_INJECTION_FOLLOW_PUMP_B; /* 记录 B 泵由手柄冷却跟随启动，停止时才允许本函数释放。 */
 	}
@@ -968,7 +990,23 @@ uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void)
 }
 
 /*
- * 函数功能：取得注水泵启动时使用的非零流量，优先使用当前手柄 Page4，Page4 为空时回退到联调安全流量。
+ * 函数功能：把 Page4/RFID 默认注水流量规整到可启动的泵业务范围。
+ * 输入参数：flow 为通道记忆中的默认注水流量。
+ * 返回参数：1~70 直接返回；0 或超过 70 时返回程序默认流量 30。
+ */
+static uint16_t Pubinterface_BuildInjectionPumpStartFlow(uint16_t flow)
+{
+	if ((flow < HANDLE_INJECTION_PUMP_FLOW_MIN) ||
+		(flow > HANDLE_INJECTION_PUMP_FLOW_MAX))
+	{
+		return HANDLE_INJECTION_PUMP_DEFAULT_FLOW; /* 异常 EEPROM/RFID 流量不能写入泵速度，统一使用 30 保证启动可控。 */
+	}
+
+	return flow; /* 有效配置值直接使用，保证 EEPROM 写多少，注水泵默认就按多少运行。 */
+}
+
+/*
+ * 函数功能：取得注水泵启动时使用的非零流量，优先使用当前手柄 Page4，Page4 为空或越界时回退 30。
  * 输入参数：无。
  * 返回参数：可直接写入 pumpMessageA/B.speed_work 的非零注水泵启动流量。
  */
@@ -976,12 +1014,7 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 {
 	uint16_t flow = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 先读当前通道 Page4 默认注水流量，保证有配置时仍以 EEPROM 为准。 */
 
-	if (flow == 0U)
-	{
-		flow = HANDLE_INJECTION_PUMP_DEFAULT_FLOW; /* Page4 未装载或默认流量为 0 时，启动泵必须有兜底流量，否则 run_flag 置位也不会转。 */
-	}
-
-	return flow; /* 返回最终启动流量，调用方只负责写入对应 A/B 泵速度。 */
+	return Pubinterface_BuildInjectionPumpStartFlow(flow); /* 0 或越界时统一回退 30，正常 1~70 直接作为注水泵速度。 */
 }
 
 /*
@@ -1001,7 +1034,7 @@ uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message)
 	case DRAWWATER:
 		return PUMP_DRAWWATER_START_SPEED; /* 抽吸泵从一档小流量启动，避免 0 速只亮运行态。 */
 	case INJECTWATER:
-		return Pubinterface_GetInjectionPumpStartFlow(); /* 注水泵仍沿用当前通道 Page4 默认流量和 70ml 兜底策略。 */
+		return Pubinterface_GetInjectionPumpStartFlow(); /* 注水泵沿用当前通道 Page4 默认流量，非法值回退 30。 */
 	case POURWATER:
 		return PUMP_POURWATER_START_SPEED; /* 灌注泵从一档 50ml 启动，解决屏幕直接启动时不转的问题。 */
 	default:
@@ -1090,23 +1123,35 @@ uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void)
 }
 
 /*
- * 函数功能：手柄上线时把当前通道 Page4 默认注水流量写入仍为 0 的注水泵速度。
- * 输入参数：channel 本次上线的手柄通道。
+ * 函数功能：把指定默认流量写入所有已识别为注水泵的泵口，并立即刷新泵显示。
+ * 输入参数：flow 为待装载的默认流量；0 或越界时按程序默认 30 处理。
+ * 返回参数：无。
+ */
+static void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
+{
+	uint16_t default_flow = Pubinterface_BuildInjectionPumpStartFlow(flow); /* 统一规整默认流量，保证无手柄或 EEPROM 异常时都回到 30。 */
+
+	if (pumpMessageA.type == INJECTWATER)
+	{
+		pumpMessageA.speed_work = default_flow; /* A 泵是注水泵时写入新的待机流量，使后续屏幕启动和手柄联动使用同一设定。 */
+		Pubinterface_RefreshPumpADisplay(); /* 默认流量变化后立即刷新 A 泵数值，避免屏幕停留在泵先上线时的 30。 */
+	}
+
+	if (pumpMessageB.type == INJECTWATER)
+	{
+		pumpMessageB.speed_work = default_flow; /* B 泵是注水泵时同步写入同一默认流量，保证单注水泵或双注水泵场景一致。 */
+		Pubinterface_RefreshPumpBDisplay(); /* 默认流量变化后立即刷新 B 泵数值，确保插拔手柄后屏幕显示跟随当前通道。 */
+	}
+}
+
+/*
+ * 函数功能：手柄上线或回落选中时把指定通道 Page4 默认注水流量写入注水泵速度。
+ * 输入参数：channel 本次成为当前选中手柄的通道。
  * 返回参数：无。
  */
 static void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
 {
-	uint16_t default_flow = Pubinterface_GetChannelDefaultInjectionFlow(channel); /* 读取本通道 Page4 默认注水流量，解析阶段已经完成 /10 和 0~70 钳位。 */
-
-	if ((pumpMessageA.type == INJECTWATER) && (pumpMessageA.speed_work == 0U))
-	{
-		pumpMessageA.speed_work = default_flow; /* A 泵是注水泵且尚未设置流量时，用当前手柄默认流量初始化。 */
-	}
-
-	if ((pumpMessageB.type == INJECTWATER) && (pumpMessageB.speed_work == 0U))
-	{
-		pumpMessageB.speed_work = default_flow; /* B 泵是注水泵且尚未设置流量时，用当前手柄默认流量初始化。 */
-	}
+	Pubinterface_ApplyInjectionPumpDefaultFlow(Pubinterface_GetChannelDefaultInjectionFlow(channel)); /* 只在通道成为当前选中时装载 Page4 默认流量，避免普通运行周期覆盖用户手动调节。 */
 }
 
 /*
@@ -1341,6 +1386,9 @@ void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 	recognize->speed_zzstep = 0U;			   /* 清扫描层正转调速步进，下一次识别成功后再由 RFID/Page6 刷新。 */
 	recognize->speed_fzstep = 0U;			   /* 清扫描层反转调速步进，避免离线刀具头继续作为在线规格上报。 */
 	recognize->speed_oscstep = 0U;			   /* 清扫描层往复调速步进，通道运行记忆不在这里清。 */
+	recognize->speed_zzstep_large = 0U;		   /* 清扫描层正转大步进，下一次识别成功后再由 Page6 重新装入。 */
+	recognize->speed_fzstep_large = 0U;		   /* 清扫描层反转大步进，避免离线刀具头继续影响屏幕快减/快加。 */
+	recognize->speed_oscstep_large = 0U;	   /* 清扫描层往复大步进，频率显示仍由当前方向和手柄能力决定。 */
 	recognize->speed_min = 0U;				   /* 清扫描层速度下限，上位机无当前刀具头时不显示在线限速范围。 */
 	recognize->speed_max = 0U;				   /* 清扫描层速度上限，下一次 RFID 成功后重新写入。 */
 	recognize->default_injection_flow = 0U;	   /* 清扫描层刀具默认泵流量，MemoryMsg 中上次运行泵流量继续保留。 */
@@ -2349,7 +2397,8 @@ void ControlTypeActive(uint8_t key_value)
 void SpeedActive(uint8_t key_value)
 {
 	uint32_t speed_value = WorkMessage.speed_set_work; /* 以当前设定速度为基准，Page4 24位最大速度可能超过16位，调速过程必须保留32位。 */
-	uint32_t speed_step = 0U;                          /* 本次实际步进，先取通道识别步进，新屏快档再按两倍换算。 */
+	uint32_t speed_step = 0U;                          /* 本次实际步进，普通键和小步进键使用 Page6 小步进。 */
+	uint32_t speed_large_step = 0U;                    /* 屏幕大加/大减使用的 Page6 大步进，不能再由小步进乘 2 推导。 */
 	uint32_t speed_max = 0U;                           /* 当前通道、当前方向允许的最大设定速度，支持 Page4 24位上限。 */
 	uint32_t speed_min = 0U;                           /* 当前通道、当前方向允许的最小设定速度。 */
 	bool add_key = false;                              /* true 表示本次按键为增加速度。 */
@@ -2370,18 +2419,21 @@ void SpeedActive(uint8_t key_value)
 		if (WorkMessage.dir_work == ZZDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_zzstep; /* A 通道正转旧键步进来自 EEPROM/识别参数。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_zzstep_large; /* A 通道正转大步进来自 EEPROM Page6[2..3]。 */
 			speed_max = ChannelrecognizeMessageA.speed_zzmax;   /* A 通道正转最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_zzmin;   /* A 通道正转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == FZDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_fzstep; /* A 通道反转旧键步进来自 EEPROM/识别参数。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_fzstep_large; /* A 通道反转大步进来自 EEPROM Page6[2..3]。 */
 			speed_max = ChannelrecognizeMessageA.speed_fzmax;   /* A 通道反转最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_fzmin;   /* A 通道反转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == OSCDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_oscstep; /* A 通道往复旧键步进来自 EEPROM/识别参数。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_oscstep_large; /* A 通道往复大步进来自 EEPROM Page6[2..3]。 */
 			speed_max = ChannelrecognizeMessageA.speed_oscmax;   /* A 通道往复最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_oscmin;   /* A 通道往复最小速度。 */
 		}
@@ -2395,18 +2447,21 @@ void SpeedActive(uint8_t key_value)
 		if (WorkMessage.dir_work == ZZDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_zzstep; /* B 通道正转旧键步进来自 B 通道识别参数。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_zzstep_large; /* B 通道正转大步进来自 B 通道 Page6。 */
 			speed_max = ChannelrecognizeMessageB.speed_zzmax;   /* B 通道正转最大速度，避免误用 A 通道限幅。 */
 			speed_min = ChannelrecognizeMessageB.speed_zzmin;   /* B 通道正转最小速度，避免误用 A 通道限幅。 */
 		}
 		else if (WorkMessage.dir_work == FZDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_fzstep; /* B 通道反转旧键步进来自 B 通道识别参数。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_fzstep_large; /* B 通道反转大步进来自 B 通道 Page6。 */
 			speed_max = ChannelrecognizeMessageB.speed_fzmax;   /* B 通道反转最大速度。 */
 			speed_min = ChannelrecognizeMessageB.speed_fzmin;   /* B 通道反转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == OSCDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_oscstep; /* B 通道往复旧键步进来自 B 通道识别参数。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_oscstep_large; /* B 通道往复大步进来自 B 通道 Page6。 */
 			speed_max = ChannelrecognizeMessageB.speed_oscmax;   /* B 通道往复最大速度。 */
 			speed_min = ChannelrecognizeMessageB.speed_oscmin;   /* B 通道往复最小速度。 */
 		}
@@ -2423,6 +2478,10 @@ void SpeedActive(uint8_t key_value)
 	if (speed_step == 0U)
 	{
 		speed_step = SCREEN_SPEED_STEP_FALLBACK; /* 识别参数没有写步进时用 1000 兜底，避免新屏速度键按下无反馈。 */
+	}
+	if (speed_large_step == 0U)
+	{
+		speed_large_step = SCREEN_SPEED_LARGE_STEP_FALLBACK; /* Page6 大步进无效时单独兜底，不再复用小步进乘法。 */
 	}
 
 	switch (key_value)
@@ -2441,14 +2500,14 @@ void SpeedActive(uint8_t key_value)
 		add_key = true; /* 新屏慢加直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Add_Large:
-		speed_step = speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR; /* 新屏快加为慢加步进两倍，使用32位避免24位速度上限被16位逻辑误截断。 */
+		speed_step = speed_large_step; /* 新屏大加直接使用 EEPROM Page6[2..3] 大步进。 */
 		add_key = true; /* 本次按键方向为增加。 */
 		break;
 	case SCREENKey_SPEED_Sub_Small:
 		sub_key = true; /* 新屏慢减直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Sub_Large:
-		speed_step = speed_step * SCREEN_SPEED_STEP_DOUBLE_FACTOR; /* 新屏快减为慢减步进两倍，使用32位保持与24位速度边界一致。 */
+		speed_step = speed_large_step; /* 新屏大减直接使用 EEPROM Page6[2..3] 大步进。 */
 		sub_key = true; /* 本次按键方向为减少。 */
 		break;
 	case HANDLEKey_greaI:
@@ -2936,16 +2995,21 @@ void HandleSwitchActive(uint8_t key_value) // 2026,4,19
 void PlugORunPLUGActive(uint8_t key_value)
 {
 	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于防止自动切到另一通道。 */
+	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
 
 	switch (key_value)
 	{
 	case SCREENKey_PLUG_A: // 插入A
+		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 先保存 A 原在线态，只有离线到在线这一跳才允许装载 Page4 默认流量。 */
 		WorkMessage.Channel_Aonline = true;					   /* A 通道校验通过后才置在线，后续心跳和显示都读取这个标志。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_A);		   /* 扫描结果只先进入 MemoryMsgA，运行中不会直接覆盖 WorkMessage。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_A))
 		{
 			Pubinterface_LoadChannelMemory(CHANNEL_A);		   /* 非运行状态下最后插入且校验通过的 A 通道成为当前选中通道。 */
-			Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A 被选中时，才用 A 的 Page4 默认流量初始化注水泵。 */
+			if (channel_was_online == 0U)
+			{
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A 首次接入并被选中时，才用 A 的 Page4 默认流量初始化注水泵。 */
+			}
 		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* A 自动成为当前通道后，同步刷新参数区和刀具规格。 */
 		}
 		Pubinterface_RefreshOnlineHandleDisplay();			   /* 无论是否自动选中，都刷新 A 在线图标和当前高亮状态。 */
@@ -2953,12 +3017,16 @@ void PlugORunPLUGActive(uint8_t key_value)
 		break;
 
 	case SCREENKey_PLUG_B: // 插入B
+		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 先保存 B 原在线态，防止 RFID/识别重复刷新覆盖用户手动调节的泵流量。 */
 		WorkMessage.Channel_Bonline = true;					   /* B 通道校验通过后才置在线，坏手柄不会进入在线态。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_B);		   /* 扫描结果只先进入 MemoryMsgB，避免运行中插入 B 抢占 A。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_B))
 		{
 			Pubinterface_LoadChannelMemory(CHANNEL_B);		   /* 非运行状态下最后插入且校验通过的 B 通道成为当前选中通道。 */
-			Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B 被选中时，才用 B 的 Page4 默认流量初始化注水泵。 */
+			if (channel_was_online == 0U)
+			{
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B 首次接入并被选中时，才用 B 的 Page4 默认流量初始化注水泵。 */
+			}
 			Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* B 自动成为当前通道后，同步刷新参数区和刀具规格。 */
 		}
 		Pubinterface_RefreshOnlineHandleDisplay();			   /* 无论是否自动选中，都刷新 B 在线图标和当前高亮状态。 */
@@ -2976,7 +3044,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 				(WorkMessage.Channel_Bonline == true))
 			{
 				Pubinterface_LoadChannelMemory(CHANNEL_B);		   /* 非工作状态拔掉当前 A 时，若 B 仍在线，则回落选中 B，保持“非工作态有在线手柄即有选中通道”。 */
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B 成为当前选中通道后，用 B 的 Page4 默认流量补齐仍为 0 的注水泵。 */
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* 当前通道回落到 B 后，注水泵目标流量也同步改为 B 的 Page4 默认值。 */
 				Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* 回落到 B 后刷新参数区，清掉 A 通道残留显示。 */
 			}
 			else
@@ -2986,6 +3054,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 B，等待用户手动确认。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
+				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，显示值和下次实际运行目标保持一致。 */
 			}
 		}
 		Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false); /* A 通道拔出后立即暗灭 A 手柄区域。 */
@@ -3003,7 +3072,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 				(WorkMessage.Channel_Aonline == true))
 			{
 				Pubinterface_LoadChannelMemory(CHANNEL_A);		   /* 非工作状态拔掉当前 B 时，若 A 仍在线，则回落选中 A，匹配现场先插 A 再插 B 再拔 B 的预期。 */
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A 成为当前选中通道后，用 A 的 Page4 默认流量补齐仍为 0 的注水泵。 */
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* 当前通道回落到 A 后，注水泵目标流量同步改为 A 的 Page4 默认值。 */
 				//Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* 回落到 A 后刷新参数区，清掉 B 通道残留显示。 */
 			}
 			else
@@ -3013,6 +3082,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 A，等待用户手动确认。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
+				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，避免拔掉最后手柄后残留 65。 */
 			}
 		}
 		Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false); /* B 通道拔出后立即暗灭 B 手柄区域。 */

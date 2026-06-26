@@ -2452,6 +2452,7 @@ static void ExternalComm_SendHeartbeat(void)
     uint8_t handle_a_raw_minor; /* A 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
     uint8_t handle_b_raw_major; /* B 通道心跳原始主类型，优先 MemoryMsg，必要时来自扫描缓存。 */
     uint8_t handle_b_raw_minor; /* B 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
+    uint8_t pump_run_bitmap;    /* 泵运行位图：bit0 表示 A 泵正在输出，bit1 表示 B 泵正在输出。 */
 
     handle_a_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
     handle_b_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
@@ -2494,6 +2495,20 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendPump(heartbeat_info, &heartbeat_len, &pumpMessageA);
     /* 追加 B 泵在线状态；若在线，紧跟 B 泵类型和 B 泵速度。 */
     ExternalComm_HeartbeatAppendPump(heartbeat_info, &heartbeat_len, &pumpMessageB);
+    /* 初始化泵运行位图，避免未运行泵仍因设定速度非 0 被上位机误判为运动。 */
+    pump_run_bitmap = 0U;
+    /* A 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
+    if ((pumpMessageA.online_flag != false) && (pumpMessageA.run_flag != false))
+    {
+        pump_run_bitmap |= 0x01U;
+    }
+    /* B 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
+    if ((pumpMessageB.online_flag != false) && (pumpMessageB.run_flag != false))
+    {
+        pump_run_bitmap |= 0x02U;
+    }
+    /* 在 A/B 泵压力字段之后追加运行位图，旧上位机最多忽略该字节，新上位机用于压力日志导出。 */
+    ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);
     /* 追加 A/B 刀具扩展信息；无有效刀具时不追加，保持旧心跳兼容。 */
     ExternalComm_HeartbeatAppendToolInfo(heartbeat_info, &heartbeat_len);
 

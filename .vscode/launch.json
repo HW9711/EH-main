@@ -2,23 +2,49 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "C/C++ Runner: Debug Session",
-      "type": "cppdbg",
+      "name": "ST-LINK Debug (flash, stop at main)",
+      "type": "cortex-debug",
       "request": "launch",
-      "args": [],
-      "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": "d:/Study_HL/F413EXOsSSCH_RTOSV1.5/User/Application/Handle",
-      "program": "d:/Study_HL/F413EXOsSSCH_RTOSV1.5/User/Application/Handle/build/Debug/outDebug",
-      "MIMode": "gdb",
-      "miDebuggerPath": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
-      ]
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/EIDE/build/MainCtrlF413MXOs/MainCtrlF413MXOs.axf",
+      "device": "STM32F413VGTx",
+      "interface": "swd",
+      "runToEntryPoint": "main",
+      "gdbPath": "C:/Users/Dell/.eide/tools/gcc_arm/bin/arm-none-eabi-gdb.exe",
+      "serverpath": "C:/Users/Dell/.eide/tools/stlink_gdb_server/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/Users/Dell/.eide/tools/st_cube_programer/bin",
+      "serverArgs": [
+        "--halt",
+        "--swd",
+        "--frequency",
+        "4000",
+        "-cp",
+        "C:/Users/Dell/.eide/tools/st_cube_programer/bin"
+      ],
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "name": "ST-LINK Attach (no flash)",
+      "type": "cortex-debug",
+      "request": "attach",
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/EIDE/build/MainCtrlF413MXOs/MainCtrlF413MXOs.axf",
+      "device": "STM32F413VGTx",
+      "interface": "swd",
+      "gdbPath": "C:/Users/Dell/.eide/tools/gcc_arm/bin/arm-none-eabi-gdb.exe",
+      "serverpath": "C:/Users/Dell/.eide/tools/stlink_gdb_server/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/Users/Dell/.eide/tools/st_cube_programer/bin",
+      "serverArgs": [
+        "--halt",
+        "--swd",
+        "--frequency",
+        "4000",
+        "-cp",
+        "C:/Users/Dell/.eide/tools/st_cube_programer/bin"
+      ],
+      "showDevDebugOutput": "raw"
     }
   ]
 }

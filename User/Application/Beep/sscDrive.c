@@ -15,7 +15,10 @@
 
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
-#define MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO 2U /* 临时补丁：公共接头刀具自带 2 倍增速，电机端下发速度需要除以 2。 */
+#define MOTOR_DRIVE_RATIO_UNIT 1U /* 机械变速倍率为 1 时表示屏幕速度和电机速度一致。 */
+#define MOTOR_DRIVE_SPEED_UP_SHIFT 16U /* WorkMessage.tool_reduction_ratio 高 16 位表示增速比。 */
+#define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
+#define MOTOR_DRIVE_SPEED_MAX 0xFFFFU /* 电机驱动启动帧速度字段只有高低 2 字节，超出时必须钳位。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -71,19 +74,39 @@ static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
 }
 
 /*
- * 函数功能：公共接头 EPC 临时补丁下，把屏幕目标速度折算成电机驱动板速度。
- * 输入参数：speed_value 为已从 WorkMessage x10 单位换算到驱动帧单位的目标速度。
- * 返回参数：需要写入 UART1 电机启动帧的速度值。
+ * 函数功能：按 EEPROM/RFID 解析出的机械减速比或增速比，把屏幕手柄速度换算成电机输出速度。
+ * 输入参数：display_speed_x10 为 WorkMessage.speed_set_work，单位沿用屏幕显示速度的 x10。
+ * 返回参数：需要写入 UART1 电机启动帧的速度值，已完成倍率换算和 16 位钳位。
  */
-static uint32_t MotorDrive_ApplyCommonSocketSpeedPatch(uint32_t speed_value)
+static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed_x10)
 {
-    if ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) &&
-        ((WorkMessage.tool_reduction_ratio >> 16) == MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO))
+    uint32_t ratio = WorkMessage.tool_reduction_ratio;        /* 当前通道记忆装载的完整倍率，高 16 位增速、低 16 位减速。 */
+    uint32_t reduction_ratio = ratio & MOTOR_DRIVE_REDUCTION_MASK; /* 低 16 位减速比，减速机构需要放大电机速度。 */
+    uint32_t speed_up_ratio = ratio >> MOTOR_DRIVE_SPEED_UP_SHIFT; /* 高 16 位增速比，增速机构需要降低电机速度。 */
+    uint32_t motor_speed = display_speed_x10 / 10U;           /* 屏幕速度内部按 x10 保存，下发驱动前先恢复 rpm 单位。 */
+
+    if ((reduction_ratio > MOTOR_DRIVE_RATIO_UNIT) &&
+        (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT))
     {
-        return speed_value / 2U; /* 公共接头刀具自带 2 倍增速，电机转速减半后刀具端显示速度才对得上。 */
+        reduction_ratio = MOTOR_DRIVE_RATIO_UNIT;             /* 双倍率同时有效属于 EEPROM 写入错误，保护为无减速。 */
+        speed_up_ratio = 0U;                                  /* 同时清增速分支，避免错误标签让电机速度不可预测。 */
     }
 
-    return speed_value; /* 非公共接头或未识别到 2 倍增速比时保持原有驱动速度。 */
+    if (reduction_ratio > MOTOR_DRIVE_RATIO_UNIT)
+    {
+        motor_speed = motor_speed * reduction_ratio;          /* 减速机构：刀具端 4000、减速比 2，则电机端下发 8000。 */
+    }
+    else if (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT)
+    {
+        motor_speed = motor_speed / speed_up_ratio;           /* 增速机构：刀具端速度由机械放大，电机端按增速比折减。 */
+    }
+
+    if (motor_speed > MOTOR_DRIVE_SPEED_MAX)
+    {
+        motor_speed = MOTOR_DRIVE_SPEED_MAX;                  /* 驱动协议只能下发 16 位速度，异常倍率导致超限时钳到最大值。 */
+    }
+
+    return motor_speed;                                       /* 返回本次启动帧实际使用的电机转速。 */
 }
 
 /// 开口定位
@@ -120,18 +143,7 @@ void MOTORRUN(void)
     static uint8_t huci=0;
     uint8_t display_value[10]={0};
     uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
-    if(WorkMessage.tool_reduction_ratio==0)WorkMessage.tool_reduction_ratio=1;
-    if((WorkMessage.auto_identify==0) && (WorkMessage.hand_model != COMMON_SOCKET_ONLINES))WorkMessage.tool_reduction_ratio=1;
-    uint32_t ssc_speed_value=0U; /* 电机驱动帧速度，公共接头临时补丁需要绕开原有比例乘法，避免高16位增速比被当成普通乘数。 */
-    if ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) &&
-        ((WorkMessage.tool_reduction_ratio >> 16) == MOTOR_DRIVE_COMMON_SOCKET_TEMP_UP_RATIO))
-    {
-        ssc_speed_value = MotorDrive_ApplyCommonSocketSpeedPatch(WorkMessage.speed_set_work / 10U); /* 公共接头显示速度仍按 x10 存储，先转驱动单位再按 2 倍增速折半。 */
-    }
-    else
-    {
-        ssc_speed_value=WorkMessage.speed_set_work*WorkMessage.tool_reduction_ratio/10;//显示速度使用设定速度，保持与切通道时一致，避免运行中调速显示跳变；实际下发驱动的速度仍使用 WorkMessage.speed_work，保持控制和反馈的分离，以及与驱动协议的兼容。
-    }
+    uint32_t ssc_speed_value=MotorDrive_ApplyToolReductionRatio(WorkMessage.speed_set_work); /* 电机驱动帧速度统一按 EEPROM/RFID 倍率换算，不再按型号写死。 */
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
     //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */

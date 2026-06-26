@@ -2278,14 +2278,6 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 
 ### 9.1 主控工程
 
-在主控工程根目录执行：
-
-```powershell
-python tools\check_handle_channel_logic.py
-```
-
-该脚本当前用于回归手柄通道逻辑。近期记录显示 8 项检查通过，是修改手柄插拔、报警和 A/B 通道逻辑后必须跑的最低限度检查。
-
 如需 EIDE 构建，按工程现有 EIDE 配置执行。注意 `Agents.md` 明确要求：调整源文件注册关系时，必须同步检查：
 
 | 文件 | 原因 |
@@ -2345,7 +2337,6 @@ rg -n "BB AA|PWM_FRE|CRC_Calc" D:\EH_main\reference\shima_waixie\small_2026_3_31
 | 外控 | 授权、心跳、运行、急停、静默 | ACK、停输出、释放授权符合预期 |
 | EEPROM | 读写和重启保持 | 读回一致，断电不丢 |
 | 压力 | 周期上报和标定 | `Seq` 递增，重量可校准，标定表持久 |
-| 回归 | `check_handle_channel_logic.py` | 检查通过 |
 
 ## 12. 当前最值得优先处理的风险
 

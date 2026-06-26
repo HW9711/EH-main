@@ -415,6 +415,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   static uint8_t DiameterLast = 0xff, AngleLast = 0xff;
   static uint8_t ModeLast = 0xff;
   uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 记录本次下发是否为公共接头 EPC 原始整数格式，避免影响旧小数直径路径。 */
+  uint8_t diameter_decimal_extra = 0U; /* 直径小数格式达到 10.0mm 以上时多占 1 个字符，长度和角度文本需要同步右移。 */
 
   if ((Length == LengthLast) && (Diameter == DiameterLast) && (Angle == AngleLast) && (raw_integer_mode == ModeLast))
     return ;
@@ -490,53 +491,65 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  }
 	  else
 	  {
-		  dat[14] = DiameterTemp[1] + 0x30; //直径十位
-		  dat[15] = 0x2E;  //.
-		  dat[16] = DiameterTemp[0] + 0x30; //直径个位
+		  if(DiameterTemp[2] > 0U)
+		  {
+			  diameter_decimal_extra = 1U; /* Page3 直径按 0.1mm 存储，150 必须显示为 15.0，不能丢掉百位。 */
+			  dat[2] = 32; /* 直径从 x.y 扩展为 xx.y 后，DWIN 本帧数据长度增加 1 字节。 */
+			  dat[14] = DiameterTemp[2] + 0x30; //直径十位，150 中的 1 表示 15.0 的十位。
+			  dat[15] = DiameterTemp[1] + 0x30; //直径个位，150 中的 5 表示 15.0 的个位。
+			  dat[16] = 0x2E;  //.
+			  dat[17] = DiameterTemp[0] + 0x30; //直径小数位，151 时这里显示 1。
+		  }
+		  else
+		  {
+			  dat[14] = DiameterTemp[1] + 0x30; //直径整数位，40 显示为 4.0 时保持旧位置。
+			  dat[15] = 0x2E;  //.
+			  dat[16] = DiameterTemp[0] + 0x30; //直径小数位，40 显示为 4.0。
+		  }
 	  }
-	  dat[17] = 0xA1;
-	  dat[18] = 0xA2;  //、
-	  dat[19] = 0x20;  //空格
+	  dat[17 + diameter_decimal_extra] = 0xA1;
+	  dat[18 + diameter_decimal_extra] = 0xA2;  //、
+	  dat[19 + diameter_decimal_extra] = 0x20;  //空格
 
-	  dat[20] = LengthTemp[2] + 0x30;
-	  dat[21] = LengthTemp[1] + 0x30;
-	  dat[22] = LengthTemp[0] + 0x30;
-	  dat[23] = 0x6D;  //'m'
-	  dat[24] = 0x6D;  //'m'
-	  dat[25] = 0xA1;
-	  dat[26] = 0xA2;  //、
-	  dat[27] = 0x20;
+	  dat[20 + diameter_decimal_extra] = LengthTemp[2] + 0x30;
+	  dat[21 + diameter_decimal_extra] = LengthTemp[1] + 0x30;
+	  dat[22 + diameter_decimal_extra] = LengthTemp[0] + 0x30;
+	  dat[23 + diameter_decimal_extra] = 0x6D;  //'m'
+	  dat[24 + diameter_decimal_extra] = 0x6D;  //'m'
+	  dat[25 + diameter_decimal_extra] = 0xA1;
+	  dat[26 + diameter_decimal_extra] = 0xA2;  //、
+	  dat[27 + diameter_decimal_extra] = 0x20;
 
 	  if(AngleTemp[2] > 0)//百位不为0
 	  {
-   	  dat[28] = AngleTemp[2] + 0x30;
-	    dat[29] = AngleTemp[1] + 0x30;
-	    dat[30] = AngleTemp[0] + 0x30;
-	    dat[31] = 0xA1;
-	    dat[32] = 0xE3;  //°
-	    dat[33] = 0x20;
+   	  dat[28 + diameter_decimal_extra] = AngleTemp[2] + 0x30;
+	    dat[29 + diameter_decimal_extra] = AngleTemp[1] + 0x30;
+	    dat[30 + diameter_decimal_extra] = AngleTemp[0] + 0x30;
+	    dat[31 + diameter_decimal_extra] = 0xA1;
+	    dat[32 + diameter_decimal_extra] = 0xE3;  //°
+	    dat[33 + diameter_decimal_extra] = 0x20;
 	  }
 	  else if(AngleTemp[1] > 0)//百位为0，十位不为0
 	  {
-	    dat[28] = AngleTemp[1] + 0x30;
-	    dat[29] = AngleTemp[0] + 0x30 ;
-	    dat[30] = 0xA1;
-	    dat[31] = 0xE3;  //°
-	    dat[32] = 0x20;
-	    dat[33] = 0x20;
+	    dat[28 + diameter_decimal_extra] = AngleTemp[1] + 0x30;
+	    dat[29 + diameter_decimal_extra] = AngleTemp[0] + 0x30 ;
+	    dat[30 + diameter_decimal_extra] = 0xA1;
+	    dat[31 + diameter_decimal_extra] = 0xE3;  //°
+	    dat[32 + diameter_decimal_extra] = 0x20;
+	    dat[33 + diameter_decimal_extra] = 0x20;
 	  }
 	  else //百位为0，十位为0
 	  {
-	    dat[28] = AngleTemp[0] + 0x30 ;
-	    dat[29] = 0xA1;
-	    dat[30] = 0xE3;  //°
-	    dat[31] = 0x20;
-	    dat[32] = 0x20;
-	    dat[33] = 0x20;
+	    dat[28 + diameter_decimal_extra] = AngleTemp[0] + 0x30 ;
+	    dat[29 + diameter_decimal_extra] = 0xA1;
+	    dat[30 + diameter_decimal_extra] = 0xE3;  //°
+	    dat[31 + diameter_decimal_extra] = 0x20;
+	    dat[32 + diameter_decimal_extra] = 0x20;
+	    dat[33 + diameter_decimal_extra] = 0x20;
 	  }
   }
 
-  Uart6_SendPacket(dat, 34);
+  Uart6_SendPacket(dat, (uint16_t)(dat[2] + 3U));
 
 }
 
