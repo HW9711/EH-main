@@ -41,8 +41,7 @@
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x01U /* 心跳刀具扩展版本，当前固定为 1，便于后续扩字段时区分。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN 20U /* 单通道刀具扩展块长度：通道/来源/规格/速度/方向/减速比共 20 字节。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_EEPROM_PAGE3 0x00U /* 普通不可拆手柄，刀具信息来自 EEPROM 第三页。 */
-#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC 0x01U /* 公共接头式可拆手柄，刀具信息来自 RFID EPC。 */
-#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER 0x02U /* PXBA/PXBB 分体式手柄，刀具信息来自 RFID USER。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC 0x01U /* 公共接头和 PXBA/PXBB 分体式手柄，刀具信息来自 RFID EPC。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD 0x00U /* 刀具扩展方向字段：正转。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE 0x01U /* 刀具扩展方向字段：反转。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC 0x02U /* 刀具扩展方向字段：往复。 */
@@ -601,7 +600,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 手柄速度按 WorkMessage.speed_work 的内部 x10 单位解析；A/B 泵速度仍按泵业务流量值解析，三者协议字段都是 2 字节大端。 */
+    /* 手柄速度按 WorkMessage.speed_work 的实际 rpm 解析；A/B 泵速度仍按泵业务流量值解析，三者协议字段都是 2 字节大端。 */
     if ((frame->area_code == 0x01U) || (frame->area_code == 0x03U) || (frame->area_code == 0x04U))
     {
         /* 2 字节参数不足时不能解析。 */
@@ -1175,6 +1174,36 @@ void ExternalComm_ClearHandleInjectionPumpFollow(void)
 }
 
 /*
+ * 函数功能：压力保护停泵时清除外控层保存的对应泵运行请求。
+ * 输入参数：pump_channel 为触发压力保护的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
+ * 返回参数：无。
+ */
+void ExternalComm_ClearPumpPressureRunRequest(uint8_t pump_channel)
+{
+    if (pump_channel == CHANNEL_A)
+    {
+        s_uart5_pump_manual_run_request = 0U; /* A 泵压力停机后撤销外控独立 A 泵请求，避免刷新函数把 A 泵重新置为运行。 */
+        s_uart5_inject_pump_follow_run_request = 0U; /* A 泵可能也是手柄冷却跟随泵，压力停机时同步清掉跟随请求。 */
+        ExternalComm_RefreshUart5PumpRunState(); /* 请求清零后重算 A 泵最终状态，保证 run_flag 保持停止。 */
+    }
+    else if (pump_channel == CHANNEL_B)
+    {
+        s_external_pump_b_manual_run_request = 0U; /* B 泵压力停机后撤销外控独立 B 泵请求，等待上位机下一次启动命令。 */
+        s_uart5_inject_pump_follow_run_request = 0U; /* B 作为唯一注水泵时也可能来自手柄冷却跟随，压力停机必须清掉。 */
+        ExternalComm_RefreshUart5PumpRunState(); /* 清掉跟随后同步 A 泵合并状态，避免 A 泵仍因旧跟随请求运行。 */
+    }
+    else
+    {
+        return; /* 非 A/B 通道不属于泵压力保护，直接返回避免误清外控状态。 */
+    }
+
+    if ((ControlArbitration_IsExternalActive() != false) || (s_external_comm_display_online != 0U))
+    {
+        ExternalComm_RefreshExternalControlRunDisplay(); /* 只有外控已在线或已占用时才刷新小电脑图标，避免本地压力停机误点亮外控。 */
+    }
+}
+
+/*
  * 函数功能：处理上位机控制命令，包括 A/B 泵启停、当前手柄启停、开口定位、急停和退出外控。
  * 输入参数：frame 指向已解析的外部通信控制帧，area_code 表示具体控制动作。
  * 返回参数：无。
@@ -1262,6 +1291,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
                                          EXTERNAL_COMM_REASON_NOT_SUPPORT);
                 return; /* 公共接头基座在线但 EPC 刀具头未识别时，外控真正启动电机才报警并拒绝运行。 */
             }
+            Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 上位机再次下发手柄启动命令属于新的控制源触发，允许重新尝试压力闭环启动。 */
             /* 恢复实际速度为已设置速度。 */
             WorkMessage.speed_work = WorkMessage.speed_set_work;
             /* 置位运行标志，驱动任务会发送启动帧。 */
@@ -1769,22 +1799,17 @@ static uint8_t ExternalComm_CurrentHandleMode(void)
 /*
  * 函数功能：根据手柄基座类型换算心跳刀具信息来源。
  * 输入参数：hand_model 为 MemoryMsgA/B 中保存的手柄基座型号。
- * 返回参数：0 表示 EEPROM Page3，1 表示 RFID EPC，2 表示 RFID USER。
+ * 返回参数：0 表示 EEPROM Page3，1 表示 RFID EPC。
  */
 static uint8_t ExternalComm_GetHandleToolSource(uint8_t hand_model)
 {
-    /* 公共接头式手柄的刀具头可更换，实际刀具信息来自 RFID EPC。 */
-    if (hand_model == COMMON_SOCKET_ONLINES)
+    /* 公共接头和 PXBA/PXBB 的刀具头可更换，当前协议统一从 RFID EPC 提取 12 字节刀具信息。 */
+    if ((hand_model == COMMON_SOCKET_ONLINES) ||
+        (hand_model == PXBA_ONLINES) ||
+        (hand_model == PXBB_ONLINES))
     {
-        /* 上位机据此显示“RFID EPC”，避免把公共接头基座误当成刀具。 */
+        /* 上位机据此显示“RFID EPC”，避免把可拆基座误当成 EEPROM 一体式刀具。 */
         return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC;
-    }
-
-    /* PXBA/PXBB 是当前确认的分体式手柄，刀具头信息来自 RFID USER 区。 */
-    if ((hand_model == PXBA_ONLINES) || (hand_model == PXBB_ONLINES))
-    {
-        /* 上位机据此显示“RFID USER”，便于和普通 EEPROM 手柄区分。 */
-        return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER;
     }
 
     /* 其它不可拆手柄继续使用 EEPROM 第三页刀具信息。 */
@@ -1810,7 +1835,7 @@ static uint16_t ExternalComm_RfidSpeedToWorkSpeed(uint8_t speed_k)
 
 /*
  * 函数功能：把 RFID 齿轮比字段转换为心跳使用的 32 位减速比。
- * 输入参数：ratio_hi/ratio_lo 为 EPC 两字节齿轮比；USER 单字节时 ratio_lo 传 0。
+ * 输入参数：ratio_hi/ratio_lo 为 EPC 两字节齿轮比。
  * 返回参数：高 16 位表示增速，低 16 位表示减速；未知格式保留原始低 16 位。
  */
 static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
@@ -1818,14 +1843,14 @@ static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t r
     uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 保留 EPC 原始齿轮比，便于未知格式仍能追溯。 */
     uint16_t ratio_value = (uint16_t)(raw_ratio & 0x0FFFU); /* 去掉高 4 位方向标记，剩余 12 位是比例数值。 */
 
-    if ((ratio_hi & 0xF0U) == 0xF0U)
-    {
-        return (uint32_t)ratio_value; /* 高 4 位为 F 时表示减速，写入低 16 位，和 handlescan 解析一致。 */
-    }
-
     if ((ratio_hi & 0xF0U) == 0x00U)
     {
-        return ((uint32_t)ratio_value << 16); /* 高 4 位为 0 时表示增速，写入高 16 位。 */
+        return (uint32_t)ratio_value; /* 高 4 位为 0 时表示减速，写入低 16 位，和 handlescan 解析一致。 */
+    }
+
+    if ((ratio_hi & 0xF0U) == 0xF0U)
+    {
+        return ((uint32_t)ratio_value << 16); /* 高 4 位为 F 时表示增速，写入高 16 位。 */
     }
 
     return (uint32_t)raw_ratio; /* 未知方向标记不强行解释，原样放在低 16 位供上位机和售后判断。 */
@@ -1870,16 +1895,12 @@ static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
         return false; /* RFID 缓存必须属于当前 A/B 通道，防止两路手柄刀具信息串用。 */
     }
 
-    if (handle_model == COMMON_SOCKET_ONLINES)
+    if ((handle_model == COMMON_SOCKET_ONLINES) ||
+        (handle_model == PXBA_ONLINES) ||
+        (handle_model == PXBB_ONLINES))
     {
         return (bool)((rfid_result->source == RFID_READ_SOURCE_EPC) &&
-                      (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)); /* 公共接头只接受 EPC 12 字节标签。 */
-    }
-
-    if ((handle_model == PXBA_ONLINES) || (handle_model == PXBB_ONLINES))
-    {
-        return (bool)((rfid_result->source == RFID_READ_SOURCE_USER) &&
-                      (rfid_result->payload_length == RFID_PAYLOAD_USER_LENGTH)); /* PXBA/PXBB 分体式只接受 USER 16 字节标签。 */
+                      (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)); /* 公共接头和 PXBA/PXBB 当前只接受 EPC 12 字节标签。 */
     }
 
     return false; /* 普通不可拆手柄仍走 EEPROM Page3，不使用 RFID 缓存兜底。 */
@@ -2149,7 +2170,7 @@ static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
                                                   const ChannelrecognizeMessage_t *recognize,
                                                   RfidToolResult_t *rfid_result)
 {
-    uint8_t handle_model; /* 保存心跳侧可见的基座类型，用来限定 EPC/USER 来源。 */
+    uint8_t handle_model; /* 保存心跳侧可见的基座类型，用来限定 EPC 来源。 */
 
     if (online == 0U)
     {
@@ -2173,7 +2194,7 @@ static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
         return false; /* RFID 任务还没有读到该通道有效标签，上位机继续显示等待 RFID。 */
     }
 
-    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 只有通道和 EPC/USER 来源都匹配时才允许兜底上报。 */
+    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 只有通道和 EPC 来源都匹配时才允许兜底上报。 */
 }
 
 /*
@@ -2186,8 +2207,8 @@ static void ExternalComm_HeartbeatAppendRfidResultBlock(uint8_t *info_area,
                                                         uint8_t channel,
                                                         const RfidToolResult_t *rfid_result)
 {
-    const uint8_t *payload; /* 指向 RFID 原始 payload，按 EPC/USER 来源解释字段。 */
-    uint8_t source_code; /* 心跳 block byte1，区分 RFID EPC 和 RFID USER。 */
+    const uint8_t *payload; /* 指向 RFID EPC 原始 payload，按最终协议解释字段。 */
+    uint8_t source_code; /* 心跳 block byte1，当前 RFID 刀具固定上报 EPC 来源。 */
     uint8_t tool_type; /* 心跳 block byte2，实际刀具型号来自 RFID 标签。 */
     uint8_t diameter; /* 心跳 block byte3，刀具直径来自 RFID 标签。 */
     uint16_t length; /* 心跳 block byte4~5，刀具长度按大端上报。 */
@@ -2204,49 +2225,23 @@ static void ExternalComm_HeartbeatAppendRfidResultBlock(uint8_t *info_area,
         return; /* 异常参数不写半截 block，保持心跳扩展格式完整。 */
     }
 
-    payload = rfid_result->payload; /* payload 长度已由调用方按来源检查，这里只做字段拆解。 */
-    if (rfid_result->source == RFID_READ_SOURCE_EPC)
+    payload = rfid_result->payload; /* payload 长度已由调用方按 EPC 检查，这里只做字段拆解。 */
+    if ((rfid_result->source != RFID_READ_SOURCE_EPC) ||
+        (rfid_result->payload_length != RFID_PAYLOAD_EPC_LENGTH))
     {
-        if (rfid_result->payload_length != RFID_PAYLOAD_EPC_LENGTH)
-        {
-            return; /* EPC 必须是 12 字节，长度异常时不生成兜底块。 */
-        }
-
-        source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC; /* 公共接头刀具来源显示为 RFID EPC。 */
-        tool_type = payload[0]; /* EPC byte0：刀具型号。 */
-        diameter = payload[1]; /* EPC byte1：刀具直径。 */
-        length = payload[2]; /* EPC byte2：刀具长度。 */
-        angle = payload[3]; /* EPC byte3：刀具角度。 */
-        reduction_ratio = ExternalComm_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比/减速比。 */
-        max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，按 k rpm 转工程单位。 */
-        min_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，按 k rpm 转工程单位。 */
-        default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* EPC byte8：默认速度，按 k rpm 转工程单位。 */
-        default_flow = payload[9]; /* EPC byte9：默认注水泵流量。 */
-        direction = ExternalComm_RfidDirectionToHeartbeat(payload[10]); /* EPC byte10：方向字段。 */
+        return; /* 最终协议只允许 EPC 12 字节结果进入心跳刀具扩展。 */
     }
-    else if (rfid_result->source == RFID_READ_SOURCE_USER)
-    {
-        if (rfid_result->payload_length != RFID_PAYLOAD_USER_LENGTH)
-        {
-            return; /* USER 必须是 16 字节，长度异常时不生成兜底块。 */
-        }
-
-        source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_USER; /* PXBA/PXBB 分体式刀具来源显示为 RFID USER。 */
-        tool_type = payload[0]; /* USER byte0：代号和结构字段。 */
-        diameter = payload[1]; /* USER byte1：刀具直径。 */
-        length = payload[2]; /* USER byte2：刀具长度。 */
-        angle = payload[3]; /* USER byte3：刀具角度。 */
-        reduction_ratio = (uint32_t)payload[4]; /* USER byte4：单字节减速比，扩展成 32 位后上报。 */
-        max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* USER byte8：转速上限。 */
-        min_speed = 0U; /* USER 当前未定义最低速度，和 handlescan 正式解析保持 0。 */
-        default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[9]); /* USER byte9：默认速度。 */
-        default_flow = payload[11]; /* USER byte11：泵流量。 */
-        direction = ExternalComm_RfidDirectionToHeartbeat(payload[5]); /* USER byte5：方向字段。 */
-    }
-    else
-    {
-        return; /* 只有 EPC/USER 两种来源允许进入心跳刀具扩展。 */
-    }
+    source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC; /* 公共接头和 PXBA/PXBB 的 EPC 标签来源都显示为 RFID EPC。 */
+    tool_type = payload[0]; /* EPC byte0：刀具型号。 */
+    diameter = payload[1]; /* EPC byte1：刀具直径。 */
+    length = payload[2]; /* EPC byte2：刀具长度。 */
+    angle = payload[3]; /* EPC byte3：刀具角度。 */
+    reduction_ratio = ExternalComm_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比/减速比。 */
+    max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，按 k rpm 转工程单位。 */
+    min_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，按 k rpm 转工程单位。 */
+    default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* EPC byte8：默认速度，按 k rpm 转工程单位。 */
+    default_flow = payload[9]; /* EPC byte9：默认注水泵流量。 */
+    direction = ExternalComm_RfidDirectionToHeartbeat(payload[10]); /* EPC byte10：方向字段。 */
 
     if ((max_speed != 0U) && (default_speed > max_speed))
     {
@@ -2313,7 +2308,7 @@ static void ExternalComm_HeartbeatAppendOneToolBlock(uint8_t *info_area,
 
     /* block byte0：通道号，1 为 A，2 为 B。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, channel);
-    /* block byte1：刀具信息来源，区分 EEPROM、RFID EPC、RFID USER。 */
+    /* block byte1：刀具信息来源，区分 EEPROM 和 RFID EPC。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_GetHandleToolSource(handle_model));
     /* block byte2：实际刀具类型，RFID 手柄来自标签，普通手柄来自 EEPROM 第三页。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->tool_type);
@@ -2519,7 +2514,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
-        /* 当前通道手柄工作速度，单位为 WorkMessage.speed_work 内部 x10，2 字节大端；上位机显示 rpm 时需要除以 10。 */
+        /* 当前通道手柄工作速度，单位为 WorkMessage.speed_work 实际 rpm，2 字节大端；上位机可直接按 rpm 显示。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
         /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);
@@ -2533,14 +2528,18 @@ static void ExternalComm_SendHeartbeat(void)
     /* 初始化泵运行位图，避免未运行泵仍因设定速度非 0 被上位机误判为运动。 */
     pump_run_bitmap = 0U;
     /* A 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
-    if ((pumpMessageA.online_flag != false) && (pumpMessageA.run_flag != false))
+    if ((pumpMessageA.online_flag != false) &&
+        ((pumpMessageA.run_flag != false) || (pumpMessageA.timingDrainage_flag != false)) &&
+        (pumpMessageA.speed_output > 0U))
     {
-        pump_run_bitmap |= 0x01U;
+        pump_run_bitmap |= 0x01U; /* A 泵运行位按实际闭环输出置位，压力停泵保持 run_flag 时也不会误报正在转。 */
     }
     /* B 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
-    if ((pumpMessageB.online_flag != false) && (pumpMessageB.run_flag != false))
+    if ((pumpMessageB.online_flag != false) &&
+        ((pumpMessageB.run_flag != false) || (pumpMessageB.timingDrainage_flag != false)) &&
+        (pumpMessageB.speed_output > 0U))
     {
-        pump_run_bitmap |= 0x02U;
+        pump_run_bitmap |= 0x02U; /* B 泵同样以上一周期实际输出速度为准，保证上位机状态和真实下发一致。 */
     }
     /* 在 A/B 泵压力字段之后追加运行位图，旧上位机最多忽略该字节，新上位机用于压力日志导出。 */
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);

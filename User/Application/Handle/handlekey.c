@@ -376,6 +376,7 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 		{
 			return false; /* 其它控制来源正在占用时不抢占，实体键本周期启动无效。 */
 		}
+		Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 实体键再次按下属于新的控制源触发，允许泵任务重新按实时压力判断。 */
 	}
 
 	ControlSignalMessage.handle_control_flag = enable; /* 通知公共控制信号当前由手柄实体键控制电机启停。 */

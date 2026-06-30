@@ -84,14 +84,20 @@ extern "C" {
 #endif
 
 /*
- * PumpPressureControl_Apply 根据当前泵速对应的压力阈值对目标泵速做闭环限速。
- * target_speed 是上层业务原本准备输出的泵速，weight_x10 是压力模块换算重量 0.1g，threshold_g 仅作为压力上报有效性标志。
+ * PumpPressureControl_Apply 根据压力模块阈值和当前泵速限速或停泵。
+ * target_speed 是上层业务原本准备输出的泵速；weight_x10 是压力模块换算重量 0.1g；threshold_g 是压力模块报警阈值，达到 threshold_g*10 时主控必须同步停泵。
  */
 uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
 
 /*
- * PumpPressureControl_ShouldForceStop 判断压力是否已经到达绝对硬停泵区间。
- * 该接口没有泵速参数，因此只使用 300 ml/min 的硬停阈值做兜底锁存；随泵速变化的停泵输出由 PumpPressureControl_Apply 完成。
+ * PumpPressureControl_IsPressureStopReached 判断当前压力是否已经达到压力模块上报的停泵阈值。
+ * target_speed 是本周期准备输出的泵速，用于过滤 0 速请求；weight_x10 是压力模块上报 0.1g 单位重量；threshold_g 是压力模块报警阈值。
+ */
+uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
+
+/*
+ * PumpPressureControl_ShouldForceStop 判断旧直连泵入口是否已经到达压力模块硬停阈值。
+ * 该接口没有泵速参数，因此直接使用 threshold_g*10 硬停，防止绕过 A/B 泵任务时继续转泵。
  */
 uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t threshold_g);
 

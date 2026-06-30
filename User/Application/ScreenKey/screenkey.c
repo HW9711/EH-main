@@ -109,10 +109,10 @@ static void ScreenKey_ServiceTouchKeepAlive(void)
     s_touch_alarm_release_ticks = SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS; /* 同步恢复释放计数到空闲态。 */
     return;
   }
-if(WorkMessage.runflag_work == false)
+if ((WorkMessage.runflag_work == false) && (s_touch_alarm_release_required == 0U))
 {
-  s_touch_keepalive_ticks=0;
-  s_touch_alarm_release_ticks=0;
+  s_touch_keepalive_ticks=0; /* 普通触控待运行状态下保持保活计数为 0，避免未按运行键时触发超时停机。 */
+  s_touch_alarm_release_ticks=0; /* 没有报警释放等待时才清松手计数，避免运行中掉线后永远等不到松手确认。 */
 
 }
 
@@ -126,6 +126,7 @@ if(WorkMessage.runflag_work == false)
     if (s_touch_alarm_release_ticks >= SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_TICKS)
     {
       s_touch_alarm_release_required = 0U; /* 原始保活帧已经停止约 200ms，确认用户松手，可允许下一次按压。 */
+      Pubinterface_ReleaseTouchHandleNotConnectedAlarm(); /* 若本次松手对应运行中拔手柄报警，则退出触控控制源并关闭报警弹窗。 */
     }
   }
 

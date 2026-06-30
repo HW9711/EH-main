@@ -377,6 +377,7 @@ void FootControlTask(uint32_t event)
                 }
                  //通知界面，如果因为脚踏行为报警，则恢复
                  ControlSignalMessage.jt_enable_flag=false;//脚踏掉线，禁止脚踏控制界面选择少了一个。后续界面按钮需要判断脚踏是否使能进行判断
+                 Pubinterface_ClearFootControlManualLock(); /* 脚踏离线代表本在线周期结束，用户手动切手控/触控的锁存到此失效。 */
 
                  if(ControlSignalMessage.jtL_control_flag||ControlSignalMessage.jtR_control_flag)//如果当前正是脚踏控制电机过程中
                  {
@@ -394,22 +395,7 @@ void FootControlTask(uint32_t event)
             else
             {
                 ControlSignalMessage.jt_enable_flag=true;
-               if(WorkMessage.drivetype_work!=HANDLEWORK&&WorkMessage.drivetype_work!=TOUCHWORK)//如果没有手控，没有点开触控，外控除外，即便外控在控制运行中，也可以显示脚踏选中
-               {
-                 WorkMessage.drivetype_work=JTWORK;//是否要更新记忆值
-                  if(WorkMessage.channel_work==CHANNEL_A)
-                    {
-                    MemoryMsgA.drive_type=JTWORK;//添加记忆功能
-                    }
-                    else if(WorkMessage.channel_work==CHANNEL_B)
-                    {
-                    MemoryMsgB.drive_type=JTWORK;
-                    }
-               }
-               else
-               {
-                    /* 脚踏在线但未取得控制权时，统一刷新在分支结束处执行，避免重复入队。 */
-               }
+               (void)Pubinterface_ApplyFootControlPriorityOnConnect(); /* 脚踏上线时统一按脚控优先处理，未运行且未被屏幕手动锁住时会覆盖手控/触控。 */
                Pubinterface_RefreshControlModeDisplay();//脚踏上线后统一刷新三种控制方式，避免其它图标残留高亮
             }
         }
@@ -561,6 +547,7 @@ void FootControlTask(uint32_t event)
                     ControlSignalMessage.jtL_control_flag=true;
                     WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left)* WorkMessage.speed_set_work;
                     WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                    Pubinterface_SetHandleInjectionPumpRun(true); /* 脚踏二段启动电机后统一经过联动接口，压力锁存时会立即拒绝连续踩踏重新起机。 */
                 }
                 else
                 {
@@ -627,6 +614,7 @@ void FootControlTask(uint32_t event)
                                 ControlSignalMessage.jtL_control_flag=true;
                                 WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left-30)*WorkMessage.speed_set_work;
                                 WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                                Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧启动 A 通道后进入冷却联动和压力锁存门禁，堵管后保持踩踏不能重启手柄。 */
                             }
                             else if(WorkMessage.channel_work==CHANNEL_B)
                             {
@@ -651,6 +639,7 @@ void FootControlTask(uint32_t event)
                                         ControlSignalMessage.jtL_control_flag=true;
                                         WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left)*WorkMessage.speed_set_work;
                                         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                                        Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧跨通道启动后同样走压力锁存门禁，避免旧分支绕过停手柄保护。 */
                                     }
                             }
                         }
@@ -744,7 +733,8 @@ void FootControlTask(uint32_t event)
                                if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                                ControlSignalMessage.jtR_control_flag=true;
                                 WorkMessage.speed_work=(float)(adValue_r-msg.MValue_Right)/(float)(msg.HValue_Right-msg.MValue_Right-30)*WorkMessage.speed_set_work;
-                                WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                                 WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                                Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧启动 B 通道后统一刷新冷却泵跟随，并让压力堵塞锁存能够清回 runflag。 */
                             }
                             else if(WorkMessage.channel_work==CHANNEL_A)
                             {
@@ -767,9 +757,10 @@ void FootControlTask(uint32_t event)
                                         else
                                         {
                                             if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
-                                             ControlSignalMessage.jtR_control_flag=true;
+                                            ControlSignalMessage.jtR_control_flag=true;
                                             WorkMessage.speed_work=(float)(adValue_r-msg.MValue_Right)/(float)(msg.HValue_Right-msg.MValue_Right)*WorkMessage.speed_set_work;
                                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
+                                            Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧跨通道启动后不能绕过联动接口，否则压力停机后脚踏保持会重新置运行。 */
                                         }
 
                                     }

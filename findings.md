@@ -75,3 +75,81 @@
 - 步进 PWM 中断 `USER\bujing.c:47-82` 在开环 Stage0 每周期执行 `RampUpTemp += RampUpInc`、`Step_Temp += RampUpTemp`；Stage1 在 `USER\bujing.c:83-109` 直接按 `Step_Unit` 推进相位。`Step_Unit/RampUpInc` 均由 `App.Log.Set_Speed` 直接换算，缺少速度上限防线。
 - 无刷/有刷失停建议断点：`UserCode\mcuart.c:453-545` 确认停止帧是否被接收并解析为 `Set_Spd=0`；`UserCode\fangbo.c:1104-1138` 确认 `Brake_StopPwmOK` 是否置位；`UserCode\interrupt.c:207-297` 观察 `VBusNowPWM`、`qOutMin`、`MCPara[44]`、`MCPara[45]`、`MCPara2[44]`、`MCPara2[45]`；`YouShua\YSstatemachine.c:174-240` 观察有刷 `BreakSta`、`StopTimCnt`、`AllowRun` 和 `Status`。
 - 步进异常快启动建议断点：`USER\logic.c:43-57` 观察 `RxLen`、`R_DATA[0..5]`、`RxCRC/CalcCRC`、`App.Log.Set_Speed`；`USER\logic.c:185-201` 观察 `MCPara[25]`、`RampUpTime`、`Step_Unit`、`RampUpInc`；`USER\bujing.c:47-82` 观察启动前 50 个 PWM 周期内 `RampUpTemp` 和 `Step_Temp` 是否跳变过快。
+
+## 2026-06-27 主控软件调试报告发现
+
+- 已存在 `docs/product-software-handoff.md`，该文档覆盖产品架构、协议、测试流程和静态风险；新报告应从“调试动作”角度组织，减少重复。
+- 新报告建议路径为 `docs/software-debug-report.md`，命名直接，后续测试人员能从文件名判断用途。
+- 当前报告应覆盖三类入口：配置入口、断点入口、故障现象入口。
+- 配置入口需要覆盖 EIDE/Keil 源文件清单、UART 参数、任务周期、手柄 EEPROM 解析、泵 A/B 物理口互换、压力白名单、外控超时、报警码和屏幕/外控命令字段。
+- 断点入口需要覆盖启动链路、`Userparser_Init()`、软任务调度、`WorkMessage` 装载、手柄扫描、脚踏解析、电机命令、泵输出、压力软 UART、外控收发、EEPROM 读写、报警处理。
+- 故障现象入口需要覆盖上电无响应、手柄不上线、A/B 选中异常、工作中拔插异常、电机不启停、泵不转或方向错、压力不更新、脚踏无效、外控无授权、心跳异常、参数不保存和构建清单回退旧模块。
+- `Src\main.c` 启动顺序为 HAL/CubeMX 初始化、Tracealyzer、`Hardware_PostInit()`、`App_Bootstrap_Init()`、`MX_FREERTOS_Init()`、`vTaskStartScheduler()`。
+- `User\Application\Src\userparser.c` 是业务初始化入口，顺序为 GPIO、EEPROM、UART1/2/3/4/5/6/7、屏幕启动页、电机紧急停止、公共状态初始化、RFID、各软任务初始化。
+- `Src\app_task.c` 中旧业务回调通过同一个静态互斥锁串行执行，说明多个软任务不代表业务代码真正并发运行。
+- `User\Application\include\Pubinterface.h` 中当前报警码存在复用：`WORK_ALARM_SPEED_THRESHOLD` 和 `WORK_ALARM_MOTOR_DRIVER_BOARD` 都是 11，调试时必须结合来源函数区分。
+- `User\Application\Pubinterface\Pubinterface.c` 中通道切换首选断点为 `Pubinterface_LoadChannelMemory()`，插拔首选断点为 `PlugORunPLUGActive()`，控制权首选断点为 `ControlArbitration_TryEnter()`/`ControlArbitration_IsBusyByOther()`。
+- `User\Application\Handle\handlescan.c` 扫描周期 10ms，插入去抖 50ms，拔出去抖 500ms，认证前等待 200ms，普通认证最多 3 次快速重试，RFID 刀具头等待约 2 秒。
+- `User\Application\Beep\sscDrive.c` 电机输出任务 50ms 根据 `WorkMessage.runflag_work` 下发 UART1 启停帧，`User\Application\MotorUartData\motoruartdata.c` 3ms 解析驱动回包并更新 `driver_speed_feedback`、`driver_current_x100` 和报警。
+- `User\Application\include\pump.h` 当前 `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=0`，逻辑 A 泵走 UART5，逻辑 B 泵走 UART7。
+- `User\Application\include\pump_pressure_control.h` 当前压力闭环总开关默认开启，恢复消抖 3000ms；A 压力源固定 `pumpMessageA`/SIM_UART_2/PE6，B 压力源固定 `pumpMessageB`/SIM_UART_1/PE4。
+- A 泵任务周期 25ms，B 泵任务周期 100ms；同样的排空计数 `>300` 会导致 A/B 实际排空时长不同。
+- `docs/software-debug-report.md` 已生成，报告采用“配置速查、观察变量、模块断点、故障现象、构建清单”的顺序，适合后续测试时直接定位问题。
+- 本轮没有修改业务源码；报告生成后检查了异常字符、占位符、行尾空格、关键断点函数和 `git diff --check`。
+
+## 2026-06-27 主控原理版调试报告重写发现
+
+- 旧调试报告偏向“在哪里打断点”，对为什么要经过公共状态、为什么不能输入直连输出解释不足；新版报告应把原理放在断点前面。
+- 当前主控输入链路统一收敛到 `WorkMessage`、`MemoryMsgA/B`、`ChannelrecognizeMessageA/B`、`pumpMessageA/B`、`ControlSignalMessage`，这是理解脚踏、手柄、屏幕和外控互斥的主线。
+- `AppTaskRuntimeGate()` 让旧业务回调通过同一个互斥锁串行执行，因此 FreeRTOS 多任务不是任意业务代码并发运行；调试周期卡顿时要同时看任务周期和互斥等待。
+- 当前外控短超时为 2 秒停输出，长超时为 10 秒释放外控，应以 `EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS` 和 `EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS` 为准。
+- 当前主控压力设备码白名单为 `0x00/0x08/0x09`，旧文档和压力工程历史资料出现过其它设备码组合，属于跨工程协议一致性风险。
+- `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE` 改的是逻辑泵到物理 UART 的映射，`UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE` 改的是屏幕显示和触控映射，二者不能混用。
+- A 泵任务周期 25ms，B 泵任务周期 100ms，两者共用 `timingDrainage_times > 300` 会造成实际排空时长不同，新报告需要明确这是实机测试点。
+- `WORK_ALARM_SPEED_THRESHOLD` 和 `WORK_ALARM_MOTOR_DRIVER_BOARD` 当前都为 11，报警定位时必须结合来源函数和上游链路区分。
+
+## 2026-06-27 产品手册级报告参考文档发现
+
+- Zephyr 文档的结构价值在于按子系统、内核服务、驱动、硬件支持、构建与配置系统分层说明，适合作为本工程“主控层、应用层、外设层、配套工程”的组织参考。参考地址：`https://docs.zephyrproject.org/latest/introduction/index.html`。
+- PX4 架构文档把源码模块、消息总线、运行环境和更新频率放在同一页解释；本工程可以对应到“软任务、公共状态、UART/软串口输出、任务周期”。参考地址：`https://docs.px4.io/main/en/concept/architecture`。
+- Klipper 的代码总览直接写“整体代码布局、主要代码流、典型动作路径”，并把一次动作从命令入口写到硬件输出；本工程故障排查章节也应按“输入 -> 公共状态 -> 输出 -> 反馈”的路径写。参考地址：`https://www.klipper3d.org/Code_Overview.html`。
+- Marlin 配置文档明确说明配置文件和 `#define` 是最权威来源；本工程临时配置章节也应以源码宏为权威，旧文档和注释只作为辅助。参考地址：`https://marlinfw.org/docs/configuration/configuration.html`。
+- 本工程主报告不应写成“源码目录说明”，而应按交付手册方式写：先解释设计边界，再解释数据结构，再给动作路径，最后给配置、断点、验证和风险。
+
+## 2026-06-27 产品手册级报告第 15 至 16 轮发现
+
+- AT24CS32 当前按 128 页、每页 32 字节管理，前 30 字节是业务数据，最后 2 字节是前 30 字节累加和；外控写业务页只应提供 30 字节，页和由主控写页函数生成。
+- Page1 认证输入不是单页数据，而是 SN 16 字节加 Page2~Page8 共 224 字节；改 Page2~Page8 任一业务页后，如果不更新 Page1 认证结果，下次识别可能返回 CRC 不匹配。
+- 外控 EEPROM 读写不直接选择 I2C2/I2C3，而是根据 `WorkMessage.channel_work` 写当前选中通道；无当前通道时读写应失败。
+- 外控运行设置和 EEPROM 写页是两条链路：运行设置改 `WorkMessage`、`MemoryMsgA/B` 或 `pumpMessageA/B`，EEPROM 写页改持久化原始资料，二者生效时机不同。
+- 当前主控核心业务主要依赖手柄 EEPROM 和公共状态流转；`flash.c` 存在通用驱动，但没有作为当前主控主要参数保存入口使用。
+- 主控电机 11 字节下发帧仍依赖驱动工程对 `0xAABB` 兼容尾的接受；驱动侧若只接受真实 CRC，主控电机命令会被拒绝。
+- 步进/泵板接收主控 6 字节泵命令，同样支持 `BB AA` 旁路；泵类型不由步进板决定，而由主控业务和压力设备码决定。
+- 压力板 21 字节上报帧中的 `DeviceCode` 是主控判断在线和泵类型的重要输入；主控白名单和压力工程合法集合必须成套验证。
+- 外控上位机必须按动态心跳解析手柄、泵和压力扩展字段，不能假设固定长度；EEPROM 写入还要配合主控当前通道和二次确认。
+
+## 2026-06-27 产品手册级报告第 17 至 20 轮发现
+
+- 当前源码确认外控短超时为 `EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS=2000U`，长超时为 `EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS=10000U`，主报告最终按 2 秒停输出、10 秒释放授权写入。
+- 当前源码确认 `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=0U`，主报告将泵物理口互换和屏幕镜像、压力源映射分开说明。
+- 当前源码确认注水泵业务速度上限 `PUMP_INJECTWATER_SPEED_MAX=70U`，主报告将其限定为注水泵钳位入口，不扩展成所有泵类型上限。
+- 脚踏真实业务文件是 `User\Application\Beep\sscFOOT.c`，掉线判断在 `Foot_ParseDataS()` 中使用 `footDisconnect_times > 100`，头文件旧阈值不能单独作为运行判断依据。
+- 压力超过停泵点时不清 `run_flag` 是安全层保持停泵设计，恢复依赖压力回到安全区并满足 `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS`。
+- 报告最终新增了实机记录模板和串口抓包字段，后续现场问题应同时记录公共状态快照和 UART 原始帧，避免只凭 UI 现象判断。
+
+## 2026-06-27 代码段解释增强发现
+
+- 报告中的代码段应当按“入口条件、公共状态写入、提前返回、最终输出动作”四步解释，单独贴源码不足以支撑现场定位。
+- `WorkMessage_t`、`ChannelMemoryMessagr_t`、`ChannelrecognizeMessage_t` 和 `pumpMessage_t` 需要明确分组说明，否则容易把当前工作、通道记忆、识别缓存和压力反馈混用。
+- `Userparser_Init()` 和 `AppTaskRuntimeGate()` 是理解全局行为的关键代码段：前者决定业务初始化顺序，后者决定旧业务回调串行化。
+- 屏幕触控保活、脚踏前置检查、实体键准备通道、电机速度倍率、泵方向互换、压力帧校验、外控解析、UI 去重和蜂鸣消息这些代码段都容易被误解为“直接输出”，因此已补充业务含义和调试读法。
+- 新增的代码段解释索引可以作为后续补充文档的模板：每个代码片段都要写明解决的问题、重点变量和常见误解。
+
+## 2026-06-27 现场使用增强发现
+
+- 现场定位 SOP 需要比普通故障排查更“动作化”：每一步必须有断点、正常结果和异常下一步，否则测试时仍会回到凭经验猜测。
+- 协议帧逐字节判读比单纯列帧格式更适合抓包现场使用；必须同时说明字段位置、单位、大小端、CRC 覆盖范围和异常含义。
+- 报警体系必须区分真实报警、限时提示和蜂鸣阈值提示；否则会把蜂鸣误认为 `WorkMessage.alarm_flag=true`，或把临时外控报警误认为整机真实报警。
+- 变量字典需要写“谁写、谁读、正常范围、清零条件、首选断点”，这样 Watch 窗口才能服务定位，而不是只堆变量名。
+- 配置 cookbook 按“想实现什么”组织比按文件组织更适合临时修改；每个配置项都要说明影响范围、验证方法、回退点和风险。
+- 测试用例表必须同时记录 UI、公共状态和原始帧；只记录 UI 现象不足以判定问题边界。

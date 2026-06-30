@@ -290,8 +290,8 @@ typedef struct {
   
   volatile uint16_t  current_work;
   volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
-  volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
-  volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为速度×10
+  volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
+  volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint32_t  tool_reduction_ratio;//刀具减数比
   volatile uint8_t   auto_identify;//通道自动识别状态记忆，避免切换通道后丢失 RFID 识别模式
@@ -336,8 +336,8 @@ typedef struct
 	volatile uint16_t  overloadThresholdRev;//过载阀值（反）
 	volatile uint16_t  overloadThresholdOSC;//过载阀值（往复）
 	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM大端直接写1~70，0或越界由业务层回退30
-	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
-	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为速度×10
+	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
+	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
 	volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值，只用于蜂鸣阈值
 	volatile uint8_t   handle_type;//手柄类型
 	volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，扫描认证后先暂存在识别结构，后续由PlugORunPLUGActive统一写入MemoryMsg
@@ -346,6 +346,7 @@ typedef struct
     volatile uint8_t   control_mode;//控制模式
     volatile uint8_t   tool_type;//刀具类型	
     volatile uint8_t   raw_tool_type;//原始刀具型号，RFID/EEPROM 解析后用于保留标签或旧表码
+    volatile uint8_t   rfid_cache_hit;//同一 EPC 标签重识别标志，保存到 MemoryMsg 前用于保留用户调节过的速度和频率
 }
 ChannelrecognizeMessage_t;//通道数据结构体(手柄，刀具识别内容)
 extern ChannelrecognizeMessage_t ChannelrecognizeMessageA;
@@ -372,6 +373,8 @@ typedef struct
   volatile int32_t  pressure_value;//压力传感器原始值，对应下位机 RawCs1237
   volatile uint16_t pressure_threshold;//压力阀值，由压力模块提供
   volatile uint32_t weight_x10;//重量值，单位 0.1g，对应下位机 WeightX10
+  volatile bool     pressure_hold_flag;//压力触发停泵后的锁止标志，保持期间实际输出为0，只能由下一次控制源启动沿清除。
+  volatile uint32_t pressure_recover_ms;//压力锁止辅助计数保留字段，当前策略不再按压力恢复时间自动恢复泵输出。
   volatile uint8_t  seq;//压力模块上报帧序号
 
 }
@@ -424,6 +427,8 @@ bool ControlArbitration_EnterExternalControl(void);
 void ControlArbitration_ReleaseExternalControl(void);
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key);
 void Pubinterface_RefreshControlModeDisplay(void); /* 统一刷新脚控、手控、触控三个控制方式图标，避免脚踏任务分散直写残留高亮。 */
+bool Pubinterface_ApplyFootControlPriorityOnConnect(void); /* 脚踏上线且手柄未运行时，按脚踏优先规则尝试切到脚控。 */
+void Pubinterface_ClearFootControlManualLock(void); /* 脚踏离线或用户重新选择脚控时清除本在线周期的屏幕手动锁存。 */
 void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag); /* 刷新外部通信小电脑图标：在线白色、外控黄色、离线熄灭。 */
 void WorkAlarm_Set(uint8_t alarm_value);
 void WorkAlarm_Clear(void);
@@ -433,6 +438,7 @@ bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
 bool Pubinterface_IsCommonSocketToolReady(void);
 bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 手柄电机启动前检查公共接头 EPC 刀具头，缺失时负责报警并拒绝运行。 */
 void Pubinterface_StopTouchKeepAliveRun(void);
+void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void); /* 触控运行中拔手柄后，用户松开运行按钮时退出触控来源并清报警。 */
 void Pubinterface_LoadChannelMemory(uint8_t channel);
 uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel);
 uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void);
@@ -445,7 +451,11 @@ void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和�
 void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
 void Pubinterface_SetHandleInjectionPumpRun(bool enable);
+void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵并蜂鸣；注水冷却时再停手柄。 */
+void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */
+void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 手控/触控/外控新的启动沿到来时清除压力停机锁存。 */
 void Pubinterface_CheckSpeedThresholdAlarm(void);
+bool Pubinterface_IsRfidAutoIdentifyEnabled(uint8_t channel); /* 查询 PXBA/PXBB 指定通道是否仍允许 RFID 自动识别，供 handlescan 在线监测门禁使用。 */
 void ControlTypeActive(uint8_t key_value);
 void PlanerGridH(uint8_t key_value);
  void ChannelrecognizeMessageInit(void);

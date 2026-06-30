@@ -112,78 +112,54 @@ static uint16_t PumpPressureControl_BuildReduceThresholdG(uint16_t target_speed)
     return PUMP_PRESSURE_CONTROL_REDUCE_300_G;
 }
 
-/*
- * 函数功能：根据当前目标泵速计算输出压到 0 的停泵压力阈值。
- * 输入参数：target_speed 为当前准备输出的泵速，单位 ml/min。
- * 返回参数：返回 g 单位停泵压力阈值。
- */
-static uint16_t PumpPressureControl_BuildStopThresholdG(uint16_t target_speed)
-{
-    /* 低于最小实测泵速时沿用 50 ml/min 停泵阈值，避免低速堵管不能停泵。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN)
-    {
-        /* 返回 50 ml/min 输出压到 0 的阈值。 */
-        return PUMP_PRESSURE_CONTROL_STOP_50_G;
-    }
-    /* 50~110 ml/min 之间按实测点线性插值。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN)
-    {
-        /* 返回 50~110 ml/min 对应的停泵阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_50_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_110_G);
-    }
-    /* 110~140 ml/min 之间按实测点线性插值。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN)
-    {
-        /* 返回 110~140 ml/min 对应的停泵阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_110_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_140_G);
-    }
-    /* 140~200 ml/min 之间按实测点线性插值。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN)
-    {
-        /* 返回 140~200 ml/min 对应的停泵阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_140_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_200_G);
-    }
-    /* 200~260 ml/min 之间按实测点线性插值。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN)
-    {
-        /* 返回 200~260 ml/min 对应的停泵阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_200_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_260_G);
-    }
-    /* 260~300 ml/min 之间按实测点线性插值。 */
-    if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN)
-    {
-        /* 返回 260~300 ml/min 对应的停泵阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_260_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_300_G);
-    }
-    /* 高于 300 ml/min 时沿用当前最高实测档位阈值，避免外推导致停泵压力继续升高。 */
-    return PUMP_PRESSURE_CONTROL_STOP_300_G;
-}
 #endif
 
 /*
- * 函数功能：判断压力是否达到无泵速参数接口下的绝对兜底停泵阈值。
- * 输入参数：weight_x10 为压力模块上报重量，单位 0.1g；threshold_g 仅用于判断压力上报阈值是否有效。
- * 返回参数：返回 1 表示需要进入兜底硬停泵路径，返回 0 表示未达到兜底硬停泵条件。
+ * 函数功能：判断当前压力是否已经达到压力模块上报的停泵阈值。
+ * 输入参数：target_speed 当前准备输出的泵速，用于过滤 0 速请求；weight_x10 压力模块重量值；threshold_g 压力模块报警阈值。
+ * 返回参数：1 表示需要进入压力保持停泵，0 表示尚未达到停泵条件。
+ */
+uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g)
+{
+#if (PUMP_PRESSURE_CONTROL_ENABLE == 0U)
+    /* 关闭压力闭环总开关时不读取泵速，保证调试版本完全绕开压力停泵逻辑。 */
+    (void)target_speed;
+    /* 关闭压力闭环总开关时不读取压力值，避免无用参数告警。 */
+    (void)weight_x10;
+    /* 关闭压力闭环总开关时不读取压力阈值，避免无用参数告警。 */
+    (void)threshold_g;
+    /* 返回 0，表示压力闭环关闭时永远不触发压力保持停泵。 */
+    return 0U;
+#else
+    /* stop_x10 保存压力模块 ThresholdG 换算后的停泵阈值，单位统一为压力模块使用的 0.1g。 */
+    uint32_t stop_x10;
+
+    /* 目标泵速为 0 时本来就没有输出，不需要再进入压力保持状态。 */
+    if (target_speed == 0U)
+    {
+        /* 返回 0，避免空转状态被误锁存为压力故障。 */
+        return 0U;
+    }
+
+    /* 压力模块阈值为 0 表示当前压力数据尚未有效，不能用 0 阈值误触发停泵。 */
+    if (threshold_g == 0U)
+    {
+        /* 返回 0，等待有效压力帧上报后再参与停泵判断。 */
+        return 0U;
+    }
+
+    /* 按压力模块报警阈值计算停泵点，使主控停泵和上位机报警同口径。 */
+    stop_x10 = PumpPressureControl_BuildPressureX10(threshold_g);
+
+    /* 当前压力达到停泵阈值时进入锁止停泵，后续只能由下一次控制源启动沿重新放行。 */
+    return (weight_x10 >= stop_x10) ? 1U : 0U;
+#endif
+}
+
+/*
+ * 函数功能：判断旧直连泵入口是否达到压力模块硬停阈值。
+ * 输入参数：weight_x10 为压力模块上报重量，单位 0.1g；threshold_g 为压力模块报警阈值，单位 g。
+ * 返回参数：返回 1 表示需要进入硬停泵路径，返回 0 表示未达到硬停泵条件。
  */
 uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t threshold_g)
 {
@@ -195,7 +171,7 @@ uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t thresh
     /* 返回 0 表示不触发硬停泵，保持原有调试/生产路径。 */
     return 0U;
 #else
-    /* stop_x10 保存绝对硬停阈值，当前接口没有泵速参数，因此使用最高实测档 300 ml/min 的停泵阈值兜底。 */
+    /* stop_x10 保存压力模块 ThresholdG 换算后的硬停阈值，旧直连入口也必须和报警阈值一致。 */
     uint32_t stop_x10;
 
     /* 阈值为 0 表示压力模块尚未给出有效保护阈值，此时不能用 0 阈值误触发停泵。 */
@@ -205,10 +181,10 @@ uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t thresh
         return 0U;
     }
 
-    /* 把最高档停泵阈值转换为 0.1g，作为无泵速参数接口的兜底硬停锁存点。 */
-    stop_x10 = PumpPressureControl_BuildPressureX10(PUMP_PRESSURE_CONTROL_STOP_300_G);
+    /* 把压力模块报警阈值转换为 0.1g，作为无泵速参数接口的硬停锁存点。 */
+    stop_x10 = PumpPressureControl_BuildPressureX10(threshold_g);
 
-    /* 当前重量达到或超过绝对兜底停泵阈值时返回 1，调用方据此暂停输出并下发 0 速帧。 */
+    /* 当前重量达到或超过压力模块报警阈值时返回 1，调用方据此暂停输出并下发 0 速帧。 */
     if (weight_x10 >= stop_x10)
     {
         /* 返回 1 明确告诉泵任务进入硬停泵路径。 */
@@ -237,7 +213,7 @@ uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, u
 #else
     /* reduce_x10 表示当前泵速下开始限速的压力阈值，单位 0.1g。 */
     uint32_t reduce_x10;
-    /* stop_x10 表示当前泵速下输出压到 0 的压力阈值，单位 0.1g。 */
+    /* stop_x10 表示压力模块 ThresholdG 对应的停泵阈值，单位 0.1g。 */
     uint32_t stop_x10;
     /* available_margin_x10 表示开始限速点到停泵点之间可用于线性减速的总区间。 */
     uint32_t available_margin_x10;
@@ -260,26 +236,33 @@ uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, u
         return target_speed;
     }
 
-    /* 根据当前目标泵速查表并插值得到开始限速阈值，替代原来单一 ThresholdG。 */
+    /* 根据当前目标泵速查表并插值得到开始限速阈值，只用于 ThresholdG 以下的平滑降速。 */
     reduce_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildReduceThresholdG(target_speed));
-    /* 根据当前目标泵速查表并插值得到停泵阈值，压力达到后本周期输出压到 0。 */
-    stop_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildStopThresholdG(target_speed));
+    /* 停泵阈值直接使用压力模块 ThresholdG，压力达到后本周期输出压到 0。 */
+    stop_x10 = PumpPressureControl_BuildPressureX10(threshold_g);
 
-    /* 当前压力没有超过阈值时不降速，保持用户设定的目标泵速。 */
+    /* 先按压力模块 ThresholdG 判断硬停，避免限速表阈值高于上位机报警阈值时继续转泵。 */
+    if (weight_x10 >= stop_x10)
+    {
+        /* 到达上位机报警同口径阈值后，本周期直接输出 0，外层会锁止到下一次控制源启动沿。 */
+        return 0U;
+    }
+
+    /* 当前压力没有超过提前限速点时不降速，保持用户设定的目标泵速。 */
     if (weight_x10 <= reduce_x10)
     {
         /* 返回未调整泵速，保证阈值以下不影响正常注水/抽水/灌注。 */
         return target_speed;
     }
 
-    /* 当前压力达到或超过当前泵速对应的停泵阈值时，立即把输出泵速压到 0。 */
+    /* 前面已经完成 ThresholdG 硬停判断，这里保留防御分支，避免后续维护调整顺序后漏停。 */
     if (weight_x10 >= stop_x10)
     {
-        /* 返回 0 表示本周期停止泵转动；run_flag 保持原样，便于压力恢复后自动继续闭环输出。 */
+        /* 返回 0 表示本周期停止泵转动；外层会撤销运行请求，避免压力恢复后自动继续输出。 */
         return 0U;
     }
 
-    /* 如果停泵点误配置得不高于限速点，则超过限速点后直接输出 0，避免除法区间异常。 */
+    /* 如果限速点不低于停泵点，则超过限速点后直接输出 0，避免除法区间异常。 */
     if (stop_x10 <= reduce_x10)
     {
         /* 返回 0 表示进入保守保护，防止错误宏配置导致压力越高反而继续输出。 */

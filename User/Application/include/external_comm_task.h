@@ -13,6 +13,8 @@ void ExternalComm_Init(void);
 void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms);
 /* 手柄运行中掉线时清除外控层保存的注水泵跟随请求，避免后续外控刷新重新拉起联动泵。 */
 void ExternalComm_ClearHandleInjectionPumpFollow(void);
+/* 压力保护停泵时清除外控层对应泵的运行请求，避免旧外控锁存再次拉起已堵塞的泵。 */
+void ExternalComm_ClearPumpPressureRunRequest(uint8_t pump_channel);
 
 #ifdef __cplusplus
 }

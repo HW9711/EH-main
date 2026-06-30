@@ -16,9 +16,12 @@
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
 #define MOTOR_DRIVE_RATIO_UNIT 1U /* 机械变速倍率为 1 时表示屏幕速度和电机速度一致。 */
+#define MOTOR_DRIVE_RATIO_X10_UNIT 10U /* 内部完整齿轮比按 x10 保存，50 表示 5.0 倍。 */
+#define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* GE2433 启动帧速度字段单位为 10rpm，3000rpm 需要下发 300。 */
+#define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* GE2433 启动帧速度字段只有 16 位，超过时必须钳位。 */
+#define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 电机实际 rpm 的协议可表达上限。 */
 #define MOTOR_DRIVE_SPEED_UP_SHIFT 16U /* WorkMessage.tool_reduction_ratio 高 16 位表示增速比。 */
 #define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
-#define MOTOR_DRIVE_SPEED_MAX 0xFFFFU /* 电机驱动启动帧速度字段只有高低 2 字节，超出时必须钳位。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -74,16 +77,68 @@ static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
 }
 
 /*
+ * 函数功能：把已经完成机械倍率换算的电机实际 rpm 转成 GE2433 启动帧速度字段。
+ * 输入参数：motor_speed_rpm 为最终希望电机达到的实际转速，单位 rpm。
+ * 返回参数：写入启动帧 byte4~5 的 16 位速度字段，单位 10rpm。
+ */
+static uint16_t MotorDrive_BuildCommandSpeed(uint32_t motor_speed_rpm)
+{
+    uint32_t command_speed = motor_speed_rpm / MOTOR_DRIVE_CMD_SPEED_UNIT_RPM; /* GE2433 协议规定速度字段等于实际 rpm/10，例如 3000rpm 写 300。 */
+
+    if (command_speed > MOTOR_DRIVE_CMD_SPEED_MAX)
+    {
+        command_speed = MOTOR_DRIVE_CMD_SPEED_MAX; /* 实际 rpm 超过协议字段可表达范围时钳到 0xFFFF，避免高低字节回绕。 */
+    }
+
+    return (uint16_t)command_speed; /* 返回组帧可直接拆高低字节的协议速度值。 */
+}
+
+/*
+ * 函数功能：把内部 x10 倍率或历史整数倍率换算成减速机构需要的电机速度。
+ * 输入参数：motor_speed 为已从屏幕 x10 速度恢复后的 rpm；ratio 为低 16 位减速比。
+ * 返回参数：换算后的电机 rpm，未做 16 位钳位。
+ */
+static uint32_t MotorDrive_ApplyReductionRatioValue(uint32_t motor_speed, uint32_t ratio)
+{
+    if (ratio >= MOTOR_DRIVE_RATIO_X10_UNIT)
+    {
+        return (motor_speed * ratio) / MOTOR_DRIVE_RATIO_X10_UNIT; /* 内部倍率按 x10 保存，50 表示 5.0 倍减速，电机端速度需要乘 5.0。 */
+    }
+
+    return motor_speed * ratio; /* 兼容历史直接写入的整数倍率，2 表示 2 倍减速。 */
+}
+
+/*
+ * 函数功能：把内部 x10 倍率或历史整数倍率换算成增速机构需要的电机速度。
+ * 输入参数：motor_speed 为已从屏幕 x10 速度恢复后的 rpm；ratio 为高 16 位增速比。
+ * 返回参数：换算后的电机 rpm，倍率异常时返回原速度。
+ */
+static uint32_t MotorDrive_ApplySpeedUpRatioValue(uint32_t motor_speed, uint32_t ratio)
+{
+    if (ratio >= MOTOR_DRIVE_RATIO_X10_UNIT)
+    {
+        return (motor_speed * MOTOR_DRIVE_RATIO_X10_UNIT) / ratio; /* 内部倍率按 x10 保存，50 表示 5.0 倍增速，电机端速度需要除以 5.0。 */
+    }
+
+    if (ratio > MOTOR_DRIVE_RATIO_UNIT)
+    {
+        return motor_speed / ratio; /* 兼容历史直接写入的整数倍率，2 表示 2 倍增速。 */
+    }
+
+    return motor_speed; /* 0 或 1 表示无有效增速，保护为原速度。 */
+}
+
+/*
  * 函数功能：按 EEPROM/RFID 解析出的机械减速比或增速比，把屏幕手柄速度换算成电机输出速度。
- * 输入参数：display_speed_x10 为 WorkMessage.speed_set_work，单位沿用屏幕显示速度的 x10。
+ * 输入参数：display_speed 为 WorkMessage.speed_set_work，单位为屏幕和上位机设置的实际 rpm。
  * 返回参数：需要写入 UART1 电机启动帧的速度值，已完成倍率换算和 16 位钳位。
  */
-static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed_x10)
+static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed)
 {
     uint32_t ratio = WorkMessage.tool_reduction_ratio;        /* 当前通道记忆装载的完整倍率，高 16 位增速、低 16 位减速。 */
     uint32_t reduction_ratio = ratio & MOTOR_DRIVE_REDUCTION_MASK; /* 低 16 位减速比，减速机构需要放大电机速度。 */
     uint32_t speed_up_ratio = ratio >> MOTOR_DRIVE_SPEED_UP_SHIFT; /* 高 16 位增速比，增速机构需要降低电机速度。 */
-    uint32_t motor_speed = display_speed_x10 / 10U;           /* 屏幕速度内部按 x10 保存，下发驱动前先恢复 rpm 单位。 */
+    uint32_t motor_speed = display_speed;                     /* 设定速度已经是实际 rpm，例如 6000 表示 6000rpm，倍率换算前不能再除以 10。 */
 
     if ((reduction_ratio > MOTOR_DRIVE_RATIO_UNIT) &&
         (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT))
@@ -94,19 +149,19 @@ static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed_x10)
 
     if (reduction_ratio > MOTOR_DRIVE_RATIO_UNIT)
     {
-        motor_speed = motor_speed * reduction_ratio;          /* 减速机构：刀具端 4000、减速比 2，则电机端下发 8000。 */
+        motor_speed = MotorDrive_ApplyReductionRatioValue(motor_speed, reduction_ratio); /* 减速机构：正常内部 50 表示 5.0 倍，历史值 2 仍兼容为 2 倍。 */
     }
     else if (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT)
     {
-        motor_speed = motor_speed / speed_up_ratio;           /* 增速机构：刀具端速度由机械放大，电机端按增速比折减。 */
+        motor_speed = MotorDrive_ApplySpeedUpRatioValue(motor_speed, speed_up_ratio); /* 增速机构：正常内部 50 表示 5.0 倍，历史值 2 仍兼容为 2 倍。 */
     }
 
-    if (motor_speed > MOTOR_DRIVE_SPEED_MAX)
+    if (motor_speed > MOTOR_DRIVE_RPM_MAX)
     {
-        motor_speed = MOTOR_DRIVE_SPEED_MAX;                  /* 驱动协议只能下发 16 位速度，异常倍率导致超限时钳到最大值。 */
+        motor_speed = MOTOR_DRIVE_RPM_MAX;                    /* 实际 rpm 超过 GE2433 协议可表达上限时先钳位，后续再按 /10 写入速度字段。 */
     }
 
-    return motor_speed;                                       /* 返回本次启动帧实际使用的电机转速。 */
+    return motor_speed;                                       /* 返回本次启动帧希望电机达到的实际 rpm，组帧前还要按协议 /10。 */
 }
 
 /// 开口定位
@@ -143,7 +198,8 @@ void MOTORRUN(void)
     static uint8_t huci=0;
     uint8_t display_value[10]={0};
     uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
-    uint32_t ssc_speed_value=MotorDrive_ApplyToolReductionRatio(WorkMessage.speed_set_work); /* 电机驱动帧速度统一按 EEPROM/RFID 倍率换算，不再按型号写死。 */
+    uint32_t ssc_speed_value=MotorDrive_ApplyToolReductionRatio(WorkMessage.speed_set_work); /* 电机驱动帧速度统一按 EEPROM/RFID 倍率换算，结果仍是实际 rpm。 */
+    uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
     //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
@@ -167,7 +223,7 @@ void MOTORRUN(void)
     {
         if(huci==0)
         {
-            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位为 WorkMessage 的实际 rpm。 */
             display_value[1] = (uint8_t)((WorkMessage.speed_set_work >> 8)&0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
          display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
             display_value[3] = 1U;             
@@ -232,8 +288,9 @@ void MOTORRUN(void)
             }
         }
       WorkMessage.current_work=0xffff;
-      msg.speed_h=ssc_speed_value/256;
-      msg.speed_l=(ssc_speed_value)%256;//速度
+      command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 最终输出给电机前按 GE2433 协议把实际 rpm 转为 rpm/10 字段。 */
+      msg.speed_h=command_speed_value/256;
+      msg.speed_l=(command_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256;
       msg.pro_current_l=WorkMessage.current_work%256;//电流
       MotorStart();
@@ -242,7 +299,7 @@ void MOTORRUN(void)
     {
          if(huci==1){
             huci=0;
-            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位沿用 WorkMessage 的 x10 速度。 */
+            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位为 WorkMessage 的实际 rpm。 */
             display_value[1] = (uint8_t)((WorkMessage.speed_set_work >>8)& 0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
              display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
             display_value[3] = 1U; 

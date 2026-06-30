@@ -14,11 +14,8 @@
 #define RFID_FRAME_HEAD                 0xBBU /* RFID 模块帧头，所有回包都从该字节开始。 */
 #define RFID_FRAME_TAIL                 0x7EU /* RFID 模块帧尾，帧尾前一字节是累加和校验。 */
 #define RFID_RESP_SECOND_EPC            0x02U /* EPC 读取回包第二字节，协议指定为 BB 02 22。 */
-#define RFID_RESP_SECOND_USER           0x01U /* USER 读取回包第二字节，协议指定为 BB 01 39。 */
 #define RFID_RESP_CMD_EPC               0x22U /* EPC 读取回包命令码。 */
-#define RFID_RESP_CMD_USER              0x39U /* USER 读取回包命令码。 */
 #define RFID_PAYLOAD_EPC_OFFSET         8U    /* EPC 标签数据从整帧 data[8] 开始。 */
-#define RFID_PAYLOAD_USER_OFFSET        20U   /* USER 标签数据从整帧 data[20] 开始。 */
 #define RFID_FRAME_LENGTH_FIELD_OFFSET  4U    /* RFID 帧第 4 下标字节保存模块数据区长度。 */
 #define RFID_FRAME_MIN_SIZE             7U    /* 最短帧至少包含头、命令、长度、校验和尾。 */
 #define RFID_QUEUE_LENGTH               4U    /* 队列保存少量屏幕/扫描层触发请求，避免按键抖动丢入口。 */
@@ -32,21 +29,19 @@ typedef struct
     uint8_t channel;             /* 请求所属通道，只有 A/B 通道有效。 */
     bool start;                  /* true 启动一次读取，false 停止当前读取。 */
     bool fast_mode;              /* true 使用快速识别尝试次数，false 使用普通监测尝试次数。 */
-    RfidReadSource_t source;     /* 本次读取 EPC 还是 USER，由 handlescan 按 EEPROM 第二页决定。 */
+    RfidReadSource_t source;     /* 本次读取来源，最终协议只允许 EPC。 */
     uint16_t generation;         /* 请求入队时的通道代次，清刀具后旧代次请求会被丢弃。 */
 } RFIDMessage_t;
 
 typedef struct
 {
     bool valid;                                  /* true 表示该通道曾经读到过完整标签，可用于“同一刀具不重复蜂鸣”的历史判重。 */
-    RfidReadSource_t source;                     /* 记录历史标签来源，EPC 和 USER 数据不能互相判为同一刀具。 */
+    RfidReadSource_t source;                     /* 记录历史标签来源，当前固定为 EPC，保留字段用于判重完整性。 */
     uint8_t payload_length;                      /* 记录历史 payload 长度，避免不同协议长度误比较。 */
-    uint8_t payload[RFID_PAYLOAD_USER_LENGTH];   /* 保存最近一次刀具头原始 payload；USER 16 字节最长，EPC 只使用前 12 字节。 */
+    uint8_t payload[RFID_PAYLOAD_EPC_LENGTH];    /* 保存最近一次 EPC 12 字节原始 payload，用于同一刀具判重。 */
 } RfidPayloadMemory_t;
 
 static uint8_t NO_MASK3_WRITE_EPC[7] = {0XBB, 0X00, 0X22, 0X00, 0X00, 0X22, 0X7E}; /* 无掩码读取 EPC 区。 */
-static uint8_t NO_MASK3_READ_USER[16] = {0xBB, 0x00, 0x39, 0x00, 0x09, 0x00, 0x00, 0x00,
-                                         0x00, 0x03, 0x00, 0x00, 0x00, 0x08, 0x4d, 0x7E}; /* 无掩码读取 USER 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
 static unsigned char pa_gain0[] = {0XBB, 0X00, 0XB6, 0X00, 0X02, 0X00, 0X00, 0XB8, 0X7E}; /* 发射功率设为 0。 */
 static unsigned char  pa_gain15[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X05, 0XDC, 0Xea, 0X7E};//发射功率
@@ -68,7 +63,7 @@ static uint16_t s_presence_sequence[2] = {0U, 0U};  /* A/B 通道有效读到标
 static uint16_t s_request_generation[2] = {0U, 0U}; /* A/B 通道 RFID 请求代次，清刀具时递增以作废旧排队请求。 */
 static bool s_request_active = false;               /* true 表示任务当前有一次未完成 RFID 请求。 */
 static uint8_t s_request_channel = CHANNEL_NONE;    /* 当前活动请求所属通道。 */
-static RfidReadSource_t s_request_source = RFID_READ_SOURCE_NONE; /* 当前活动请求读取 EPC 还是 USER。 */
+static RfidReadSource_t s_request_source = RFID_READ_SOURCE_NONE; /* 当前活动请求读取来源，最终协议只允许 EPC。 */
 static uint8_t s_request_attempts_left = 0U;        /* 当前请求剩余发送次数，归零后任务停止本次请求。 */
 static bool s_request_fast_mode = false;            /* true 表示本次请求来自上线/重试快速识别，同标签也要让扫描层重新消费。 */
 
@@ -100,13 +95,13 @@ static bool Rfid_ChannelToIndex(uint8_t channel, uint8_t *index)
 }
 
 /*
- * 函数功能：判断读取来源是否为当前支持的 EPC 或 USER。
+ * 函数功能：判断读取来源是否为当前支持的 EPC。
  * 输入参数：source 为外部传入的读取来源。
  * 返回参数：true 表示来源有效，false 表示来源无效。
  */
 static bool Rfid_IsSourceValid(RfidReadSource_t source)
 {
-    return ((source == RFID_READ_SOURCE_EPC) || (source == RFID_READ_SOURCE_USER)); /* 只允许两种协议来源参与识别。 */
+    return (source == RFID_READ_SOURCE_EPC); /* 最终射频协议只允许 EPC 参与识别。 */
 }
 
 /*
@@ -169,40 +164,30 @@ static bool Rfid_IsRequestAllowedForCurrentSelection(uint8_t channel)
 }
 
 /*
- * 函数功能：根据读取来源返回原始标签数据长度。
- * 输入参数：source 为 EPC 或 USER。
- * 返回参数：对应协议的标签数据长度，无效来源返回 0。
+ * 函数功能：根据读取来源返回 EPC 原始标签数据长度。
+ * 输入参数：source 为读取来源，当前只接受 RFID_READ_SOURCE_EPC。
+ * 返回参数：EPC 协议标签数据长度，无效来源返回 0。
  */
 static uint8_t Rfid_GetPayloadLength(RfidReadSource_t source)
 {
     if (source == RFID_READ_SOURCE_EPC)
     {
-        return RFID_PAYLOAD_EPC_LENGTH; /* 公共接头 EPC 固定提取 12 字节。 */
-    }
-
-    if (source == RFID_READ_SOURCE_USER)
-    {
-        return RFID_PAYLOAD_USER_LENGTH; /* PXBA/PXBB USER 固定提取 16 字节。 */
+        return RFID_PAYLOAD_EPC_LENGTH; /* 公共接头和 PXBA/PXBB 最终协议 EPC 固定提取 12 字节。 */
     }
 
     return 0U; /* 无效来源没有标签长度。 */
 }
 
 /*
- * 函数功能：根据读取来源返回原始标签数据在整帧中的起始偏移。
- * 输入参数：source 为 EPC 或 USER。
- * 返回参数：协议指定的数据偏移，无效来源返回 0。
+ * 函数功能：根据读取来源返回 EPC 原始标签数据在整帧中的起始偏移。
+ * 输入参数：source 为读取来源，当前只接受 RFID_READ_SOURCE_EPC。
+ * 返回参数：EPC 协议指定的数据偏移，无效来源返回 0。
  */
 static uint8_t Rfid_GetPayloadOffset(RfidReadSource_t source)
 {
     if (source == RFID_READ_SOURCE_EPC)
     {
         return RFID_PAYLOAD_EPC_OFFSET; /* EPC 按 data[8..19] 提取。 */
-    }
-
-    if (source == RFID_READ_SOURCE_USER)
-    {
-        return RFID_PAYLOAD_USER_OFFSET; /* USER 按 data[20..35] 提取。 */
     }
 
     return 0U; /* 无效来源不应继续提取。 */
@@ -225,13 +210,6 @@ static RfidReadSource_t Rfid_GetFrameSource(const uint8_t *frame)
         (frame[2] == RFID_RESP_CMD_EPC))
     {
         return RFID_READ_SOURCE_EPC; /* BB 02 22 是公共接头 EPC 回包。 */
-    }
-
-    if ((frame[0] == RFID_FRAME_HEAD) &&
-        (frame[1] == RFID_RESP_SECOND_USER) &&
-        (frame[2] == RFID_RESP_CMD_USER))
-    {
-        return RFID_READ_SOURCE_USER; /* BB 01 39 是分体式 USER 回包。 */
     }
 
     return RFID_READ_SOURCE_NONE; /* 其它回包不作为刀具标签数据处理。 */
@@ -289,21 +267,15 @@ static bool Rfid_ChecksumMatches(const uint8_t *buffer, uint16_t start_pos, uint
 }
 
 /*
- * 函数功能：发送当前请求对应的 RFID 读命令。
- * 输入参数：source 指定 EPC 或 USER。
+ * 函数功能：发送当前请求对应的 RFID EPC 读命令。
+ * 输入参数：source 指定读取来源，当前只允许 EPC。
  * 返回参数：无。
  */
 static void Rfid_SendReadCommand(RfidReadSource_t source)
 {
     if (source == RFID_READ_SOURCE_EPC)
     {
-        Uart3_SendPacket(NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* 公共接头刀具头读取 EPC。 */
-        return; /* EPC 命令已发送，本周期不再发送 USER。 */
-    }
-
-    if (source == RFID_READ_SOURCE_USER)
-    {
-        Uart3_SendPacket(NO_MASK3_READ_USER, (uint16_t)sizeof(NO_MASK3_READ_USER)); /* 分体式 PXBA/PXBB 刀具头读取 USER。 */
+        Uart3_SendPacket(NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* 公共接头和 PXBA/PXBB 刀具头统一读取 EPC。 */
     }
 }
 
@@ -336,7 +308,7 @@ static bool Rfid_UpdateParsedCache(RfidToolResult_t *result)
         (payload_memory->payload_length == result->payload_length) &&
         (memcmp(payload_memory->payload, result->payload, result->payload_length) == 0))
     {
-        same_payload = true; /* 完整 EPC/USER 原始数据一致时才视为同一个标签数据。 */
+        same_payload = true; /* 完整 EPC 原始数据一致时才视为同一个标签数据。 */
     }
 
     result->cache_hit = same_payload; /* 缓存命中时 handlescan 可以直接复用参数。 */
@@ -363,7 +335,7 @@ static bool Rfid_UpdateParsedCache(RfidToolResult_t *result)
     s_result_sequence[index]++; /* 每次读到有效标签都递增，包含相同标签掉线后恢复。 */
     result->sequence = s_result_sequence[index]; /* 把序号写入结果，供扫描层判断是否处理过。 */
     payload_memory->valid = true; /* 新 payload 成为该通道新的历史记忆，后续相同数据不再触发新刀具蜂鸣。 */
-    payload_memory->source = result->source; /* 同步历史来源，避免 EPC/USER 互相命中。 */
+    payload_memory->source = result->source; /* 同步历史来源，当前固定为 EPC，用于保持判重字段完整。 */
     payload_memory->payload_length = result->payload_length; /* 同步历史长度，保证 memcmp 只比较有效数据。 */
     memcpy(payload_memory->payload, result->payload, result->payload_length); /* 记录完整原始 payload，用于下一次判重。 */
     s_last_result[index] = *result; /* 保存完整原始标签和缓存状态。 */
@@ -429,7 +401,7 @@ static void Rfid_ReceiveRequestMessage(void)
 
     Rfid_SelectHardwareChannel(msg.channel); /* 出队后按请求通道切 R200-K8，保证后续读命令进入正确手柄通道。 */
     s_request_channel = msg.channel; /* 保存请求通道，解析成功后写回同通道缓存。 */
-    s_request_source = msg.source; /* 保存本次应读取 EPC 还是 USER。 */
+    s_request_source = msg.source; /* 保存本次应读取的来源，当前只允许 EPC。 */
     s_request_attempts_left = msg.fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* 快速/普通识别使用不同尝试次数。 */
     s_request_fast_mode = msg.fast_mode; /* 保存本次请求模式，决定同标签回包是否刷新序号。 */
     Uart3_ClearRecvData(); /* 新请求开始前丢弃 UART3 残留帧，避免刀具头已拔掉后旧标签回包被重新识别并触发蜂鸣。 */
@@ -592,7 +564,7 @@ void SscSplitTypeAutoModeGetData_Init(void)
 
 /*
  * 函数功能：发起一次 RFID 刀具头读取请求。
- * 输入参数：channel 为 A/B 通道；source 为 EPC/USER；fast_mode 为 true 时使用快速识别尝试次数。
+ * 输入参数：channel 为 A/B 通道；source 为 EPC；fast_mode 为 true 时使用快速识别尝试次数。
  * 返回参数：true 表示请求已入队，false 表示队列未初始化或参数无效。
  */
 bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode)
@@ -615,7 +587,7 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
     }
     /*
      * RFID 来源已经由 handlescan 按 EEPROM 第二页和协议选择：
-     * 公共接头 COMMON_SOCKET_ONLINES 走 EPC，PXBA/PXBB 分体式走 USER。
+     * 公共接头 COMMON_SOCKET_ONLINES 与 PXBA/PXBB 分体式当前都走 EPC。
      * 这里不能再用当前 WorkMessage.hand_model 做 PXBA-only 门禁，
      * 因为公共接头基座刚上线时当前工作通道可能尚未装载到 WorkMessage。
      */
@@ -629,7 +601,7 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
         {
             SendKeyRFIDMessageBdown();
         }
-        return false; /* 只有有效 A/B 通道和 EPC/USER 来源才能发起读取。 */
+        return false; /* 只有有效 A/B 通道和 EPC 来源才能发起读取。 */
     }
 
     if (WorkMessage.runflag_work == true)
@@ -643,7 +615,7 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
     }
 
     msg.channel = channel; /* 保存请求通道。 */
-    msg.source = source; /* 保存读取 EPC 还是 USER。 */
+    msg.source = source; /* 保存读取来源，最终协议固定为 EPC。 */
     msg.start = true; /* true 表示启动一次读取。 */
     msg.fast_mode = fast_mode; /* 保存快速或普通识别模式。 */
     msg.generation = s_request_generation[index]; /* 记录入队时的通道代次，清刀具后旧请求会被出队校验丢弃。 */
@@ -676,7 +648,7 @@ bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result)
 }
 
 /*
- * 函数功能：解析 UART3 DMA 缓冲中的 EPC/USER RFID 回包。
+ * 函数功能：解析 UART3 DMA 缓冲中的 EPC RFID 回包。
  * 输入参数：uartx_rf_buff 为 DMA 数据；length 为有效字节数；expected_source 为期望来源；result 为输出结果。
  * 返回参数：true 表示找到并提取出一帧校验通过的标签数据。
  */
@@ -688,8 +660,8 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
     uint16_t start_pos;             /* 当前尝试的帧头位置。 */
     uint16_t tail_pos;              /* 当前找到的帧尾位置。 */
     RfidReadSource_t frame_source;  /* 当前帧实际来源。 */
-    uint8_t payload_offset;         /* EPC/USER 标签数据起始偏移。 */
-    uint8_t payload_length;         /* EPC/USER 标签数据长度。 */
+    uint8_t payload_offset;         /* EPC 标签数据起始偏移。 */
+    uint8_t payload_length;         /* EPC 标签数据长度。 */
 
     if (result != NULL)
     {
@@ -725,7 +697,7 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                 continue; /* 未找到帧尾时继续向后扫描。 */
             }
 
-            frame_source = Rfid_GetFrameSource(&uartx_rf_buff[start_pos]); /* 判断当前帧是 EPC 还是 USER。 */
+            frame_source = Rfid_GetFrameSource(&uartx_rf_buff[start_pos]); /* 判断当前帧是否为 EPC 回包。 */
             if (frame_source == RFID_READ_SOURCE_NONE)
             {
                 break; /* 当前 BB 开头不是刀具识别回包，换下一个帧头搜索。 */
@@ -746,8 +718,8 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                 break; /* checksum 不通过，不能提取刀具数据。 */
             }
 
-            payload_offset = Rfid_GetPayloadOffset(frame_source); /* 按 EPC/USER 来源取协议偏移。 */
-            payload_length = Rfid_GetPayloadLength(frame_source); /* 按 EPC/USER 来源取协议长度。 */
+            payload_offset = Rfid_GetPayloadOffset(frame_source); /* 按 EPC 来源取协议偏移。 */
+            payload_length = Rfid_GetPayloadLength(frame_source); /* 按 EPC 来源取协议长度。 */
             if ((payload_length == 0U) ||
                 ((uint16_t)(start_pos + payload_offset + payload_length) > (uint16_t)(tail_pos - 1U)))
             {
@@ -755,7 +727,7 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
             }
 
             result->valid = true; /* 当前帧已经通过头、尾、长度和 checksum 校验。 */
-            result->source = frame_source; /* 保存 EPC 或 USER 来源。 */
+            result->source = frame_source; /* 保存 EPC 来源。 */
             result->payload_length = payload_length; /* 保存原始标签数据长度。 */
             memcpy(result->payload, &uartx_rf_buff[start_pos + payload_offset], payload_length); /* 拷贝完整原始标签数据用于缓存比较。 */
             return true; /* 成功提取一帧标签数据。 */
@@ -796,18 +768,15 @@ void Rfid_ClearChannelResult(uint8_t channel)
 }
 
 /*
- * 函数功能：把旧接口 rfid_data 转成明确的 EPC/USER 来源。
- * 输入参数：rfid_data 为旧屏/旧业务传入值，1 沿用旧注释表示 USER，其它值按 EPC 处理。
- * 返回参数：EPC 或 USER 读取来源。
+ * 函数功能：把旧接口 rfid_data 转成当前工程统一使用的 EPC 来源。
+ * 输入参数：rfid_data 为旧屏/旧业务传入值，保留形参仅兼容旧函数签名。
+ * 返回参数：EPC 读取来源。
  */
 static RfidReadSource_t Rfid_LegacyTypeToSource(uint8_t rfid_data)
 {
-    if (rfid_data == 1U)
-    {
-        return RFID_READ_SOURCE_USER; /* 旧 A 通道入口注释为读取 USER，保持兼容。 */
-    }
+    (void)rfid_data; /* 分体式 PXBA/PXBB 与公共接头已经统一 EPC 协议，旧参数不再参与来源选择。 */
 
-    return RFID_READ_SOURCE_EPC; /* 其它旧值默认读取 EPC，供公共接头自动识别使用。 */
+    return RFID_READ_SOURCE_EPC; /* 所有旧 up 入口统一读取 EPC。 */
 }
 
 /*

@@ -6,15 +6,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#define RFID_PAYLOAD_EPC_LENGTH     12U  /* EPC 模式按协议提取 data[8..19]，用于公共接头刀具头。 */
-#define RFID_PAYLOAD_USER_LENGTH    16U  /* USER 模式按协议提取 data[20..35]，用于 PXBA/PXBB 分体式刀具头。 */
-#define RFID_PAYLOAD_MAX_LENGTH     RFID_PAYLOAD_USER_LENGTH /* 结果缓存按较大的 USER 数据区预留空间。 */
+#define RFID_PAYLOAD_EPC_LENGTH     12U  /* EPC 模式按协议提取 data[8..19]，公共接头和 PXBA/PXBB 均只使用这一种射频数据区。 */
+#define RFID_PAYLOAD_MAX_LENGTH     RFID_PAYLOAD_EPC_LENGTH /* 当前最终协议只保留 EPC，结果缓存按 12 字节预留。 */
 
 typedef enum
 {
     RFID_READ_SOURCE_NONE = 0U, /* 无 RFID 读取来源，用于清空或无效请求。 */
-    RFID_READ_SOURCE_EPC = 1U,  /* 公共接头式可拆手柄读取 EPC 区。 */
-    RFID_READ_SOURCE_USER = 2U  /* 分体式 PXBA/PXBB 可拆手柄读取 USER 区。 */
+    RFID_READ_SOURCE_EPC = 1U   /* 公共接头和 PXBA/PXBB 可拆手柄统一读取 EPC 区。 */
 } RfidReadSource_t;
 
 typedef struct
@@ -23,8 +21,8 @@ typedef struct
     bool cache_hit;                                  /* true 表示本次标签数据与该通道上一次有效标签完全一致。 */
     bool changed;                                    /* true 表示本次标签数据与该通道上一次有效标签不同。 */
     uint8_t channel;                                 /* 结果所属通道，使用 CHANNEL_A/CHANNEL_B 的数值。 */
-    RfidReadSource_t source;                         /* 结果来源，区分 EPC 公共接头和 USER 分体式。 */
-    uint8_t payload_length;                          /* payload 实际长度，EPC 为 12，USER 为 16。 */
+    RfidReadSource_t source;                         /* 结果来源，当前只允许 EPC；字段保留用于清空和有效性判断。 */
+    uint8_t payload_length;                          /* payload 实际长度，当前固定为 EPC 12 字节。 */
     uint8_t payload[RFID_PAYLOAD_MAX_LENGTH];        /* 按协议提取出的完整原始标签数据，用于缓存比较。 */
     uint16_t sequence;                               /* 每次成功读到标签后递增，handlescan 用它判断是否有新结果。 */
     uint16_t presence_sequence;                      /* 每次有效读到 RFID 标签都递增，在线监测用它区分“同一标签仍在”和“连续读不到标签”。 */

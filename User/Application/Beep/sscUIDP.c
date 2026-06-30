@@ -683,13 +683,7 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 	}
 	else
 	{
-		if(auto_identify_flag){
-				LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//自动按钮识别显示
-		}
-		else
-		{
-			LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);
-		}
+		LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);//禁用识别区时必须隐藏 0x1407，避免拔掉一体式手柄后旧自动识别标志把按钮重新画出来。
 	
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
@@ -725,6 +719,7 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 	// 	}
 	 }
 }
+
 /*
  * 函数功能：刷新开口定位入口。
  * 输入参数：enable_flag 表示当前刀具是否需要显示开口定位。
@@ -733,6 +728,27 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 void UIORALDP(bool enable_flag)
 {
 	enable_flag?LCD_Show_Picture(UIDP_LCD_VP_OPEN_POSITION,50U):LCD_Disappear_Picture(UIDP_LCD_VP_OPEN_POSITION);//开口定位只使用 UIDP_LCD_VP_OPEN_POSITION 和 50 号资源
+}
+
+/*
+ * 函数功能：最后一个手柄拔出后强制刷新主运行页无手柄状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void UIDP_ForceNoHandleDisplay(void)
+{
+	if(UIDPMsgQueue != NULL)
+	{
+		xQueueReset(UIDPMsgQueue); /* 清掉旧 UI 队列，防止拔出后旧方向或自动识别消息晚到覆盖无手柄状态。 */
+		s_uidp_last_valid = 0U;	 /* 队列已被清空时同步释放去重缓存，保证后续无手柄刷新消息不会被误判为重复帧。 */
+	}
+
+	UIDIRDP(false, 0U, 0U);				   /* 无手柄时三个方向按钮必须全部回到灰色初始状态。 */
+	UIHANDLEDP(false, 0U, 1U, 0U);		   /* A 通道写无手柄图标，避免拔出 PXYTM 后仍保留旧选中图标。 */
+	UIHANDLEDP(false, 0U, 2U, 0U);		   /* B 通道写无手柄图标，保证最后一个手柄拔出后两侧状态一致。 */
+	UITOOLSPECDP(false, 0U, 0U, 0U, 0U);	   /* 隐藏刀具规格，避免 EEPROM 规格在无手柄状态下残留。 */
+	UIMANUALBUTTONDP(false, false, 0U, 0U); /* 隐藏自动识别、手动磨/刨和识别结果区域。 */
+	UIORALDP(false);						   /* 隐藏开口定位入口，避免无手柄时保留旧刀具能力入口。 */
 }
 
 /*
