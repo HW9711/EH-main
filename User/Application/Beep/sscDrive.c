@@ -22,6 +22,7 @@
 #define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 电机实际 rpm 的协议可表达上限。 */
 #define MOTOR_DRIVE_SPEED_UP_SHIFT 16U /* WorkMessage.tool_reduction_ratio 高 16 位表示增速比。 */
 #define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
+#define MOTOR_DRIVE_DISPLAY_SPEED_INVALID 0xFFFFFFFFUL /* 速度显示缓存的无效值，用于强制下一次运行刷新屏幕速度。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -130,7 +131,7 @@ static uint32_t MotorDrive_ApplySpeedUpRatioValue(uint32_t motor_speed, uint32_t
 
 /*
  * 函数功能：按 EEPROM/RFID 解析出的机械减速比或增速比，把屏幕手柄速度换算成电机输出速度。
- * 输入参数：display_speed 为 WorkMessage.speed_set_work，单位为屏幕和上位机设置的实际 rpm。
+ * 输入参数：display_speed 为本次控制源目标速度，脚踏模式取行程比例后的 speed_work，其它模式取设定最大速度 speed_set_work。
  * 返回参数：需要写入 UART1 电机启动帧的速度值，已完成倍率换算和 16 位钳位。
  */
 static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed)
@@ -196,10 +197,19 @@ void MotorStart()
 void MOTORRUN(void)
 {
     static uint8_t huci=0;
+    static uint32_t last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 记录脚踏运行时上一次发给屏幕的实时速度，避免每 50ms 无变化也刷屏。 */
     uint8_t display_value[10]={0};
     uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
-    uint32_t ssc_speed_value=MotorDrive_ApplyToolReductionRatio(WorkMessage.speed_set_work); /* 电机驱动帧速度统一按 EEPROM/RFID 倍率换算，结果仍是实际 rpm。 */
+    uint32_t motor_source_speed=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕/EEPROM 当前设定速度就是电机运行目标速度。 */
+    uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
+    uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    if(WorkMessage.drivetype_work==JTWORK)
+    {
+        motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
+        display_speed_value=WorkMessage.speed_work; /* 脚踏运行时屏幕速度显示实际比例速度，而不是手柄允许的最大速度。 */
+    }
+    ssc_speed_value=MotorDrive_ApplyToolReductionRatio(motor_source_speed); /* 本次控制源速度统一按 EEPROM/RFID 倍率换算成电机实际 rpm。 */
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
     //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
@@ -221,15 +231,16 @@ void MOTORRUN(void)
    
     if(WorkMessage.runflag_work)
     {
-        if(huci==0)
+        if((huci==0) || ((WorkMessage.drivetype_work==JTWORK) && (last_display_speed!=display_speed_value)))
         {
-            display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位为 WorkMessage 的实际 rpm。 */
-            display_value[1] = (uint8_t)((WorkMessage.speed_set_work >> 8)&0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
-         display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  
+            display_value[0] = (uint8_t)(display_speed_value >> 16); /* 运行速度高字节按 UIDP 协议传输，脚踏时来自实时行程速度。 */
+            display_value[1] = (uint8_t)((display_speed_value >> 8)&0xFFU); /* 运行速度中字节按 UIDP 协议传输，保证 24 位速度完整显示。 */
+         display_value[2] = (uint8_t)(display_speed_value & 0xFFU);
             display_value[3] = 1U;             
             display_value[4] = 1U; 
             huci=1;
-	SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+            last_display_speed=display_speed_value; /* 缓存本次运行显示速度，脚踏行程变化后下一周期才再次刷新屏幕。 */
+	SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 刷新运行速度，脚踏模式下随行程实时变化，非脚踏模式仍只在起转时刷新。 */
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
@@ -299,6 +310,7 @@ void MOTORRUN(void)
     {
          if(huci==1){
             huci=0;
+            last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 停机后清显示缓存，下次起转必须重新同步运行速度。 */
             display_value[0] = (uint8_t)(WorkMessage.speed_set_work >> 16); /* 速度高字节按 UIDP 协议传输，单位为 WorkMessage 的实际 rpm。 */
             display_value[1] = (uint8_t)((WorkMessage.speed_set_work >>8)& 0xFFU); /* 速度低字节按 UIDP 协议传输，保证 16 位速度完整显示。 */
              display_value[2] = (uint8_t)(WorkMessage.speed_set_work & 0xFFU);  

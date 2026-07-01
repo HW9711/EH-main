@@ -43,6 +43,7 @@
 /* 单踏板松脚去抖周期数；FootControlTask 为 25ms，3 个周期约 75ms，用于过滤踩住时 AD 瞬时跌落导致的泵反复启停。 */
 #define FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS 3U
 #define FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS 10U
+#define FOOT_PEDAL_SPEED_HIGH_MARGIN 30U /* 双脚踏当前通道运行段预留的高位死区，沿用旧公式 HValue-MValue-30 的行程范围。 */
 
 static uint8_t get_jtHvalue[10]={0XFE,0XEF,0XB6,0XC1,0XB8,0Xdf,0x3e,0x84};//读高值
 
@@ -79,6 +80,103 @@ typedef struct {
 } FootMessage_t;
 
 FootMessage_t footmessage;
+
+/*
+ * 函数功能：按当前通道和当前方向读取手柄 EEPROM/RFID 已装载的最小运行速度。
+ * 输入参数：无。
+ * 返回参数：当前方向最小速度，单位为实际 rpm；无有效通道或方向参数缺失时返回 0。
+ */
+static uint32_t Foot_GetCurrentDirectionMinSpeed(void)
+{
+    ChannelrecognizeMessage_t *recognize = NULL; /* 指向当前工作通道识别缓存，里面保存 Page4/RFID 解析出的速度下限。 */
+
+    if(WorkMessage.channel_work==CHANNEL_A)
+    {
+        recognize=&ChannelrecognizeMessageA; /* A 通道运行时，脚踏下限必须读取 A 通道当前刀具/手柄参数。 */
+    }
+    else if(WorkMessage.channel_work==CHANNEL_B)
+    {
+        recognize=&ChannelrecognizeMessageB; /* B 通道运行时，脚踏下限必须读取 B 通道当前刀具/手柄参数。 */
+    }
+    else
+    {
+        return 0U; /* 未选中 A/B 通道时不施加下限，避免无手柄状态误写运行速度。 */
+    }
+
+    if(WorkMessage.dir_work==FZDIR)
+    {
+        return recognize->speed_fzmin; /* 反转脚踏比例速度从反转最小速度开始，避免低速触发驱动报警。 */
+    }
+    if(WorkMessage.dir_work==OSCDIR)
+    {
+        return recognize->speed_oscmin; /* 往复脚踏比例速度从往复最小速度开始，保持和屏幕调速下限一致。 */
+    }
+
+    return recognize->speed_zzmin; /* 正转或异常方向默认按正转下限处理，和当前工程默认方向逻辑一致。 */
+}
+
+/*
+ * 函数功能：把脚踏霍尔 ADC 行程换算为本周期实际电机目标速度。
+ * 输入参数：ad_value 为当前脚踏 ADC；low_adc 为运行段起点；high_adc 为运行段终点；high_margin 为高位死区。
+ * 返回参数：钳位后的实际运行速度，范围为 EEPROM 最小速度到当前屏幕/EEPROM 设定速度。
+ */
+static uint32_t Foot_BuildTravelMotorSpeed(uint16_t ad_value,uint16_t low_adc,uint16_t high_adc,uint16_t high_margin)
+{
+    uint16_t effective_high_adc=high_adc; /* 运行段实际高点，双脚踏部分分支需要扣除旧逻辑保留的 30 点死区。 */
+    uint16_t clamped_adc=ad_value; /* 钳位后的 ADC，避免猛踩或采样过冲让比例超过 100%。 */
+    uint32_t min_speed=Foot_GetCurrentDirectionMinSpeed(); /* 当前方向 EEPROM/RFID 最小速度，脚踏比例不能再从 0 开始。 */
+    uint32_t max_speed=WorkMessage.speed_set_work; /* 当前屏幕/EEPROM 设定速度在脚踏模式下作为最大速度。 */
+    uint32_t adc_range=0U; /* 运行段 ADC 总行程，用于线性比例计算。 */
+    uint32_t adc_offset=0U; /* 当前 ADC 相对运行段起点的有效行程。 */
+    uint32_t speed_range=0U; /* 允许脚踏调节的速度区间，等于最大速度减最小速度。 */
+    uint32_t speed=0U; /* 本周期换算出的实际运行速度，最终写入 WorkMessage.speed_work。 */
+
+    if(max_speed==0U)
+    {
+        max_speed=Pubinterface_GetCurrentDefaultMotorSpeed(); /* 通道刚上线但速度未装载时，用当前方向默认速度作为脚踏最大速度。 */
+        WorkMessage.speed_set_work=max_speed; /* 同步回设定速度，保证屏幕显示、脚踏换算和驱动输出使用同一最大值。 */
+    }
+
+    if((high_margin!=0U)&&((uint32_t)effective_high_adc>((uint32_t)low_adc+(uint32_t)high_margin)))
+    {
+        effective_high_adc=(uint16_t)(effective_high_adc-high_margin); /* 仅在高点足够大时扣除死区，防止无符号下溢。 */
+    }
+
+    if(min_speed>max_speed)
+    {
+        min_speed=max_speed; /* EEPROM 上下限或当前设定异常时，最小速度不能超过本次允许的最大速度。 */
+    }
+
+    if(effective_high_adc<=low_adc)
+    {
+        return min_speed; /* 脚踏校准区间无效时不做除法，安全地保持最小运行速度。 */
+    }
+
+    if(clamped_adc<low_adc)
+    {
+        clamped_adc=low_adc; /* 低于运行段起点时按 0% 行程处理，输出 EEPROM 最小速度。 */
+    }
+    if(clamped_adc>effective_high_adc)
+    {
+        clamped_adc=effective_high_adc; /* 高于运行段终点时按 100% 行程处理，输出不超过设定速度。 */
+    }
+
+    adc_range=(uint32_t)(effective_high_adc-low_adc); /* 计算有效行程总宽度，前面已保证不为 0。 */
+    adc_offset=(uint32_t)(clamped_adc-low_adc); /* 计算当前踩踏位置在运行段内的偏移。 */
+    speed_range=max_speed-min_speed; /* 最小速度已经钳到不大于最大速度，此处不会下溢。 */
+    speed=min_speed+(uint32_t)(((uint64_t)speed_range*(uint64_t)adc_offset)/(uint64_t)adc_range); /* 用 64 位乘法避免高转速和大 ADC 行程相乘溢出。 */
+
+    if(speed>max_speed)
+    {
+        speed=max_speed; /* 最终保护：任何舍入或异常输入都不能让实际速度超过屏幕设定最大速度。 */
+    }
+    if(speed<min_speed)
+    {
+        speed=min_speed; /* 最终保护：脚踏进入运行段后实际速度不能低于 EEPROM 最小速度。 */
+    }
+
+    return speed; /* 返回可直接写入 WorkMessage.speed_work 的脚踏实时目标速度。 */
+}
 
 
 
@@ -281,6 +379,47 @@ static bool Foot_ShouldIgnoreSinglePedalReleaseGlitch(uint8_t *release_ticks)
     return false;
 }
 
+/*
+ * 函数功能：脚踏已经确认松开后，结束本次压力堵塞造成的手柄停机锁存。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_ClearPressureStopLatchAfterRelease(void)
+{
+    Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 脚踏松开只解除压力停机锁存，不走停泵接口，避免误清手柄联动注水泵状态。 */
+}
+
+/*
+ * 函数功能：压力堵塞停机锁存有效时拦截脚踏保持踩下造成的重复启动。
+ * 输入参数：无。
+ * 返回参数：true 表示本周期必须保持停机，false 表示允许脚踏按正常路径继续判断。
+ */
+static bool Foot_BlockRunIfPressureStopLatched(void)
+{
+    if(Pubinterface_IsPressureBlockStopLatched() == false)
+    {
+        return false; /* 没有压力停机锁存时，脚踏可以按普通启动沿继续运行。 */
+    }
+
+    WorkMessage.runflag_work=false;                 /* 压力保护后脚踏仍踩住时，继续强制手柄运行命令为停止。 */
+    WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免驱动任务看到旧速度重新输出。 */
+    ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行来源，必须等左脚释放后重新踩下才允许再置位。 */
+    ControlSignalMessage.jtR_control_flag=false;    /* 清右脚踏运行来源，双脚踏两侧都不能靠保持踩踏自动恢复。 */
+    ControlSignalMessage.jtL_gentlypump_flag=false; /* 清左侧轻踩泵联动来源，防止压力保护后轻踩段重新开泵。 */
+    ControlSignalMessage.jtR_gentlypump_flag=false; /* 清右侧轻踩泵联动来源，防止右脚保持踩下时泵自动恢复。 */
+    return true;                                    /* 通知调用处退出本次脚踏启动分支，等待真实松脚。 */
+}
+
+/*
+ * 函数功能：判断某一路脚踏 AD 是否已经回到释放区间。
+ * 输入参数：ad_value 为当前脚踏 AD 原始值，low_value 为该路脚踏低位基准值。
+ * 返回参数：true 表示已经低于启动阈值，false 表示该路脚踏仍处于踩下状态。
+ */
+static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
+{
+    return ((uint32_t)ad_value <= ((uint32_t)low_value + (uint32_t)JT_threshold)); /* 用和运行入口一致的低阈值判断释放，避免双脚踏一边未松就清压力锁存。 */
+}
+
 static void Foot_DoublePedalRequireReleaseBeforeRun(uint8_t channel)
 {
     s_double_pedal_release_before_run_channel = channel;
@@ -409,6 +548,10 @@ void FootControlTask(uint32_t event)
                 if(adValue<msg.LValue_Left)adValue=msg.LValue_Left;
                 if(adValue-msg.LValue_Left>JT_threshold)
                     {
+                        if(Foot_BlockRunIfPressureStopLatched())
+                        {
+                            break; /* 压力保护后脚踏仍踩住时，本周期不允许重新写运行标志，必须等待真实松脚。 */
+                        }
                             ControlSignalMessage.jtL_control_flag=true;
                         /* 单踏板重新确认踩下后清掉松脚去抖计数，防止上一轮释放残留影响本次泵保持运行。 */
                         single_release_debounce_ticks=0U;
@@ -426,7 +569,7 @@ void FootControlTask(uint32_t event)
                        // if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)return; /* 脚踏启动手柄电机前检查公共接头 EPC 刀具头，缺失时只报警不运行。 */
                         if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                     
-                        WorkMessage.speed_work=(float)(jt_adcvalue-msg.LValue_Left)/(float)(msg.HValue_Left-msg.LValue_Left)*WorkMessage.speed_set_work;
+                        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(jt_adcvalue,msg.LValue_Left,msg.HValue_Left,0U); /* 单踏板按低值到高值线性映射，输出限制在 EEPROM 最小速度到设定速度之间。 */
                         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                         Pubinterface_SetHandleInjectionPumpRun(true); /* 电机确认进入运行态后再按泵类型和当前通道启动 A/B 注水冷却泵，保证冷却泵只跟随手柄运行。 */
                     }
@@ -465,8 +608,11 @@ void FootControlTask(uint32_t event)
                         }
                         else
                         {
-                            /* 未处于脚踏运行态时不需要保留释放计数，避免下次启动前误认为已经连续松脚。 */
-                            single_release_debounce_ticks=0U;
+                            if(Foot_ShouldIgnoreSinglePedalReleaseGlitch(&single_release_debounce_ticks))
+                            {
+                                break; /* 压力停机后 jtL_control_flag 已被清零，仍要按松脚去抖确认，防止踩住脚踏时 AD 抖动误清锁存。 */
+                            }
+                            Foot_ClearPressureStopLatchAfterRelease(); /* 单踏板确认松开后结束压力停机锁存，下一次重新踩下才允许启动。 */
                             //本来就是停止，如果不是脚踏控制的那么不需要任何处理和操作
                         }
                     }
@@ -476,6 +622,10 @@ void FootControlTask(uint32_t event)
                 if(adValue<msg.LValue_Left)adValue=msg.LValue_Left;
                 if(adValue-msg.LValue_Left>JT_threshold)//注水标志进行，至于如何让那个泵运行，则要看泵的状态，以及泵的行为
                 {
+                    if(Foot_BlockRunIfPressureStopLatched())
+                    {
+                        break; /* 双段脚踏保持踩下时如果仍在压力锁存内，不允许轻踩段重新启动注水泵。 */
+                    }
                     ControlSignalMessage.jtL_control_flag=true;
                     //   if(WorkMessage.alarm_flag!=0)
                     //     {
@@ -523,19 +673,20 @@ void FootControlTask(uint32_t event)
                              ControlSignalMessage.jtL_control_flag=false;
                         }
                         //如果泵以注水泵运行-泵停止
-                       if(ControlSignalMessage.jtL_gentlypump_flag)
-                            {
-                              ControlSignalMessage.jtL_gentlypump_flag=false;
+                        if(ControlSignalMessage.jtL_gentlypump_flag)
+                             {
+                               ControlSignalMessage.jtL_gentlypump_flag=false;
                               if(pumpMessageA.type==INJECTWATER)
                               {
                                 Foot_StopPumpAInjection();
                               }
                               else if(pumpMessageB.type==INJECTWATER)
                               {
-                                Foot_StopPumpBInjection();
-                              }
-                            }
-                }
+                                 Foot_StopPumpBInjection();
+                               }
+                             }
+                         Foot_ClearPressureStopLatchAfterRelease(); /* 双段脚踏完全松到低阈值以下后，释放压力停机锁存，避免再踩脚踏被旧锁存拒绝。 */
+                 }
                 if(adValue<msg.MValue_Left)adValue=msg.MValue_Left;
                 if(adValue-msg.MValue_Left>JT_threshold)
                 {
@@ -545,7 +696,7 @@ void FootControlTask(uint32_t event)
                     // if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)return; /* 脚踏比例启动前先确认刀具头参数有效，避免公共接头空刀具运行。 */
                     if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                     ControlSignalMessage.jtL_control_flag=true;
-                    WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left)* WorkMessage.speed_set_work;
+                    WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg.MValue_Left,msg.HValue_Left,0U); /* 双段脚踏电机段从中值开始算比例，不再从 0rpm 起步。 */
                     WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                     Pubinterface_SetHandleInjectionPumpRun(true); /* 脚踏二段启动电机后统一经过联动接口，压力锁存时会立即拒绝连续踩踏重新起机。 */
                 }
@@ -573,6 +724,10 @@ void FootControlTask(uint32_t event)
                 if(adValue<msg.LValue_Left)adValue=msg.LValue_Left;
                     if(adValue-msg.LValue_Left>JT_threshold)
                     {
+                        if(Foot_BlockRunIfPressureStopLatched())
+                        {
+                            break; /* 双脚踏左侧保持踩下时如果压力锁存未释放，禁止继续进入轻踩泵和电机启动路径。 */
+                        }
                         ControlSignalMessage.jtL_control_flag=true;
 
                        if(Foot_EnsureFootControlMode() == false)return;
@@ -612,7 +767,7 @@ void FootControlTask(uint32_t event)
                                 }
                                 if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                                 ControlSignalMessage.jtL_control_flag=true;
-                                WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left-30)*WorkMessage.speed_set_work;
+                                WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg.MValue_Left,msg.HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏左侧当前通道保留高位死区，并限制最大不超过设定速度。 */
                                 WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                                 Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧启动 A 通道后进入冷却联动和压力锁存门禁，堵管后保持踩踏不能重启手柄。 */
                             }
@@ -637,7 +792,7 @@ void FootControlTask(uint32_t event)
                                     {
                                         if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                                         ControlSignalMessage.jtL_control_flag=true;
-                                        WorkMessage.speed_work=(float)(adValue-msg.MValue_Left)/(float)(msg.HValue_Left-msg.MValue_Left)*WorkMessage.speed_set_work;
+                                        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg.MValue_Left,msg.HValue_Left,0U); /* 双脚踏左侧跨通道运行同样按 EEPROM 最小速度起步。 */
                                         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                                         Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧跨通道启动后同样走压力锁存门禁，避免旧分支绕过停手柄保护。 */
                                     }
@@ -677,24 +832,32 @@ void FootControlTask(uint32_t event)
                                 Foot_ClearHandleOrOverloadAlarm();
                            }
                         }
-                        if(ControlSignalMessage.jtL_gentlypump_flag)
-                            {
-                              ControlSignalMessage.jtL_gentlypump_flag=false;
+                         if(ControlSignalMessage.jtL_gentlypump_flag)
+                             {
+                               ControlSignalMessage.jtL_gentlypump_flag=false;
                               if(pumpMessageA.type==INJECTWATER)
                               {
                                Foot_StopPumpAInjection();
                               }
                               else if(pumpMessageB.type==INJECTWATER)
                               {
-                               Foot_StopPumpBInjection();
-                              }
-                            }
-                       //左脚停止
-                    }
+                                Foot_StopPumpBInjection();
+                               }
+                             }
+                         if(Foot_IsPedalReleased(jtd_adcvalue_r, msg.LValue_Right))
+                         {
+                             Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都回到释放区，才算退出本次压力停机控制源。 */
+                         }
+                        //左脚停止
+                     }
                     adValue_r=jtd_adcvalue_r;
                     if(adValue_r<msg.LValue_Right)adValue_r=msg.LValue_Right;
                     if(adValue_r-msg.LValue_Right>JT_threshold)//右踏板
                     {
+                        if(Foot_BlockRunIfPressureStopLatched())
+                        {
+                            break; /* 双脚踏右侧保持踩下时如果压力锁存未释放，禁止蜂鸣结束后自动拉起手柄和泵。 */
+                        }
                         ControlSignalMessage.jtR_control_flag=true;
                        if(Foot_EnsureFootControlMode() == false)return;
 
@@ -732,7 +895,7 @@ void FootControlTask(uint32_t event)
                                }
                                if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                                ControlSignalMessage.jtR_control_flag=true;
-                                WorkMessage.speed_work=(float)(adValue_r-msg.MValue_Right)/(float)(msg.HValue_Right-msg.MValue_Right-30)*WorkMessage.speed_set_work;
+                                WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg.MValue_Right,msg.HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏右侧当前通道保留高位死区，并限制最大不超过设定速度。 */
                                  WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                                 Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧启动 B 通道后统一刷新冷却泵跟随，并让压力堵塞锁存能够清回 runflag。 */
                             }
@@ -758,7 +921,7 @@ void FootControlTask(uint32_t event)
                                         {
                                             if(ControlArbitration_TryEnter(CONTROL_OWNER_FOOT) == false)return;
                                             ControlSignalMessage.jtR_control_flag=true;
-                                            WorkMessage.speed_work=(float)(adValue_r-msg.MValue_Right)/(float)(msg.HValue_Right-msg.MValue_Right)*WorkMessage.speed_set_work;
+                                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg.MValue_Right,msg.HValue_Right,0U); /* 双脚踏右侧跨通道运行同样按 EEPROM 最小速度起步。 */
                                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                                             Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧跨通道启动后不能绕过联动接口，否则压力停机后脚踏保持会重新置运行。 */
                                         }
@@ -811,7 +974,11 @@ void FootControlTask(uint32_t event)
                                Foot_StopPumpBInjection();
                               }
                             }
-                    }
+                        if(Foot_IsPedalReleased(jtd_adcvalue_l, msg.LValue_Left))
+                        {
+                            Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都松开后才清压力锁存，防止另一侧仍踩住时自动恢复。 */
+                        }
+                     }
 
                 break;
                 default:

@@ -153,3 +153,31 @@
 - 变量字典需要写“谁写、谁读、正常范围、清零条件、首选断点”，这样 Watch 窗口才能服务定位，而不是只堆变量名。
 - 配置 cookbook 按“想实现什么”组织比按文件组织更适合临时修改；每个配置项都要说明影响范围、验证方法、回退点和风险。
 - 测试用例表必须同时记录 UI、公共状态和原始帧；只记录 UI 现象不足以判定问题边界。
+
+## 2026-07-01 主控工程接手理解发现
+
+- 当前主控工程顶层包含 `Src`、`User`、`Drivers`、`Middlewares`、`EIDE`、`MDK-ARM`、`build`、`docs` 等目录；主控业务主要落在 `User/Application`，CubeMX/HAL 入口主要在 `Src`。
+- 当前已有两份核心文档：`docs/software-debug-report.md` 是主调试和原理报告，约 220KB；`docs/product-software-handoff.md` 是历史接手资料，约 141KB。后续源码和旧文档冲突时，应优先按当前源码和 `software-debug-report.md` 复核。
+- 当前工作区不是干净状态：`EIDE/.eide/eide.yml`、`Src/main.c`、`User/Application/Beep/sscDrive.c`、`User/Application/Beep/sscFOOT.c`、`User/Application/Pubinterface/Pubinterface.c`、`User/Application/include/Pubinterface.h` 已有未提交改动；`.omx` 下也有运行状态文件改动和新增日志。
+- 未提交源码差异的业务含义：`Src/main.c` 暂时注释掉 `Tracealyzer_RecorderInit()`；`sscDrive.c` 让脚踏模式下电机输出速度和屏幕速度显示使用实时 `WorkMessage.speed_work`；`sscFOOT.c` 新增脚踏按 EEPROM 最小速度起步、压力堵塞停机锁存、松脚后解除锁存等逻辑；`Pubinterface.c/.h` 暴露压力停机锁存查询接口；`EIDE/.eide/eide.yml` 上传器从 STLink 改为 JLink。
+- 旧模块回编译风险扫描未命中：`handledata.c`、`param.c`、`warn.c`、`User/Data/data.c`、`UI_Main.c`、`UI_ModelConfiguration.c`、`UI_Password.c` 以及旧 `SysRunData`、`SysSetParam`、`SysModelConfig`、`SysHandleData`、`SysInterface`、`SysFootPedalData`、`SysUIDisplayData` 在指定 EIDE/Keil 构建清单和源码范围内未检出。
+- 启动主线为 `Src/main.c`：HAL 和外设初始化后执行 `Hardware_PostInit()`、`App_Bootstrap_Init()`、`MX_FREERTOS_Init()`、`vTaskStartScheduler()`；IWDG 当前保持禁用以匹配参考固件行为。
+- 业务初始化主入口为 `User/Application/Src/userparser.c::Userparser_Init()`：先初始化板级 GPIO、EEPROM、UART1/2/3/4/5/6/7、启动页、电机急停、UI 启动页，再初始化 `WorkMessage`、通道识别、通道记忆、泵状态、控制信号，最后启动手柄扫描、脚踏、屏幕键、电机、外控、泵、UI、软串口压力等软任务。
+- 软任务门控在 `Src/app_task.c::AppTaskRuntimeGate()`：虽然软任务拆成多个 FreeRTOS 线程，但业务回调进入前仍抢同一个 `sAppTaskRuntimeMutex`，保持旧业务串行访问全局状态的时序假设。
+- 核心状态分三层：`ChannelrecognizeMessageA/B` 是 EEPROM/RFID 本次识别缓存；`MemoryMsgA/B` 是 A/B 通道记忆；`WorkMessage` 是当前工作快照。运行中另一路插入只应更新通道记忆，不应抢占当前 `WorkMessage`。
+- `Pubinterface_LoadChannelMemory()` 是 A/B 通道记忆装载到当前工作快照的关键入口；它先装载电流、倍率、方向、控制方式、频率、刀具、手柄，再最后写 `channel_work`，用于避免中间状态被其它任务读到。
+- `PlugORunPLUGActive()` 是 A/B 插拔事件落地入口：插入时先写在线状态和 `MemoryMsgA/B`，非运行且非普通报警时才自动选中；运行中插入另一路不抢占；非运行状态拔掉当前通道时可回落到另一在线通道；运行中拔掉当前通道停电机、停联动注水泵并等待用户确认。
+
+## 2026-07-01 屏幕偶发点不动软件分析发现
+
+- 屏幕输入链路为 `USART6 DMA` -> `Uart6_DMARecvDataPeek()` -> `ScreenKey_Scan()` -> `ScreenKey_PostLegacyAction()` -> `SendKeyBehMessage(SCREENKey, ...)` -> `KeyBehaviors()` -> `SCREENKeyBehanior()` -> `Pubinterface.c` 业务入口。
+- `uart6.c` 没有使用 USART6 IDLE 中断判帧；`USART6_IRQHandler()` 只调用 `HAL_UART_IRQHandler(&huart6)`。当前收包依赖 `Uart6_DMARecvDataPeek()` 每 30ms 轮询 DMA 剩余长度，连续 3 次不变后才认为一包结束，再 `HAL_UART_DMAStop()`、拷贝、清 DMA 缓冲并重启。
+- 上述 UART6 设计在连续触控保活、屏幕多帧连发或软任务被 UI 刷新拖住时会延迟出包；如果 DMA 剩余长度持续变化，`ScreenKey_Scan()` 长时间拿不到 `rlen`，现象就是屏幕原始帧可能到了但业务事件没生成。
+- `ScreenKey_Scan()` 使用 `uint8_t dat1[16]` 接收单帧，但 `len = dat[i + 2] + 3` 后没有检查 `len <= sizeof(dat1)`，直接 `Common_CopyData(&dat[i], dat1, len)`；`Common_CopyData()` 是裸循环拷贝，没有边界保护。串口噪声、错位帧或异常长度字节可造成栈越界，属于已确认的软件设计缺陷。
+- `ScreenKey_Scan()` 解析多帧时 `slen` 初始为 `rlen`，只在命中一帧后 `slen -= len`，没有扣掉前面跳过的非帧头字节；存在噪声前缀时，剩余长度判断可能偏大，增加越界或误解析风险。
+- `SendKeyBehMessage()` 对普通屏幕键使用 `Kernel_QueueSend(..., 0)` 非阻塞入队，并忽略返回值；`KeyBehivQueue` 深度为 20，队列满时普通屏幕键静默丢失。插拔事件有 60ms 等待，但普通屏幕按钮没有。
+- 屏幕按键被 `KeyBehaviors()` 取出后，还会先走 `ControlArbitration_ShouldBlockLocalKey()`；若外控 owner 未释放或本地其它 owner 正忙，很多屏幕控制键会被 `continue` 静默丢弃，没有 UI 错误提示。
+- owner 释放依赖 `ControlArbitration_IsMotorBusy()==false`，即 `WorkMessage.runflag_work==false` 且 `WorkMessage.driver_speed_feedback <= CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD`。如果驱动反馈回包漏解析或 `driver_speed_feedback` 卡在非零，`s_control_owner` 会保持占用，屏幕模式切换、手柄切换、启动类按键会像“点不动”。
+- `motoruartdata.c` 回包扫描循环为 `for (i = 0; i < (rlen - 11); i++)`，对刚好 12 字节单帧的边界存在漏解析风险，可能导致 `driver_speed_feedback` 不及时归零，间接导致 owner 不释放。
+- `UIDP` 显示队列深度也是 20，`UIDISPLAYBehavior()` 每 10ms 最多处理 12 条消息；每条消息会调用多个 `LCD_Show_*()`，底层 `Uart6_SendPacket()` 使用阻塞式 `HAL_UART_Transmit(..., timeout=3)`。所有软任务业务回调又被 `AppTaskRuntimeGate()` 串行互斥，因此大量 UI 刷新会拖住 `ScreenKey_Scan()` 和 `KeyBehaviors()` 的进入时间。
+- `SendUIDSMessage()` 队列满时也只是不更新去重缓存，没有全局错误计数；现场无法直接知道 UI 队列是否已经拥堵。屏幕“有蜂鸣但业务不动”时应同时看按键队列和 UI 队列水位。

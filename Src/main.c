@@ -113,7 +113,7 @@ int main(void)
   MX_TIM14_Init();
   /* USER CODE BEGIN 2 */
   /* 初始化 Tracealyzer 记录器，尽量覆盖启动阶段的任务和同步对象创建事件。 */
-  Tracealyzer_RecorderInit();
+  //Tracealyzer_RecorderInit();
 
   Hardware_PostInit();
 
@@ -123,16 +123,15 @@ int main(void)
   MX_FREERTOS_Init();
   /* Start scheduler */
   vTaskStartScheduler();
+
+
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
-    // uint8_t motor_startcode[11]={0xAA ,0x03 ,0x28 ,0x03\
-    //      ,0x08 ,0xCA ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};
-    // Uart1_SendPacket(motor_startcode, 11);
-    // HAL_Delay(500);
+
     /* USER CODE BEGIN 3 */
 
     /* USER CODE BEGIN 3 */

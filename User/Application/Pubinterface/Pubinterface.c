@@ -1191,6 +1191,16 @@ void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void)
 }
 
 /*
+ * 函数功能：查询注水冷却压力停机锁存是否仍处于有效状态。
+ * 输入参数：无。
+ * 返回参数：true 表示压力保护后尚未释放控制源，false 表示允许新的启动沿重新尝试运行。
+ */
+bool Pubinterface_IsPressureBlockStopLatched(void)
+{
+	return (s_handle_pressure_block_stop_latched != 0U); /* 脚踏保持踩下时必须先看该锁存，避免蜂鸣结束后旧控制源自动拉起手柄和泵。 */
+}
+
+/*
  * 函数功能：按照“手柄运行则冷却出口识别为注水泵时运行、手柄停止则联动泵停止”的规则刷新冷却泵状态。
  * 输入参数：enable 为 true 表示手柄已经进入运行态，需要在冷却出口识别为注水泵时启动冷却；false 表示手柄已经停止，需要同步关闭联动泵。
  * 返回参数：无。

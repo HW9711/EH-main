@@ -454,6 +454,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable);
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵并蜂鸣；注水冷却时再停手柄。 */
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */
 void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 手控/触控/外控新的启动沿到来时清除压力停机锁存。 */
+bool Pubinterface_IsPressureBlockStopLatched(void); /* 查询注水冷却压力停机锁存是否仍有效，脚踏保持踩下时用它拦截自动重启。 */
 void Pubinterface_CheckSpeedThresholdAlarm(void);
 bool Pubinterface_IsRfidAutoIdentifyEnabled(uint8_t channel); /* 查询 PXBA/PXBB 指定通道是否仍允许 RFID 自动识别，供 handlescan 在线监测门禁使用。 */
 void ControlTypeActive(uint8_t key_value);
