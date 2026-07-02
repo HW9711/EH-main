@@ -45,10 +45,10 @@ static uint32_t s_screen_external_exit_first_tick = 0U;
 #define COMMON_SOCKET_TOOL_MISSING_REPEAT_MS 1000U
 /* 手控模式运行中拔手柄只提示 3 秒，避免手控没有退出键时蜂鸣和弹窗永久锁住。 */
 #define RUNNING_HANDLE_UNPLUG_TRANSIENT_ALARM_MS 3000U
-/* 泵压力阈值触发后的蜂鸣提示时间，当前需求只蜂鸣不弹屏幕报警。 */
+/* 泵压力阈值触发后的蜂鸣和屏幕临时弹窗保持时间，保持 3 秒后自动释放提示。 */
 #define PUMP_PRESSURE_BLOCKED_ALARM_MS 3000U
-/* 压力堵塞复用只蜂鸣的阈值报警码，不写 WorkMessage，避免屏幕弹出无映射报警。 */
-#define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_SPEED_THRESHOLD
+/* 压力堵塞使用独立报警码，只驱动限时蜂鸣和 89 号临时弹窗，不写 WorkMessage 全局报警锁存。 */
+#define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_PUMP_PRESSURE_BLOCKED
 /* 公共接头缺刀具提示是否已经显示，用于 EPC 识别成功后只清理本模块产生的临时屏幕报警。 */
 static uint8_t s_common_socket_tool_missing_alarm_active = 0U;
 /* 公共接头缺刀具提示最近一次发送时间，用于限制重复报警频率。 */
@@ -57,6 +57,10 @@ static uint32_t s_common_socket_tool_missing_alarm_tick = 0U;
 static uint8_t s_running_handle_unplug_transient_alarm_value = 0U;
 /* 手控运行中拔手柄临时弹窗开始时间，用于周期服务到 3 秒后关闭屏幕报警。 */
 static uint32_t s_running_handle_unplug_transient_alarm_tick = 0U;
+/* 压力阈值临时弹窗归属标志，置 1 表示屏幕报警区当前由压力报警 89 图占用。 */
+static uint8_t s_pump_pressure_blocked_transient_alarm_active = 0U;
+/* 压力阈值临时弹窗开始时间，用于 3 秒后关闭 89 号压力报警图。 */
+static uint32_t s_pump_pressure_blocked_transient_alarm_tick = 0U;
 /* 手柄冷却跟随当前占用 A 泵，停止手柄时只释放本函数启动过的 A 泵输出。 */
 #define HANDLE_INJECTION_FOLLOW_PUMP_A 0x01U
 /* 手柄冷却跟随当前占用 B 泵，支持单个 B 注水泵跨通道给手柄降温。 */
@@ -1098,8 +1102,59 @@ static void Pubinterface_StopPumpByPressureMask(uint8_t blocked_mask)
 }
 
 /*
- * 函数功能：处理泵压力锁止事件；新触发时蜂鸣，保持态只负责继续停泵和停手柄。
- * 输入参数：pump_channel 触发压力停泵的泵通道；new_event 为 true 表示本次刚跨过阈值，需要 3 秒蜂鸣。
+ * 函数功能：上报泵压力阈值触发后的 3 秒临时屏幕报警。
+ * 输入参数：无，报警码固定使用 WORK_ALARM_PUMP_PRESSURE_BLOCKED。
+ * 返回参数：无。
+ */
+static void Pubinterface_RaisePumpPressureBlockedTimedAlarm(void)
+{
+	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0] 保存报警码，其余字节清零避免旧报警参数残留。 */
+
+	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 压力触发时驱动 UIAIARMDP 显示屏幕新增的 89 号报警图。 */
+	s_pump_pressure_blocked_transient_alarm_tick = HAL_GetTick(); /* 记录本次压力弹窗开始时间，后续周期服务按 3 秒自动关闭。 */
+	if ((WorkMessage.alarm_flag == false) &&
+		(s_common_socket_tool_missing_alarm_active == 0U) &&
+		(s_running_handle_unplug_transient_alarm_value == 0U))
+	{
+		SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 没有更高优先级报警或其它临时弹窗时，立即显示压力 89 号图。 */
+		s_pump_pressure_blocked_transient_alarm_active = 1U; /* 只有实际显示过 89 号图，后续才允许本模块关闭报警区。 */
+	}
+	else
+	{
+		s_pump_pressure_blocked_transient_alarm_active = 0U; /* 报警区被其它报警占用时只蜂鸣不停留关闭权，避免到期误清其它弹窗。 */
+	}
+}
+
+/*
+ * 函数功能：周期关闭泵压力阈值产生的 3 秒临时屏幕报警。
+ * 输入参数：无，直接读取压力弹窗归属和 HAL 毫秒 tick。
+ * 返回参数：无。
+ */
+static void Pubinterface_ServicePumpPressureBlockedTimedAlarm(void)
+{
+	if (s_pump_pressure_blocked_transient_alarm_active == 0U)
+	{
+		return; /* 当前屏幕报警区不由压力弹窗占用，本周期不处理 89 号图关闭。 */
+	}
+
+	if ((uint32_t)(HAL_GetTick() - s_pump_pressure_blocked_transient_alarm_tick) < PUMP_PRESSURE_BLOCKED_ALARM_MS)
+	{
+		return; /* 压力报警 3 秒保持时间未到，继续显示 89 号弹窗。 */
+	}
+
+	if ((WorkMessage.alarm_flag == false) &&
+		(s_common_socket_tool_missing_alarm_active == 0U) &&
+		(s_running_handle_unplug_transient_alarm_value == 0U))
+	{
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 没有全局报警和其它临时弹窗时，关闭本模块显示的压力报警区。 */
+	}
+	s_pump_pressure_blocked_transient_alarm_active = 0U; /* 无论是否实际清屏，本次压力临时弹窗生命周期都已结束。 */
+	s_pump_pressure_blocked_transient_alarm_tick = 0U; /* 清时间戳，避免下一次压力触发沿用旧 tick。 */
+}
+
+/*
+ * 函数功能：处理泵压力锁止事件；新触发时蜂鸣并显示 89 号压力弹窗，保持态只负责继续停泵和停手柄。
+ * 输入参数：pump_channel 触发压力停泵的泵通道；new_event 为 true 表示本次刚跨过阈值，需要 3 秒蜂鸣和弹窗。
  * 返回参数：无。
  */
 static void Pubinterface_HandlePumpPressureBlockedInternal(uint8_t pump_channel, bool new_event)
@@ -1126,7 +1181,8 @@ static void Pubinterface_HandlePumpPressureBlockedInternal(uint8_t pump_channel,
 
 	if (new_event != false)
 	{
-		SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BLOCKED_ALARM_MS); /* 压力首次触发只做 3 秒蜂鸣，不写全局报警弹窗。 */
+		SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BLOCKED_ALARM_MS); /* 压力首次触发启动 3 秒报警蜂鸣，但仍不写全局 WorkMessage 报警。 */
+		Pubinterface_RaisePumpPressureBlockedTimedAlarm(); /* 同步显示 89 号压力报警弹窗，到期由周期服务自动关闭。 */
 	}
 
 	Pubinterface_StopPumpByPressureMask(blocked_mask); /* 无论该泵是否正在冷却手柄，触发压力阈值的泵都必须先停。 */
@@ -1161,7 +1217,7 @@ static void Pubinterface_HandlePumpPressureBlockedInternal(uint8_t pump_channel,
 }
 
 /*
- * 函数功能：A/B 泵压力堵塞首次触发时停当前泵并启动 3 秒蜂鸣，注水泵冷却手柄时额外停手柄。
+ * 函数功能：A/B 泵压力堵塞首次触发时停当前泵、启动 3 秒蜂鸣并显示 89 号压力弹窗，注水泵冷却手柄时额外停手柄。
  * 输入参数：pump_channel 触发压力停泵的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。
  */
@@ -2545,6 +2601,7 @@ void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner)
  */
 void ControlArbitration_RefreshMotorOwner(void)
 {
+	Pubinterface_ServicePumpPressureBlockedTimedAlarm(); /* 电机任务周期维护压力报警 89 号临时弹窗，到 3 秒后自动关闭。 */
 	Pubinterface_ServiceRunningHandleUnplugTimedAlarm(); /* 电机任务周期顺带维护手控掉线 3 秒临时弹窗，到期自动清屏。 */
 	/* 统一复用本地 owner 释放逻辑，保证手柄、脚踏、屏幕停止后不因反馈延迟永久占用。 */
 	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();

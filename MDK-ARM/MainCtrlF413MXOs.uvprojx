@@ -1166,6 +1166,11 @@
               <FilePath>..\User\Peripheral\uart\uart7.c</FilePath>
             </File>
             <File>
+              <FileName>uart9.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Peripheral\uart\uart9.c</FilePath>
+            </File>
+            <File>
               <FileName>soft_uart.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Peripheral\uart\soft_uart.c</FilePath>

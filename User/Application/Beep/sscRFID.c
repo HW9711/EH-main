@@ -3,11 +3,13 @@
 #include "FreeRTOS.h"
 #include "Pubinterface.h"
 #include "board.h"
+#include "board_profile.h"
 #include "kernel_scheduler.h"
 #include "queue.h"
 #include "sscBEEP.h"
 #include "delay.h"
 #include "uart3.h"
+#include "uart9.h"
 
 #include <string.h>
 
@@ -20,9 +22,15 @@
 #define RFID_FRAME_MIN_SIZE             7U    /* 最短帧至少包含头、命令、长度、校验和尾。 */
 #define RFID_QUEUE_LENGTH               4U    /* 队列保存少量屏幕/扫描层触发请求，避免按键抖动丢入口。 */
 #define RFID_FAST_ATTEMPTS              10U   /* 快速识别最多尝试 10 个任务周期，覆盖基座刚上线。 */
-#define RFID_NORMAL_ATTEMPTS            3U    /* 普通周期识别只尝试 3 次，避免空闲监测占用 UART3。 */
-#define RFID_DEBUG_BEEP_EVERY_UART_RESPONSE 0U /* 临时调试开关：1 表示 UART3 收到任意 RFID 模块回包都蜂鸣，定位完成后关闭以避免影响业务调度。 */
+#define RFID_NORMAL_ATTEMPTS            3U    /* 普通周期识别只尝试 3 次，避免空闲监测长期占用 RFID 串口。 */
+#define RFID_DEBUG_BEEP_EVERY_UART_RESPONSE 0U /* 临时调试开关：1 表示当前 RFID 串口收到任意模块回包都蜂鸣，定位完成后关闭以避免影响业务调度。 */
 #define RFID_DEBUG_BEEP_EVERY_VALID_READ 0U   /* 有效帧调试蜂鸣关闭，蜂鸣只在缓存确认新刀具信息时触发。 */
+
+#if (UART9_MAX_PACKET_SIZE > UART3_MAX_PACKET_SIZE)
+#define RFID_UART_PACKET_SIZE          UART9_MAX_PACKET_SIZE /* 双串口模式下临时解析缓存按更大的 UART 缓冲区预留。 */
+#else
+#define RFID_UART_PACKET_SIZE          UART3_MAX_PACKET_SIZE /* 当前 UART3/UART9 都是 150 字节，保持旧解析缓存容量不变。 */
+#endif
 
 typedef struct
 {
@@ -105,28 +113,88 @@ static bool Rfid_IsSourceValid(RfidReadSource_t source)
 }
 
 /*
- * 函数功能：根据业务通道切换 R200-K8 模拟开关。
+ * 函数功能：按 RFID 硬件模式选择射频通道。
  * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
  * 返回参数：无。
  */
 static void Rfid_SelectHardwareChannel(uint8_t channel)
 {
+#if (RFID_USE_DUAL_UART_MODE == 0U)
     if (channel == CHANNEL_A)
     {
-        R200_K8_SELECT_A(); /* A 通道 RFID 识别前把模拟开关切到高电平，确保 UART3 读到 A 手柄射频模块。 */
-        return; /* A 通道已经完成硬件切换，本次不再访问 B 通道。 */
+        R200_K8_SELECT_A(); /* 旧硬件 A 通道通过 R200-K8 高电平连接到 UART3。 */
+        return; /* A 通道已经完成选通，不再继续判断 B 通道。 */
     }
 
     if (channel == CHANNEL_B)
     {
-        R200_K8_SELECT_B(); /* B 通道 RFID 识别前把模拟开关切到低电平，确保 UART3 读到 B 手柄射频模块。 */
+        R200_K8_SELECT_B(); /* 旧硬件 B 通道通过 R200-K8 低电平连接到 UART3。 */
     }
+#else
+    (void)channel; /* 双串口模式下 A/B RFID 已经固定到 UART3/UART9，不再驱动 R200-K8。 */
+#endif
+}
+
+/*
+ * 函数功能：按业务通道清空对应 RFID 串口接收缓存。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+static void Rfid_ClearChannelUartData(uint8_t channel)
+{
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+    if (channel == CHANNEL_B)
+    {
+        Uart9_ClearRecvData(); /* 新硬件 B 通道独占 UART9，清缓存只影响 B 通道 RFID 回包。 */
+        return; /* B 通道已经清理完成，不再误清 A 通道 UART3 缓存。 */
+    }
+#else
+    (void)channel; /* 旧硬件 A/B 仍共用 UART3，通道参数只用于 R200-K8 选通。 */
+#endif
+    Uart3_ClearRecvData(); /* A 通道或旧硬件共用模式都清 UART3，防止旧回包污染下一次解析。 */
+}
+
+/*
+ * 函数功能：按业务通道发送 RFID 命令帧。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B；pData 指向命令缓冲区；Length 为命令长度。
+ * 返回参数：无。
+ */
+static void Rfid_SendPacketForChannel(uint8_t channel, uint8_t *pData, uint16_t Length)
+{
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+    if (channel == CHANNEL_B)
+    {
+        Uart9_SendPacket(pData, Length); /* 新硬件 B 通道命令固定从 UART9 发往 B 侧 RFID 模块。 */
+        return; /* B 通道已经发送完成，不再从 UART3 重发。 */
+    }
+#else
+    (void)channel; /* 旧硬件由 R200-K8 决定 UART3 当前连到 A 还是 B。 */
+#endif
+    Uart3_SendPacket(pData, Length); /* A 通道或旧硬件模式继续使用 UART3，保持原 RFID 命令时序。 */
+}
+
+/*
+ * 函数功能：按业务通道读取对应 RFID 串口 DMA 缓存。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B；data 指向调用方接收缓冲区。
+ * 返回参数：本次读取到的字节数，0 表示没有新回包。
+ */
+static uint16_t Rfid_PeekChannelUartData(uint8_t channel, uint8_t *data)
+{
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+    if (channel == CHANNEL_B)
+    {
+        return Uart9_DMARecvDataPeek(data); /* 新硬件 B 通道只解析 UART9 收到的 RFID 回包。 */
+    }
+#else
+    (void)channel; /* 旧硬件共用 UART3，实际通道由 R200-K8 保证。 */
+#endif
+    return Uart3_DMARecvDataPeek(data); /* A 通道或旧硬件模式继续从 UART3 DMA 缓存取数据。 */
 }
 
 /*
  * 函数功能：判断本次 RFID 请求是否允许按当前通道状态执行。
  * 输入参数：channel 为请求读取的业务通道。
- * 返回参数：true 表示允许切换模拟开关并读取；false 表示当前状态禁止读取。
+ * 返回参数：true 表示允许读取，false 表示当前状态禁止读取。
  */
 static bool Rfid_IsRequestAllowedForCurrentSelection(uint8_t channel)
 {
@@ -267,15 +335,15 @@ static bool Rfid_ChecksumMatches(const uint8_t *buffer, uint16_t start_pos, uint
 }
 
 /*
- * 函数功能：发送当前请求对应的 RFID EPC 读命令。
- * 输入参数：source 指定读取来源，当前只允许 EPC。
+ * 函数功能：向指定业务通道发送 RFID EPC 读取命令。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B；source 指定读取来源，当前只允许 EPC。
  * 返回参数：无。
  */
-static void Rfid_SendReadCommand(RfidReadSource_t source)
+static void Rfid_SendReadCommand(uint8_t channel, RfidReadSource_t source)
 {
     if (source == RFID_READ_SOURCE_EPC)
     {
-        Uart3_SendPacket(NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* 公共接头和 PXBA/PXBB 刀具头统一读取 EPC。 */
+        Rfid_SendPacketForChannel(channel, NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* A/B 通道按宏选择 UART3 或 UART9 发送 EPC 读取命令。 */
     }
 }
 
@@ -376,7 +444,7 @@ static void Rfid_ReceiveRequestMessage(void)
     if ((Rfid_IsSourceValid(msg.source) == false) ||
         (Rfid_ChannelToIndex(msg.channel, &index) == false))
     {
-        s_request_active = false; /* 无效请求不进入活动状态，避免 UART3 发错命令。 */
+        s_request_active = false; /* 无效请求不进入活动状态，避免当前 RFID 串口发错命令。 */
         s_request_channel = CHANNEL_NONE; /* 无效通道清零。 */
         s_request_source = RFID_READ_SOURCE_NONE; /* 无效来源清零。 */
         s_request_attempts_left = 0U; /* 无效请求不尝试。 */
@@ -392,7 +460,7 @@ static void Rfid_ReceiveRequestMessage(void)
     if (Rfid_IsRequestAllowedForCurrentSelection(msg.channel) == false)
     {
         s_request_active = false; /* 当前运行状态或选中通道不允许读取时，取消本次出队请求。 */
-        s_request_channel = CHANNEL_NONE; /* 清掉请求通道，避免后续 UART3 回包被误认为属于旧通道。 */
+        s_request_channel = CHANNEL_NONE; /* 清掉请求通道，避免后续 RFID 回包被误认为属于旧通道。 */
         s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下周期按旧协议发命令。 */
         s_request_attempts_left = 0U; /* 禁止请求继续消耗 RFID 发送次数。 */
         s_request_fast_mode = false; /* 清掉快速识别状态，避免影响下一次合法请求。 */
@@ -404,7 +472,7 @@ static void Rfid_ReceiveRequestMessage(void)
     s_request_source = msg.source; /* 保存本次应读取的来源，当前只允许 EPC。 */
     s_request_attempts_left = msg.fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* 快速/普通识别使用不同尝试次数。 */
     s_request_fast_mode = msg.fast_mode; /* 保存本次请求模式，决定同标签回包是否刷新序号。 */
-    Uart3_ClearRecvData(); /* 新请求开始前丢弃 UART3 残留帧，避免刀具头已拔掉后旧标签回包被重新识别并触发蜂鸣。 */
+    Rfid_ClearChannelUartData(s_request_channel); /* 新请求开始前按通道清理串口缓存，防止旧标签回包被重新识别。 */
     s_request_active = true; /* 标记任务从本周期开始处理本次 RFID 请求。 */
 }
 
@@ -456,21 +524,21 @@ static void RFIDQueue_Init(void)
 }
 
 /*
- * 函数功能：按当前活动请求处理 UART3 RFID 发送和接收。
+ * 函数功能：按当前活动请求处理 RFID 命令发送、串口接收和标签解析。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void SplitType_AutoModeGetData_Task(void)
 {
-    uint16_t rlen;                                      /* 保存本周期从 UART3 DMA 取到的字节数。 */
-    uint8_t dat[UART3_MAX_PACKET_SIZE] = {0U};          /* 临时接收缓冲，取出后 DMA 会被 uart3 驱动复位。 */
+    uint16_t rlen;                                      /* 保存本周期从当前 RFID 串口 DMA 取到的字节数。 */
+    uint8_t dat[RFID_UART_PACKET_SIZE] = {0U};          /* 临时接收缓冲，取出后对应通道 DMA 会被串口驱动复位。 */
     RfidToolResult_t parsed_result;                     /* 保存本周期解析出的标签结果。 */
 
     Rfid_ReceiveRequestMessage(); /* 先处理新请求，让屏幕键或 handlescan 能立即切换读取来源。 */
 
     if (s_request_active == false)
     {
-        return; /* 没有活动请求时不占用 UART3。 */
+        return; /* 没有活动请求时不占用 RFID 串口。 */
     }
 
     if (WorkMessage.runflag_work == true)
@@ -484,15 +552,15 @@ static void SplitType_AutoModeGetData_Task(void)
     if (Rfid_IsRequestAllowedForCurrentSelection(s_request_channel) == false)
     {
         s_request_active = false; /* 通道选择变化后当前请求失效，停止识别以免非选中通道刷新刀具信息。 */
+        Rfid_ClearChannelUartData(s_request_channel); /* 活动请求失效时先清原通道串口，避免晚到回包污染下一次请求。 */
         s_request_channel = CHANNEL_NONE; /* 清掉活动通道，避免晚到回包写入错误 A/B 缓存。 */
         s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下一周期误按旧来源解析。 */
         s_request_attempts_left = 0U; /* 禁止继续发送 RFID 命令，等待扫描层按当前通道重新发起请求。 */
         s_request_fast_mode = false; /* 清掉快速识别标志，避免后续合法请求继承旧状态。 */
-        Uart3_ClearRecvData(); /* 丢弃可能属于旧模拟开关通道的回包，避免屏幕出现残留刀具信息。 */
         return; /* 当前选中通道不允许读取时直接退出。 */
     }
 
-    rlen = Uart3_DMARecvDataPeek(dat); /* 电机未运行时才取 DMA 数据，避免运行态处理新 RFID 结果。 */
+    rlen = Rfid_PeekChannelUartData(s_request_channel, dat); /* 电机未运行时才取 DMA 数据，避免运行态处理新 RFID 结果。 */
     if (rlen >= RFID_FRAME_MIN_SIZE)
     {
 #if (RFID_DEBUG_BEEP_EVERY_UART_RESPONSE == 1U)
@@ -517,7 +585,7 @@ static void SplitType_AutoModeGetData_Task(void)
     }
 
     Rfid_SelectHardwareChannel(s_request_channel); /* 发读命令前再次确认 R200-K8 指向目标通道，避免排队期间通道被切走。 */
-    Rfid_SendReadCommand(s_request_source); /* 未读到有效帧时发送下一次读命令。 */
+    Rfid_SendReadCommand(s_request_channel, s_request_source); /* 未读到有效帧时发送下一次读命令。 */
     //s_request_attempts_left--; /* 记录已消耗一次命令发送机会。 */
 }
 
@@ -533,20 +601,35 @@ static void AUTOMODEGETDATATaskFunc(uint32_t event)
 }
 
 /*
- * 函数功能：初始化射频模块功率、区域和跳频。
+ * 函数功能：初始化指定业务通道上的 RFID 模块参数。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+static void Rfid_InitModuleOnChannel(uint8_t channel)
+{
+    Rfid_SendPacketForChannel(channel, pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 按通道发送发射功率配置，保证 A/B 模块功率一致。 */
+    Delay_ms(50); /* 等待 RFID 模块处理功率命令，避免连续命令粘连。 */
+
+    Rfid_SendPacketForChannel(channel, region_set_us, (uint16_t)sizeof(region_set_us)); /* 按通道发送区域配置，保持原工程默认频段。 */
+    Delay_ms(50); /* 等待 RFID 模块处理区域命令，避免下一条跳频命令被吞掉。 */
+
+    Rfid_SendPacketForChannel(channel, hop_ch, (uint16_t)sizeof(hop_ch)); /* 按通道发送跳频配置，保持原射频初始化行为。 */
+    Delay_ms(50); /* 等待 RFID 模块完成跳频配置，保证后续读 EPC 命令可用。 */
+}
+
+/*
+ * 函数功能：初始化当前硬件模式下启用的 RFID 模块。
  * 输入参数：无。
  * 返回参数：无。
  */
 void SscRadioFreq_Init(void)
 {
-    Uart3_SendPacket(pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 设置发射功率，保持原工程默认值。 */
-    Delay_ms(50); /* 等待模块处理功率设置命令。 */
-
-    Uart3_SendPacket(region_set_us, (uint16_t)sizeof(region_set_us)); /* 设置中国频段。 */
-    Delay_ms(50); /* 等待模块处理区域设置命令。 */
-
-    Uart3_SendPacket(hop_ch, (uint16_t)sizeof(hop_ch)); /* 开启跳频，保持原工程射频初始化行为。 */
-    Delay_ms(50); /* 等待模块处理跳频命令。 */
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+    Rfid_InitModuleOnChannel(CHANNEL_A); /* 双串口模式先初始化 A 通道 UART3 上的 RFID 模块。 */
+    Rfid_InitModuleOnChannel(CHANNEL_B); /* 双串口模式再初始化 B 通道 UART9 上的 RFID 模块。 */
+#else
+    Rfid_InitModuleOnChannel(CHANNEL_A); /* 旧模式保持原行为，只初始化 UART3 当前经 R200-K8 选通的模块。 */
+#endif
 }
 
 /*
@@ -558,7 +641,7 @@ void SscSplitTypeAutoModeGetData_Init(void)
 {
     RFIDQueue_Init(); /* 先创建请求队列，保证 handlescan 和屏幕键可以投递请求。 */
     Kernel_TaskCreate(&AUTOMODEGETDATATaskHandle, AUTOMODEGETDATATaskFunc); /* 创建 RFID 周期任务。 */
-    Kernel_TaskStart(&AUTOMODEGETDATATaskHandle, KERNEL_TASK_ALWAYS, 100); /* 100ms 周期检查请求和 UART3 回包。 */
+    Kernel_TaskStart(&AUTOMODEGETDATATaskHandle, KERNEL_TASK_ALWAYS, 100); /* 100ms 周期检查请求和当前 RFID 串口回包。 */
     (void)CUTTERSCANTaskHandle; /* 旧独立刀具扫描句柄不启动，保留变量避免旧工程符号假设失效。 */
 }
 
@@ -648,7 +731,7 @@ bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result)
 }
 
 /*
- * 函数功能：解析 UART3 DMA 缓冲中的 EPC RFID 回包。
+ * 函数功能：解析 RFID 串口 DMA 缓冲中的 EPC RFID 回包。
  * 输入参数：uartx_rf_buff 为 DMA 数据；length 为有效字节数；expected_source 为期望来源；result 为输出结果。
  * 返回参数：true 表示找到并提取出一帧校验通过的标签数据。
  */
@@ -759,11 +842,11 @@ void Rfid_ClearChannelResult(uint8_t channel)
     if ((s_request_active != false) && (s_request_channel == channel))
     {
         s_request_active = false; /* 清刀具时同步取消该通道未完成读取，避免丢失判定后晚到回包复活旧刀具。 */
+        Rfid_ClearChannelUartData(channel); /* 清刀具时按目标通道丢弃晚到回包，防止旧标签重新上报。 */
         s_request_channel = CHANNEL_NONE; /* 清掉活动请求通道，后续回包没有合法归属。 */
         s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下一周期误按旧来源解析。 */
         s_request_attempts_left = 0U; /* 清掉剩余发送次数，停止本次识别尝试。 */
         s_request_fast_mode = false; /* 清掉快速识别标志，避免影响后续普通在线监测。 */
-        Uart3_ClearRecvData(); /* 丢弃 UART3 里可能晚到的旧回包，防止上位机刀具信息被旧标签重新兜底上报。 */
     }
 }
 

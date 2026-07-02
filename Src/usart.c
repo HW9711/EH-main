@@ -33,6 +33,7 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 UART_HandleTypeDef huart6;
 UART_HandleTypeDef huart8;
+UART_HandleTypeDef huart9;
 UART_HandleTypeDef huart10;
 
 DMA_HandleTypeDef hdma_uart4_rx;
@@ -43,6 +44,7 @@ DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart3_rx;
 DMA_HandleTypeDef hdma_usart6_rx;
 DMA_HandleTypeDef hdma_uart8_rx;
+DMA_HandleTypeDef hdma_uart9_rx;
 DMA_HandleTypeDef hdma_uart10_rx;
 /* UART4 init function */
 void MX_UART4_Init(void)
@@ -153,9 +155,38 @@ void MX_UART8_Init(void)
     
     Error_Handler();
   }
-  /* USER CODE BEGIN UART8_Init 2 */
+/* USER CODE BEGIN UART8_Init 2 */
 
   /* USER CODE END UART8_Init 2 */
+}
+
+/* UART9 init function */
+void MX_UART9_Init(void)
+{
+
+  /* USER CODE BEGIN UART9_Init 0 */
+
+  /* USER CODE END UART9_Init 0 */
+
+  /* USER CODE BEGIN UART9_Init 1 */
+
+  /* USER CODE END UART9_Init 1 */
+  huart9.Instance = UART9;
+  huart9.Init.BaudRate = 115200;              /* UART9 作为 B 通道 RFID，波特率与 A 通道 USART3 保持一致。 */
+  huart9.Init.WordLength = UART_WORDLENGTH_8B;
+  huart9.Init.StopBits = UART_STOPBITS_2;     /* RFID 模块当前按 UART3 的 2 stop bits 时序工作，新串口保持同配置。 */
+  huart9.Init.Parity = UART_PARITY_NONE;
+  huart9.Init.Mode = UART_MODE_TX_RX;
+  huart9.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart9.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart9) != HAL_OK)
+  {
+
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART9_Init 2 */
+
+  /* USER CODE END UART9_Init 2 */
 }
 
 /* UART10 init function */
@@ -566,6 +597,37 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_NVIC_SetPriority(UART8_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(UART8_IRQn);
   }
+  else if (uartHandle->Instance == UART9)
+  {
+    BOARD_UART9_CLK_ENABLE();        /* 使能 UART9 APB2 时钟，B 通道 RFID 独立串口才能收发。 */
+    __HAL_RCC_GPIOD_CLK_ENABLE();    /* UART9 使用 PD14/PD15，必须先打开 GPIOD 时钟。 */
+
+    GPIO_InitStruct.Pin = BOARD_UART9_TX_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = BOARD_UART9_TX_AF;
+    HAL_GPIO_Init(BOARD_UART9_TX_PORT, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = BOARD_UART9_RX_PIN;
+    GPIO_InitStruct.Alternate = BOARD_UART9_RX_AF;
+    HAL_GPIO_Init(BOARD_UART9_RX_PORT, &GPIO_InitStruct);
+
+    hdma_uart9_rx.Instance = BOARD_UART9_DMA_RX;
+    hdma_uart9_rx.Init.Channel = BOARD_UART9_DMA_CHANNEL;
+    hdma_uart9_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_uart9_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_uart9_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_uart9_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_uart9_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_uart9_rx.Init.Mode = DMA_CIRCULAR;    /* RFID 回包长度不固定，沿用 UART3 的环形 DMA 接收模式。 */
+    hdma_uart9_rx.Init.Priority = DMA_PRIORITY_LOW;
+    hdma_uart9_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_uart9_rx) != HAL_OK) { Error_Handler(); }
+    __HAL_LINKDMA(uartHandle, hdmarx, hdma_uart9_rx);
+    HAL_NVIC_SetPriority(UART9_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(UART9_IRQn);
+  }
   else if (uartHandle->Instance == UART10)
   {
     /*
@@ -666,6 +728,14 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_DeInit(BOARD_UART7_RX_PORT, BOARD_UART7_RX_PIN);
     HAL_DMA_DeInit(uartHandle->hdmarx);
     HAL_NVIC_DisableIRQ(UART7_IRQn);
+  }
+  else if (uartHandle->Instance == UART9)
+  {
+    __HAL_RCC_UART9_CLK_DISABLE(); /* 释放 B 通道 RFID 串口时钟，低功耗或重初始化时使用。 */
+    HAL_GPIO_DeInit(BOARD_UART9_TX_PORT, BOARD_UART9_TX_PIN);
+    HAL_GPIO_DeInit(BOARD_UART9_RX_PORT, BOARD_UART9_RX_PIN);
+    HAL_DMA_DeInit(uartHandle->hdmarx);
+    HAL_NVIC_DisableIRQ(UART9_IRQn);
   }
 }
 

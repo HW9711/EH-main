@@ -279,6 +279,83 @@ static void Foot_ReportHandleNotConnectedAlarm(void)
     SendUIDSMessage(UI_AIARM_ID, true, display_value);   /* 同步屏幕报警弹窗，让用户直接看到未连接提示。 */
 }
 
+/*
+ * 函数功能：判断单踏板保存的低点和高点是否满足有效行程要求。
+ * 输入参数：low_adc 为脚踏保存低点；high_adc 为脚踏保存高点。
+ * 返回参数：true 表示低点到高点的行程有效；false 表示脚踏存储值错误。
+ */
+static bool Foot_IsPedalTwoPointStorageValid(uint16_t low_adc, uint16_t high_adc)
+{
+    if(high_adc <= low_adc)
+    {
+        return false; /* 高点必须大于低点，否则脚踏行程方向错误，不能允许控制泵或手柄。 */
+    }
+
+    if(((uint32_t)high_adc - (uint32_t)low_adc) <= JT_threshold)
+    {
+        return false; /* 有效行程必须大于启动阈值，避免一点抖动就触发泵或手柄运行。 */
+    }
+
+    return true; /* 低点和高点顺序、行程都有效，允许后续接入脚踏。 */
+}
+
+/*
+ * 函数功能：判断双段脚踏保存的低点、中点和高点是否满足有效行程要求。
+ * 输入参数：low_adc 为低点；mid_adc 为中点；high_adc 为高点。
+ * 返回参数：true 表示低/中/高值有效；false 表示脚踏存储值错误。
+ */
+static bool Foot_IsPedalThreePointStorageValid(uint16_t low_adc, uint16_t mid_adc, uint16_t high_adc)
+{
+    if(Foot_IsPedalTwoPointStorageValid(low_adc, mid_adc) == false)
+    {
+        return false; /* 轻排段低点到中点无有效行程时，脚踏不能安全控制泵。 */
+    }
+
+    if(Foot_IsPedalTwoPointStorageValid(mid_adc, high_adc) == false)
+    {
+        return false; /* 电机段中点到高点无有效行程时，脚踏不能安全控制手柄。 */
+    }
+
+    return true; /* 低/中/高三点递增且两段行程都有效，允许脚踏接入。 */
+}
+
+/*
+ * 函数功能：上报脚踏存储值错误报警，并锁住后续脚踏泵/手柄控制入口。
+ * 输入参数：无，报警码固定为 WORK_ALARM_FOOT_VALUE_ERROR。
+ * 返回参数：无。
+ */
+static void Foot_ReportFootValueErrorAlarm(void)
+{
+    uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0] 保存报警码，其余字节清零避免旧参数残留。 */
+
+    if(WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR))
+    {
+        return; /* 当前已经是脚踏值错误报警，避免同一坏数据帧重复塞蜂鸣和屏幕队列。 */
+    }
+
+    display_value[0] = WORK_ALARM_FOOT_VALUE_ERROR; /* 报警码 6 驱动 UIAIARMDP 显示 EX8 83 号脚踏存储值错误图。 */
+    WorkAlarm_Set(WORK_ALARM_FOOT_VALUE_ERROR);     /* 写入全局报警锁存，Foot_EnsureFootControlMode 会据此禁止泵和手柄运行。 */
+    SendAlarmMessage(WORK_ALARM_FOOT_VALUE_ERROR);  /* 同步蜂鸣报警，提示当前脚踏定标值不可用。 */
+    SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 同步屏幕显示 83 号报警弹窗。 */
+}
+
+/*
+ * 函数功能：脚踏存储值恢复有效后，只清除本模块产生的脚踏值错误报警。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_ClearFootValueErrorAlarm(void)
+{
+    if(WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR) == false)
+    {
+        return; /* 当前不是脚踏值错误报警，不能误清其它真实报警。 */
+    }
+
+    WorkAlarm_Clear();                 /* 新收到的脚踏存储值已经有效，释放脚踏值错误锁存。 */
+    SendAlarmMessage(WORK_ALARM_NONE); /* 停止本模块触发的报警蜂鸣。 */
+    SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 关闭 83 号报警弹窗，后续由脚踏接入刷新控制状态。 */
+}
+
 static void Foot_ClearHandleOrOverloadAlarm(void)
 {
     static uint8_t times=0;
@@ -337,6 +414,11 @@ static bool Foot_EnsureFootControlMode(void)
     if(ControlArbitration_IsBusyByOther(CONTROL_OWNER_FOOT))
     {
         return false;
+    }
+
+    if(WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR))
+    {
+        return false; /* 脚踏存储值错误属于输入安全故障，未恢复有效值前禁止控制泵和手柄。 */
     }
 
     /* 历史脚踏分支会把“当前不是脚踏模式”误报成 0x02；现在接管前先清掉这个旧误报。 */
@@ -1075,7 +1157,15 @@ void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
                      double_connect_flag=1;
 
                     footmessage.HValue_Left=dat[i+6]<<8 | dat[i+7];
-                    //判断脚踏高低值是否正确，正确队列通知
+                    if(Foot_IsPedalTwoPointStorageValid(footmessage.LValue_Left, footmessage.HValue_Left) == false)
+                    {
+                      first_connect_flag=0; /* 本次读到的低/高值无效，清掉低值阶段，等待下次重新读取完整定标值。 */
+                      double_connect_flag=0; /* 高值阶段同样回到未完成状态，避免坏高值让脚踏误上线。 */
+                      Foot_ReportFootValueErrorAlarm(); /* 脚踏存储值错误时弹出 83 号报警图，并锁住泵和手柄控制。 */
+                      return; /* 坏定标值不能发送脚踏上线消息，避免后续任务使用错误行程计算速度。 */
+                    }
+                    Foot_ClearFootValueErrorAlarm(); /* 新读到的单踏板低/高值有效，允许清除历史脚踏值错误报警。 */
+                    //判断脚踏高低值正确后，队列通知脚踏上线
                       footconnect_flag=1;
                       footmessage.connect_flag=true;
                       footmessage.pedalType=1;//JT
@@ -1092,12 +1182,18 @@ void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
                          jtb_adcvalue=dat[i+6]<<8 | dat[i+7];//ad值
                         if(!footconnect_flag)
                         {
-                            if(i+13 < rlen) // 确保不会越界
+                            if(i+15 < rlen) // 确保读取 H/M/L 三组定标值时不会越界
                             {
                                 footmessage.HValue_Left=dat[i+10]<<8  | dat[i+11];
                                 footmessage.MValue_Left=dat[i+12]<<8 | dat[i+13];
                                 footmessage.LValue_Left=dat[i+14]<<8 | dat[i+15];
-                                //判断脚踏值是否正确，不正确请通知队列报警
+                                if(Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left, footmessage.MValue_Left, footmessage.HValue_Left) == false)
+                                {
+                                  Foot_ReportFootValueErrorAlarm(); /* JTB 低/中/高任一段无效时显示 83 号报警，并禁止控制泵和手柄。 */
+                                  return; /* 不发送脚踏上线消息，避免错误中点把轻排段或电机段误触发。 */
+                                }
+                                Foot_ClearFootValueErrorAlarm(); /* JTB 三点定标恢复有效后，释放脚踏值错误报警锁存。 */
+                                //判断脚踏值正确后，通知队列脚踏上线
                                 //footconnect_flag=2;
                                 footmessage.connect_flag=true;
                                 footmessage.pedalType=2;//JTB
@@ -1124,7 +1220,14 @@ void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
                                 footmessage.HValue_Right=dat[i+16]<<8 | dat[i+17];
                                 footmessage.MValue_Right=dat[i+18]<<8 | dat[i+19];
                                 footmessage.LValue_Right=dat[i+20]<<8 | dat[i+21];
-                                //判断一下，脚踏值是否错误，如果有错误，队列通知报警
+                                if((Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left, footmessage.MValue_Left, footmessage.HValue_Left) == false) ||
+                                   (Foot_IsPedalThreePointStorageValid(footmessage.LValue_Right, footmessage.MValue_Right, footmessage.HValue_Right) == false))
+                                {
+                                  Foot_ReportFootValueErrorAlarm(); /* JTD 左/右任一路三点定标无效时显示 83 号报警，并禁止双脚踏控制。 */
+                                  return; /* 不发送脚踏上线消息，避免错误通道继续控制泵或手柄。 */
+                                }
+                                Foot_ClearFootValueErrorAlarm(); /* JTD 左右两路三点定标都有效后，释放历史脚踏值错误报警。 */
+                                //判断脚踏值正确后，队列通知脚踏上线
                                 footmessage.connect_flag=true;
                                 footmessage.pedalType=3;//JTd
                                 Foot_SendMessage(footmessage);

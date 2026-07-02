@@ -6,6 +6,7 @@
 #include "delay.h"
 #include "eeprom.h"
 #include "bsp_board.h"
+#include "board_profile.h"
 #include "hw_bootstrap.h"
 #include "uart1.h"
 #include "uart2.h"
@@ -14,6 +15,7 @@
 #include "uart5.h"
 #include "uart6.h"
 #include "uart7.h"
+#include "uart9.h"
 
 //#include "adc.h"
 #include "lcd.h"
@@ -72,6 +74,9 @@ void Userparser_Init(void)
   Uart1_Init();  //无刷
   Uart2_Init();  //外部通讯
   Uart3_Init();  //射频
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+  Uart9_Init();  //B 通道射频独立串口，旧模式关闭时不占用 PD14/PD15。
+#endif
   Uart4_Init();  //脚踏
   Uart5_Init();  //步进1
 	Uart6_Init();  //屏

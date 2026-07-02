@@ -666,20 +666,6 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 				LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//磨头选中时刨刀按钮回未选中态
 			}
 		}
-    //   if(PAO_flag)
-	//   {
-	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);//手动刨刀模式下 0x1404 显示“手柄刨标”，和 EX8 按键表保持一致
-	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//刨刀选中时磨头按钮回未选中态
-	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,56U);//刨刀按钮显示选中态
-	// 	LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”，避免和自动识别状态混淆
-	//   }
-	//   else
-	//   {
-    //     LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);//手动磨头模式下仍显示“手柄刨标”，磨/刨状态由 0x1405/0x1406 按钮区表达
-	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,54U);//磨头按钮显示选中态
-	// 	LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//磨头选中时刨刀按钮回未选中态
-	// 	LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”，和 EX8 图号 52 对齐
-	//   }
 	}
 	else
 	{
@@ -688,35 +674,6 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);
-	// 	if(auto_identify_flag)
-	// 	{
-	// 		if(tool_result_pic != 0U)
-	// 		{
-	// 			LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,tool_result_pic);//自动识别等待或掉线时显示最近一次刀具结果图，63/61/62 由业务层决定
-	// 		}
-	// 		else
-	// 		{
-	// 			LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);//自动识别已成功时隐藏 0x1404，避免和 0x4200 规格同时出现
-	// 		}
-	// 	}
-	// 	else
-	// 	{
-	// 		//LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,60U);//非自动识别且无有效规格时显示禁用态
-	// 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
-	// 	}
-	// 	LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
-	// 	LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);
-	// 	// LCD_Show_Picture(UIDP_LCD_VP_TOOL_BURR,53U);//磨头按钮禁用态
-	// 	// LCD_Show_Picture(UIDP_LCD_VP_TOOL_BLADE,55U);//刨刀按钮禁用态
-	// 	if(auto_identify_flag)
-	// 	{
-	// 		LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//自动识别模式等待 RFID 或显示规格时，0x1407 保持“自动识别”图 51
-	// 	}
-	// 	else
-	// 	{
-	// 		LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);
-	// 		//LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//无有效当前通道时沿用自动识别默认图，避免上电空白
-	// 	}
 	 }
 }
 
@@ -870,6 +827,9 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value)
 		break;
 		case WORK_ALARM_MOTOR_DRIVER_BOARD:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//驱动板故障暂无专图，使用 EX8 84 号通用保护图
+		break;
+		case WORK_ALARM_PUMP_PRESSURE_BLOCKED:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,89U);//泵压力达到阈值时显示屏幕新增 89 号压力报警图
 		break;
 	  }
 

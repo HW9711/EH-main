@@ -65,6 +65,9 @@ void MX_DMA_Init(void)
   /* DMA2_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
+  /* DMA2_Stream7_IRQn interrupt configuration - UART9_RX 用于 RFID B 通道 */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5, 0); /* UART9_RX DMA 中断优先级与其它串口 DMA 保持一致。 */
+  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);          /* 使能 B 通道 RFID 的 UART9 RX DMA 中断入口。 */
 
 }
 

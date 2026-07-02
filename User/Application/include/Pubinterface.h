@@ -74,6 +74,7 @@
 #define WORK_ALARM_MOTOR_DRIVER_BOARD   11U//电机驱动板故障报警码，UI 绑定 0x0B；真实报警写 WorkMessage，阈值报警只蜂鸣
 #define WORK_ALARM_HANDLE_MODEL_ERROR_B 12U//B通道EEprom校验失败，手柄型号错误
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U//A/B通道EEprom均校验失败，上位机需要显示双通道来源
+#define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U//泵压力达到模块阈值，屏幕显示 89 号压力报警图，当前只做限时提示不锁全局报警
 
 
 #define PLANER      1U//刨头
@@ -451,7 +452,7 @@ void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和�
 void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
 void Pubinterface_SetHandleInjectionPumpRun(bool enable);
-void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵并蜂鸣；注水冷却时再停手柄。 */
+void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵、蜂鸣并显示 89 号弹窗；注水冷却时再停手柄。 */
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */
 void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 手控/触控/外控新的启动沿到来时清除压力停机锁存。 */
 bool Pubinterface_IsPressureBlockStopLatched(void); /* 查询注水冷却压力停机锁存是否仍有效，脚踏保持踩下时用它拦截自动重启。 */

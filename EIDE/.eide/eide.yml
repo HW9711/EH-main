@@ -77,6 +77,7 @@ virtualFolder:
             - path: ../User/Peripheral/uart/uart5.c
             - path: ../User/Peripheral/uart/uart6.c
             - path: ../User/Peripheral/uart/uart7.c
+            - path: ../User/Peripheral/uart/uart9.c
           folders: []
         - name: Device
           files:

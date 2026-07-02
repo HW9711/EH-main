@@ -12,6 +12,7 @@ typedef enum
     BSP_UART_PORT_5 = 5,
     BSP_UART_PORT_6 = 6,
     BSP_UART_PORT_7 = 7,
+    BSP_UART_PORT_9 = 9,
     BSP_UART_PORT_10 = 10
 } bsp_uart_port_t;
 

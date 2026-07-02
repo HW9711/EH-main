@@ -33,6 +33,7 @@
 #include "app_bootstrap.h"
 #include "at24cs32_crc_verify.h"
 #include "tracealyzer_recorder.h"
+#include "board_profile.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -105,6 +106,9 @@ int main(void)
   MX_USART6_UART_Init();
   MX_UART7_Init();
   MX_UART8_Init();
+#if (RFID_USE_DUAL_UART_MODE == 1U)
+  MX_UART9_Init(); /* 双串口 RFID 模式下，UART9 固定作为 B 通道射频识别串口。 */
+#endif
   MX_UART10_Init();
   /* Keep IWDG disabled to match the current reference firmware behavior. */
   /* MX_IWDG_Init(); */
