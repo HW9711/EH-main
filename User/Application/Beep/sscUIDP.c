@@ -7,6 +7,7 @@
 #include "lcd.h"
 #include "Pubinterface.h"
 #include "screen_address.h"
+#include "sscBEEP.h"
 
 uint8_t DisPlayData[10] = {0};
 
@@ -823,7 +824,7 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value)
 		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//手柄型号校验失败暂无专图，使用通用保护图，避免误显示外部控制
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,90U);//手柄型号校验失败暂无专图，使用通用保护图，避免误显示外部控制
 		break;
 		case WORK_ALARM_MOTOR_DRIVER_BOARD:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//驱动板故障暂无专图，使用 EX8 84 号通用保护图
@@ -1027,6 +1028,7 @@ void UIDISPLAYBehavior()
 					UIAIARMDP(0,0);
 					UIMANUALBUTTONDP(0,0,0,0);
 					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
+					SendKeyBeepMessage(1U); /* 主运行页已经切换完成，蜂鸣一次提示开机进入运行界面。 */
 					break;
 					default:
 					break;

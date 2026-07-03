@@ -580,6 +580,7 @@ void FootControlTask(uint32_t event)
 {
     uint16_t adValue;
     uint16_t adValue_r;
+    uint8_t switch_before_channel = CHANNEL_NONE; /* 双脚踏跨通道切换前的工作通道快照，用于确认切换成功后只蜂鸣一次。 */
     static uint8_t single_release_debounce_ticks=0U;
    (void)event;
     if(ControlArbitration_IsBusyByOther(CONTROL_OWNER_FOOT))
@@ -909,7 +910,12 @@ void FootControlTask(uint32_t event)
                                             return;//未达到切换去抖计数，不执行
                                         }
                                          WorkMessage.switchhandle_counts=0;
+                                        switch_before_channel = WorkMessage.channel_work; /* 记录切换前通道，后续用实际 channel_work 判断是否成功切到 A。 */
                                         HandleSwitchActive(SCREENKey_HANDLE_A);//切换
+                                        if((switch_before_channel != CHANNEL_A) && (WorkMessage.channel_work == CHANNEL_A))
+                                        {
+                                            SendKeyBeepMessage(1U); /* 双脚踏左踏板跨通道切换 A 手柄成功，蜂鸣一次给操作者确认。 */
+                                        }
                                         Foot_DoublePedalRequireReleaseBeforeRun(CHANNEL_A);
                                         ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                                         return;
@@ -1040,7 +1046,12 @@ void FootControlTask(uint32_t event)
                                                 return;//未达到切换去抖计数，不执行
                                             }
                                             WorkMessage.switchhandle_countss=0;
+                                            switch_before_channel = WorkMessage.channel_work; /* 记录切换前通道，后续用实际 channel_work 判断是否成功切到 B。 */
                                             HandleSwitchActive(SCREENKey_HANDLE_B);//切换
+                                            if((switch_before_channel != CHANNEL_B) && (WorkMessage.channel_work == CHANNEL_B))
+                                            {
+                                                SendKeyBeepMessage(1U); /* 双脚踏右踏板跨通道切换 B 手柄成功，蜂鸣一次给操作者确认。 */
+                                            }
                                             Foot_DoublePedalRequireReleaseBeforeRun(CHANNEL_B);
                                             ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                                             return;

@@ -7,6 +7,7 @@
 #include "tim.h"
 #include "bsp_uart.h"
 #include "Pubinterface.h"
+#include "sscBEEP.h"
 
 #include <stdbool.h>
 
@@ -35,6 +36,7 @@
 #define CS1237_DEVICE_CODE_INJECT_WATER 0x00U  /* 0x00 表示注水泵，PUMPA/PUMPB 按注水方向和流量公式输出。 */
 #define CS1237_DEVICE_CODE_POUR_WATER   0x08U  /* 0x08 表示灌注泵，PUMPA/PUMPB 按灌注方向和流量公式输出。 */
 #define CS1237_DEVICE_CODE_DRAW_WATER   0x09U  /* 0x09 表示抽水泵，PUMPA/PUMPB 按抽水方向和流量公式输出。 */
+#define CS1237_PUMP_LOSS_TIMEOUT_MS     1500U  /* 压力模块正常持续上报，超过 1.5 秒无有效帧即按泵丢失处理并刷新 UI。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -121,6 +123,7 @@ static uint8_t s_dwt_ready = 0U;
 static uint8_t s_tim7_ready = 0U;
 static uint8_t s_timer_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
+static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 记录每路最近一次有效帧时间，用于拔泵后无数据场景的离线判定。 */
 
 /* 私有函数声明区：
  * 这些函数按“时基/硬件控制 -> 缓冲区 -> 状态机 -> 对外接口”的顺序组织。 */
@@ -147,7 +150,11 @@ static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length);
 static uint16_t Cs1237_ReadU16Le(const uint8_t *data);
 static uint32_t Cs1237_ReadU32Le(const uint8_t *data);
 static bool Cs1237_FrameValid(const uint8_t *frame);
+static pumpMessage_t *Cs1237_GetPumpMessageForChannel(sim_uart_channel_t channel);
+static void Cs1237_BeepOnceIfNoAlarm(void);
+static void Cs1237_RefreshPumpDisplayByChannel(sim_uart_channel_t channel);
 static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame);
+static void Cs1237_ServicePumpLossTimeout(void);
 static void Cs1237_ParserResync(Cs1237FrameParser *parser);
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data);
 static void delay_us(uint32_t us);
@@ -167,6 +174,56 @@ static SoftUartChannelContext *SoftUart_GetChannel(sim_uart_channel_t channel)
     }
 
     return &s_channels[(uint32_t)channel];
+}
+
+/*
+ * 函数功能：按模拟串口通道取得对应的 A/B 泵公共状态结构。
+ * 输入参数：channel 为压力模块模拟串口通道，SIM_UART_1 固定接 B 泵，SIM_UART_2 固定接 A 泵。
+ * 返回参数：有效通道返回对应 pumpMessage_t 指针，非法通道返回 NULL。
+ */
+static pumpMessage_t *Cs1237_GetPumpMessageForChannel(sim_uart_channel_t channel)
+{
+    if (channel == SIM_UART_1)
+    {
+        return &pumpMessageB; /* SIM_UART_1 的 RX 是 PE4，现场固定接 B 泵压力传感器。 */
+    }
+
+    if (channel == SIM_UART_2)
+    {
+        return &pumpMessageA; /* SIM_UART_2 的 RX 是 PE6，现场固定接 A 泵压力传感器。 */
+    }
+
+    return NULL; /* 非法通道不能写泵状态，避免越界访问公共状态。 */
+}
+
+/*
+ * 函数功能：在系统无全局报警时发送一次普通提示蜂鸣。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Cs1237_BeepOnceIfNoAlarm(void)
+{
+    if (WorkMessage.alarm_flag == false)
+    {
+        SendKeyBeepMessage(1U); /* 普通蜂鸣会清蜂鸣任务内部报警态，所以只在无报警时提示泵接入/丢失。 */
+    }
+}
+
+/*
+ * 函数功能：按压力模块通道刷新对应屏幕泵区域。
+ * 输入参数：channel 为压力模块模拟串口通道。
+ * 返回参数：无。
+ */
+static void Cs1237_RefreshPumpDisplayByChannel(sim_uart_channel_t channel)
+{
+    if (channel == SIM_UART_1)
+    {
+        Pubinterface_RefreshPumpBDisplay(); /* SIM_UART_1/PE4 固定对应 B 泵，只刷新右侧 B 泵显示。 */
+    }
+    else if (channel == SIM_UART_2)
+    {
+        Pubinterface_RefreshPumpADisplay(); /* SIM_UART_2/PE6 固定对应 A 泵，只刷新左侧 A 泵显示。 */
+    }
 }
 
 static void SoftUart_WriteTx(const SoftUartChannelContext *channel, GPIO_PinState level)
@@ -672,42 +729,50 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     uint16_t threshold_g = Cs1237_ReadU16Le(&frame[14]);
     uint8_t device_code = frame[16];
     uint16_t pump_type = Cs1237_MapDeviceCodeToPumpType(device_code);
+    bool new_online_flag = (pump_type != 0U);
     uint16_t old_pump_type;
     bool old_online_flag;
+    bool pump_online_changed;
     bool pump_display_changed;
+    uint32_t now_tick = HAL_GetTick();
 
-    if (channel == SIM_UART_1)
+    pump_message = Cs1237_GetPumpMessageForChannel(channel);
+    if (pump_message == NULL)
     {
-        /* SIM_UART_1 的 RX 是 PE4，现场固定接 B 泵压力传感器。 */
-        pump_message = &pumpMessageB;
+        return; /* 非法通道不能写泵状态，也不能刷新屏幕，保持原有运行状态不变。 */
     }
-    else if (channel == SIM_UART_2)
-    {
-        /* SIM_UART_2 的 RX 是 PE6，现场固定接 A 泵压力传感器。 */
-        pump_message = &pumpMessageA;
-    }
-    else
-    {
-        return;
-    }
+
+    s_cs1237_last_valid_tick[(uint32_t)channel] = now_tick; /* 有效帧到达即刷新保活时间，供拔泵无数据超时判定使用。 */
 
     taskENTER_CRITICAL();
     old_pump_type = pump_message->type; /* 记录本帧前的业务泵类型，只在识别变化时刷新屏幕，避免每帧压满 UIDP 队列。 */
     old_online_flag = pump_message->online_flag; /* 记录本帧前在线状态，未识别/重新识别时需要让屏幕可用状态同步变化。 */
-    pump_message->pressure_value = raw_cs1237;
-    pump_message->weight_x10 = weight_x10;
-    pump_message->pressure_threshold = threshold_g;
+    pump_message->pressure_value = raw_cs1237; /* 保存压力原始值，泵任务后续按该值做压力堵塞保护。 */
+    pump_message->weight_x10 = weight_x10; /* 保存 0.1g 重量值，供屏幕或外部通信读取压力模块当前重量。 */
+    pump_message->pressure_threshold = threshold_g; /* 保存压力模块阈值，供压力报警弹窗和堵塞逻辑使用。 */
     /* 把设备码转换后的业务泵类型写入公共状态，后续泵任务按该类型选择方向和换算公式。 */
-   
-   
     pump_message->type = pump_type;
-   
-    
-    pump_message->seq = frame[5];
-    pump_message->online_flag = (pump_type != 0U);
-    pump_message->losses_times = pump_message->online_flag ? 0U : (uint8_t)(pump_message->losses_times + 1U);
+    pump_message->seq = frame[5]; /* 保存下位机帧序号，便于后续诊断压力模块是否连续上报。 */
+    pump_message->online_flag = new_online_flag; /* 只有设备码映射到业务泵类型时才认为泵在线，备用码不允许启动泵。 */
+    if (new_online_flag != false)
+    {
+        pump_message->losses_times = 0U; /* 识别恢复后清丢失计数，表示当前泵类型已重新可信。 */
+    }
+    else
+    {
+        if (pump_message->losses_times < 0xFFU)
+        {
+            pump_message->losses_times++; /* 未知设备码按识别丢失累计，饱和保护避免长时间运行后溢出回零。 */
+        }
+        pump_message->run_flag = false; /* 泵类型已经无效，强制停泵，避免沿用上一帧在线时的运行请求。 */
+        pump_message->timingDrainage_flag = false; /* 清定时排空请求，避免重新识别后继承未知码阶段的排空状态。 */
+        pump_message->speed_output = 0U; /* 实际输出速度清零，屏幕和外部通信都不能继续显示旧输出。 */
+        pump_message->pressure_hold_flag = false; /* 泵已不可信时清压力锁存，下一次有效识别重新建立压力保护状态。 */
+        pump_message->pressure_recover_ms = 0U; /* 清压力恢复计数，避免未知码期间残留旧压力恢复阶段。 */
+    }
+    pump_online_changed = (old_online_flag != new_online_flag); /* 只在在线/离线边沿蜂鸣，避免每帧重复响。 */
     pump_display_changed = ((old_pump_type != pump_type) ||
-                            (old_online_flag != pump_message->online_flag)); /* 类型或在线状态变化才触发 A/B 对应区域重绘，保持 A 左 B 右不换位。 */
+                            pump_online_changed); /* 类型或在线状态变化才触发 A/B 对应区域重绘，保持 A 左 B 右不换位。 */
     taskEXIT_CRITICAL();
 
     if (pump_display_changed)
@@ -724,13 +789,68 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
         {
         pump_message->speed_work=10;
         }
-        if (channel == SIM_UART_1)
+        Cs1237_RefreshPumpDisplayByChannel(channel); /* 泵类型或在线状态变化后立即刷新对应泵区，保证屏幕可用态同步。 */
+    }
+
+    if (pump_online_changed)
+    {
+        Cs1237_BeepOnceIfNoAlarm(); /* 泵识别接入或识别丢失只在状态边沿蜂鸣一次，避免连续帧重复提示。 */
+    }
+}
+
+/*
+ * 函数功能：周期检查 CS1237 有效帧超时，处理拔泵后不再上报任何数据的离线状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Cs1237_ServicePumpLossTimeout(void)
+{
+    uint32_t now_tick = HAL_GetTick();
+
+    for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
+    {
+        sim_uart_channel_t channel = (sim_uart_channel_t)i;
+        pumpMessage_t *pump_message = Cs1237_GetPumpMessageForChannel(channel);
+        bool loss_confirmed = false;
+
+        if (pump_message == NULL)
         {
-            Pubinterface_RefreshPumpBDisplay(); /* SIM_UART_1/PE4 固定对应 B 泵，只刷新右侧 B 泵显示，不改变控制归属。 */
+            continue; /* 非法通道没有业务泵状态，不能参与超时清理。 */
         }
-        else
+
+        if (pump_message->online_flag == false)
         {
-            Pubinterface_RefreshPumpADisplay(); /* SIM_UART_2/PE6 固定对应 A 泵，只刷新左侧 A 泵显示，不改变控制归属。 */
+            continue; /* 已经离线的泵不重复蜂鸣，避免拔泵后每个周期都提示。 */
+        }
+
+        if ((uint32_t)(now_tick - s_cs1237_last_valid_tick[i]) <= CS1237_PUMP_LOSS_TIMEOUT_MS)
+        {
+            continue; /* 最近仍收到有效帧，保持当前在线状态和运行状态不变。 */
+        }
+
+        taskENTER_CRITICAL();
+        if ((pump_message->online_flag != false) &&
+            ((uint32_t)(now_tick - s_cs1237_last_valid_tick[i]) > CS1237_PUMP_LOSS_TIMEOUT_MS))
+        {
+            pump_message->online_flag = false; /* 超时确认泵丢失，屏幕和外部通信后续都读到离线。 */
+            pump_message->type = 0U; /* 清业务泵类型，避免屏幕或控制路径沿用旧类型继续允许启动。 */
+            pump_message->run_flag = false; /* 泵丢失时强制退出运行，避免后续泵任务继续按旧状态输出。 */
+            pump_message->timingDrainage_flag = false; /* 清定时排空状态，避免重新接入后继承拔泵前的排空请求。 */
+            pump_message->speed_output = 0U; /* 实际输出速度归零，运行态显示和外部通信都不能保留旧输出。 */
+            pump_message->pressure_hold_flag = false; /* 泵已经离线，清压力锁存，下一次接入重新按新状态判断。 */
+            pump_message->pressure_recover_ms = 0U; /* 清压力恢复计数，避免离线期间残留旧压力恢复阶段。 */
+            if (pump_message->losses_times < 0xFFU)
+            {
+                pump_message->losses_times++; /* 记录一次超时丢失，饱和保护避免长时间运行后溢出回零。 */
+            }
+            loss_confirmed = true; /* 标记本周期刚发生在线到离线边沿，后续只响一次并刷新 UI。 */
+        }
+        taskEXIT_CRITICAL();
+
+        if (loss_confirmed != false)
+        {
+            Cs1237_RefreshPumpDisplayByChannel(channel); /* 离线状态已经写入公共结构，立即把对应泵区刷为不可用。 */
+            Cs1237_BeepOnceIfNoAlarm(); /* 泵丢失边沿蜂鸣一次，报警期间不抢占报警蜂鸣。 */
         }
     }
 }
@@ -855,6 +975,8 @@ static void SimUartTaskFunc(uint32_t event)
             SoftUart_TestForwardFrame(channel, test_forward_buffer, test_forward_length);
         }
     }
+
+    Cs1237_ServicePumpLossTimeout(); /* 两路字节搬运结束后统一检查有效帧超时，处理拔泵无数据的离线边沿。 */
 }
 
 /* 初始化两路模拟串口的全部底层资源。

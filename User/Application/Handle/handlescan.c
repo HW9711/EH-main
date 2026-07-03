@@ -2007,8 +2007,33 @@ static uint8_t Handlescan_GetPeerActiveHandleAlarm(uint8_t channel)
 }
 
 /*
- * 清除当前通道拥有的手柄认证报警。
- * 拔出坏手柄后，如果没有另一通道接管报警，就同步清 WorkMessage 和蜂鸣锁存。
+ * 函数功能：向 UIDP 队列推送手柄 EEPROM 校验报警弹窗或关闭请求。
+ * 输入参数：alarm_value 为 A/B/AB 手柄校验报警码；enable_flag 为 true 时显示报警，为 false 时关闭弹窗。
+ * 返回参数：无。
+ */
+static void Handlescan_SendHandleVerifyAlarmUi(uint8_t alarm_value, bool enable_flag)
+{
+    uint8_t display_value[10] = {0U};                         /* UI_AIARM_ID 只读取 Value[0]，其余字节清零避免沿用上一条报警参数。 */
+
+    if (enable_flag != false)
+    {
+        if (Handlescan_IsHandleVerifyAlarm(alarm_value) == 0U)
+        {
+            return;                                          /* 只处理手柄 EEPROM 校验系列报警，避免运行中插拔等其它码误占用 84 号弹窗。 */
+        }
+
+        display_value[0] = alarm_value;                      /* 把 A/B/AB 来源报警码送给 UIAIARMDP，当前屏幕统一映射到 84 号图。 */
+        SendUIDSMessage(UI_AIARM_ID, true, display_value);   /* 持续报警建立后立即弹窗，避免只有蜂鸣和上位机报警但屏幕无提示。 */
+        return;                                              /* 显示路径已经完成，不再执行关闭弹窗分支。 */
+    }
+
+    SendUIDSMessage(UI_AIARM_ID, false, NULL);                /* 手柄校验报警解除后关闭报警弹窗，恢复主运行界面普通显示。 */
+}
+
+/*
+ * 函数功能：清除当前通道拥有的手柄认证报警。
+ * 输入参数：channel 当前扫描通道；alarm_value 当前通道最后一次手柄 EEPROM 校验报警码。
+ * 返回参数：无。
  */
 static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
 {
@@ -2030,6 +2055,7 @@ static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
         WorkMessage.alarm_flag = true;                       /* 另一通道仍失败时，全局报警继续保持有效。 */
         WorkMessage.alarm_value = peer_alarm;                /* 把全局报警值切回另一通道仍保持的手柄型号错误报警。 */
         SendAlarmMessage(peer_alarm);                        /* 重新通知蜂鸣任务当前仍存在手柄认证报警。 */
+        Handlescan_SendHandleVerifyAlarmUi(peer_alarm, true); /* 屏幕弹窗同步切换到仍失败的通道报警，避免拔出一只坏手柄后误清提示。 */
         Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, peer_alarm); /* 输出报警继承调试码。 */
         return;                                              /* 已由另一通道接管报警，不执行清零。 */
     }
@@ -2037,6 +2063,7 @@ static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
     WorkMessage.alarm_flag = false;                          /* 没有其他手柄认证报警时，清除全局报警标志。 */
     WorkMessage.alarm_value = 0U;                             /* 清除全局报警码，UI 和外部通信后续可读到无报警状态。 */
     SendAlarmMessage(0U);                                     /* 通知蜂鸣任务退出报警蜂鸣模式。 */
+    Handlescan_SendHandleVerifyAlarmUi(WORK_ALARM_NONE, false); /* 最后一只坏手柄拔出或恢复后关闭手柄校验报警弹窗。 */
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_CLEAR, 0U); /* 输出报警清除调试码。 */
 }
 
@@ -2156,6 +2183,11 @@ static void Handlescan_UpdateSelfTypedHandleRecognizeMessage(ChannelrecognizeMes
                                       0U); /* 这类 0x7C 型号自身就是手柄和刀具能力来源，规格字段没有 Page3 来源时保持 0。 */
 }
 
+/*
+ * 函数功能：建立持续报警状态，并在手柄 EEPROM 校验失败时同步推送屏幕报警弹窗。
+ * 输入参数：channel 当前扫描通道；alarm_value 当前模块生成的报警码。
+ * 返回参数：无。
+ */
 static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 {
     uint8_t report_alarm = alarm_value;                      /* 默认按当前通道报警码上报。 */
@@ -2168,6 +2200,7 @@ static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 
     WorkAlarm_Set(report_alarm);                             /* 所有持续报警统一写入 WorkMessage.alarm_value。 */
     SendAlarmMessage(report_alarm);                          /* 持续报警蜂鸣直到对应清除路径发送 0。 */
+    Handlescan_SendHandleVerifyAlarmUi(report_alarm, true);  /* 手柄 EEPROM 校验持续报警需要主动推送屏幕弹窗，非手柄报警由 helper 自动忽略。 */
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, report_alarm);
 }
 
