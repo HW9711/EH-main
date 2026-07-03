@@ -5,12 +5,14 @@
 #include "data.h"
 //#include "adc.h"
 #include "soft_uart.h"
+#include "stm32f4xx_hal.h"
 
 #include "kernel_scheduler.h"
 #include "datahand.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
 #include "sscKEYBH.h"
+#include "sscUIDP.h"
 kernel_task_t HANDLEKEYTaskHandle;
 
 //键值按下状态
@@ -263,6 +265,57 @@ typedef struct
 static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false}; /* A通道实体键去抖状态。 */
 static HandleRunKeyDebounce_t s_handle_run_key_b_filter = {0U, 0U, false, false}; /* B通道实体键去抖状态。 */
 static uint8_t s_handle_run_key_owner_channel = CHANNEL_NONE;			   /* 当前由实体键启动的通道，防止另一通道松开误停。 */
+#define HANDLE_MODE_MISMATCH_ALARM_MS 3000U /* 脚控已选中时误按手柄实体键，82 号弹窗保持 3 秒后自动关闭。 */
+static uint8_t s_handle_foot_selected_timed_alarm_active = 0U; /* 记录 82 号错模式弹窗是否由手柄键模块显示，防止到期误清其它报警。 */
+static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号错模式弹窗开始时间，用于 3 秒自动清除。 */
+
+/*
+ * 函数功能：脚控已选中时按手柄实体运行键，上报 82 号 3 秒临时弹窗。
+ * 输入参数：无，报警码固定使用 WORK_ALARM_FOOT_SELECTED。
+ * 返回参数：无。
+ */
+static void HandleRunKey_RaiseFootSelectedTimedAlarm(void)
+{
+	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只读取 Value[0]，其余补零避免沿用上一条报警参数。 */
+
+	display_value[0] = WORK_ALARM_FOOT_SELECTED; /* 82 号图提示当前脚控已选中，用户应使用脚踏启动。 */
+	SendAlarmMessageTimed(WORK_ALARM_FOOT_SELECTED, HANDLE_MODE_MISMATCH_ALARM_MS); /* 错模式提示只响 3 秒，不写全局报警锁存。 */
+	s_handle_foot_selected_timed_alarm_tick = HAL_GetTick(); /* 记录本次弹窗起点，后续由手柄键任务周期自动关闭。 */
+	if (WorkMessage.alarm_flag == false)
+	{
+		SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 没有真实报警占用报警区时显示 82 号临时弹窗。 */
+		s_handle_foot_selected_timed_alarm_active = 1U; /* 只有实际显示了 82 号图，本模块才拥有后续关闭权。 */
+	}
+	else
+	{
+		s_handle_foot_selected_timed_alarm_active = 0U; /* 真实报警优先级更高，本次只蜂鸣不抢屏幕报警区。 */
+	}
+}
+
+/*
+ * 函数功能：周期维护 82 号错模式临时弹窗，达到 3 秒后自动关闭。
+ * 输入参数：无，直接读取弹窗归属和 HAL 毫秒 tick。
+ * 返回参数：无。
+ */
+static void HandleRunKey_ServiceFootSelectedTimedAlarm(void)
+{
+	if (s_handle_foot_selected_timed_alarm_active == 0U)
+	{
+		return; /* 当前没有由手柄键模块显示的 82 号弹窗，不处理屏幕报警区。 */
+	}
+
+	if ((uint32_t)(HAL_GetTick() - s_handle_foot_selected_timed_alarm_tick) < HANDLE_MODE_MISMATCH_ALARM_MS)
+	{
+		return; /* 3 秒保持时间未到，继续显示脚控已选中提示。 */
+	}
+
+	if (WorkMessage.alarm_flag == false)
+	{
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 没有真实报警时关闭 82 号临时弹窗。 */
+	}
+	s_handle_foot_selected_timed_alarm_active = 0U; /* 本次临时弹窗生命周期结束，允许下一次误按重新显示。 */
+	s_handle_foot_selected_timed_alarm_tick = 0U; /* 清时间戳，避免下次比较沿用旧 tick。 */
+}
 
 /*
  * 函数功能：判断手柄型号是否支持本次实体按键启停。
@@ -458,6 +511,10 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event)
 
 	if ((WorkMessage.drivetype_work != HANDLEWORK) && (s_handle_run_key_owner_channel == CHANNEL_NONE))
 	{
+		if ((press_event == true) && (WorkMessage.drivetype_work == JTWORK))
+		{
+			HandleRunKey_RaiseFootSelectedTimedAlarm(); /* 当前选中脚控时误按手柄键，只提示 82 号报警，不启动手柄。 */
+		}
 		return; /* 手控未被选中时实体手柄键不允许启动，避免脚控或触控选中时被手柄按键绕过。 */
 	}
 
@@ -507,6 +564,7 @@ void HANDLEKEYTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN HANDLEKEYTaskFunc */
   /* Infinite loop */
+	HandleRunKey_ServiceFootSelectedTimedAlarm(); /* 手柄键任务周期维护 82 号临时弹窗，保证 3 秒后自动消失。 */
 	if(ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 		return;
 	HandleKey_ScanRunKeys(); /* 实体键采用稳定按下沿翻转启停：按一次启动，再按一次停止，松开只复位下一次按下资格。 */

@@ -340,7 +340,44 @@ static void Foot_ReportFootValueErrorAlarm(void)
 }
 
 /*
- * 函数功能：脚踏存储值恢复有效后，只清除本模块产生的脚踏值错误报警。
+ * 函数功能：手控已选中时踩脚踏，上报 81 号错模式报警并锁住脚踏控制入口。
+ * 输入参数：无，报警码固定为 WORK_ALARM_MANUAL_SELECTED。
+ * 返回参数：无。
+ */
+static void Foot_ReportManualSelectedAlarm(void)
+{
+    uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0] 保存报警码，其余清零避免旧弹窗参数残留。 */
+
+    if(WorkAlarm_Is(WORK_ALARM_MANUAL_SELECTED))
+    {
+        return; /* 脚踏保持踩下期间不重复投递同一个 81 号报警，避免屏幕和蜂鸣队列堆积。 */
+    }
+
+    display_value[0] = WORK_ALARM_MANUAL_SELECTED; /* 81 号图提示当前手控已选中，用户应使用手柄按键启动。 */
+    WorkAlarm_Set(WORK_ALARM_MANUAL_SELECTED);     /* 锁住错模式报警状态，松开脚踏后由本模块清零。 */
+    SendAlarmMessage(WORK_ALARM_MANUAL_SELECTED);  /* 同步蜂鸣报警，提示当前脚踏启动来源不匹配。 */
+    SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 同步屏幕显示 81 号报警弹窗。 */
+}
+
+/*
+ * 函数功能：脚踏释放后清除“手控已选中，请用手控”错模式报警。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_ClearManualSelectedAlarmOnRelease(void)
+{
+    if(WorkAlarm_Is(WORK_ALARM_MANUAL_SELECTED) == false)
+    {
+        return; /* 当前不是脚踏错模式报警，不能误清其它报警。 */
+    }
+
+    WorkAlarm_Clear();                 /* 用户已经松开脚踏，本次错模式启动尝试结束，释放报警状态。 */
+    SendAlarmMessage(WORK_ALARM_NONE); /* 报警状态清零后同步关闭蜂鸣。 */
+    SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 关闭 81 号报警弹窗，恢复普通运行页显示。 */
+}
+
+/*
+ * 函数功能：脚踏存储值恢复有效或错误脚踏拔出后，只清除本模块产生的脚踏值错误报警。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -351,7 +388,7 @@ static void Foot_ClearFootValueErrorAlarm(void)
         return; /* 当前不是脚踏值错误报警，不能误清其它真实报警。 */
     }
 
-    WorkAlarm_Clear();                 /* 新收到的脚踏存储值已经有效，释放脚踏值错误锁存。 */
+    WorkAlarm_Clear();                 /* 新收到的脚踏存储值已经有效，或错误脚踏已拔出，释放脚踏值错误锁存。 */
     SendAlarmMessage(WORK_ALARM_NONE); /* 停止本模块触发的报警蜂鸣。 */
     SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 关闭 83 号报警弹窗，后续由脚踏接入刷新控制状态。 */
 }
@@ -394,6 +431,10 @@ static bool Foot_EnsureFootControlMode(void)
     /* 只有脚控已经被选中时，脚踏动作才允许继续进入运行分支。 */
     if(WorkMessage.drivetype_work!=JTWORK)
     {
+        if(WorkMessage.drivetype_work==HANDLEWORK)
+        {
+            Foot_ReportManualSelectedAlarm(); /* 当前选中手控时踩脚踏，只显示 81 号报警并拒绝泵和手柄运行。 */
+        }
         return false;
     }
 
@@ -599,6 +640,7 @@ void FootControlTask(uint32_t event)
                  //通知界面，如果因为脚踏行为报警，则恢复
                  ControlSignalMessage.jt_enable_flag=false;//脚踏掉线，禁止脚踏控制界面选择少了一个。后续界面按钮需要判断脚踏是否使能进行判断
                  Pubinterface_ClearFootControlManualLock(); /* 脚踏离线代表本在线周期结束，用户手动切手控/触控的锁存到此失效。 */
+                 Foot_ClearManualSelectedAlarmOnRelease(); /* 脚踏掉线等价于释放脚踏，清除手控已选中的错模式报警。 */
 
                  if(ControlSignalMessage.jtL_control_flag||ControlSignalMessage.jtR_control_flag)//如果当前正是脚踏控制电机过程中
                  {
@@ -687,6 +729,7 @@ void FootControlTask(uint32_t event)
                            {
                             Foot_ClearHandleOrOverloadAlarm();
                            }
+                           Foot_ClearManualSelectedAlarmOnRelease(); /* 单踏板确认松开后清除 81 号错模式报警。 */
                         }
                         else
                         {
@@ -695,6 +738,7 @@ void FootControlTask(uint32_t event)
                                 break; /* 压力停机后 jtL_control_flag 已被清零，仍要按松脚去抖确认，防止踩住脚踏时 AD 抖动误清锁存。 */
                             }
                             Foot_ClearPressureStopLatchAfterRelease(); /* 单踏板确认松开后结束压力停机锁存，下一次重新踩下才允许启动。 */
+                            Foot_ClearManualSelectedAlarmOnRelease(); /* 单踏板无运行标志但已释放时，也要关闭手控已选中报警。 */
                             //本来就是停止，如果不是脚踏控制的那么不需要任何处理和操作
                         }
                     }
@@ -768,6 +812,7 @@ void FootControlTask(uint32_t event)
                                }
                              }
                          Foot_ClearPressureStopLatchAfterRelease(); /* 双段脚踏完全松到低阈值以下后，释放压力停机锁存，避免再踩脚踏被旧锁存拒绝。 */
+                         Foot_ClearManualSelectedAlarmOnRelease(); /* 双段脚踏完全松开后清除 81 号错模式报警。 */
                  }
                 if(adValue<msg.MValue_Left)adValue=msg.MValue_Left;
                 if(adValue-msg.MValue_Left>JT_threshold)
@@ -929,6 +974,7 @@ void FootControlTask(uint32_t event)
                          if(Foot_IsPedalReleased(jtd_adcvalue_r, msg.LValue_Right))
                          {
                              Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都回到释放区，才算退出本次压力停机控制源。 */
+                             Foot_ClearManualSelectedAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
                          }
                         //左脚停止
                      }
@@ -1059,6 +1105,7 @@ void FootControlTask(uint32_t event)
                         if(Foot_IsPedalReleased(jtd_adcvalue_l, msg.LValue_Left))
                         {
                             Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都松开后才清压力锁存，防止另一侧仍踩住时自动恢复。 */
+                            Foot_ClearManualSelectedAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
                         }
                      }
 
@@ -1082,7 +1129,11 @@ void FootControlTask(uint32_t event)
 
 
 
-//数据解析
+/*
+ * 函数功能：周期读取脚踏串口数据，完成脚踏上线、掉线、定标值校验和脚踏状态解析。
+ * 输入参数：event 为调度器传入的任务事件，本函数当前不依赖该值。
+ * 返回参数：无。
+ */
 void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
 {
 
@@ -1102,19 +1153,23 @@ void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
     if (rlen < 10)
     {   //不够一个数据包大小
                /* RFID 由 handlescan 在线监测统一触发，脚踏无数据时不能周期塞队列，避免刀具头拔掉后旧刀具信息无法清除。 */
-        if(footconnect_flag)
+        if((footconnect_flag != 0U) || (WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR) != false))
         {
-          footDisconnect_times++;
+          footDisconnect_times++; /* 已上线脚踏或脚踏值错误报警都需要累计无数据周期，用于确认脚踏已经真正拔出。 */
           if(footDisconnect_times > 100) // 160*10ms=1600ms，超过1.6秒没有数据，认为脚踏掉线,这个地方判断一下，难道1秒6都不清零的么
           {
             footDisconnect_times=0;
-            footconnect_flag=0;
-            first_connect_flag=0;
-            double_connect_flag=0;
-            footmessage.connect_flag=false;
-            Foot_SendMessage(footmessage);//队列通知掉线
-            //队列消息通知脚踏掉线
+            if(footconnect_flag != 0U)
+            {
+              footmessage.connect_flag=false;
+              Foot_SendMessage(footmessage);//队列通知掉线
+              //队列消息通知脚踏掉线
               SendKeyBeepMessage(1U);
+            }
+            footconnect_flag=0; /* 断开确认后统一回到未连接状态，下一次插入必须重新读取并校验脚踏存储值。 */
+            first_connect_flag=0; /* 清掉单脚踏低值读取阶段，避免下次插入沿用上一次不完整的定标读取进度。 */
+            double_connect_flag=0; /* 清掉双脚踏读取阶段，保证重新插入后从高/中/低值流程重新开始。 */
+            Foot_ClearFootValueErrorAlarm(); /* 错误值脚踏拔出后没有新的有效帧，断开确认完成时清掉 83 号报警。 */
           }
         }
         return;
