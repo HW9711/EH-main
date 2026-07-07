@@ -39,9 +39,14 @@ void SendPumpBMessage(uint8_t pump_type,uint16_t value)
 	(void)Kernel_QueueSend(PUMPBMsgQueue, &msg, 0);
 }
 
+/*
+ * 函数功能：取得 B 泵闭环使用的逻辑压力状态。
+ * 输入参数：无。
+ * 返回参数：返回 pumpMessageB；模拟串口层已把 SIM_UART_2/PE6 的 B 泵压力帧写入该结构。
+ */
 static const pumpMessage_t *PUMPB_GetPressureSource(void)
 {
-	/* 固定读取 pumpMessageB；当前现场映射为 B 泵压力传感器接 SIM_UART_1/PE4。 */
+	/* 固定读取 pumpMessageB；当前压力线束映射为 B 泵压力传感器接 SIM_UART_2/PE6。 */
 	return &pumpMessageB;
 }
 
@@ -89,7 +94,7 @@ static uint16_t PUMPB_ApplyPressureClosedLoopRaw(uint16_t pump_speed, uint8_t *p
  */
 static uint16_t PUMPB_ApplyPressureClosedLoop(uint16_t pump_speed, uint8_t *pressure_force_stop)
 {
-	const pumpMessage_t *pressure_source = PUMPB_GetPressureSource(); /* 固定读取 B 泵压力源，保持和现场 PE4 压力线束一致。 */
+	const pumpMessage_t *pressure_source = PUMPB_GetPressureSource(); /* 固定读取 B 泵压力源，当前由 soft_uart.c 的 PE6 压力帧更新。 */
 	uint32_t weight_x10 = pressure_source->weight_x10;                /* 本周期缓存压力重量，避免多次读取 volatile 字段造成前后不一致。 */
 	uint16_t threshold_g = pressure_source->pressure_threshold;        /* 本周期缓存压力有效阈值，用于判断压力数据是否可用。 */
 
@@ -156,6 +161,11 @@ static void Pump_SetSpeedS_B(uint16_t value,uint8_t pump_dir)
 #endif
 }
 
+/*
+ * 函数功能：按 pumpMessageB 状态计算 B 泵本周期输出，处理注水排空、压力闭环和 UART 下发。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void PUMPBehaviors(void)
 {
 		static uint8_t huici = 0;
@@ -186,7 +196,7 @@ static void PUMPBehaviors(void)
 		if(pumpMessageB.run_flag || pumpMessageB.timingDrainage_flag)
 		{
 			pump_type=pumpMessageB.type;
-			pump_speed = (timing_drainage_active != 0U) ? 100U : pumpMessageB.speed_work; /* 排空模式实际输出按 100 参与压力闭环，不能先用旧设定速度判断。 */
+			pump_speed = (timing_drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : pumpMessageB.speed_work; /* 排空模式固定使用 70 档业务速度，保证 A/B 泵排空转速一致。 */
 		}
 		switch(pump_type)
 		{
@@ -213,7 +223,6 @@ static void PUMPBehaviors(void)
 				/* 高压硬停时公共接口已经撤销运行请求，后续必须等待新的控制源启动沿。 */
 				PUMPB_PauseByPressureLimit();
 			}
-			//uart_data=(pump_speed*0.02+2.1)*pump_speed;//
 			uart_data=pump_speed/1.6;
 				break;
 			case POURWATER://灌
@@ -234,20 +243,23 @@ static void PUMPBehaviors(void)
 		}
 		if(timing_drainage_active != 0U)
 		{
-			uart_data=(pump_speed*0.02+2.1)*pump_speed;//s
 		   if (pressure_force_stop != 0U)
 		   {
 			uart_data = 0U; /* 压力已触发停泵时禁止排空逻辑重新写入非零 UART 速度，保证堵管后实际电机停止。 */
 			pump_speed = 0U; /* 同步实际业务输出为 0，让屏幕和上位机速度显示与真实下发一致。 */
 			/* 压力锁止期间排空请求已被公共接口清除，本周期只保证 UART 速度为 0。 */
 		   }
-           else if(pumpMessageB.timingDrainage_times++>300)//排空计时，当为注水的时候
+           else if(pumpMessageB.timingDrainage_times >= PUMP_TIMING_DRAINAGE_TICKS)
 		   {
 			uart_data=0;
 			pump_speed = 0U; /* 排空计时结束后实际输出已经关断，显示速度必须同步清零。 */
 			pumpMessageB.timingDrainage_flag=false;
 			pumpMessageB.run_flag=false;
 			pumpMessageB.timingDrainage_times=0;
+		   }
+		   else
+		   {
+			pumpMessageB.timingDrainage_times++; /* B 泵排空未到 10 秒时只累计时间，UART 速度沿用注水 70 的正常换算结果。 */
 		   }
 		}
 		Pubinterface_UpdatePumpBOutputSpeed(pump_speed); /* 发布闭环限速后的实际业务速度，驱动屏幕和上位机显示实时变化。 */
@@ -278,10 +290,15 @@ static void PUMPBBehaviorTask(uint32_t event)
 	PUMPBehaviors();
 
 }
+/*
+ * 函数功能：初始化 B 泵消息队列并按统一 25ms 周期启动 B 泵行为任务。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void SscPumpBTask_Init(void)
 {
   /* definition and creation of HANDLEKEYTask */
   	PUMPBQueue_Init();
 	Kernel_TaskCreate(&PUMPBBehaviorHandle, PUMPBBehaviorTask);
-	Kernel_TaskStart(&PUMPBBehaviorHandle, KERNEL_TASK_ALWAYS, 100);
+	Kernel_TaskStart(&PUMPBBehaviorHandle, KERNEL_TASK_ALWAYS, PUMP_BEHAVIOR_TASK_PERIOD_MS);
 }

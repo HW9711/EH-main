@@ -180,19 +180,19 @@ static SoftUartChannelContext *SoftUart_GetChannel(sim_uart_channel_t channel)
 
 /*
  * 函数功能：按模拟串口通道取得对应的 A/B 泵公共状态结构。
- * 输入参数：channel 为压力模块模拟串口通道，SIM_UART_1 固定接 B 泵，SIM_UART_2 固定接 A 泵。
+ * 输入参数：channel 为压力模块模拟串口通道，当前线束要求 SIM_UART_1/PE4 接 A 泵压力传感器，SIM_UART_2/PE6 接 B 泵压力传感器。
  * 返回参数：有效通道返回对应 pumpMessage_t 指针，非法通道返回 NULL。
  */
 static pumpMessage_t *Cs1237_GetPumpMessageForChannel(sim_uart_channel_t channel)
 {
     if (channel == SIM_UART_1)
     {
-        return &pumpMessageB; /* SIM_UART_1 的 RX 是 PE4，现场固定接 B 泵压力传感器。 */
+        return &pumpMessageA; /* PE4 收到的是 A 泵压力帧，只修正压力数据归属，不改变 A 泵驱动串口。 */
     }
 
     if (channel == SIM_UART_2)
     {
-        return &pumpMessageA; /* SIM_UART_2 的 RX 是 PE6，现场固定接 A 泵压力传感器。 */
+        return &pumpMessageB; /* PE6 收到的是 B 泵压力帧，只修正压力数据归属，不改变 B 泵驱动串口。 */
     }
 
     return NULL; /* 非法通道不能写泵状态，避免越界访问公共状态。 */
@@ -220,11 +220,11 @@ static void Cs1237_RefreshPumpDisplayByChannel(sim_uart_channel_t channel)
 {
     if (channel == SIM_UART_1)
     {
-        Pubinterface_RefreshPumpBDisplay(); /* SIM_UART_1/PE4 固定对应 B 泵，只刷新右侧 B 泵显示。 */
+        Pubinterface_RefreshPumpADisplay(); /* PE4 对应 A 泵压力状态，在线/离线变化后只刷新左侧 A 泵显示。 */
     }
     else if (channel == SIM_UART_2)
     {
-        Pubinterface_RefreshPumpADisplay(); /* SIM_UART_2/PE6 固定对应 A 泵，只刷新左侧 A 泵显示。 */
+        Pubinterface_RefreshPumpBDisplay(); /* PE6 对应 B 泵压力状态，在线/离线变化后只刷新右侧 B 泵显示。 */
     }
 }
 

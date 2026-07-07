@@ -65,3 +65,11 @@
 3. EIDE 插件实际构建时优先使用 `EIDE/build/MainCtrlF413MXOs/builder.params`，因此最终验证必须覆盖这一路径，避免旧模块被 EIDE 生成清单重新带回编译。
 4. 清理旧状态模块时，尤其要确认 `handledata.c`、`param.c`、`warn.c`、`User/Data/data.c`、`UI_Main.c`、`UI_ModelConfiguration.c`、`UI_Password.c` 不再出现在 EIDE 和 Keil 的源文件清单中。
 5. 如果 EIDE 插件缓存或工程视图临时把上述旧模块重新加入构建，这些旧模块源文件也只能保留为空兼容文件，不能恢复任何 `SysRunData`、`SysSetParam`、`SysModelConfig`、`SysHandleData`、`SysInterface`、`SysFootPedalData`、`SysUIDisplayData` 读写。
+
+## 版本修改记录
+
+### 2026-07-07 泵排空与压力串口映射调整
+
+1. 相较上一版，A/B 泵行为任务周期统一为 25ms，注水泵屏幕排空统一为 10s、70 档业务速度，并按 25ms 周期累计 400 次结束。
+2. 相较上一版，排空模式不再使用 `(pump_speed * 0.02 + 2.1) * pump_speed` 的高转速公式，改为沿用注水泵 70 档的正常速度换算，避免排空实际转速明显偏大。
+3. 相较上一版，压力传感器模拟串口按当前线束映射为 A 泵使用 `SIM_UART_1/PE4`、B 泵使用 `SIM_UART_2/PE6`；该映射只影响 CS1237 压力数据写入 `pumpMessageA/B` 和屏幕 A/B 区刷新，不交换 A/B 泵驱动串口。

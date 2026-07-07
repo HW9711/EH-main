@@ -24,15 +24,25 @@ static void PumpTaskDelayMs(uint32_t delay_ms)
 	Kernel_DelayUntilMs(delay_ms);
 }
 
+/*
+ * 函数功能：取得旧 A 泵直接输出入口使用的逻辑压力状态。
+ * 输入参数：无。
+ * 返回参数：返回 pumpMessageA；模拟串口层已把 SIM_UART_1/PE4 的 A 泵压力帧写入该结构。
+ */
 static const pumpMessage_t *PumpLegacy_GetPressureSourceA(void)
 {
-	/* 固定读取 pumpMessageA；当前现场映射为 A 泵压力传感器接 SIM_UART_2/PE6。 */
+	/* 固定读取 pumpMessageA；当前压力线束映射为 A 泵压力传感器接 SIM_UART_1/PE4。 */
 	return &pumpMessageA;
 }
 
+/*
+ * 函数功能：取得旧 B 泵直接输出入口使用的逻辑压力状态。
+ * 输入参数：无。
+ * 返回参数：返回 pumpMessageB；模拟串口层已把 SIM_UART_2/PE6 的 B 泵压力帧写入该结构。
+ */
 static const pumpMessage_t *PumpLegacy_GetPressureSourceB(void)
 {
-	/* 固定读取 pumpMessageB；当前现场映射为 B 泵压力传感器接 SIM_UART_1/PE4。 */
+	/* 固定读取 pumpMessageB；当前压力线束映射为 B 泵压力传感器接 SIM_UART_2/PE6。 */
 	return &pumpMessageB;
 }
 

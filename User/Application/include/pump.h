@@ -23,6 +23,15 @@
 #define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
+/* PUMP_BEHAVIOR_TASK_PERIOD_MS 表示 A/B 泵行为任务统一调度周期，排空计时按该周期换算真实毫秒。 */
+#define PUMP_BEHAVIOR_TASK_PERIOD_MS 25U
+/* PUMP_TIMING_DRAINAGE_DURATION_MS 表示注水泵屏幕排空总时长，10000ms 对应现场要求的 10 秒。 */
+#define PUMP_TIMING_DRAINAGE_DURATION_MS 10000U
+/* PUMP_TIMING_DRAINAGE_SPEED 表示注水泵排空固定业务速度，A/B 泵必须使用同一个 70 档输出。 */
+#define PUMP_TIMING_DRAINAGE_SPEED 70U
+/* PUMP_TIMING_DRAINAGE_TICKS 表示 10 秒排空在 25ms 泵任务中的累计次数，当前结果为 400 次。 */
+#define PUMP_TIMING_DRAINAGE_TICKS (PUMP_TIMING_DRAINAGE_DURATION_MS / PUMP_BEHAVIOR_TASK_PERIOD_MS)
+
 extern uint8_t pum_close_flag_B; 
 extern uint8_t pum_close_flag_A; 
 //============================================================================

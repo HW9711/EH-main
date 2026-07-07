@@ -62,14 +62,14 @@ extern "C" {
 
 /* PUMP_PRESSURE_CONTROL_SOURCE_AUTO 仅保留旧宏值兼容，当前默认配置不再使用自动回退。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_AUTO 0U
-/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPA 表示闭环压力数据来自 pumpMessageA，也就是 SIM_UART_2/PE6 解析结果。 */
+/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPA 表示闭环压力数据来自 pumpMessageA；当前由 SIM_UART_1/PE4 解析结果写入该结构。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_PUMPA 1U
-/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPB 表示闭环压力数据来自 pumpMessageB，也就是 SIM_UART_1/PE4 解析结果。 */
+/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPB 表示闭环压力数据来自 pumpMessageB；当前由 SIM_UART_2/PE6 解析结果写入该结构。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_PUMPB 2U
 
 /*
  * PUMP_PRESSURE_CONTROL_A_SOURCE 用于记录 A 泵闭环压力源固定配置。
- * 现场线束已固定为 A 泵压力传感器接 PE6，因此 A 泵固定读取 pumpMessageA，不再自动回退。
+ * 当前压力线束为 A 泵压力传感器接 PE4，模拟串口层写入 pumpMessageA；泵驱动串口不参与该映射。
  */
 #ifndef PUMP_PRESSURE_CONTROL_A_SOURCE
 #define PUMP_PRESSURE_CONTROL_A_SOURCE PUMP_PRESSURE_CONTROL_SOURCE_PUMPA
@@ -77,7 +77,7 @@ extern "C" {
 
 /*
  * PUMP_PRESSURE_CONTROL_B_SOURCE 用于记录 B 泵闭环压力源固定配置。
- * 现场线束已固定为 B 泵压力传感器接 PE4，因此 B 泵固定读取 pumpMessageB，不再切换到 A 源。
+ * 当前压力线束为 B 泵压力传感器接 PE6，模拟串口层写入 pumpMessageB；泵驱动串口不参与该映射。
  */
 #ifndef PUMP_PRESSURE_CONTROL_B_SOURCE
 #define PUMP_PRESSURE_CONTROL_B_SOURCE PUMP_PRESSURE_CONTROL_SOURCE_PUMPB
