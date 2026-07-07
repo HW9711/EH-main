@@ -116,7 +116,7 @@ int main(void)
   MX_TIM10_Init();
   MX_TIM14_Init();
   /* USER CODE BEGIN 2 */
-  /* 初始化 Tracealyzer 记录器，尽量覆盖启动阶段的任务和同步对象创建事件。 */
+  /* 启动阶段默认关闭 Tracealyzer 记录器，后续需要抓调度日志时再临时打开。 */
   //Tracealyzer_RecorderInit();
 
   Hardware_PostInit();

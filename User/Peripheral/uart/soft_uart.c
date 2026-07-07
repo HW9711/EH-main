@@ -19,7 +19,7 @@
 #define SOFT_UART_DEFAULT_BAUDRATE     9600U
 #define SOFT_UART_TIMER_INSTANCE       TIM11
 #define SOFT_UART_TIMER_IRQn           TIM1_TRG_COM_TIM11_IRQn
-#define SOFT_UART_IRQ_PRIORITY         5U
+#define SOFT_UART_IRQ_PRIORITY         4U  /* 软串口位采样必须高于 FreeRTOS 临界区屏蔽阈值 5，避免 TIM11 采样被任务临界区延迟导致错帧。 */
 #define SOFT_UART_DIAG_LED             0
 
 #define CS1237_FRAME_LENGTH            21U
@@ -36,7 +36,8 @@
 #define CS1237_DEVICE_CODE_INJECT_WATER 0x00U  /* 0x00 表示注水泵，PUMPA/PUMPB 按注水方向和流量公式输出。 */
 #define CS1237_DEVICE_CODE_POUR_WATER   0x08U  /* 0x08 表示灌注泵，PUMPA/PUMPB 按灌注方向和流量公式输出。 */
 #define CS1237_DEVICE_CODE_DRAW_WATER   0x09U  /* 0x09 表示抽水泵，PUMPA/PUMPB 按抽水方向和流量公式输出。 */
-#define CS1237_PUMP_LOSS_TIMEOUT_MS     1500U  /* 压力模块正常持续上报，超过 1.5 秒无有效帧即按泵丢失处理并刷新 UI。 */
+#define CS1237_PUMP_LOSS_SUSPECT_MS     1500U  /* 超过 1.5 秒无有效帧先进入疑似丢失，避免单次软串口错帧立刻清在线状态。 */
+#define CS1237_PUMP_LOSS_CONFIRM_MS     3000U  /* 疑似丢失持续到 3 秒仍无有效帧才确认离线，兼顾拔泵响应和偶发错帧容错。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -124,6 +125,7 @@ static uint8_t s_tim7_ready = 0U;
 static uint8_t s_timer_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
 static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 记录每路最近一次有效帧时间，用于拔泵后无数据场景的离线判定。 */
+static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 记录每路首次进入疑似丢失的时间，用于连续确认后再清在线状态。 */
 
 /* 私有函数声明区：
  * 这些函数按“时基/硬件控制 -> 缓冲区 -> 状态机 -> 对外接口”的顺序组织。 */
@@ -521,19 +523,24 @@ static void SoftUart_RingPushFromIsr(sim_uart_channel_t channel, uint8_t data)
     ctx->received_bytes++;
 }
 
-/* 在任务上下文从 ISR 环形缓冲取出 1 字节。
- * 这里用临界区保护 head/tail/count，避免和中断并发修改。 */
+/*
+ * 函数功能：在任务上下文从 ISR 环形缓冲取出 1 字节。
+ * 输入参数：channel 为模拟串口通道；data 为输出字节指针。
+ * 返回参数：成功取到字节返回 true，无数据或参数无效返回 false。
+ */
 static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
     bool has_data = false;
+    uint32_t primask; /* 保存进入临界区前的全局中断状态，退出时按原状态恢复，避免破坏外层关中断状态。 */
 
     if ((ctx == NULL) || (data == NULL))
     {
         return false;
     }
 
-    taskENTER_CRITICAL();
+    primask = __get_PRIMASK(); /* 软串口 ISR 优先级高于 FreeRTOS 屏蔽阈值，BASEPRI 不能保护下面的环形缓冲共享索引。 */
+    __disable_irq(); /* 暂停所有中断，防止 TIM11 ISR 正在写 ring_count/head 时任务同时修改 tail/count。 */
     if (ctx->ring_count > 0U)
     {
         *data = ctx->ring_buffer[ctx->ring_tail];
@@ -541,7 +548,10 @@ static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
         ctx->ring_count--;
         has_data = true;
     }
-    taskEXIT_CRITICAL();
+    if (primask == 0U)
+    {
+        __enable_irq(); /* 只有进入前允许中断时才重新打开，避免破坏调用方已有的全局关中断保护。 */
+    }
 
     return has_data;
 }
@@ -667,6 +677,11 @@ static uint32_t Cs1237_ReadU32Le(const uint8_t *data)
            ((uint32_t)data[3] << 24U);
 }
 
+/*
+ * 函数功能：检查 21 字节 CS1237 压力帧的固定字段和 CRC 是否有效。
+ * 输入参数：frame 指向待检查的 21 字节候选帧。
+ * 返回参数：帧头、固定字段、帧尾和 CRC 全部通过时返回 true，否则返回 false。
+ */
 static bool Cs1237_FrameValid(const uint8_t *frame)
 {
     uint16_t frame_crc;
@@ -674,25 +689,25 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
 
     if ((frame[0] != CS1237_HEADER_0) || (frame[1] != CS1237_HEADER_1))
     {
-        return false;
+        return false; /* 帧头不匹配时不能作为压力帧处理，避免错位数据刷新泵在线状态。 */
     }
 
     if ((frame[2] != CS1237_PROTOCOL_VER) ||
         (frame[3] != CS1237_MSG_TYPE_REPORT) ||
         (frame[4] != CS1237_PAYLOAD_LENGTH))
     {
-        return false;
+        return false; /* 固定协议字段不符合当前压力上报格式，不能写入业务泵状态。 */
     }
 
     if ((frame[19] != CS1237_TAIL_0) || (frame[20] != CS1237_TAIL_1))
     {
-        return false;
+        return false; /* 帧尾不匹配时说明候选窗口不完整，保持上一帧有效在线状态。 */
     }
 
     frame_crc = Cs1237_ReadU16Le(&frame[CS1237_CRC_OFFSET]);
     calc_crc = Cs1237_CalcCrc16Modbus(&frame[2], CS1237_CRC_LENGTH);
 
-    return frame_crc == calc_crc;
+    return frame_crc == calc_crc; /* CRC 通过才允许刷新泵数据，避免单字节错误污染在线和压力状态。 */
 }
 
 /*
@@ -743,6 +758,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     }
 
     s_cs1237_last_valid_tick[(uint32_t)channel] = now_tick; /* 有效帧到达即刷新保活时间，供拔泵无数据超时判定使用。 */
+    s_cs1237_loss_suspect_tick[(uint32_t)channel] = 0U; /* 有效帧恢复说明通信链路重新可信，清掉之前的疑似丢失等待状态。 */
 
     taskENTER_CRITICAL();
     old_pump_type = pump_message->type; /* 记录本帧前的业务泵类型，只在识别变化时刷新屏幕，避免每帧压满 UIDP 队列。 */
@@ -799,7 +815,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
 }
 
 /*
- * 函数功能：周期检查 CS1237 有效帧超时，处理拔泵后不再上报任何数据的离线状态。
+ * 函数功能：周期检查 CS1237 有效帧超时，先标记疑似丢失，连续确认后再处理拔泵离线状态。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -812,6 +828,8 @@ static void Cs1237_ServicePumpLossTimeout(void)
         sim_uart_channel_t channel = (sim_uart_channel_t)i;
         pumpMessage_t *pump_message = Cs1237_GetPumpMessageForChannel(channel);
         bool loss_confirmed = false;
+        uint32_t loss_age_ms; /* 当前距离最近一次有效压力帧的时间，用于区分正常间隔、疑似丢失和确认离线。 */
+        uint32_t suspect_age_ms; /* 当前疑似丢失已经持续的时间，用于避免一次错帧就清在线状态。 */
 
         if (pump_message == NULL)
         {
@@ -820,17 +838,32 @@ static void Cs1237_ServicePumpLossTimeout(void)
 
         if (pump_message->online_flag == false)
         {
+            s_cs1237_loss_suspect_tick[i] = 0U; /* 已经离线时没有疑似等待意义，清状态避免下次接入继承旧时间。 */
             continue; /* 已经离线的泵不重复蜂鸣，避免拔泵后每个周期都提示。 */
         }
 
-        if ((uint32_t)(now_tick - s_cs1237_last_valid_tick[i]) <= CS1237_PUMP_LOSS_TIMEOUT_MS)
+        loss_age_ms = (uint32_t)(now_tick - s_cs1237_last_valid_tick[i]); /* 用无符号差值兼容 HAL tick 回绕。 */
+        if (loss_age_ms <= CS1237_PUMP_LOSS_SUSPECT_MS)
         {
+            s_cs1237_loss_suspect_tick[i] = 0U; /* 有效帧间隔仍在正常窗口内，清掉可能存在的疑似丢失状态。 */
             continue; /* 最近仍收到有效帧，保持当前在线状态和运行状态不变。 */
+        }
+
+        if (s_cs1237_loss_suspect_tick[i] == 0U)
+        {
+            s_cs1237_loss_suspect_tick[i] = now_tick; /* 首次超过 1.5 秒只记录疑似时间，不立刻清在线状态。 */
+        }
+
+        suspect_age_ms = (uint32_t)(now_tick - s_cs1237_loss_suspect_tick[i]); /* 计算疑似丢失连续持续了多久。 */
+        if ((loss_age_ms <= CS1237_PUMP_LOSS_CONFIRM_MS) &&
+            (suspect_age_ms <= (CS1237_PUMP_LOSS_CONFIRM_MS - CS1237_PUMP_LOSS_SUSPECT_MS)))
+        {
+            continue; /* 尚未达到确认离线窗口，继续保持在线状态，避免屏幕周期性闪离线。 */
         }
 
         taskENTER_CRITICAL();
         if ((pump_message->online_flag != false) &&
-            ((uint32_t)(now_tick - s_cs1237_last_valid_tick[i]) > CS1237_PUMP_LOSS_TIMEOUT_MS))
+            ((uint32_t)(now_tick - s_cs1237_last_valid_tick[i]) > CS1237_PUMP_LOSS_CONFIRM_MS))
         {
             pump_message->online_flag = false; /* 超时确认泵丢失，屏幕和外部通信后续都读到离线。 */
             pump_message->type = 0U; /* 清业务泵类型，避免屏幕或控制路径沿用旧类型继续允许启动。 */
@@ -843,6 +876,7 @@ static void Cs1237_ServicePumpLossTimeout(void)
             {
                 pump_message->losses_times++; /* 记录一次超时丢失，饱和保护避免长时间运行后溢出回零。 */
             }
+            s_cs1237_loss_suspect_tick[i] = 0U; /* 已经确认离线并清业务状态，疑似阶段结束，等待下一次有效接入重新开始。 */
             loss_confirmed = true; /* 标记本周期刚发生在线到离线边沿，后续只响一次并刷新 UI。 */
         }
         taskEXIT_CRITICAL();
@@ -1194,10 +1228,15 @@ uint32_t SimUart_GetPendingBytes(sim_uart_channel_t channel)
     return (uint32_t)uxQueueMessagesWaiting(ctx->queue_handle);
 }
 
-/* 读取统计信息快照，供诊断或调试界面使用。 */
+/*
+ * 函数功能：读取指定模拟串口通道的统计信息快照，供诊断或调试界面使用。
+ * 输入参数：channel 为模拟串口通道；stats 为统计快照输出结构体指针。
+ * 返回参数：无。
+ */
 void SimUart_GetStats(sim_uart_channel_t channel, SimUartStats *stats)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
+    uint32_t primask; /* 统计字段由高优先级软串口 ISR 更新，读取快照时需要用 PRIMASK 保证字段组合一致。 */
 
     if (!s_initialized)
     {
@@ -1209,13 +1248,17 @@ void SimUart_GetStats(sim_uart_channel_t channel, SimUartStats *stats)
         return;
     }
 
-    taskENTER_CRITICAL();
+    primask = __get_PRIMASK(); /* 软串口 IRQ 提升到 4 后不会被 FreeRTOS 临界区屏蔽，这里改用全局中断屏蔽。 */
+    __disable_irq(); /* 暂停 TIM11/EXTI 写统计计数，避免读到一半时计数被 ISR 更新。 */
     stats->received_bytes = ctx->received_bytes;
     stats->queue_overflow_count = ctx->queue_overflow_count;
     stats->buffer_overflow_count = ctx->buffer_overflow_count;
     stats->overlap_drop_count = ctx->overlap_drop_count;
     stats->framing_error_count = ctx->framing_error_count;
-    taskEXIT_CRITICAL();
+    if (primask == 0U)
+    {
+        __enable_irq(); /* 进入快照前中断是打开状态才恢复，保持嵌套调用时的原始中断状态。 */
+    }
 }
 
 /* 以下几个快捷函数用于读取单项统计值。 */
