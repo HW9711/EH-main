@@ -4,7 +4,9 @@
 
 #include "at24cs32.h"
 #include "bsp_uart.h"
+#include "eeprom.h"
 #include "kernel_scheduler.h"
+#include "mainboard_software_version.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
 #include "sscDRIVE.h"
@@ -65,6 +67,7 @@
 #define EXTERNAL_COMM_DOWN_READ_NAV_PAGE    0x08U   /* 下行命令：读取导航 EEPROM 单页数据。 */
 #define EXTERNAL_COMM_DOWN_READ_NAV_ALL     0x09U   /* 下行命令：读取导航整区数据，V1 禁用。 */
 #define EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE   0x0AU   /* 下行命令：写入导航 EEPROM 单页数据。 */
+#define EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION 0x0BU /* 下行命令：读取主控板 AT24C32 Page1 软件版本记录。 */
 #define EXTERNAL_COMM_DOWN_HOST_EXIT        0xBBU   /* 下行命令：上位机主动退出外部控制，释放互斥控制权。 */
 #define EXTERNAL_COMM_DOWN_PERMISSION       0xFAU   /* 下行命令：功能升级或权限开放。 */
 
@@ -1498,6 +1501,39 @@ static void ExternalComm_WriteNavPage(const ExternalCommFrame_t *frame)
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, &frame->area_code, 1U);
 }
 
+/*
+ * 函数功能：读取主控板 AT24C32 Page1 中的软件版本记录并上传给上位机。
+ * 输入参数：frame 为外部设备下发的 0x0B 读取命令。
+ * 返回参数：无。
+ */
+static void ExternalComm_ReadSoftwareVersion(const ExternalCommFrame_t *frame)
+{
+    uint8_t payload[MAINBOARD_SW_VERSION_PAYLOAD_SIZE]; /* byte0 为读取/校验状态，byte1~32 为主控板 EEPROM Page1 原始记录。 */
+    uint16_t payload_len = 0U; /* 实际上传载荷长度，当前固定为 33 字节。 */
+
+    if ((frame->area_code != EXTERNAL_COMM_AREA_NONE) || (frame->info_len != 0U))
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                 frame->fun_code,
+                                 EXTERNAL_COMM_REASON_BAD_LENGTH); /* 软件版本读取不接受 AreaCode 和 InforArea，防止误当 EEPROM 页命令。 */
+        return;
+    }
+
+    if (MainboardSoftwareVersion_ReadPayload(payload, sizeof(payload), &payload_len) == 0U)
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                 frame->fun_code,
+                                 EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 本地组包参数异常时返回设备失败，避免发送空版本帧。 */
+        return;
+    }
+
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_SOFTWARE_VERSION,
+                           EXTERNAL_COMM_AREA_NONE,
+                           EXTERNAL_COMM_INFO_NONE,
+                           payload,
+                           payload_len); /* 上传主控软件版本记录；状态非 0 时上位机显示具体 EEPROM/Page1 问题。 */
+}
+
 static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
 {
     /* V1 只处理外部设备下发帧，忽略本机上传帧或其他方向码。 */
@@ -1541,6 +1577,10 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
         case EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE:
             /* 写入导航 EEPROM 单页。 */
             ExternalComm_WriteNavPage(frame);
+            break;
+        case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
+            /* 读取主控板 AT24C32 Page1 软件版本记录。 */
+            ExternalComm_ReadSoftwareVersion(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_ALL:
         case EXTERNAL_COMM_DOWN_READ_NAV_ALL:

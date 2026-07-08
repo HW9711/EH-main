@@ -450,7 +450,7 @@ void Pubinterface_UpdatePumpAOutputSpeed(uint16_t output_speed); /* A 泵任务�
 void Pubinterface_UpdatePumpBOutputSpeed(uint16_t output_speed); /* B 泵任务发布压力闭环后的实际输出速度，并在变化时刷新右侧泵显示。 */
 void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
-uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
+uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
 void Pubinterface_SetHandleInjectionPumpRun(bool enable);
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵、蜂鸣并显示 89 号弹窗；注水冷却时再停手柄。 */
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */

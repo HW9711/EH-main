@@ -19,6 +19,7 @@ extern "C" {
 #define EXTERNAL_COMM_FUNC_EEPROM_UPLOAD   0x01U  /* 上传 EEPROM 单页有效数据。 */
 #define EXTERNAL_COMM_FUNC_HOST_SETTING    0x02U  /* 预留：上传主机设置内容。 */
 #define EXTERNAL_COMM_FUNC_HOST_RUNNING    0x03U  /* 预留：上传主机运行内容。 */
+#define EXTERNAL_COMM_FUNC_SOFTWARE_VERSION 0x0BU /* 上传主控板 AT24C32 保存的软件版本记录。 */
 #define EXTERNAL_COMM_FUNC_HEARTBEAT       0xAAU  /* 周期上传外部通信心跳。 */
 #define EXTERNAL_COMM_FUNC_HOST_EXIT       0xBBU  /* 预留：上传主机主动退出外部控制。 */
 #define EXTERNAL_COMM_FUNC_PLUG_SWITCH     0xCCU  /* 预留：上传接插切换内容。 */

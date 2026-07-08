@@ -1644,7 +1644,7 @@ static uint16_t Pubinterface_GetPumpSpeedMin(const pumpMessage_t *pump_message)
  * 输入参数：无，函数内部读取 WorkMessage.channel_work 和 WorkMessage.dir_work。
  * 返回参数：当前方向默认速度，单位沿用 WorkMessage.speed_set_work 的实际 rpm；无有效通道时返回 0。
  */
-uint16_t Pubinterface_GetCurrentDefaultMotorSpeed(void)
+uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void)
 {
 	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前工作通道记忆结构，后续按方向读取该通道 Page4 默认速度。 */
 

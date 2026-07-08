@@ -610,7 +610,7 @@ static void Rfid_InitModuleOnChannel(uint8_t channel)
     Rfid_SendPacketForChannel(channel, pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 按通道发送发射功率配置，保证 A/B 模块功率一致。 */
     Delay_ms(50); /* 等待 RFID 模块处理功率命令，避免连续命令粘连。 */
 
-    Rfid_SendPacketForChannel(channel, region_set_us, (uint16_t)sizeof(region_set_us)); /* 按通道发送区域配置，保持原工程默认频段。 */
+    Rfid_SendPacketForChannel(channel, region_set_CHAIN, (uint16_t)sizeof(region_set_CHAIN)); /* 按通道发送区域配置，保持原工程默认频段。 */
     Delay_ms(50); /* 等待 RFID 模块处理区域命令，避免下一条跳频命令被吞掉。 */
 
     Rfid_SendPacketForChannel(channel, hop_ch, (uint16_t)sizeof(hop_ch)); /* 按通道发送跳频配置，保持原射频初始化行为。 */

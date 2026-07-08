@@ -87,7 +87,12 @@ virtualFolder:
             - path: ../User/Peripheral/flash/flash.c
             - path: ../User/Peripheral/iwdg/iwdg.c
             - path: ../User/Peripheral/lcd/lcd.c
-          folders: []
+          folders:
+            - name: Mainboard Software Version
+              files:
+                - path: ../User/Peripheral/EEPROM/mainboard_software_version.c
+                - path: ../User/Peripheral/include/mainboard_software_version.h
+              folders: []
         - name: CMSIS
           files:
             - path: ../Src/system_stm32f4xx.c
@@ -332,7 +337,7 @@ targets:
               isChecked: true
               isStartup: true
               mem:
-                size: "0x100000"
+                size: "0x40000"
                 startAddr: "0x8000000"
               tag: IROM
             - id: 2

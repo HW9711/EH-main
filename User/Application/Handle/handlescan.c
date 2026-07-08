@@ -112,6 +112,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_INFO_PAGE_INDEX    3U
 #define HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET 0U
 #define HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET 2U
+#define HANDLESCAN_INITIAL_DEFAULT_SPEED_HIGH_OFFSET 20U /* Page4[20] 保存默认速度高8位，用于和[2-3]组合成24位默认速度。 */
 #define HANDLESCAN_INITIAL_MIN_SPEED_OFFSET   4U
 #define HANDLESCAN_INITIAL_MAX_SPEED_OFFSET   6U
 #define HANDLESCAN_INITIAL_MAX_SPEED_HIGH_OFFSET 19U /* Page4[19] 保存最大速度高8位，用于和[6-7]组合成24位速度上限。 */
@@ -1453,13 +1454,25 @@ static uint16_t Handlescan_ReadUint16LE(const uint8_t *buffer, uint32_t offset)
 /*
  * 函数功能：按 Page4 扩展格式读取 24 位最大速度。
  * 输入参数：buffer 指向已通过页校验的 Page4 缓存。
- * 返回参数：最大速度，单位沿用 EEPROM x10。
+ * 返回参数：最大速度，单位为实际 rpm。
  */
 static uint32_t Handlescan_ReadPage4MaxSpeed(const uint8_t *buffer)
 {
     uint32_t max_speed = Handlescan_ReadUint16LE(buffer, HANDLESCAN_INITIAL_MAX_SPEED_OFFSET); /* 读取 Page4[6-7] 的低16位最大速度，兼容旧 EEPROM。 */
     max_speed |= ((uint32_t)buffer[HANDLESCAN_INITIAL_MAX_SPEED_HIGH_OFFSET] << 16); /* Page4[19] 是新增高8位，旧数据为0时仍保持原16位解析。 */
     return max_speed; /* 返回组合后的24位速度上限，供通道记忆、屏幕调速和默认速度钳位共用。 */
+}
+
+/*
+ * 函数功能：按 Page4 扩展格式读取 24 位默认速度。
+ * 输入参数：buffer 指向已通过页校验的 Page4 缓存。
+ * 返回参数：默认速度，单位为实际 rpm。
+ */
+static uint32_t Handlescan_ReadPage4DefaultSpeed(const uint8_t *buffer)
+{
+    uint32_t default_speed = Handlescan_ReadUint16LE(buffer, HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET); /* 读取 Page4[2-3] 的低16位默认速度，兼容旧 EEPROM。 */
+    default_speed |= ((uint32_t)buffer[HANDLESCAN_INITIAL_DEFAULT_SPEED_HIGH_OFFSET] << 16); /* Page4[20] 是默认速度高8位，旧数据为0时仍按16位默认速度解析。 */
+    return default_speed; /* 返回组合后的24位默认速度，供上线初始速度和脚踏默认最大值共用。 */
 }
 
 /*
@@ -1544,7 +1557,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
         return;                                              /* 防御空指针，避免异常插拔路径破坏通道识别结构。 */
     }
 
-    default_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_SPEED_OFFSET); /* 读取 Page4 默认速度，小端实际 rpm。 */
+    default_speed = Handlescan_ReadPage4DefaultSpeed(initial_info_buf); /* 读取 Page4 24位默认速度，支持 120000 这类超过16位的默认值。 */
     min_speed = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_MIN_SPEED_OFFSET); /* 读取 Page4 最小速度，小端实际 rpm。 */
     max_speed = Handlescan_ReadPage4MaxSpeed(initial_info_buf); /* 读取 Page4 24位最大速度，支持 70000 这类超过16位的上限。 */
     if (max_speed < min_speed)

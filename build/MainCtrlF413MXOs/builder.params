@@ -11,7 +11,7 @@
     "dumpPath": "build\\MainCtrlF413MXOs",
     "outDir": "build\\MainCtrlF413MXOs",
     "ram": 327680,
-    "rom": 1048576,
+    "rom": 262144,
     "incDirs": [
         "../Inc",
         "../Drivers/STM32F4xx_HAL_Driver/Inc",
@@ -120,6 +120,7 @@
         "../User/Peripheral/EEPROM/at24cs32.c",
         "../User/Peripheral/EEPROM/at24cs32_crc_verify.c",
         "../User/Peripheral/EEPROM/eeprom.c",
+        "../User/Peripheral/EEPROM/mainboard_software_version.c",
         "../User/Peripheral/bus/OneWireI.c",
         "../User/Peripheral/bus/OneWireII.c",
         "../User/Peripheral/bus/i2c.c",

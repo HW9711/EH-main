@@ -5,6 +5,7 @@
 #include "sysrunled.h"
 #include "delay.h"
 #include "eeprom.h"
+#include "mainboard_software_version.h"
 #include "bsp_board.h"
 #include "board_profile.h"
 #include "hw_bootstrap.h"
@@ -60,6 +61,11 @@ static void Userparser_PubinterfaceInit(void)
   ChannelFlagMessageInit();
 }
 
+/*
+ * 函数功能：完成主控业务启动初始化，依次初始化 GPIO、IIC、UART、公共状态和各周期任务。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void Userparser_Init(void)
 {
   Iwdg_Reset();
@@ -69,6 +75,7 @@ void Userparser_Init(void)
 
   //2.IIC、1-@Wire
   EEPROM_AT24CXX_Init();
+  (void)MainboardSoftwareVersion_Sync();  //主控板 AT24C32 Page1 只保存软件版本；同步失败不阻塞原有主控启动流程
 
   //3.UART
   Uart1_Init();  //无刷
@@ -97,8 +104,8 @@ void Userparser_Init(void)
   Delay_ms(500);
 	Iwdg_Reset();
 	Delay_ms(500);
-  	Delay_ms(500);
-    	Delay_ms(500);
+  Delay_ms(500);
+  Delay_ms(500);
   Userparser_PubinterfaceInit();
 	SscRadioFreq_Init();  //150ms射频初始化...串口3
   Iwdg_Reset();
