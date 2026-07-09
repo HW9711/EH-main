@@ -157,13 +157,7 @@
 #define HMIkey_HMI_EXIT 38U//外部控制 20个按键值如上
 #define  HMIkey_JTActi 64U///脚控激活
 #define  HMIkey_HandleActi 65U///手控激活
-// #define  HMIkey_TouchActi 66U///触控激活
-// #define  HMIkey_TouchStart 67U///触控开始
 
-// #define  HMIkey_Gently_left_start 68//轻排开始
-// #define  HMIkey_Gently_left_stop 69//轻排停止
-// #define  HMIkey_Gently_right_start 70//轻排开始
-// #define  HMIkey_Gently_rigth_stop 71//轻排停止
 #define  HMIkey_Gently_start 68U
 #define  HMIkey_Gently_stop 69U
 #define  HMIkey_TouchEXIT 72U///触控退出

@@ -74,10 +74,10 @@ static uint16_t PUMPA_ApplyPressureClosedLoopRaw(uint16_t pump_speed, uint8_t *p
 	const pumpMessage_t *pressure_source = PUMPA_GetPressureSource();
 	/* weight_x10 先从 volatile 结构体读到局部变量，保证一次闭环计算使用同一份重量数据。 */
 	uint32_t weight_x10 = pressure_source->weight_x10;
-	/* threshold_g 先从 volatile 结构体读到局部变量，保证限速比例和停止点来自同一帧阈值。 */
+	/* threshold_g 先从 volatile 结构体读到局部变量，只作为压力帧有效性门禁；停止点改由 STOP 宏表按泵速查询。 */
 	uint16_t threshold_g = pressure_source->pressure_threshold;
 	/* force_stop 保存本次是否已经进入压力硬停区，返回给调用方后用于决定本周期是否暂停输出。 */
-	uint8_t force_stop = PumpPressureControl_ShouldForceStop(weight_x10, threshold_g);
+	uint8_t force_stop = PumpPressureControl_ShouldForceStop(pump_speed, weight_x10, threshold_g);
 	/* protected_speed 保存压力闭环限速后的目标泵速，最终会再换算成 UART5 速度字段。 */
 	uint16_t protected_speed = PumpPressureControl_Apply(pump_speed, weight_x10, threshold_g);
 

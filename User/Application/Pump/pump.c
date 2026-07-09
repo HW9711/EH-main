@@ -54,7 +54,7 @@ static uint32_t PumpLegacy_ApplyPressureLimit(pumpMessage_t *runtime_msg,
 	uint16_t protected_value;
 	/* weight_x10 从压力源拷贝到局部变量，保证本次限速比较使用同一次读取结果。 */
 	uint32_t weight_x10;
-	/* threshold_g 从压力源拷贝到局部变量，和 weight_x10 一起组成当前闭环判断条件。 */
+	/* threshold_g 从压力源拷贝到局部变量，只作为压力帧有效性门禁；硬停点由 STOP 宏表按 protected_value 查询。 */
 	uint16_t threshold_g;
 	/* force_stop 为 1 表示压力超过硬停倍率，需要把本次输出压到 0。 */
 	uint8_t force_stop;
@@ -78,8 +78,8 @@ static uint32_t PumpLegacy_ApplyPressureLimit(pumpMessage_t *runtime_msg,
 	weight_x10 = pressure_source->weight_x10;
 	/* 读取当前压力阈值，单位 g，来自压力模块上报的 ThresholdG。 */
 	threshold_g = pressure_source->pressure_threshold;
-	/* 判断是否已经进入宏配置硬停倍率的停泵区间。 */
-	force_stop = PumpPressureControl_ShouldForceStop(weight_x10, threshold_g);
+	/* 判断是否已经进入 STOP 宏表配置的停泵区间，旧直连入口也必须按当前输出速度取停止点。 */
+	force_stop = PumpPressureControl_ShouldForceStop(protected_value, weight_x10, threshold_g);
 	/* 对旧的直接输出值同样做线性限速，避免旧 UI/参数路径绕过 sscPUMPA/sscPUMPB。 */
 	protected_value = PumpPressureControl_Apply(protected_value, weight_x10, threshold_g);
 

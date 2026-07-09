@@ -74,13 +74,13 @@ static uint16_t PUMPB_ApplyPressureClosedLoopRaw(uint16_t pump_speed, uint8_t *p
 	const pumpMessage_t *pressure_source = PUMPB_GetPressureSource();
 	/* weight_x10 先从 volatile 结构体读到局部变量，避免计算过程中多字节字段被中途刷新。 */
 	uint32_t weight_x10 = pressure_source->weight_x10;
-	/* threshold_g 先从 volatile 结构体读到局部变量，和本次 weight_x10 一起参与同一次闭环计算。 */
+	/* threshold_g 先从 volatile 结构体读到局部变量，只作为压力帧有效性门禁；停止点由 STOP 宏表按泵速计算。 */
 	uint16_t threshold_g = pressure_source->pressure_threshold;
 
 	if (pressure_force_stop != NULL)
 	{
 		/* pressure_force_stop 返回 1 时表示已经超过压力硬停阈值，调用方必须把本周期输出压到 0。 */
-		*pressure_force_stop = PumpPressureControl_ShouldForceStop(weight_x10, threshold_g);
+		*pressure_force_stop = PumpPressureControl_ShouldForceStop(pump_speed, weight_x10, threshold_g);
 	}
 
 	/* 调用公共闭环算法：阈值以下不降速，限速点到停泵点之间线性降速，达到停泵阈值输出 0。 */

@@ -35,9 +35,9 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 300U
 
 /* PUMP_PRESSURE_CONTROL_REDUCE_50_G 表示 50 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_50_G 250U
+#define PUMP_PRESSURE_CONTROL_REDUCE_50_G 450U
 /* PUMP_PRESSURE_CONTROL_REDUCE_110_G 表示 110 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_110_G 500U
+#define PUMP_PRESSURE_CONTROL_REDUCE_110_G 450U
 /* PUMP_PRESSURE_CONTROL_REDUCE_140_G 表示 140 ml/min 开始限速的压力，单位 g。 */
 #define PUMP_PRESSURE_CONTROL_REDUCE_140_G 450U
 /* PUMP_PRESSURE_CONTROL_REDUCE_200_G 表示 200 ml/min 开始限速的压力，单位 g。 */
@@ -48,9 +48,9 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_REDUCE_300_G 450U
 
 /* PUMP_PRESSURE_CONTROL_STOP_50_G 表示 50 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_50_G 280U
+#define PUMP_PRESSURE_CONTROL_STOP_50_G 500U
 /* PUMP_PRESSURE_CONTROL_STOP_110_G 表示 110 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_110_G 6000U
+#define PUMP_PRESSURE_CONTROL_STOP_110_G 500U
 /* PUMP_PRESSURE_CONTROL_STOP_140_G 表示 140 ml/min 输出压到 0 的压力，单位 g。 */
 #define PUMP_PRESSURE_CONTROL_STOP_140_G 500U
 /* PUMP_PRESSURE_CONTROL_STOP_200_G 表示 200 ml/min 输出压到 0 的压力，单位 g。 */
@@ -84,22 +84,22 @@ extern "C" {
 #endif
 
 /*
- * PumpPressureControl_Apply 根据压力模块阈值和当前泵速限速或停泵。
- * target_speed 是上层业务原本准备输出的泵速；weight_x10 是压力模块换算重量 0.1g；threshold_g 是压力模块报警阈值，达到 threshold_g*10 时主控必须同步停泵。
+ * PumpPressureControl_Apply 根据当前泵速查询 REDUCE/STOP 宏表限速或停泵。
+ * target_speed 是上层业务原本准备输出的泵速；weight_x10 是压力模块换算重量 0.1g；threshold_g 仅用于判断压力模块阈值字段是否有效，实际停泵点来自 PUMP_PRESSURE_CONTROL_STOP_xx_G。
  */
 uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
 
 /*
- * PumpPressureControl_IsPressureStopReached 判断当前压力是否已经达到压力模块上报的停泵阈值。
- * target_speed 是本周期准备输出的泵速，用于过滤 0 速请求；weight_x10 是压力模块上报 0.1g 单位重量；threshold_g 是压力模块报警阈值。
+ * PumpPressureControl_IsPressureStopReached 判断当前压力是否已经达到当前泵速对应的 STOP 宏表停泵阈值。
+ * target_speed 是本周期准备输出的泵速，用于查询停泵表并过滤 0 速请求；weight_x10 是压力模块上报 0.1g 单位重量；threshold_g 仅用于判断压力帧是否有效。
  */
 uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
 
 /*
- * PumpPressureControl_ShouldForceStop 判断旧直连泵入口是否已经到达压力模块硬停阈值。
- * 该接口没有泵速参数，因此直接使用 threshold_g*10 硬停，防止绕过 A/B 泵任务时继续转泵。
+ * PumpPressureControl_ShouldForceStop 判断当前泵速是否已经到达 STOP 宏表硬停阈值。
+ * target_speed 用于查询 PUMP_PRESSURE_CONTROL_STOP_xx_G 停泵表；threshold_g 只作为压力模块有效帧门禁，防止无效阈值时误停泵。
  */
-uint8_t PumpPressureControl_ShouldForceStop(uint32_t weight_x10, uint16_t threshold_g);
+uint8_t PumpPressureControl_ShouldForceStop(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
 
 #ifdef __cplusplus
 }

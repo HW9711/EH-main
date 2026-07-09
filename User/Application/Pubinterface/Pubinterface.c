@@ -862,7 +862,7 @@ void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_fl
 /*
  * 函数功能：取得屏幕和上位机需要显示的泵速度。
  * 输入参数：pump_message 当前泵状态指针。
- * 返回参数：运行态返回压力闭环后的实际输出速度，停止态返回 speed_work 设定速度。
+ * 返回参数：运行/排空态返回压力闭环后的实际输出速度，停止态返回 speed_work 设定速度。
  */
 uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message)
 {
@@ -871,17 +871,12 @@ uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message)
 		return 0U; /* 防御空指针调用，显示 0 并避免心跳或屏幕刷新越界读取。 */
 	}
 
-	if (pump_message->pressure_hold_flag == true)
-	{
-		return pump_message->speed_output; /* 压力保持停泵期间必须显示实际输出值，安全停机清掉 run_flag 后也不能回退显示设定流量。 */
-	}
-
 	if (pump_message->run_flag || pump_message->timingDrainage_flag)
 	{
-		return pump_message->speed_output; /* 泵正在输出时显示闭环修正后的真实业务速度，避免高压限速后仍显示旧设定值。 */
+		return pump_message->speed_output; /* 泵仍处于运行或排空请求时显示闭环后的真实输出，压力限速过程可以实时显示降速结果。 */
 	}
 
-	return pump_message->speed_work; /* 泵停止时保留设定速度显示，避免修改待机调速和再次启动的用户体验。 */
+	return pump_message->speed_work; /* 泵已经停止时回到设定速度显示；压力锁止只限制再次启动，不应把待机数值长期保持为 0。 */
 }
 
 /*
@@ -979,6 +974,11 @@ static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	uint8_t display_value[10] = {0U}; /* 所有 UI 消息都使用 10 字节缓冲，保持 UIDP 队列拷贝格式稳定。 */
 	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* 只有归一后的 PLANER 才按刨刀能力显示往复相关入口。 */
 	bool osc_supported = Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向同时看手柄硬件和刨刀能力，普通手柄或磨头刀具都不误亮往复。 */
+	bool osc_display_retained = ((osc_supported == false) &&
+								 (Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model) == true) &&
+								 (WorkMessage.tool_type == 0U) &&
+								 (WorkMessage.dir_work == OSCDIR)); /* PXBA/PXBB 拔掉 RFID 刀具后会清当前刀具类型，但保留上次往复方向；显示层需要继续点亮往复图标来匹配实际运行状态。 */
+	bool osc_display_available = (osc_supported || osc_display_retained); /* 正常有刨刀时按能力开放往复；无刀具但方向已保留为往复时只恢复显示，不改变按键切入往复的安全门槛。 */
 	bool foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 切通道刷新时脚踏图标也按实际在线状态显示。 */
 	bool external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控占用时内部驱动方式也可能是 TOUCHWORK，但屏幕不能显示为触控。 */
 	bool handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 切换 A/B 后也按当前手柄型号决定手控是否可用，LGZI 同样允许手控入口。 */
@@ -1003,9 +1003,9 @@ static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	SendUIDSMessage(UI_CONTROL_ID, touch_control_available, display_value); /* 切通道时也保持触控白色可选，外控占用时才置灰。 */
 	Pubinterface_RefreshToolDisplay(channel, planer_selected); /* 所有通道都刷新刀具区；普通手柄会主动隐藏 RFID 区，避免 A/B 切换残留。 */
 
-	if (osc_supported)
+	if (osc_display_available)
 	{
-		Pubinterface_SendDirectionDisplay(3U, true, (WorkMessage.dir_work == OSCDIR)); /* 当前手柄支持往复时开放往复按钮，按当前方向决定是否选中。 */
+		Pubinterface_SendDirectionDisplay(3U, true, (WorkMessage.dir_work == OSCDIR)); /* 当前可切入往复或已保留往复显示时点亮往复按钮，避免无刀具保留 OSCDIR 时图标变黑。 */
 	}
 	else
 	{
@@ -1014,11 +1014,11 @@ static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	Pubinterface_SendDirectionDisplay(1U, true, (WorkMessage.dir_work == ZZDIR)); /* 正转按钮始终可显示，选中状态跟随当前通道方向。 */
 	Pubinterface_SendDirectionDisplay(2U, true, (WorkMessage.dir_work == FZDIR)); /* 反转按钮始终可显示，选中状态跟随当前通道方向。 */
 
-	if (osc_supported && (WorkMessage.dir_work == OSCDIR))
+	if (osc_display_available && (WorkMessage.dir_work == OSCDIR))
 	{
 		display_value[0] = (uint8_t)WorkMessage.freq_work; /* 往复方向下显示当前通道频率值，频率范围已在识别/按键逻辑限制。 */
 		display_value[1] = 0U; /* 0 表示刷新静态值，运行中字体颜色仍由速度/运行消息单独控制。 */
-		SendUIDSMessage(UI_FREQ_ID, true, display_value); /* 手柄支持往复且已切到往复时打开频率窗口，匹配屏幕刷新流程。 */
+		SendUIDSMessage(UI_FREQ_ID, true, display_value); /* 往复可用或拔刀后保留往复时打开频率窗口，保证图标、频率和实际 OSCDIR 状态一致。 */
 	}
 	else
 	{
@@ -1968,18 +1968,22 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	if (Pubinterface_IsHandleControlReservedModel(memory->hand_model))
 	{
 		ControlSignalMessage.HMI_enable_flag = true;			  /* 带手控入口手柄上线后打开手控可用显示，实体键是否能启动由 handlekey 按型号再判断。 */
-		if ((WorkMessage.drivetype_work == TOUCHWORK) || (WorkMessage.drivetype_work == JTWORK))
+		if ((WorkMessage.drivetype_work == TOUCHWORK) ||
+			(WorkMessage.drivetype_work == JTWORK) ||
+			(WorkMessage.drivetype_work == HANDLEWORK))
 		{
-			memory->drive_type = WorkMessage.drivetype_work;	  /* 当前处于触控或脚控时，新通道记忆跟随当前控制方式，避免自动改手控。 */
+			memory->drive_type = WorkMessage.drivetype_work;	  /* RFID 只刷新刀具和运行参数，当前已明确选中的触控/脚控/手控必须原样保留，避免 PXBA 手控被脚踏在线状态覆盖。 */
 		}
 		else
 		{
-			if(ControlSignalMessage.jt_enable_flag==true)
+			if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
 			{
-				memory->drive_type = JTWORK;					  /* 脚控使能时，带按键手柄默认记忆为脚控，避免自动切手控后用户找不到控制入口。 */
+				memory->drive_type = JTWORK;					  /* 脚控使能且本在线周期没有用户手动锁定时，才按脚踏优先级写入脚控记忆。 */
 			}
 			else
-			memory->drive_type = HANDLEWORK;					  /* 没有其它控制方式占用时，带按键手柄默认记忆为手控。 */
+			{
+				memory->drive_type = HANDLEWORK;				  /* 没有其它控制方式占用，或用户已手动锁住非脚控时，带按键手柄保持手控记忆。 */
+			}
 		}
 	}
 	else if (Pubinterface_IsCommonSocketReservedModel(memory->hand_model))
