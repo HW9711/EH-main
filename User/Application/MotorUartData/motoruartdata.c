@@ -37,6 +37,7 @@ kernel_task_t MOTORUARTTaskHandle;
 
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
+static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录驱动报警第一次弹出的系统 tick，用于计算 3 秒保持时间。 */
 
 /*
  * UART2 已由 ExternalComm 独立任务接管。
@@ -79,6 +80,11 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 	}
 }
 
+/*
+ * 函数功能：把驱动板 Err 编码转换为主控报警，并记录本次弹窗开始时间。
+ * 输入参数：driver_error 为驱动板回包 dat1[7] 的错误码。
+ * 返回参数：无。
+ */
 static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 {
 	if(WorkMessage.alarm_value ==WORK_ALARM_HANDLE_NOT_CONNECTED)return;
@@ -99,22 +105,34 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 
 	s_motor_uart_last_driver_error = driver_error; /* 记录真实驱动 Err，便于下一帧判断是否发生了故障变化。 */
 	s_motor_uart_alarm_owned = alarm_value;        /* 记录本模块拥有的主控报警码，后续驱动恢复正常时才允许自动清除。 */
+	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 新报警出现时记录弹窗起点，后续即使 Err 很快恢复也要显示满 3 秒。 */
 	MotorUart_SetAlarm(alarm_value);               /* 同步 WorkMessage、蜂鸣任务和外部通信报警上传。 */
 }
 
+/*
+ * 函数功能：驱动 Err 恢复为 0 后，延时到 3 秒保持时间结束再清除本模块拥有的报警弹窗。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void MotorUart_ClearDriverAlarmIfOwned(void)
 {
 	if ((s_motor_uart_alarm_owned != 0U) &&
 	    (WorkMessage.alarm_flag == true) &&
 	    (WorkMessage.alarm_value == s_motor_uart_alarm_owned))
 	{
-		WorkAlarm_Clear();                 /* 驱动 Err 已经恢复为 0，并且当前报警仍是本模块写入的值，允许清报警码。 */
-		SendAlarmMessage(WORK_ALARM_NONE); /* 驱动报警恢复后同步释放蜂鸣，避免蜂鸣锁存继续保持。 */
-		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 驱动报警恢复后关闭屏幕报警弹窗，NULL 参数由 UIDP 统一补零。 */
+		if ((uint32_t)(HAL_GetTick() - s_motor_uart_alarm_start_tick) < ALARM_DRV_MS)
+		{
+			return; /* 驱动 Err 已经恢复但 3 秒显示时间未到，继续保持 WorkMessage 和屏幕报警，避免现场只看到闪屏。 */
+		}
+
+		WorkAlarm_Clear();                 /* 驱动 Err 已恢复且弹窗已满 3 秒，释放本模块写入的报警码。 */
+		SendAlarmMessage(WORK_ALARM_NONE); /* 3 秒提示结束后同步释放蜂鸣，避免蜂鸣锁存继续保持。 */
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 3 秒提示结束后关闭屏幕报警弹窗，NULL 参数由 UIDP 统一补零。 */
 	}
 
 	s_motor_uart_alarm_owned = 0U;        /* 无论当前报警是否被其他模块接管，都释放本模块报警所有权。 */
 	s_motor_uart_last_driver_error = 0U;  /* 驱动恢复正常后清掉上一次真实 Err，下一次新故障可以重新上报。 */
+	s_motor_uart_alarm_start_tick = 0U;   /* 本次保持周期结束或报警归属已转移，清掉旧 tick 防止下次沿用。 */
 }
 
 static void MotorUart_StopAllWork(void)

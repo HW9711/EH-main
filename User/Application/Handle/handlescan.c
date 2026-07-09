@@ -121,6 +121,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_FOR_ALARM_OFFSET   10U
 #define HANDLESCAN_INITIAL_REV_ALARM_OFFSET   12U
 #define HANDLESCAN_INITIAL_OSC_ALARM_OFFSET   14U
+#define HANDLESCAN_INITIAL_CURRENT_THRESHOLD_OFFSET 21U /* Page4[21..22] 保存驱动过流保护阈值，单位 0.01A；0 表示驱动板使用自身默认保护值。 */
 #define HANDLESCAN_INITIAL_FLOW_MIN           1U
 #define HANDLESCAN_INITIAL_FLOW_MAX           70U
 #define HANDLESCAN_INITIAL_FLOW_DEFAULT       30U
@@ -146,8 +147,7 @@ kernel_task_t HANDLESCANTaskHandle;
  * 2. EEPROM 最终校验失败按 A/B 通道上报 WORK_ALARM_HANDLE_MODEL_ERROR_A/B/AB。
  */
 #define HANDLESCAN_ALARM_RUNNING_PLUG         13U
-#define HANDLESCAN_TRANSIENT_ALARM_MS         3000U
-#define HANDLESCAN_TRANSIENT_SCREEN_TICKS     (HANDLESCAN_TRANSIENT_ALARM_MS / HANDLESCAN_TASK_PERIOD_MS)
+#define HANDLESCAN_TRANSIENT_SCREEN_TICKS     (ALARM_VERIFY_MS / HANDLESCAN_TASK_PERIOD_MS)
 
 /*
  * 串口调试步骤码定义。
@@ -1551,6 +1551,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     uint32_t default_speed;                                  /* 保存 Page4 默认速度，单位为实际 rpm，驱动下发时只做倍率换算。 */
     uint32_t min_speed;                                      /* 保存 Page4 最小速度，单位为实际 rpm。 */
     uint32_t max_speed;                                      /* 保存 Page4 最大速度，单位为实际 rpm。 */
+    uint16_t current_threshold;                              /* 保存 Page4 电流保护阈值，单位 0.01A，后续随当前通道下发驱动。 */
 
     if ((message == NULL) || (initial_info_buf == NULL))
     {
@@ -1588,6 +1589,10 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     message->speed_alarm_for = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_FOR_ALARM_OFFSET); /* 保存正转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
     message->speed_alarm_rev = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_REV_ALARM_OFFSET); /* 保存反转速度报警阈值，小端2字节，单位与WorkMessage.speed_work一致。 */
     message->freq_alarm_osc = initial_info_buf[HANDLESCAN_INITIAL_OSC_ALARM_OFFSET]; /* 保存往复频率报警值，只用于蜂鸣阈值。 */
+    current_threshold = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_INITIAL_CURRENT_THRESHOLD_OFFSET); /* 读取 Page4[21..22] 的电流保护阈值，0 表示不覆盖驱动默认值。 */
+    message->overloadThresholdFor = current_threshold;       /* 正转保护电流来自同一 Page4 字段，选中通道后写入 WorkMessage.current_work。 */
+    message->overloadThresholdRev = current_threshold;       /* 反转保护电流沿用同一阈值，保持 EEPROM 配置字段简单一致。 */
+    message->overloadThresholdOSC = current_threshold;       /* 往复保护电流沿用同一阈值，驱动侧按收到的保护电流执行停机保护。 */
 }
 
 /*
@@ -1891,6 +1896,9 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     message->speed_alarm_for = 0U;                           /* 清掉正转速度报警值，避免蜂鸣阈值跨手柄残留。 */
     message->speed_alarm_rev = 0U;                           /* 清掉反转速度报警值，避免蜂鸣阈值跨手柄残留。 */
     message->freq_alarm_osc = 0U;                            /* 清掉往复频率报警值，避免蜂鸣阈值跨手柄残留。 */
+    message->overloadThresholdFor = 0U;                       /* 清掉正转电流保护阈值，避免新手柄上线前沿用旧 EEPROM 电流限制。 */
+    message->overloadThresholdRev = 0U;                       /* 清掉反转电流保护阈值，保证通道离线态不会下发旧保护值。 */
+    message->overloadThresholdOSC = 0U;                       /* 清掉往复电流保护阈值，下一次上线重新按 Page4 或 RFID 写入。 */
     message->run_direction = 0U;                             /* 清掉默认方向，下一次上线重新按 Page4/业务规则初始化。 */
 }
 
@@ -2115,8 +2123,8 @@ static void Handlescan_RaiseTransientHandleAlarm(uint8_t channel, uint8_t alarm_
 {
     uint8_t display_value[10] = {0U};                         /* 新屏报警队列只使用 Value[0] 保存报警码，其余字节清零保持消息稳定。 */
     display_value[0] = alarm_value;                           /* 把临时报警码送给 UI_AIARM_ID，避免再调用旧屏提示接口。 */
-    SendAlarmMessageTimed(alarm_value, HANDLESCAN_TRANSIENT_ALARM_MS); /* 蜂鸣器只响 3 秒，避免覆盖当前工作通道。 */
-    ExternalComm_SendTransientAlarm(alarm_value, HANDLESCAN_TRANSIENT_ALARM_MS); /* 上位机收到非 0 后，3 秒后会收到 0 自动关闭弹窗。 */
+    SendAlarmMessageTimed(alarm_value, ALARM_VERIFY_MS); /* 蜂鸣器只响 3 秒，避免覆盖当前工作通道。 */
+    ExternalComm_SendTransientAlarm(alarm_value, ALARM_VERIFY_MS); /* 上位机收到非 0 后，3 秒后会收到 0 自动关闭弹窗。 */
     SendUIDSMessage(UI_AIARM_ID, true, display_value);          /* 屏幕显示同一报警码，但不写 WorkMessage，避免阻塞其它操作。 */
     s_transient_screen_alarm_value = alarm_value;                /* 记录当前临时屏幕报警码，到期后只清本次临时显示。 */
     s_transient_screen_alarm_ticks = HANDLESCAN_TRANSIENT_SCREEN_TICKS; /* 10ms 扫描周期下保持 3 秒。 */

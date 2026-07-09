@@ -39,18 +39,12 @@ static uint8_t s_speed_threshold_beep_refresh_ticks = 0U;
 static uint8_t s_screen_external_exit_pending = 0U;
 /* 屏幕外控退出第一次点击的 HAL tick 时间戳，用于计算 1 秒双击窗口。 */
 static uint32_t s_screen_external_exit_first_tick = 0U;
-/* 公共接头缺少 EPC 刀具头时的报警保持时间，和手柄校验临时报警一致使用 3 秒提示。 */
-#define COMMON_SOCKET_TOOL_MISSING_ALARM_MS 3000U
-/* 公共接头缺刀具提示的最小重发间隔，避免脚踏/屏幕保活连续触发导致蜂鸣队列堆积。 */
-#define COMMON_SOCKET_TOOL_MISSING_REPEAT_MS 1000U
-/* 手控模式运行中拔手柄只提示 3 秒，避免手控没有退出键时蜂鸣和弹窗永久锁住。 */
-#define RUNNING_HANDLE_UNPLUG_TRANSIENT_ALARM_MS 3000U
-/* 泵压力阈值触发后的蜂鸣和屏幕临时弹窗保持时间，保持 3 秒后自动释放提示。 */
-#define PUMP_PRESSURE_BLOCKED_ALARM_MS 3000U
 /* 压力堵塞使用独立报警码，只驱动限时蜂鸣和 89 号临时弹窗，不写 WorkMessage 全局报警锁存。 */
 #define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_PUMP_PRESSURE_BLOCKED
-/* 公共接头缺刀具提示是否已经显示，用于 EPC 识别成功后只清理本模块产生的临时屏幕报警。 */
+/* 公共接头缺刀具提示是否处于生命周期内，用于触发后按时间关闭并限制连续控制帧重复报警。 */
 static uint8_t s_common_socket_tool_missing_alarm_active = 0U;
+/* 公共接头缺刀具提示是否实际占用了屏幕报警区，只有占用过才允许到期清屏。 */
+static uint8_t s_common_socket_tool_missing_alarm_displayed = 0U;
 /* 公共接头缺刀具提示最近一次发送时间，用于限制重复报警频率。 */
 static uint32_t s_common_socket_tool_missing_alarm_tick = 0U;
 /* 手控运行中拔手柄的临时屏幕报警码；非 0 表示 3 秒弹窗还未到期。 */
@@ -529,6 +523,7 @@ static bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||    /* EX8 表格确认 PXBA 分体手柄允许显示并进入手控。 */
 			(hand_model == PXBB_ONLINES) ||    /* EX8 表格确认 PXBB 分体手柄允许显示并进入手控。 */
+			(hand_model == LGZ_I_ONLINES) ||   /* LGZI 单按键颅骨钻允许进入手控，实体键按住运行、松开停止。 */
 			(hand_model == LGZ_II_ONLINES));   /* EX8 表格确认 LGZII 双按键手柄保留手控入口，其它预留型号不再误亮手控。 */
 }
 
@@ -550,6 +545,7 @@ static bool Pubinterface_IsCommonSocketReservedModel(uint8_t hand_model)
 bool Pubinterface_IsCommonSocketToolReady(void)
 {
 	ChannelMemoryMessagr_t *memory = NULL; /* 当前通道记忆用于复核刀具类型，避免 WorkMessage 切换过程中的短暂字段不一致。 */
+	ChannelrecognizeMessage_t *recognize = NULL; /* 扫描层缓存表示当前 RFID 刀具头是否仍被在线监测确认，不能只看历史 MemoryMsg。 */
 
 	if (WorkMessage.hand_model != COMMON_SOCKET_ONLINES)
 	{
@@ -559,10 +555,12 @@ bool Pubinterface_IsCommonSocketToolReady(void)
 	if (WorkMessage.channel_work == CHANNEL_A)
 	{
 		memory = &MemoryMsgA; /* A 通道公共接头使用 A 通道记忆判断 EPC 刀具是否已写入。 */
+		recognize = &ChannelrecognizeMessageA; /* A 通道扫描缓存会在 RFID 刀具头掉线确认后清 tool_type。 */
 	}
 	else if (WorkMessage.channel_work == CHANNEL_B)
 	{
 		memory = &MemoryMsgB; /* B 通道公共接头使用 B 通道记忆判断 EPC 刀具是否已写入。 */
+		recognize = &ChannelrecognizeMessageB; /* B 通道扫描缓存会在 RFID 刀具头掉线确认后清 tool_type。 */
 	}
 	else
 	{
@@ -574,7 +572,14 @@ bool Pubinterface_IsCommonSocketToolReady(void)
 		return false; /* 通道记忆尚未同步为公共接头时，认为刀具头未就绪，等待插拔事件完成。 */
 	}
 
-	return ((WorkMessage.tool_type != 0U) && (memory->tool_type != 0U)); /* EPC 识别成功后会写入刀具类型；为 0 表示仍在等待标签。 */
+	if ((recognize == NULL) || (recognize->handle_type != COMMON_SOCKET_ONLINES))
+	{
+		return false; /* 扫描层没有确认当前基座是公共接头时禁止启动，避免旧 WorkMessage 参数被误当成在线刀具。 */
+	}
+
+	return ((WorkMessage.tool_type != 0U) &&
+			(memory->tool_type != 0U) &&
+			(recognize->tool_type != 0U)); /* 三层都必须有当前 EPC 刀具类型，历史 MemoryMsg 参数不能单独放行启动。 */
 }
 
 /*
@@ -588,19 +593,21 @@ static void Pubinterface_ReportCommonSocketToolMissing(void)
 	uint32_t now_tick = HAL_GetTick(); /* 使用 HAL 毫秒 tick 做重发限频，避免连续控制帧让蜂鸣任务反复入队。 */
 
 	if ((s_common_socket_tool_missing_alarm_active != 0U) &&
-		((uint32_t)(now_tick - s_common_socket_tool_missing_alarm_tick) < COMMON_SOCKET_TOOL_MISSING_REPEAT_MS))
+		((uint32_t)(now_tick - s_common_socket_tool_missing_alarm_tick) < ALARM_SOCKET_REPEAT_MS))
 	{
 		return; /* 1 秒内重复触发只保持当前提示，不再重复蜂鸣和刷屏。 */
 	}
 
-	s_common_socket_tool_missing_alarm_active = 1U; /* 记录本模块已经显示临时报警，后续 EPC 成功装载时由本模块清除。 */
+	s_common_socket_tool_missing_alarm_active = 1U; /* 记录本次缺刀具提示已进入生命周期，后续按定时服务或 EPC 成功装载结束。 */
+	s_common_socket_tool_missing_alarm_displayed = 0U; /* 先清显示归属，只有本次真正发出 UI 弹窗后才允许本模块到期清屏。 */
 	s_common_socket_tool_missing_alarm_tick = now_tick; /* 记录本次提示时间，用于下一次触发限频。 */
 	display_value[0] = WORK_ALARM_HANDLE_NOT_CONNECTED; /* 公共接头无刀具头时沿用“手柄未连接/请连接手柄”图片 80。 */
-	SendAlarmMessageTimed(WORK_ALARM_HANDLE_NOT_CONNECTED, COMMON_SOCKET_TOOL_MISSING_ALARM_MS); /* 只做限时蜂鸣，不写 WorkMessage.alarm_flag，避免阻塞后续 RFID 识别。 */
-	ExternalComm_SendTransientAlarm(WORK_ALARM_HANDLE_NOT_CONNECTED, COMMON_SOCKET_TOOL_MISSING_ALARM_MS); /* 上位机同步收到临时报警，便于外控模式下也知道刀具头未接入。 */
+	SendAlarmMessageTimed(WORK_ALARM_HANDLE_NOT_CONNECTED, ALARM_SOCKET_MS); /* 只做限时蜂鸣，不写 WorkMessage.alarm_flag，避免阻塞后续 RFID 识别。 */
+	ExternalComm_SendTransientAlarm(WORK_ALARM_HANDLE_NOT_CONNECTED, ALARM_SOCKET_MS); /* 上位机同步收到临时报警，便于外控模式下也知道刀具头未接入。 */
 	if (WorkMessage.alarm_flag == false)
 	{
 		SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 没有更高优先级全局报警时，屏幕显示“请连接手柄”提示。 */
+		s_common_socket_tool_missing_alarm_displayed = 1U; /* 记录 80 号图由本模块显示，后续到期或 EPC 成功时才具备清屏权。 */
 	}
 }
 
@@ -634,15 +641,48 @@ static void Pubinterface_ClearCommonSocketToolMissingAlarm(void)
 
 	if (Pubinterface_IsCommonSocketToolReady() == false)
 	{
-		return; /* EPC 刀具头仍未就绪时继续保留“请连接手柄”提示。 */
+		return; /* EPC 刀具头仍未就绪时不由识别成功路径清屏，等待周期服务按 ALARM_SOCKET_MS 到期关闭。 */
 	}
 
 	s_common_socket_tool_missing_alarm_active = 0U; /* 当前公共接头刀具已就绪，本模块的临时报警生命周期结束。 */
 	s_common_socket_tool_missing_alarm_tick = 0U; /* 清时间戳，下一次刀具头移除后可立即重新提示。 */
-	if (WorkMessage.alarm_flag == false)
+	if ((s_common_socket_tool_missing_alarm_displayed != 0U) &&
+		(WorkMessage.alarm_flag == false) &&
+		(s_pump_pressure_blocked_transient_alarm_active == 0U) &&
+		(s_running_handle_unplug_transient_alarm_value == 0U))
 	{
-		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 无全局报警时清掉临时屏幕报警，避免 EPC 成功后仍显示请连接手柄。 */
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 本模块确实显示过 80 且没有其它报警占用时，清掉公共接头缺刀具弹窗。 */
 	}
+	s_common_socket_tool_missing_alarm_displayed = 0U; /* 无论是否实际清屏，本次公共接头缺刀具弹窗归属都已结束。 */
+}
+
+/*
+ * 函数功能：周期关闭公共接头缺 EPC 刀具头产生的 80 号临时屏幕报警。
+ * 输入参数：无，直接读取公共接头临时报警归属和 HAL 毫秒 tick。
+ * 返回参数：无。
+ */
+static void Pubinterface_ServiceCommonSocketToolMissingAlarm(void)
+{
+	if (s_common_socket_tool_missing_alarm_active == 0U)
+	{
+		return; /* 当前没有公共接头缺刀具临时报警生命周期，本周期不处理屏幕报警区。 */
+	}
+
+	if ((uint32_t)(HAL_GetTick() - s_common_socket_tool_missing_alarm_tick) < ALARM_SOCKET_MS)
+	{
+		return; /* 80 号图未达到设置保持时间，继续显示到 ALARM_SOCKET_MS 到期。 */
+	}
+
+	if ((s_common_socket_tool_missing_alarm_displayed != 0U) &&
+		(WorkMessage.alarm_flag == false) &&
+		(s_pump_pressure_blocked_transient_alarm_active == 0U) &&
+		(s_running_handle_unplug_transient_alarm_value == 0U))
+	{
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 本模块实际显示的 80 到期且没有其它报警占用时，关闭屏幕报警弹窗。 */
+	}
+	s_common_socket_tool_missing_alarm_active = 0U; /* 80 临时弹窗保持时间结束，允许下一次真实启动触发重新报警。 */
+	s_common_socket_tool_missing_alarm_displayed = 0U; /* 清显示归属，避免下一轮误清其它模块后续显示的报警。 */
+	s_common_socket_tool_missing_alarm_tick = 0U; /* 清本次开始时间，后续新报警必须重新记录 tick。 */
 }
 
 /*
@@ -671,7 +711,7 @@ static void Pubinterface_ApplyEx8ControlModeFallback(void)
 
 	if (Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model) == false)
 	{
-		return; /* 只有 PXBA/PXBB/LGZII 允许脚控失能后自动显示手控选中，普通手柄不能误亮手控。 */
+		return; /* 只有 PXBA/PXBB/LGZI/LGZII 允许脚控失能后自动显示手控选中，普通手柄不能误亮手控。 */
 	}
 
 	if (WorkMessage.channel_work == CHANNEL_A)
@@ -788,7 +828,7 @@ void Pubinterface_RefreshControlModeDisplay(void)
 
 	foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 脚踏图标按实际脚踏在线标志显示，避免未接入时仍可用。 */
 	external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控内部复用 TOUCHWORK 做互斥，但显示层必须和触控按钮分开。 */
-	handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 只有 PXBA/PXBB/LGZII 等带手控入口型号才显示手控可用，避免通用磨钻误亮手控。 */
+	handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 只有 PXBA/PXBB/LGZI/LGZII 等带手控入口型号才显示手控可用，避免通用磨钻误亮手控。 */
 	touch_control_available = ((external_control_active == false) && (WorkMessage.hand_model != 0U)); /* 触控入口必须已有有效手柄才显示可用，避免无手柄时误亮。 */
 	touch_control_selected = (touch_control_available && (WorkMessage.drivetype_work == TOUCHWORK)); /* 外控或无手柄时不再误点亮触控按钮。 */
 
@@ -941,7 +981,7 @@ static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	bool osc_supported = Pubinterface_IsOscDirectionSupported(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向同时看手柄硬件和刨刀能力，普通手柄或磨头刀具都不误亮往复。 */
 	bool foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 切通道刷新时脚踏图标也按实际在线状态显示。 */
 	bool external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控占用时内部驱动方式也可能是 TOUCHWORK，但屏幕不能显示为触控。 */
-	bool handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 切换 A/B 后也按当前手柄型号决定手控是否可用，避免通道刷新把禁用手控刷白。 */
+	bool handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 切换 A/B 后也按当前手柄型号决定手控是否可用，LGZI 同样允许手控入口。 */
 	bool touch_control_available = ((external_control_active == false) && (WorkMessage.hand_model != 0U)); /* 切通道重绘也必须有有效手柄才开放触控入口。 */
 	bool touch_control_selected = (touch_control_available && (WorkMessage.drivetype_work == TOUCHWORK)); /* 外控或无手柄时不再误高亮触控按钮。 */
 
@@ -991,6 +1031,30 @@ static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	display_value[3] = 0U; /* 0 表示切通道后的静态速度刷新，不进入运行中颜色更新分支。 */
 	display_value[4] = 0U; /* 切通道时电机未启动，速度字体保持非运行状态。 */
 	SendUIDSMessage(UI_SPEED_ID, true, display_value); /* 最后刷新速度值，保证切通道后的速度显示同步。 */
+}
+
+/*
+ * 函数功能：按当前 WorkMessage/MemoryMsg 快照补刷主运行页手柄和当前通道参数区。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Pubinterface_RefreshRuntimeDisplaySnapshot(void)
+{
+	uint8_t current_channel = WorkMessage.channel_work; /* 保存当前选中通道，补刷过程只读状态，不改变控制归属。 */
+
+	Pubinterface_RefreshOnlineHandleDisplay(); /* 先重发 A/B 在线图标，修正上电集中刷新时后到通道图标丢失的问题。 */
+	if ((current_channel == CHANNEL_A) && (WorkMessage.Channel_Aonline == true))
+	{
+		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* A 已选中且在线时补刷 A 的刀具规格、方向、速度和控制方式。 */
+	}
+	else if ((current_channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == true))
+	{
+		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* B 已选中且在线时补刷 B 的刀具规格、方向、速度和控制方式。 */
+	}
+	else if ((WorkMessage.Channel_Aonline == false) && (WorkMessage.Channel_Bonline == false))
+	{
+		Pubinterface_ClearSelectedChannelDisplay(); /* 两路都不在线时保持无手柄显示，避免开机补刷恢复旧参数区。 */
+	}
 }
 
 void ChannelrecognizeMessageInit(void)
@@ -1137,7 +1201,7 @@ static void Pubinterface_ServicePumpPressureBlockedTimedAlarm(void)
 		return; /* 当前屏幕报警区不由压力弹窗占用，本周期不处理 89 号图关闭。 */
 	}
 
-	if ((uint32_t)(HAL_GetTick() - s_pump_pressure_blocked_transient_alarm_tick) < PUMP_PRESSURE_BLOCKED_ALARM_MS)
+	if ((uint32_t)(HAL_GetTick() - s_pump_pressure_blocked_transient_alarm_tick) < ALARM_PRESSURE_MS)
 	{
 		return; /* 压力报警 3 秒保持时间未到，继续显示 89 号弹窗。 */
 	}
@@ -1181,7 +1245,7 @@ static void Pubinterface_HandlePumpPressureBlockedInternal(uint8_t pump_channel,
 
 	if (new_event != false)
 	{
-		SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BLOCKED_ALARM_MS); /* 压力首次触发启动 3 秒报警蜂鸣，但仍不写全局 WorkMessage 报警。 */
+		SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, ALARM_PRESSURE_MS); /* 压力首次触发启动 3 秒报警蜂鸣，但仍不写全局 WorkMessage 报警。 */
 		Pubinterface_RaisePumpPressureBlockedTimedAlarm(); /* 同步显示 89 号压力报警弹窗，到期由周期服务自动关闭。 */
 	}
 
@@ -1376,8 +1440,8 @@ static void Pubinterface_RaiseRunningHandleUnplugTimedAlarm(void)
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0]，其余清零避免沿用上一条报警参数。 */
 
 	display_value[0] = WORK_ALARM_HANDLE_NOT_CONNECTED; /* 手控运行中掉线同样使用“请连接手柄”报警图，保证提示含义一致。 */
-	SendAlarmMessageTimed(WORK_ALARM_HANDLE_NOT_CONNECTED, RUNNING_HANDLE_UNPLUG_TRANSIENT_ALARM_MS); /* 手控没有持续按压源，蜂鸣只保持 3 秒后自动停止。 */
-	ExternalComm_SendTransientAlarm(WORK_ALARM_HANDLE_NOT_CONNECTED, RUNNING_HANDLE_UNPLUG_TRANSIENT_ALARM_MS); /* 上位机同步收到临时报警，3 秒后自动回到无报警。 */
+	SendAlarmMessageTimed(WORK_ALARM_HANDLE_NOT_CONNECTED, ALARM_UNPLUG_MS); /* 手控没有持续按压源，蜂鸣只保持 3 秒后自动停止。 */
+	ExternalComm_SendTransientAlarm(WORK_ALARM_HANDLE_NOT_CONNECTED, ALARM_UNPLUG_MS); /* 上位机同步收到临时报警，3 秒后自动回到无报警。 */
 	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 手控掉线必须弹窗提示 3 秒，弥补原来只有蜂鸣没有屏幕提示的问题。 */
 	s_running_handle_unplug_transient_alarm_value = WORK_ALARM_HANDLE_NOT_CONNECTED; /* 记录本模块拥有临时弹窗，周期到期后只清理自己的提示。 */
 	s_running_handle_unplug_transient_alarm_tick = HAL_GetTick(); /* 记录弹窗开始时间，避免依赖按键任务是否继续有事件。 */
@@ -1395,7 +1459,7 @@ static void Pubinterface_ServiceRunningHandleUnplugTimedAlarm(void)
 		return; /* 当前没有手控掉线临时弹窗，本周期不处理屏幕报警区。 */
 	}
 
-	if ((uint32_t)(HAL_GetTick() - s_running_handle_unplug_transient_alarm_tick) < RUNNING_HANDLE_UNPLUG_TRANSIENT_ALARM_MS)
+	if ((uint32_t)(HAL_GetTick() - s_running_handle_unplug_transient_alarm_tick) < ALARM_UNPLUG_MS)
 	{
 		return; /* 未到 3 秒保持时间，继续显示临时报警弹窗。 */
 	}
@@ -1740,7 +1804,7 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 		return; /* 无效通道不改 WorkMessage，避免把当前有效工作态清成不可预期状态。 */
 	}
 
-	WorkMessage.current_work = memory->current_work;			  /* 同步当前通道保护电流，后续启动时按该手柄限流。 */
+	WorkMessage.current_work = memory->current_work;			  /* 同步当前通道保护电流，单位 0.01A，后续启动时按该手柄限流。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 同步刀具减速比，保证速度换算跟随通道。 */
 	WorkMessage.dir_work = memory->dir;						  /* 同步当前方向，速度选择依赖这个方向字段。 */
 	if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
@@ -1757,7 +1821,7 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 	WorkMessage.auto_identify = memory->auto_identify;			  /* 同步当前通道自动识别状态，切通道后 RFID 识别模式不丢失。 */
 	WorkMessage.hand_model = memory->hand_model;				  /* 同步手柄型号，手柄按键扫描依赖当前型号判断。 */
 	WorkMessage.channel_work = channel;						  /* 最后切换当前工作通道，避免中间状态被其它任务读成新通道旧参数。 */
-	Pubinterface_ApplyEx8ControlModeFallback();				  /* EX8 要求脚踏离线时 PXBA/PXBB/LGZII 切通道后直接落到手控选中。 */
+	Pubinterface_ApplyEx8ControlModeFallback();				  /* EX8 要求脚踏离线时 PXBA/PXBB/LGZI/LGZII 切通道后直接落到手控选中。 */
 
 	if (WorkMessage.dir_work == ZZDIR)
 	{
@@ -1857,7 +1921,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	memory->hand_model = recognize->handle_type;  /* 保存手柄型号，后续通道切换时再装载到 WorkMessage。 */
 	memory->hand_type_raw_major = recognize->hand_type_raw_major; /* 保存 EEPROM 原始主类型，上位机心跳需要区分真实编码。 */
 	memory->hand_type_raw_minor = recognize->hand_type_raw_minor; /* 保存 EEPROM 原始子类型，便于上位机显示和售后定位。 */
-	memory->current_work = recognize->overloadThresholdFor;		  /* 保存保护电流，当前通道被选中后才影响 WorkMessage。 */
+	memory->current_work = recognize->overloadThresholdFor;		  /* 保存 Page4/RFID 保护电流，单位 0.01A；当前通道被选中后才影响 WorkMessage。 */
 	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* RFID 手柄保存完整 32 位减速比，普通 EEPROM 手柄继续兼容旧 8 位减速比。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 保存 Page4 默认注水流量，选中该通道时初始化泵。 */
 	memory->speed_alarm_for = recognize->speed_alarm_for;		  /* 保存正转速度报警阈值，运行阈值检查按当前通道读取。 */
@@ -1903,7 +1967,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 
 	if (Pubinterface_IsHandleControlReservedModel(memory->hand_model))
 	{
-		ControlSignalMessage.HMI_enable_flag = true;			  /* 带手控入口手柄上线后打开手控可用显示，新增型号只开放 UI 预留，不改实体键扫描来源。 */
+		ControlSignalMessage.HMI_enable_flag = true;			  /* 带手控入口手柄上线后打开手控可用显示，实体键是否能启动由 handlekey 按型号再判断。 */
 		if ((WorkMessage.drivetype_work == TOUCHWORK) || (WorkMessage.drivetype_work == JTWORK))
 		{
 			memory->drive_type = WorkMessage.drivetype_work;	  /* 当前处于触控或脚控时，新通道记忆跟随当前控制方式，避免自动改手控。 */
@@ -1936,7 +2000,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层通道识别缓存，用于清掉心跳有效性判断会读取的刀具字段。 */
-	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时仍要保留上次可运行参数，供切回通道继续使用。 */
+	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时保留速度等历史参数，但当前可运行刀具必须清零。 */
 	uint8_t keep_drive_type = WorkMessage.drivetype_work; /* 保留原控制方式记忆，刀具头移开不应把脚控/触控/外控显示重置。 */
 	uint8_t keep_auto_identify = WorkMessage.auto_identify; /* 保留用户选择的自动/手动识别模式，刀具掉线不应改模式或清通道记忆。 */
 	uint8_t keep_raw_tool_type = 0U; /* 保留最近一次原始刀具型号，避免扫描层清零后通道记忆丢失驱动兼容字段。 */
@@ -1998,11 +2062,14 @@ void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 	memory->hand_type_raw_minor = recognize->hand_type_raw_minor; /* 保留 EEPROM Page2 原始子类型，避免基座类型在心跳中消失。 */
 	memory->drive_type = keep_drive_type;		   /* 恢复该通道控制方式记忆，只清扫描层刀具头在线状态，不改变用户控制来源。 */
 	memory->auto_identify = keep_auto_identify;	   /* 保留原有自动识别记忆状态，掉线后继续沿用用户选中的模式。 */
-	memory->raw_tool_type = keep_raw_tool_type;	   /* 通道记忆继续保留最近一次原始刀具型号，切回通道和驱动兼容判断仍可使用。 */
+	memory->raw_tool_type = keep_raw_tool_type;	   /* 通道记忆继续保留最近一次原始刀具型号，只用于掉线图标和后续重新识别参考。 */
+	memory->tool_type = 0U;					   /* 清掉通道当前可运行刀具能力，公共接头缺刀具时启动 gate 必须失败并报警 80。 */
 
 	if (WorkMessage.channel_work == channel)
 	{
-		/* 当前工作快照继续保留上次 RFID 刀具参数，保证不切通道时仍可按上次识别速度运行。 */
+		WorkMessage.tool_type = 0U;				   /* 当前选中通道的 RFID 刀具已离线，运行快照同步失效，防止脚踏继续按旧刀具放行。 */
+		WorkMessage.raw_tool_type = 0U;			   /* 当前工作快照清原始刀具型号，避免驱动和上位机误读为仍有在线 RFID 标签。 */
+		WorkMessage.speed_work = 0U;				   /* 刀具缺失后实际输出目标必须清零，避免下一次启动前残留脚踏比例速度。 */
 		Pubinterface_RefreshSelectedChannelDisplay(channel); /* 立即刷新选中通道参数区，事件队列延迟时屏幕也先清旧刀具。 */
 	}
 
@@ -2601,6 +2668,7 @@ void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner)
  */
 void ControlArbitration_RefreshMotorOwner(void)
 {
+	Pubinterface_ServiceCommonSocketToolMissingAlarm(); /* 电机任务周期维护公共接头缺刀具 80 号临时弹窗，到设置时间后自动关闭。 */
 	Pubinterface_ServicePumpPressureBlockedTimedAlarm(); /* 电机任务周期维护压力报警 89 号临时弹窗，到 3 秒后自动关闭。 */
 	Pubinterface_ServiceRunningHandleUnplugTimedAlarm(); /* 电机任务周期顺带维护手控掉线 3 秒临时弹窗，到期自动清屏。 */
 	/* 统一复用本地 owner 释放逻辑，保证手柄、脚踏、屏幕停止后不因反馈延迟永久占用。 */
@@ -2906,7 +2974,7 @@ void ControlTypeActive(uint8_t key_value)
 			return;
 		// 手动控制
 		if (Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model) == false)
-			return; /* 只有 PXBA/PXBB/LGZII 等确认支持手控入口的手柄允许切入手控模式。 */
+			return; /* 只有 PXBA/PXBB/LGZI/LGZII 等确认支持手控入口的手柄允许切入手控模式。 */
 		if (WorkMessage.drivetype_work == HANDLEWORK || WorkMessage.touchactive_work == TOUCHWORK)
 			return;
 		WorkMessage.drivetype_work = HANDLEWORK;

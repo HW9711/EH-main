@@ -76,6 +76,18 @@
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U//A/B通道EEprom均校验失败，上位机需要显示双通道来源
 #define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U//泵压力达到模块阈值，屏幕显示 89 号压力报警图，当前只做限时提示不锁全局报警
 
+/*
+ * 报警提示固定时间配置统一放在 Pubinterface，便于现场统一调整弹窗、蜂鸣和上位机临时报警保持时间。
+ * 这些宏只定义“保持多久”，具体弹窗归属和清除动作仍由各业务模块负责，避免不同报警互相误清。
+ */
+#define ALARM_DRV_MS           3000U //电机驱动 Err 报警最少保持时间，防止堵转/过流恢复太快导致弹窗闪一下
+#define ALARM_MODE_MS          2000U //脚控已选中时误按手柄实体键，82 号提示保持时间
+#define ALARM_VERIFY_MS        2000U //运行中另一路手柄校验失败时，临时屏幕/蜂鸣/上位机提示保持时间
+#define ALARM_SOCKET_MS        2000U //公共接头缺少 EPC 刀具头时，蜂鸣和上位机临时报警保持时间
+#define ALARM_SOCKET_REPEAT_MS 1000U //公共接头缺刀具提示重复触发间隔，避免连续控制帧堆积蜂鸣消息
+#define ALARM_UNPLUG_MS        2000U //手控运行中拔手柄时，临时屏幕/蜂鸣/上位机提示保持时间
+#define ALARM_PRESSURE_MS      2000U //泵压力堵塞报警 89 号弹窗和蜂鸣保持时间
+
 
 #define PLANER      1U//刨头
 #define GRINDH      2U//磨头
@@ -242,7 +254,7 @@ typedef struct
   volatile uint32_t  speed_set_work;//设置速度
   volatile uint16_t  freq_work;//工作频率
   volatile uint16_t  dir_work;///工作方向
-  volatile uint16_t  current_work;//工作电流
+  volatile uint16_t  current_work;//驱动保护电流阈值，来自手柄 EEPROM Page4[21..22] 或 RFID，单位 0.01A；0 表示驱动板默认
   volatile uint16_t  driver_speed_feedback;//驱动板反馈实际转速，来自 0xAA 回包 byte4~5，保持驱动协议中的“实际转速/10”单位，不覆盖控制目标速度
   volatile uint16_t  driver_current_x100;//驱动板反馈实时电流，来自 0xAA 回包 byte8~9，单位 0.01A，只用于监测上传，不能覆盖 current_work 保护电流
   volatile uint32_t  tool_reduction_ratio;//减速比 高16位表示增速16位表示减速
@@ -289,7 +301,7 @@ typedef struct {
   volatile uint16_t  freq;//工作频率
   volatile uint16_t  dir;///工作方向
   
-  volatile uint16_t  current_work;
+  volatile uint16_t  current_work;//当前通道记忆的驱动保护电流阈值，单位 0.01A；切到该通道时装载到 WorkMessage.current_work
   volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
   volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
   volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
@@ -333,9 +345,9 @@ typedef struct
 	volatile uint32_t  speed_min;//速度
 	volatile uint32_t  speed_max;//速度
 	volatile uint16_t  length;///长度
-	volatile uint16_t  overloadThresholdFor;//过载阀值（正）
-	volatile uint16_t  overloadThresholdRev;//过载阀值（反）
-	volatile uint16_t  overloadThresholdOSC;//过载阀值（往复）
+	volatile uint16_t  overloadThresholdFor;//正转过流保护阈值，Page4[21..22] 小端存储，单位 0.01A
+	volatile uint16_t  overloadThresholdRev;//反转过流保护阈值，当前与正转共用 Page4[21..22]，单位 0.01A
+	volatile uint16_t  overloadThresholdOSC;//往复过流保护阈值，当前与正转共用 Page4[21..22]，单位 0.01A
 	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM大端直接写1~70，0或越界由业务层回退30
 	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
 	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
@@ -428,6 +440,7 @@ bool ControlArbitration_EnterExternalControl(void);
 void ControlArbitration_ReleaseExternalControl(void);
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key);
 void Pubinterface_RefreshControlModeDisplay(void); /* 统一刷新脚控、手控、触控三个控制方式图标，避免脚踏任务分散直写残留高亮。 */
+void Pubinterface_RefreshRuntimeDisplaySnapshot(void); /* 开机后按当前 WorkMessage/MemoryMsg 快照补刷 A/B 手柄和当前通道参数区。 */
 bool Pubinterface_ApplyFootControlPriorityOnConnect(void); /* 脚踏上线且手柄未运行时，按脚踏优先规则尝试切到脚控。 */
 void Pubinterface_ClearFootControlManualLock(void); /* 脚踏离线或用户重新选择脚控时清除本在线周期的屏幕手动锁存。 */
 void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag); /* 刷新外部通信小电脑图标：在线白色、外控黄色、离线熄灭。 */

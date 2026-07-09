@@ -298,11 +298,10 @@ void MOTORRUN(void)
                  msg.run_type=0x04;
             }
         }
-      WorkMessage.current_work=0xffff;
       command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 最终输出给电机前按 GE2433 协议把实际 rpm 转为 rpm/10 字段。 */
       msg.speed_h=command_speed_value/256;
       msg.speed_l=(command_speed_value)%256;//速度
-      msg.pro_current_h=WorkMessage.current_work/256;
+      msg.pro_current_h=WorkMessage.current_work/256; /* 保护电流来自手柄 EEPROM Page4[21..22]，单位 0.01A；0 表示驱动板使用内部默认保护。 */
       msg.pro_current_l=WorkMessage.current_work%256;//电流
       MotorStart();
     }

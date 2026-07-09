@@ -24,6 +24,12 @@ typedef struct
 
 static UIDPMessage_t s_uidp_last_msg = {0};//记录上一次成功投递的 UI 消息，用于复用副工程的重复刷新过滤效果。
 static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
+/* UIDP 队列需要承接上电 A/B 手柄和 RFID 二次刷新连续消息，容量过小会导致后到的 B 通道或刀具规格消息丢失。 */
+#define UIDP_QUEUE_LENGTH 48U
+/* 主运行页开机后 3 秒内允许补刷，覆盖手柄 EEPROM 和 RFID 首次识别完成的窗口。 */
+#define UIDP_STARTUP_REPLAY_TOTAL_TICKS 300U
+/* 每 200ms 尝试补刷一次，避免每个 10ms 周期都重复发送整页 UI。 */
+#define UIDP_STARTUP_REPLAY_PERIOD_TICKS 20U
 /* 泵档位正常运行态固定使用每档渐隐组的第 0 帧，取消动画后续如需播放再传入 1~4 帧。 */
 #define UIDP_PUMP_GEAR_RUN_FRAME 0U
 /* 每个显示任务周期最多连续处理 12 条 UI 消息，压缩上电主运行页控件逐个加载的可见时间。 */
@@ -32,6 +38,8 @@ static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免
 #define UIDP_PUMP_GEAR_FRAME_COUNT 5U
 /* 泵档位最多显示 0~10 共 11 档，和屏幕工程 249/349 起始资源保持一致。 */
 #define UIDP_PUMP_GEAR_COUNT 11U
+static uint16_t s_uidp_startup_replay_ticks = 0U; /* 开机状态补刷剩余调度次数，倒计时结束后不再重发。 */
+static uint16_t s_uidp_startup_replay_period = 0U; /* 补刷间隔计数，确保 UI 队列有时间处理上一批消息。 */
 
 /* B 泵档位资源：249 为 0 档；250~254 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
 static const uint16_t s_uidp_pump_b_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
@@ -67,7 +75,7 @@ static const uint16_t s_uidp_pump_a_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEA
 
 static void UIDPQueue_Init(void)
 {
-    UIDPMsgQueue = Kernel_QueueCreate(20, sizeof(UIDPMessage_t), "UIDPMsgQueue");
+    UIDPMsgQueue = Kernel_QueueCreate(UIDP_QUEUE_LENGTH, sizeof(UIDPMessage_t), "UIDPMsgQueue");
 }
 
 /*
@@ -1029,10 +1037,27 @@ void UIDISPLAYBehavior()
 					UIMANUALBUTTONDP(0,0,0,0);
 					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
 					SendKeyBeepMessage(1U); /* 主运行页已经切换完成，蜂鸣一次提示开机进入运行界面。 */
+					s_uidp_startup_replay_ticks = UIDP_STARTUP_REPLAY_TOTAL_TICKS; /* 进入主运行页后开启短窗口补刷，等待 A/B 手柄识别和 RFID 首包完成。 */
+					s_uidp_startup_replay_period = 0U; /* 首次调度允许立即检查当前状态，避免 B 手柄已经在线但仍显示未连接。 */
 					break;
 					default:
 					break;
 			}
+		}
+	}
+	if (s_uidp_startup_replay_ticks > 0U)
+	{
+		--s_uidp_startup_replay_ticks; /* 每个 10ms 显示任务周期递减，3 秒后自动停止补刷，不影响后续正常 UI。 */
+		if (s_uidp_startup_replay_period > 0U)
+		{
+			--s_uidp_startup_replay_period; /* 补刷间隔未到时只计时，不追加 UI 消息。 */
+		}
+		if ((s_uidp_startup_replay_period == 0U) &&
+			(UIDPMsgQueue != NULL) &&
+			(uxQueueMessagesWaiting(UIDPMsgQueue) == 0U))
+		{
+			s_uidp_startup_replay_period = UIDP_STARTUP_REPLAY_PERIOD_TICKS; /* 本次补刷后等待 200ms，再给 RFID 后续结果一次刷新机会。 */
+			Pubinterface_RefreshRuntimeDisplaySnapshot(); /* 按当前全局状态重发 A/B 在线图标和当前通道参数区，不修改控制状态。 */
 		}
 	}
 }
