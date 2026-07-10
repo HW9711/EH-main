@@ -13,242 +13,33 @@
 #include "sscBEEP.h"
 #include "sscKEYBH.h"
 #include "sscUIDP.h"
+
+/*
+ * 文件功能：每 30ms 轮询 A/B 手柄实体运行键，并按手柄型号执行翻转启停或按住运行。
+ * 运行入口：Userparser_Init() 调用 HandleKeyScan_Init()，任务回调只进入 HANDLEKEYTaskFunc()。
+ * 关键顺序：先维护 82 号限时提示，再检查控制权，最后严格按 A 后 B 顺序处理实体键。
+ * 安全约束：启动必须依次通过公共接头刀具门禁、控制权申请，再写运行状态并联动注水泵。
+ */
 kernel_task_t HANDLEKEYTaskHandle;
 
-//键值按下状态
+/* 保留两路历史按键中断翻转状态；现行 30ms 实体键任务直接读取 GPIO，不使用该数组。 */
 static bool sHandleKEYValue[2] = { false };
 
-//============================================================================
-// 函数名称: HAL_GPIO_EXTI_Callback()
-// 功能描述: 手柄（PXBA）按键中断回调函数
-// 输　  入:
-// 输    出:
-// 函数说明: false抬起，true按下
-//============================================================================
+/*
+ * 函数功能：先把 GPIO 外部中断交给软串口边沿处理，再兼容记录两路历史手柄按键翻转状态。
+ * 输入参数：GPIO_Pin 为本次触发中断的 GPIO 引脚编号。
+ * 返回参数：无。
+ */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	SimUart_HandleExti(GPIO_Pin);
+	SimUart_HandleExti(GPIO_Pin); /* 压力软串口依赖 GPIO 边沿收数，任何手柄键整理都不能跳过该转发。 */
 
 	switch (GPIO_Pin)
 	{
-		case BOARD_RES_HANDLE_KEY1_PIN : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; //H_KEY1
-		case BOARD_RES_HANDLE_KEY0_PIN : sHandleKEYValue[0] = (sHandleKEYValue[0] ? false : true); break; //H_KEY
-		default : break;
+		case BOARD_RES_HANDLE_KEY1_PIN : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; /* 兼容保留 B 路历史中断状态翻转，不参与当前轮询启停。 */
+		case BOARD_RES_HANDLE_KEY0_PIN : sHandleKEYValue[0] = (sHandleKEYValue[0] ? false : true); break; /* 兼容保留 A 路历史中断状态翻转，不参与当前轮询启停。 */
+		default : break; /* 其它 GPIO 中断只完成软串口边沿处理，不改手柄历史状态。 */
 	}
-}
-
-//============================================================================
-// 函数名称: HandleKey_GetKeyValue()
-// 功能描述: 手柄（PXBA）按键状态
-// 输　  入: 
-// 输    出:
-// 函数说明: 
-//============================================================================
-bool HandleKey_GetKeyValue(uint8_t keynum)
-{
-	return 0; //sHandleKEYValue[keynum];
-}
-
-/*
- * 手柄按键迁移到 V1.8 新接口后，不再直接写旧的运行/报警全局标志。
- * 这里保留原有按键去抖和长按窗口，只把输出改成 WorkMessage、ControlSignalMessage
- * 以及 SendKeyBehMessage()/SendAlarmMessage()，确保后续 sscKEYBH 统一分发。
- */
-static void HandleKey_SetAlarm(uint8_t alarm_value)
-{
-	/* 手柄按键产生的普通报警统一交给 WorkAlarm_Set，同步 WorkMessage、蜂鸣和 sscUIDP 屏幕显示。 */
-	WorkAlarm_Set(alarm_value);
-}
-
-static void HandleKey_ClearAlarm(uint8_t alarm_value)
-{
-	/* 只清当前按键模块自己关心的报警码，避免误清其它模块仍存在的故障。 */
-	WorkAlarm_ClearIf(alarm_value);
-}
-
-static void HandleKey_SetMotorRun(bool enable)
-{
-	if (enable)
-	{
-		if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
-		{
-			return; /* 公共接头基座未读取到 EPC 刀具头时，实体键启动只提示“请连接手柄”，不下发运行。 */
-		}
-		/* 手柄按键启动电机前先占用手柄控制权，若其它方式正在控制则本次按键无效。 */
-		if (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)
-		{
-			return;
-		}
-	}
-	ControlSignalMessage.handle_control_flag = enable;
-	WorkMessage.runflag_work = enable;
-	if (enable == false)
-	{
-		/* 手柄停止后释放手柄控制权，允许脚踏、屏幕或上位机重新申请。 */
-		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE);
-	}
-	SendKeyBehMessage(HANDLEKey, enable ? HANDLEKey_motor_start : HANDLEKey_motor_stop);
-}
-
-
-//
-void HandleKey_Scan0SSC()
-{
-	static uint8_t KEY0_ADC_time = 0;
-	static uint8_t key0_up_down = 0;//按键按松开标志
-	static uint8_t start_flags=0;
-	static uint8_t activation_flag=0;
-	
-	if(WorkMessage.channel_work!=CHANNEL_A||WorkMessage.hand_model!=PXBA_ONLINES){
-		return;
-	}
-if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
-		if(KEY0_STATUS() == 0)
-			{
-					key0_up_down=0;
-				KEY0_ADC_time++;
-				if(KEY0_ADC_time<15)return;
-				KEY0_ADC_time=0;
-				if(start_flags)
-					{
-						start_flags=0;
-						if(WorkMessage.drivetype_work==JTWORK)
-						{
-							//报警，请选择脚控启动
-							HandleKey_SetAlarm(WORK_ALARM_FOOT_SELECTED);
-							HandleKey_SetMotorRun(false);
-							return;
-						}
-						
-						if(WorkMessage.drivetype_work==HANDLEWORK)
-						{
-								if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_COMM_ERROR)
-								{
-									activation_flag=0;
-									HandleKey_SetMotorRun(false);
-								}
-								else{
-									if(activation_flag==0){
-										activation_flag=1;
-										HandleKey_SetMotorRun(true);
-									}
-									else
-									{
-										activation_flag=0;
-										HandleKey_SetMotorRun(false);
-									}
-								} 
-					}
-					}
-			}
-			else
-			{
-				KEY0_ADC_time=0;
-				key0_up_down++;
-				if(key0_up_down<10)return;
-				start_flags=1;
-				
-				if(key0_up_down>55)
-				{
-					if(WorkMessage.alarm_value==WORK_ALARM_FOOT_SELECTED)
-					{
-						HandleKey_ClearAlarm(WORK_ALARM_FOOT_SELECTED);
-						key0_up_down=0;
-					}
-					else if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_COMM_ERROR)
-					{
-						if(WorkMessage.drivetype_work==HANDLEWORK)
-						{
-						HandleKey_ClearAlarm(WORK_ALARM_MOTOR_COMM_ERROR);
-						key0_up_down=0;
-						}
-					}
-					else
-					{
-						key0_up_down=0;
-					}
-				}
-				
-			}
-	}
-void HandleKey_Scan1SSC()
-{
-	static uint8_t KEY0_ADC_time = 0;
-  static uint8_t key0_up_down = 0;//按键按松开标志
-	static uint8_t start_flags=0;
-	static uint8_t activation_flag=0;
-	if(WorkMessage.channel_work!=CHANNEL_B||WorkMessage.hand_model!=PXBA_ONLINES){
-		return;}
-			if(WorkMessage.alarm_value==11||WorkMessage.alarm_value==12){return;}
-			if(KEY1_STATUS() == 0)
-			{
-				key0_up_down=0;
-				KEY0_ADC_time++;
-				if(KEY0_ADC_time<15)return;
-				KEY0_ADC_time=0;
-				if(start_flags)
-					{
-						start_flags=0;
-						if(WorkMessage.drivetype_work==JTWORK)
-						{
-							//报警，请选择脚控启动
-							HandleKey_SetAlarm(WORK_ALARM_FOOT_SELECTED);
-							HandleKey_SetMotorRun(false);
-					
-							return;
-						}
-				
-						if(WorkMessage.drivetype_work==HANDLEWORK)
-						{
-								if(WorkMessage.alarm_value==WORK_ALARM_HALL_ERROR)
-								{
-									activation_flag=0;
-									HandleKey_SetMotorRun(false);
-								}
-								else{
-									if(activation_flag==0){
-										activation_flag=1;
-										HandleKey_SetMotorRun(true);
-									}
-									else
-									{
-										activation_flag=0;
-										HandleKey_SetMotorRun(false);
-									}
-						}
-					}
-					}
-			}
-			else
-			{
-				KEY0_ADC_time=0;
-				key0_up_down++;
-				if(key0_up_down<10)return;
-				start_flags=1;
-				
-				if(key0_up_down>55)
-				{
-					if(WorkMessage.alarm_value==WORK_ALARM_FOOT_SELECTED)
-					{
-						HandleKey_ClearAlarm(WORK_ALARM_FOOT_SELECTED);
-						key0_up_down=0;
-						activation_flag=0;
-					}
-					else if(WorkMessage.alarm_value==WORK_ALARM_HALL_ERROR)
-					{
-						if(WorkMessage.drivetype_work==HANDLEWORK)
-						{
-						HandleKey_ClearAlarm(WORK_ALARM_HALL_ERROR);
-						key0_up_down=0;
-							activation_flag=0;
-						}
-					}
-					else
-					{
-						key0_up_down=0;
-					}
-				}
-			}
 }
 
 #define HANDLE_KEY_DEBOUNCE_COUNT 2U /* 30ms任务连续2次确认电平，约60ms去抖，避免触点抖动误启停。 */
@@ -267,10 +58,10 @@ static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false,
 static HandleRunKeyDebounce_t s_handle_run_key_b_filter = {0U, 0U, false, false, false}; /* B通道实体键去抖状态。 */
 static uint8_t s_handle_run_key_owner_channel = CHANNEL_NONE;			   /* 当前由实体键启动的通道，防止另一通道松开误停。 */
 static uint8_t s_handle_foot_selected_timed_alarm_active = 0U; /* 记录 82 号错模式弹窗是否由手柄键模块显示，防止到期误清其它报警。 */
-static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号错模式弹窗开始时间，用于 3 秒自动清除。 */
+static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号错模式弹窗开始时间，按 ALARM_MODE_MS（当前 2000ms）自动清除。 */
 
 /*
- * 函数功能：脚控已选中时按手柄实体运行键，上报 82 号 3 秒临时弹窗。
+ * 函数功能：脚控已选中时按手柄实体运行键，上报 82 号限时提示，保持时间由 ALARM_MODE_MS 控制（当前 2000ms）。
  * 输入参数：无，报警码固定使用 WORK_ALARM_FOOT_SELECTED。
  * 返回参数：无。
  */
@@ -279,7 +70,7 @@ static void HandleRunKey_RaiseFootSelectedTimedAlarm(void)
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只读取 Value[0]，其余补零避免沿用上一条报警参数。 */
 
 	display_value[0] = WORK_ALARM_FOOT_SELECTED; /* 82 号图提示当前脚控已选中，用户应使用脚踏启动。 */
-	SendAlarmMessageTimed(WORK_ALARM_FOOT_SELECTED, ALARM_MODE_MS); /* 错模式提示只响 3 秒，不写全局报警锁存。 */
+	SendAlarmMessageTimed(WORK_ALARM_FOOT_SELECTED, ALARM_MODE_MS); /* 错模式提示只保持 ALARM_MODE_MS（当前 2000ms），不写全局报警锁存。 */
 	s_handle_foot_selected_timed_alarm_tick = HAL_GetTick(); /* 记录本次弹窗起点，后续由手柄键任务周期自动关闭。 */
 	if (WorkMessage.alarm_flag == false)
 	{
@@ -293,7 +84,7 @@ static void HandleRunKey_RaiseFootSelectedTimedAlarm(void)
 }
 
 /*
- * 函数功能：周期维护 82 号错模式临时弹窗，达到 3 秒后自动关闭。
+ * 函数功能：周期维护 82 号错模式限时弹窗，达到 ALARM_MODE_MS（当前 2000ms）后自动关闭。
  * 输入参数：无，直接读取弹窗归属和 HAL 毫秒 tick。
  * 返回参数：无。
  */
@@ -306,7 +97,7 @@ static void HandleRunKey_ServiceFootSelectedTimedAlarm(void)
 
 	if ((uint32_t)(HAL_GetTick() - s_handle_foot_selected_timed_alarm_tick) < ALARM_MODE_MS)
 	{
-		return; /* 3 秒保持时间未到，继续显示脚控已选中提示。 */
+		return; /* ALARM_MODE_MS（当前 2000ms）尚未到期，继续显示脚控已选中提示。 */
 	}
 
 	if (WorkMessage.alarm_flag == false)
@@ -604,24 +395,22 @@ static void HandleKey_ScanRunKeys(void)
  */
 void HANDLEKEYTaskFunc(uint32_t event)
 {
-  /* USER CODE BEGIN HANDLEKEYTaskFunc */
-  /* Infinite loop */
-	HandleRunKey_ServiceFootSelectedTimedAlarm(); /* 手柄键任务周期维护 82 号临时弹窗，保证 3 秒后自动消失。 */
-	if(ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
-		return;
-	HandleKey_ScanRunKeys(); /* 实体键按型号处理：LGZI松开停止，其它支持型号仍按稳定按下沿翻转启停。 */
-  /* USER CODE END HANDLEKEYTaskFunc */
+	(void)event; /* 当前任务只按固定 30ms 周期运行，不使用调度事件值。 */
+	HandleRunKey_ServiceFootSelectedTimedAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
+	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
+	{
+		return; /* 其它来源正在控制时不扫描启动键，但仍先完成本模块提示生命周期维护。 */
+	}
+	HandleKey_ScanRunKeys(); /* 严格先处理 A、再处理 B；A 已取得 owner 时 B 本周期不能抢占。 */
 }
 
-/**
- * @brief Function implementing the Time thread.
- * @param argument: Not used
- * @retval None 15
+/*
+ * 函数功能：创建并启动手柄实体按键 30ms 周期任务。
+ * 输入参数：无。
+ * 返回参数：无。
  */
-//============================================================================
 void HandleKeyScan_Init(void)
 {
-  /* definition and creation of HANDLEKEYTask */
-	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc);
-	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);
+	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc); /* 使用现有独立静态任务对象创建实体键任务。 */
+	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30U); /* 周期固定为 30ms，不改变当前实体键去抖时基。 */
 }
