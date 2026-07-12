@@ -234,6 +234,24 @@ typedef struct
 } HandlescanChannelContext;
 
 /*
+ * A/B 通道固定资源绑定。
+ * 该结构只保存不会在运行中变化的硬件和业务对象地址，扫描计数与状态仍放在 HandlescanChannelContext 中。
+ * 统一状态机通过这张绑定表选择本通道资源，避免 A/B 各复制一份五百行流程。
+ */
+typedef struct
+{
+    uint8_t channel;                                       /* 通道号，决定 EEPROM 总线、RFID 结果和报警归属。 */
+    GPIO_TypeDef *short_gpio;                              /* 手柄短接检测 GPIO 端口，低电平表示手柄已插入。 */
+    uint16_t short_pin;                                    /* 手柄短接检测引脚，只用于读取插拔状态。 */
+    HandlescanChannelContext *context;                     /* 本通道跨 10ms 周期保存的扫描运行状态。 */
+    ChannelrecognizeMessage_t *message;                    /* 本通道识别缓存，上线事件会把它装入通道记忆。 */
+    ChannelMemoryMessagr_t *memory;                        /* 本通道记忆，仅保留原有 auto_identify 更新顺序。 */
+    uint32_t *spec_values;                                 /* 本通道刀具规格显示缓存，A/B 不得交叉使用。 */
+    uint8_t plug_key;                                      /* 手柄或 RFID 刀具上线时发送的屏幕事件键值。 */
+    uint8_t unplug_key;                                    /* 手柄确认拔出时发送的屏幕事件键值。 */
+} HandlescanChannelBinding;
+
+/*
  * EEPROM 手柄类型映射配置表项。
  * 说明：
  * 1. `first_byte / second_byte` 对应 EEPROM 第二页前两个字节；
@@ -298,39 +316,64 @@ static const HandlescanHandleTypeConfig s_tool_type_config_table[] =
 static HandlescanChannelContext s_a_context;                  /* 文件静态对象自动清零，保持 A 通道原有初始状态。 */
 static HandlescanChannelContext s_b_context;                  /* 文件静态对象自动清零，保持 B 通道原有初始状态。 */
 
+/* A/B 固定绑定只描述资源归属；运行时不会改写，防止泵位、I2C 总线或事件键值串通道。 */
+static const HandlescanChannelBinding s_a_binding =
+{
+    CHANNEL_A, HANDLESCAN_A_SHORT_GPIO, HANDLESCAN_A_SHORT_PIN,
+    &s_a_context, &ChannelrecognizeMessageA, &MemoryMsgA, paoxueSpeciValue_A,
+    SCREENKey_PLUG_A, SCREENKey_UNPLUG_A
+};
+static const HandlescanChannelBinding s_b_binding =
+{
+    CHANNEL_B, HANDLESCAN_B_SHORT_GPIO, HANDLESCAN_B_SHORT_PIN,
+    &s_b_context, &ChannelrecognizeMessageB, &MemoryMsgB, paoxueSpeciValue_B,
+    SCREENKey_PLUG_B, SCREENKey_UNPLUG_B
+};
+
+/*
+ * 函数功能：把公共接口传入的 A/B 通道号转换为本文件固定绑定。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：返回对应绑定；非法通道返回 NULL，调用方不得继续访问硬件。
+ */
+static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
+{
+    if (channel == CHANNEL_A)
+    {
+        return &s_a_binding; /* A 通道固定关联 I2C2、PD1 和 A 侧业务缓存。 */
+    }
+    if (channel == CHANNEL_B)
+    {
+        return &s_b_binding; /* B 通道固定关联 I2C3、PD0 和 B 侧业务缓存。 */
+    }
+
+    return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
+}
+
 /* 运行中另一路手柄校验失败时，屏幕提示只保持 3 秒，不写 WorkMessage，避免影响当前工作通道。 */
 static uint16_t s_transient_screen_alarm_ticks = 0U;
 static uint8_t s_transient_screen_alarm_value = 0U;
 
 static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value);
 static void Handlescan_ClearToolSpecValues(uint32_t *spec_values);
-static bool Handlescan_IsSplitManualModeWithoutRfid(uint8_t channel, HandlescanToolSource tool_source);
-static bool Handlescan_LoadSplitBaseEepromRuntime(uint8_t channel, ChannelrecognizeMessage_t *message);
-static void Handlescan_ReloadSpeedStepMessage(uint8_t channel, ChannelrecognizeMessage_t *message);
-static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
-                                           HandlescanToolSource tool_source,
-                                           ChannelrecognizeMessage_t *message,
-                                           uint32_t *spec_values,
+static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *binding,
+                                          uint16_t addr,
+                                          uint8_t *data,
+                                          uint16_t len);
+static uint8_t Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding,
+                                         uint16_t page_index,
+                                         uint8_t *page_buf);
+static bool Handlescan_IsSplitManualModeWithoutRfid(const HandlescanChannelBinding *binding);
+static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding *binding);
+static void Handlescan_ReloadSpeedStepMessage(const HandlescanChannelBinding *binding);
+static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *binding,
                                            uint8_t mapped_model,
                                            uint8_t raw_type_major,
-                                           uint8_t raw_type_minor,
-                                           uint16_t *last_sequence,
-                                           uint16_t *last_presence_sequence,
-                                           uint8_t *miss_count,
-                                           uint8_t *monitor_pending,
-                                           uint8_t *tool_online,
-                                           uint8_t plug_key);
+                                           uint8_t raw_type_minor);
 static void Handlescan_EnterRetryOrFail(uint8_t channel,
-                                        HandlescanStage *stage,
-                                        uint8_t *retry_count,
-                                        uint16_t *retry_wait_ticks,
-                                        uint8_t *last_alarm,
+                                        HandlescanChannelContext *context,
                                         uint8_t set_alarm);
 static void Handlescan_EnterRfidRetryOrFail(uint8_t channel,
-                                            HandlescanStage *stage,
-                                            uint8_t *retry_count,
-                                            uint16_t *retry_wait_ticks,
-                                            uint8_t *last_alarm,
+                                            HandlescanChannelContext *context,
                                             uint8_t set_alarm);
 static void Handlescan_BeepOnceIfNoAlarm(void);
 
@@ -923,59 +966,51 @@ static void Handlescan_PrepareRfidBaseRecognizeMessage(ChannelrecognizeMessage_t
  * 输入参数：channel 为 A/B 通道；message/spec_values 为通道识别和规格缓存；mapped_model/raw_type_* 为 EEPROM 第二页基座信息；last_sequence/last_presence_sequence/miss_count/monitor_pending 为 RFID 在线监测状态；tool_online 为刀具头在线边沿标志；plug_key 为刷新事件键值。
  * 返回参数：无。
  */
-static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
-                                           HandlescanToolSource tool_source,
-                                           ChannelrecognizeMessage_t *message,
-                                           uint32_t *spec_values,
+static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *binding,
                                            uint8_t mapped_model,
                                            uint8_t raw_type_major,
-                                           uint8_t raw_type_minor,
-                                           uint16_t *last_sequence,
-                                           uint16_t *last_presence_sequence,
-                                           uint8_t *miss_count,
-                                           uint8_t *monitor_pending,
-                                           uint8_t *tool_online,
-                                           uint8_t plug_key)
+                                           uint8_t raw_type_minor)
 {
-    if ((message == NULL) || (spec_values == NULL) || (last_sequence == NULL) ||
-        (last_presence_sequence == NULL) || (miss_count == NULL) || (monitor_pending == NULL) ||
-        (tool_online == NULL))
+    HandlescanChannelContext *context; /* 指向需要清刀具头的通道运行状态。 */
+
+    if (binding == NULL)
     {
-        return; /* 参数不完整时不改全局状态，避免误清正在工作的另一通道。 */
+        return; /* 绑定无效时不清任何通道。 */
     }
 
-    if (*tool_online == 0U)
+    context = binding->context; /* 后续只清绑定通道。 */
+    if (context->rfid_tool_online == 0U)
     {
-        *miss_count = 0U; /* 刀具头已经处于离线态时，只清缺失计数，避免后续周期重复触发离线提示。 */
-        *monitor_pending = 0U; /* 同步清掉监测等待标志，让下一轮继续安静监测是否重新上线。 */
+        context->rfid_miss_count = 0U; /* 已离线时只清缺失计数。 */
+        context->rfid_monitor_pending = 0U; /* 清监测等待标志。 */
         return; /* 已经离线时不重复清 MemoryMsg、不重复发插拔事件，也不重复蜂鸣。 */
     }
 
-    if (tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+    if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
     {
-        Handlescan_PrepareRfidBaseRecognizeMessage(message,
+        Handlescan_PrepareRfidBaseRecognizeMessage(binding->message,
                                                    mapped_model,
                                                    raw_type_major,
                                                    raw_type_minor); /* RFID 刀具头离线时保留基座信息，只清刀具字段等待下一次标签。 */
         if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
         {
-            (void)Handlescan_LoadSplitBaseEepromRuntime(channel, message); /* 仅分体式基座恢复手柄 EEPROM 参数；公共接头无 EPC 刀具时继续保持不可运行。 */
+            (void)Handlescan_LoadSplitBaseEepromRuntime(binding); /* 仅分体式基座恢复本通道 EEPROM 参数。 */
         }
-        Handlescan_ClearToolSpecValues(spec_values); /* RFID 刀具头移开后清屏幕规格，避免继续显示旧刀具 0x4200。 */
-        Rfid_ClearChannelResult(channel); /* 清当前 RFID 结果但保留历史 payload，下一次同标签重新上线也能发布业务序号。 */
-        Pubinterface_ClearRfidToolMemory(channel); /* RFID 无刀具头时同步清通道记忆，屏幕显示 61/62 或等待图。 */
-        Handlescan_ReloadSpeedStepMessage(channel, message); /* 清刀具头后重新装回基座 Page6 步进，等待下一次 RFID 上线继承。 */
+        Handlescan_ClearToolSpecValues(binding->spec_values); /* 清本通道屏幕规格。 */
+        Rfid_ClearChannelResult(binding->channel); /* 清本通道 RFID 结果。 */
+        Pubinterface_ClearRfidToolMemory(binding->channel); /* 同步清本通道刀具记忆。 */
+        Handlescan_ReloadSpeedStepMessage(binding); /* 重新装回本通道基座 Page6 步进。 */
         //SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
     }
-    *tool_online = 0U; /* 先把边沿状态切到离线，后续周期继续读不到标签时不会再次进入离线提示。 */
+    context->rfid_tool_online = 0U; /* 先切到离线边沿状态，后续不重复提示。 */
     Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头离线确认时单响一次，让使用者知道刀具头已移开。 */
-    if (tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+    if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
     {
-        *last_sequence = 0U; /* RFID 刀具头已被清除，后续读到任意有效标签都需要重新消费。 */
-        *last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 继续挡住下一次上线。 */
+        context->rfid_last_sequence = 0U; /* 后续任意有效标签都重新消费。 */
+        context->rfid_last_presence_sequence = 0U; /* 清存在序号。 */
     }
-    *miss_count = 0U; /* 清掉缺失次数，当前这次状态变化已经处理完成。 */
-    *monitor_pending = 0U; /* 清掉未完成监测标志，等待下一轮 1 秒周期重新读取。 */
+    context->rfid_miss_count = 0U; /* 清缺失次数。 */
+    context->rfid_monitor_pending = 0U; /* 清未完成监测标志。 */
 }
 
 /*
@@ -983,43 +1018,33 @@ static void Handlescan_ClearOnlineRfidTool(uint8_t channel,
  * 输入参数：channel 为 A/B 通道；stage 为当前通道状态机；tool_source 为 RFID EPC 来源；last_sequence 为已消费序号；wait_ticks 为等待计数器；fast_mode 表示是否快速识别。
  * 返回参数：true 表示已进入 RFID 等待阶段，false 表示请求未发起。
  */
-static bool Handlescan_StartRfidWait(uint8_t channel,
-                                     HandlescanStage *stage,
-                                     HandlescanToolSource tool_source,
-                                     uint16_t *last_sequence,
-                                     uint16_t *wait_ticks,
+static bool Handlescan_StartRfidWait(const HandlescanChannelBinding *binding,
                                      bool fast_mode)
 {
-    RfidReadSource_t rfid_source = Handlescan_ToRfidSource(tool_source); /* 把手柄扫描来源转换成 RFID 模块来源。 */
+    HandlescanChannelContext *context; /* 指向绑定通道的 RFID 等待状态。 */
+    RfidReadSource_t rfid_source; /* 保存当前手柄对应的 RFID 数据来源。 */
 
-    if ((stage == NULL) || (last_sequence == NULL) || (wait_ticks == NULL))
+    if (binding == NULL)
     {
-        return false; /* 状态或序号指针为空时不切状态，避免异常路径卡死。 */
+        return false; /* 绑定无效时不发送任何通道的 RFID 请求。 */
     }
 
+    context = binding->context; /* 后续只修改本通道 RFID 状态。 */
+    rfid_source = Handlescan_ToRfidSource(context->tool_source); /* 把刀具来源转换成 RFID 模块来源。 */
     if (rfid_source == RFID_READ_SOURCE_NONE)
     {
         return false; /* EEPROM 第三页来源不进入 RFID 等待。 */
     }
 
-    *last_sequence = 0U; /* 新一轮 RFID 上线等待必须重新消费结果，避免同一刀具头沿用旧序号后被挡住。 */
-    *wait_ticks = 0U; /* 新一轮等待从 0 计数。 */
-    Rfid_ClearChannelResult(channel); /* 清掉该通道旧 RFID 缓存，让同型号刀具头重新插入时也能生成可消费结果。 */
-    if (channel == CHANNEL_A)
+    context->rfid_last_sequence = 0U; /* 新一轮等待重新消费结果。 */
+    context->rfid_wait_ticks = 0U; /* 新一轮等待从 0 计数。 */
+    context->rfid_last_presence_sequence = 0U; /* 存在检测从空状态开始。 */
+    context->rfid_miss_count = 0U; /* 清掉上一轮在线缺失次数。 */
+    context->rfid_monitor_pending = 0U; /* 上线等待独立处理，不继承在线监测请求。 */
+    Rfid_ClearChannelResult(binding->channel); /* 清掉本通道旧 RFID 缓存。 */
+    if (Rfid_RequestToolRead(binding->channel, rfid_source, fast_mode) == true)
     {
-        s_a_context.rfid_last_presence_sequence = 0U; /* A 通道重新进入 RFID 上线等待时，存在检测也从空状态开始。 */
-        s_a_context.rfid_miss_count = 0U; /* 清掉 A 通道在线监测缺失次数，避免上一轮刀具头拔出状态影响本轮上线。 */
-        s_a_context.rfid_monitor_pending = 0U; /* 清掉 A 通道在线监测等待标志，上线等待由 WAIT_RFID_TOOL 独立处理。 */
-    }
-    else if (channel == CHANNEL_B)
-    {
-        s_b_context.rfid_last_presence_sequence = 0U; /* B 通道重新进入 RFID 上线等待时，存在检测也从空状态开始。 */
-        s_b_context.rfid_miss_count = 0U; /* 清掉 B 通道在线监测缺失次数，避免上一轮刀具头拔出状态影响本轮上线。 */
-        s_b_context.rfid_monitor_pending = 0U; /* 清掉 B 通道在线监测等待标志，上线等待由 WAIT_RFID_TOOL 独立处理。 */
-    }
-    if (Rfid_RequestToolRead(channel, rfid_source, fast_mode) == true)
-    {
-        *stage = HANDLESCAN_STAGE_WAIT_RFID_TOOL; /* 请求已入队后才进入 RFID 等待阶段。 */
+        context->stage = HANDLESCAN_STAGE_WAIT_RFID_TOOL; /* 请求已入队后才进入 RFID 等待阶段。 */
         return true; /* RFID 请求已经交给射频任务，调用方可以同步发布基座上线。 */
     }
 
@@ -1031,28 +1056,15 @@ static bool Handlescan_StartRfidWait(uint8_t channel,
  * 输入参数：channel 为 A/B 通道；stage 为状态机；tool_source 为刀具来源；message/spec_values 为通道缓存；mapped_model/raw_type_* 为 EEPROM 第二页基座信息；last_sequence/last_presence_sequence 为该通道已处理 RFID 序号；miss_count/monitor_pending 为在线监测状态；tool_online 为刀具头在线边沿标志；wait_ticks 为等待计数；last_alarm/retry 参数沿用原有失败重试逻辑；plug_key 为插入事件键值。
  * 返回参数：true 表示本轮已处理 RFID 等待阶段，调用方应返回。
  */
-static bool Handlescan_ProcessRfidWait(uint8_t channel,
-                                       HandlescanStage *stage,
-                                       HandlescanToolSource tool_source,
-                                       ChannelrecognizeMessage_t *message,
-                                       uint32_t *spec_values,
+static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
                                        uint8_t mapped_model,
                                        uint8_t raw_type_major,
-                                       uint8_t raw_type_minor,
-                                       uint16_t *last_sequence,
-                                       uint16_t *last_presence_sequence,
-                                       uint8_t *miss_count,
-                                       uint8_t *monitor_pending,
-                                       uint8_t *tool_online,
-                                       uint16_t *wait_ticks,
-                                       uint8_t *verify_retry_count,
-                                       uint16_t *verify_retry_wait_ticks,
-                                       uint8_t *last_alarm,
-                                       uint8_t plug_key)
+                                       uint8_t raw_type_minor)
 {
+    HandlescanChannelContext *context = binding->context; /* RFID 等待只维护绑定通道的序号、计数和状态。 */
     RfidToolResult_t result; /* 保存 RFID 任务最近一次有效结果。 */
 
-    if ((stage == NULL) || (*stage != HANDLESCAN_STAGE_WAIT_RFID_TOOL))
+    if (context->stage != HANDLESCAN_STAGE_WAIT_RFID_TOOL)
     {
         return false; /* 当前不在 RFID 等待阶段时，调用方继续处理其它阶段。 */
     }
@@ -1062,76 +1074,49 @@ static bool Handlescan_ProcessRfidWait(uint8_t channel,
         return true; /* 运行中不处理 RFID，不改变参数，等待电机停止后继续。 */
     }
 
-    if (Handlescan_IsSplitManualModeWithoutRfid(channel, tool_source) != false)
+    if (Handlescan_IsSplitManualModeWithoutRfid(binding) != false)
     {
-        if (wait_ticks != NULL)
-        {
-            *wait_ticks = 0U; /* 用户已切手动模式时结束 RFID 等待计时，避免后续超时重试重新拉起 EPC。 */
-        }
-        if (miss_count != NULL)
-        {
-            *miss_count = 0U; /* 手动模式下不累计 RFID 缺失，避免误清手动磨/刨状态。 */
-        }
-        if (monitor_pending != NULL)
-        {
-            *monitor_pending = 0U; /* 手动模式不再等待 RFID 回包，晚到结果在在线阶段也会被丢弃。 */
-        }
-        *stage = HANDLESCAN_STAGE_ONLINE; /* 基座仍在线，只是刀具来源从自动识别切回手动 EEPROM 参数。 */
+        context->rfid_wait_ticks = 0U; /* 用户切手动模式后结束 RFID 等待计时。 */
+        context->rfid_miss_count = 0U; /* 手动模式不累计 RFID 缺失。 */
+        context->rfid_monitor_pending = 0U; /* 手动模式不再等待 RFID 回包。 */
+        context->stage = HANDLESCAN_STAGE_ONLINE; /* 基座仍在线，刀具来源切回手动 EEPROM 参数。 */
         return true; /* 本轮 RFID 等待已被手动模式接管，调用方不要继续处理普通 EEPROM 链路。 */
     }
 
-    if (Rfid_CopyLastResult(channel, &result) == true)
+    if (Rfid_CopyLastResult(binding->channel, &result) == true)
     {
-        if ((last_sequence != NULL) && (result.sequence != *last_sequence))
+        if (result.sequence != context->rfid_last_sequence)
         {
-            if ((Handlescan_ToRfidSource(tool_source) == result.source) &&
-                (Handlescan_ApplyRfidToolResult(channel,
-                                                message,
-                                                spec_values,
+            if ((Handlescan_ToRfidSource(context->tool_source) == result.source) &&
+                (Handlescan_ApplyRfidToolResult(binding->channel,
+                                                binding->message,
+                                                binding->spec_values,
                                                 mapped_model,
                                                 raw_type_major,
                                                 raw_type_minor,
                                                 &result) == true))
             {
-                *last_sequence = result.sequence; /* 记录本次结果序号，避免下轮重复处理同一帧。 */
-                if (last_presence_sequence != NULL)
-                {
-                    *last_presence_sequence = result.presence_sequence; /* 上线成功时同步记录存在序号，在线监测从当前标签状态继续。 */
-                }
-                if (miss_count != NULL)
-                {
-                    *miss_count = 0U; /* 上线阶段已经读到标签，连续缺失次数必须清零。 */
-                }
-                if (monitor_pending != NULL)
-                {
-                    *monitor_pending = 0U; /* 上线阶段不是低频监测请求，清掉在线监测等待标志。 */
-                }
-                if (tool_online != NULL)
-                {
-                    *tool_online = 1U; /* 等待阶段读到有效 RFID 后切到在线态，本次上线蜂鸣只对应这个状态边沿。 */
-                }
-                SendKeyBehMessage(PLUGunPLUG, plug_key); /* RFID 结果生效后沿用现有插入事件链装载 MemoryMsg/WorkMessage。 */
+                context->rfid_last_sequence = result.sequence; /* 记录本次结果序号，避免重复处理。 */
+                context->rfid_last_presence_sequence = result.presence_sequence; /* 在线监测从当前标签存在序号继续。 */
+                context->rfid_miss_count = 0U; /* 已读到标签，连续缺失次数清零。 */
+                context->rfid_monitor_pending = 0U; /* 清掉在线监测等待标志。 */
+                context->rfid_tool_online = 1U; /* 刀具头切到在线边沿状态。 */
+                SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 沿用插入事件链装载本通道记忆。 */
                 Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头上线确认时单响一次，同一标签重新插回也给用户插入反馈。 */
-                Handlescan_ClearChannelAlarm(channel, *last_alarm); /* 成功识别后释放该通道历史校验报警。 */
-                *last_alarm = 0U; /* 清掉最近报警缓存。 */
-                *stage = HANDLESCAN_STAGE_ONLINE; /* 刀具头也识别成功后，通道才进入在线保持。 */
+                Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* 成功识别后释放本通道历史报警。 */
+                context->last_alarm = 0U; /* 清掉最近报警缓存。 */
+                context->stage = HANDLESCAN_STAGE_ONLINE; /* 刀具头识别成功后进入在线保持。 */
                 return true; /* 本轮 RFID 阶段处理完毕。 */
             }
         }
     }
 
-    if (wait_ticks != NULL)
+    ++context->rfid_wait_ticks; /* 未取到新结果时增加等待时间。 */
+    if (context->rfid_wait_ticks >= HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS)
     {
-        (*wait_ticks)++; /* 未取到新结果时增加等待时间。 */
-        if (*wait_ticks >= HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS)
-        {
-            Handlescan_EnterRfidRetryOrFail(channel,
-                                            stage,
-                                            verify_retry_count,
-                                            verify_retry_wait_ticks,
-                                            last_alarm,
-                                            0U); /* RFID 超时使用独立 2 秒窗口，避免无刀具头时长时间显示等待。 */
-        }
+        Handlescan_EnterRfidRetryOrFail(binding->channel,
+                                        context,
+                                        0U); /* RFID 超时使用独立 2 秒窗口，避免无刀具头时长时间显示等待。 */
     }
 
     return true; /* RFID 等待阶段已处理，调用方本轮返回。 */
@@ -1142,34 +1127,23 @@ static bool Handlescan_ProcessRfidWait(uint8_t channel,
  * 输入参数：channel 为 A/B 通道；tool_source 为当前通道刀具来源。
  * 返回参数：true 表示 PXBA/PXBB 手动模式，应禁止 RFID 覆盖手动参数；false 表示仍允许 RFID 监测。
  */
-static bool Handlescan_IsSplitManualModeWithoutRfid(uint8_t channel, HandlescanToolSource tool_source)
+static bool Handlescan_IsSplitManualModeWithoutRfid(const HandlescanChannelBinding *binding)
 {
-    uint8_t handle_type = 0U; /* 保存当前通道识别出的基座型号，用于区分 PXBA/PXBB 和公共接头。 */
+    uint8_t handle_type; /* 保存当前通道识别出的基座型号，用于区分 PXBA/PXBB 和公共接头。 */
 
-    if (tool_source == HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+    if ((binding == NULL) || (binding->context->tool_source == HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3))
     {
         return false; /* 普通 EEPROM 手柄本身不走 RFID，不需要手动模式屏蔽。 */
     }
 
-    if (channel == CHANNEL_A)
-    {
-        handle_type = ChannelrecognizeMessageA.handle_type; /* A 通道从扫描缓存读取基座型号，避免误用当前工作通道。 */
-    }
-    else if (channel == CHANNEL_B)
-    {
-        handle_type = ChannelrecognizeMessageB.handle_type; /* B 通道从扫描缓存读取基座型号，保证 A/B 模式独立。 */
-    }
-    else
-    {
-        return false; /* 非 A/B 通道不参与 RFID 在线监测。 */
-    }
+    handle_type = binding->message->handle_type; /* 直接读取绑定通道基座型号，不再按 A/B 分支选全局对象。 */
 
     if ((handle_type != PXBA_ONLINES) && (handle_type != PXBB_ONLINES))
     {
         return false; /* 公共接头没有手动磨/刨模式，即使 auto_identify 为 0 也必须继续 EPC 在线监测。 */
     }
 
-    return (Pubinterface_IsRfidAutoIdentifyEnabled(channel) == false); /* PXBA/PXBB 被用户切到手动模式后，停止 RFID 轮询和晚到结果消费。 */
+    return (Pubinterface_IsRfidAutoIdentifyEnabled(binding->channel) == false); /* PXBA/PXBB 切到手动模式后停止 RFID 轮询。 */
 }
 
 /*
@@ -1177,53 +1151,50 @@ static bool Handlescan_IsSplitManualModeWithoutRfid(uint8_t channel, HandlescanT
  * 输入参数：channel 为 A/B 通道；tool_source 为刀具来源；monitor_ticks 为低频计数器；miss_count 为连续未读到次数；monitor_pending 表示上一轮监测请求仍未被 presence 序号确认。
  * 返回参数：无。
  */
-static void Handlescan_RequestOnlineRfidMonitor(uint8_t channel,
-                                                HandlescanToolSource tool_source,
-                                                uint16_t *monitor_ticks,
-                                                uint8_t *miss_count,
-                                                uint8_t *monitor_pending)
+static void Handlescan_RequestOnlineRfidMonitor(const HandlescanChannelBinding *binding)
 {
-    RfidReadSource_t rfid_source = Handlescan_ToRfidSource(tool_source); /* 只对 RFID 来源通道做低频监测。 */
+    HandlescanChannelContext *context = binding->context; /* 在线轮询只修改绑定通道的计数。 */
+    RfidReadSource_t rfid_source = Handlescan_ToRfidSource(context->tool_source); /* 只对 RFID 来源通道做低频监测。 */
 
-    if ((monitor_ticks == NULL) || (miss_count == NULL) || (monitor_pending == NULL) || (rfid_source == RFID_READ_SOURCE_NONE))
+    if (rfid_source == RFID_READ_SOURCE_NONE)
     {
         return; /* EEPROM 第三页来源不需要周期 RFID。 */
     }
 
-    if (Handlescan_IsSplitManualModeWithoutRfid(channel, tool_source) != false)
+    if (Handlescan_IsSplitManualModeWithoutRfid(binding) != false)
     {
-        *monitor_ticks = 0U;   /* PXBA/PXBB 手动模式不累计在线 RFID 轮询周期，避免重新发起 EPC 读取。 */
-        *monitor_pending = 0U; /* 手动模式下取消上一轮 RFID 等待状态，防止后续被误判为刀具头缺失。 */
-        *miss_count = 0U;      /* 手动模式关闭自动识别后不再按 RFID 缺失次数清刀具状态。 */
+        context->rfid_monitor_ticks = 0U;   /* 手动模式不累计在线 RFID 轮询周期。 */
+        context->rfid_monitor_pending = 0U; /* 取消上一轮 RFID 等待状态。 */
+        context->rfid_miss_count = 0U;      /* 不按 RFID 缺失清手动刀具状态。 */
         return;                /* 手动模式已经关闭 RFID 自动识别，本轮不发送读取命令。 */
     }
 
     if (WorkMessage.runflag_work == true)
     {
-        *monitor_ticks = 0U; /* 电机运行中暂停周期读取，停止后重新计时。 */
-        *monitor_pending = 0U; /* 运行中不做 RFID 识别，也不把暂停识别误判为刀具头拔出。 */
+        context->rfid_monitor_ticks = 0U; /* 电机运行中暂停周期读取，停止后重新计时。 */
+        context->rfid_monitor_pending = 0U; /* 不把暂停识别误判为刀具头拔出。 */
         return; /* 运行中不发送 RFID 命令。 */
     }
 
-    (*monitor_ticks)++; /* 空闲时累计在线监测周期。 */
-    if (*monitor_ticks >= HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)//大于100
+    ++context->rfid_monitor_ticks; /* 空闲时累计在线监测周期。 */
+    if (context->rfid_monitor_ticks >= HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)//大于100
     {
-        *monitor_ticks = 0U; /* 到周期后清零，避免连续投递请求。 */
-        if (*monitor_pending != 0U)
+        context->rfid_monitor_ticks = 0U; /* 到周期后清零，避免连续投递请求。 */
+        if (context->rfid_monitor_pending != 0U)
         {
-            *monitor_pending = 0U; /* 上一轮请求经过 1 秒仍未被 presence 序号确认，先结束等待。 */
-            if (*miss_count < 0xFFU)
+            context->rfid_monitor_pending = 0U; /* 上一轮请求未被 presence 序号确认，先结束等待。 */
+            if (context->rfid_miss_count < 0xFFU)
             {
-                ++(*miss_count); /* 记录一次在线监测未读到标签，达到阈值后由结果处理函数清刀具头。 */
+                ++context->rfid_miss_count; /* 记录一次在线监测未读到标签。 */
             }
-            if (*miss_count >= HANDLESCAN_RFID_MISS_MAX)
+            if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX)
             {
                 return; /* 已达到约 2 秒缺失判定，本轮不再追加新请求，交给清刀具逻辑刷新状态。 */
             }
         }
-        if (Rfid_RequestToolRead(channel, rfid_source, false) == true)
+        if (Rfid_RequestToolRead(binding->channel, rfid_source, false) == true)
         {
-            *monitor_pending = 1U; /* 普通在线监测请求已发出，等待 RFID 任务用 presence 序号确认标签仍在。 */
+            context->rfid_monitor_pending = 1U; /* 请求已发出，等待 presence 序号确认标签仍在。 */
         }
     }
 }
@@ -1233,26 +1204,15 @@ static void Handlescan_RequestOnlineRfidMonitor(uint8_t channel,
  * 输入参数：channel 为 A/B 通道；tool_source 为刀具来源；message/spec_values 为通道缓存；mapped_model/raw_type_* 为基座信息；last_sequence/last_presence_sequence 为已处理序号；miss_count/monitor_pending 为在线监测状态；tool_online 为刀具头在线边沿标志；plug_key 为刷新事件键值。
  * 返回参数：无。
  */
-static void Handlescan_ProcessOnlineRfidResult(uint8_t channel,
-                                               HandlescanToolSource tool_source,
-                                               ChannelrecognizeMessage_t *message,
-                                               uint32_t *spec_values,
+static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *binding,
                                                uint8_t mapped_model,
                                                uint8_t raw_type_major,
-                                               uint8_t raw_type_minor,
-                                               uint16_t *last_sequence,
-                                               uint16_t *last_presence_sequence,
-                                               uint8_t *miss_count,
-                                               uint8_t *monitor_pending,
-                                               uint8_t *tool_online,
-                                               uint8_t plug_key)
+                                               uint8_t raw_type_minor)
 {
+    HandlescanChannelContext *context = binding->context; /* 在线结果只更新绑定通道的 RFID 状态。 */
     RfidToolResult_t result; /* 保存 RFID 任务最近一次有效结果。 */
 
-    if ((last_sequence == NULL) || (last_presence_sequence == NULL) ||
-        (miss_count == NULL) || (monitor_pending == NULL) ||
-        (tool_online == NULL) ||
-        (Handlescan_ToRfidSource(tool_source) == RFID_READ_SOURCE_NONE))
+    if (Handlescan_ToRfidSource(context->tool_source) == RFID_READ_SOURCE_NONE)
     {
         return; /* 非 RFID 来源或序号指针无效时不处理。 */
     }
@@ -1262,56 +1222,47 @@ static void Handlescan_ProcessOnlineRfidResult(uint8_t channel,
         return; /* 运行中不消费新 RFID 结果，避免运行参数变化。 */
     }
 
-    if (Handlescan_IsSplitManualModeWithoutRfid(channel, tool_source) != false)
+    if (Handlescan_IsSplitManualModeWithoutRfid(binding) != false)
     {
-        *miss_count = 0U;      /* 手动模式不按 RFID 结果缺失累计故障，避免关闭自动识别后又清手动刀具。 */
-        *monitor_pending = 0U; /* 手动模式不再等待 RFID 回包，晚到结果直接丢弃。 */
+        context->rfid_miss_count = 0U;      /* 手动模式不累计 RFID 缺失。 */
+        context->rfid_monitor_pending = 0U; /* 手动模式不再等待 RFID 回包。 */
         return;                /* PXBA/PXBB 已切手动模式，禁止 EPC 晚到回包覆盖手动磨/刨选择。 */
     }
 
-    if (*miss_count >= HANDLESCAN_RFID_MISS_MAX)
+    if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX)
     {
-        Handlescan_ClearOnlineRfidTool(channel,
-                                       tool_source,
-                                       message,
-                                       spec_values,
+        Handlescan_ClearOnlineRfidTool(binding,
                                        mapped_model,
                                        raw_type_major,
-                                       raw_type_minor,
-                                       last_sequence,
-                                       last_presence_sequence,
-                                       miss_count,
-                                       monitor_pending,
-                                       tool_online,
-                                       plug_key); /* 连续一次在线监测未确认标签时，清刀具头并让上位机显示等待 RFID，整体约 2 秒。 */
+                                       raw_type_minor); /* 连续在线监测未确认标签时清本通道刀具头。 */
         return; /* 本轮已处理刀具头缺失状态。 */
     }
 
-    if (Rfid_CopyLastResult(channel, &result) == false)
+    if (Rfid_CopyLastResult(binding->channel, &result) == false)
     {
         return; /* 当前通道还没有有效 RFID 结果。 */
     }
 
-    if (result.source != Handlescan_ToRfidSource(tool_source))
+    if (result.source != Handlescan_ToRfidSource(context->tool_source))
     {
         return; /* 来源不匹配时不使用，避免非本通道 EPC 结果串用。 */
     }
 
-    if (result.presence_sequence != *last_presence_sequence)
+    if (result.presence_sequence != context->rfid_last_presence_sequence)
     {
-        *last_presence_sequence = result.presence_sequence; /* 无论 payload 是否变化，只要读到标签就刷新存在序号。 */
-        *miss_count = 0U; /* 标签仍可读到时清掉连续缺失次数。 */
-        *monitor_pending = 0U; /* 本轮在线监测请求已经被 RFID 回包确认。 */
+        context->rfid_last_presence_sequence = result.presence_sequence; /* 读到标签就刷新存在序号。 */
+        context->rfid_miss_count = 0U; /* 标签仍在时清连续缺失。 */
+        context->rfid_monitor_pending = 0U; /* 本轮请求已被回包确认。 */
     }
 
-    if (result.sequence == *last_sequence)
+    if (result.sequence == context->rfid_last_sequence)
     {
         return; /* 结果已经处理过，不重复刷新。 */
     }
 
-    if (Handlescan_ApplyRfidToolResult(channel,
-                                       message,
-                                       spec_values,
+    if (Handlescan_ApplyRfidToolResult(binding->channel,
+                                       binding->message,
+                                       binding->spec_values,
                                        mapped_model,
                                        raw_type_major,
                                        raw_type_minor,
@@ -1320,11 +1271,11 @@ static void Handlescan_ProcessOnlineRfidResult(uint8_t channel,
         return; /* 数据不符合当前来源时不刷新。 */
     }
 
-    *last_sequence = result.sequence; /* 记录已处理序号。 */
-    SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、WorkMessage、屏幕和上位机状态。 */
-    if (*tool_online == 0U)
+    context->rfid_last_sequence = result.sequence; /* 记录已处理序号。 */
+    SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 复用插入事件链刷新本通道状态。 */
+    if (context->rfid_tool_online == 0U)
     {
-        *tool_online = 1U; /* 刀具头从离线重新变为在线，同一标签重新插回也要形成一次上线反馈。 */
+        context->rfid_tool_online = 1U; /* 刀具头从离线重新变为在线。 */
         Handlescan_BeepOnceIfNoAlarm(); /* 离线后的重新上线只响一次，后续在线监测同标签不会重复响。 */
     }
     else if (result.cache_hit == false)
@@ -1645,36 +1596,26 @@ static void Handlescan_UpdateSpeedStepMessage(ChannelrecognizeMessage_t *message
  * 输入参数：channel 为 A/B 通道；message 为目标通道识别缓存。
  * 返回参数：无。
  */
-static void Handlescan_LoadPage6SpeedStep(uint8_t channel, ChannelrecognizeMessage_t *message)
+static void Handlescan_LoadPage6SpeedStep(const HandlescanChannelBinding *binding)
 {
+    HandlescanChannelContext *context;                       /* 指向绑定通道的 Page6 缓存。 */
+    ChannelrecognizeMessage_t *message;                      /* 指向绑定通道的识别结果。 */
     uint8_t read_status = 0U;                                 /* 保存 Page6 读取状态，1 表示读页和页尾校验通过。 */
 
-    if (message == NULL)
+    if (binding == NULL)
     {
-        return;                                               /* 识别缓存为空时不访问 EEPROM，避免异常路径误写全局参数。 */
+        return;                                               /* 通道绑定无效时不访问 EEPROM，避免误读另一侧总线。 */
     }
 
+    context = binding->context;                              /* Page6 缓存只取当前绑定通道。 */
+    message = binding->message;                              /* 步进结果只写当前绑定通道。 */
     AT24CS32_ClearLastDebugInfo();                            /* 读取 Page6 前清掉上一次 I2C 调试信息，便于现场需要时定位失败页。 */
-    if (channel == CHANNEL_A)
+    read_status = Handlescan_ReadEepromPage(binding, HANDLESCAN_SPEED_STEP_PAGE_INDEX, context->speed_step_buf); /* 固定绑定负责选择 I2C2 或 I2C3。 */
+    if (read_status == 0U)
     {
-        read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_SPEED_STEP_PAGE_INDEX, s_a_context.speed_step_buf); /* A 通道从 I2C2 读取 Page6 多档位速度页。 */
-        if (read_status == 0U)
-        {
-            memset(s_a_context.speed_step_buf, 0, sizeof(s_a_context.speed_step_buf)); /* Page6 失败不影响上线，只清缓存并让步进走 1000 兜底。 */
-        }
-        Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? s_a_context.speed_step_buf : NULL); /* 把 A 通道 Page6 转成正反往复三组步进。 */
-        return;                                               /* A 通道 Page6 处理完成，本轮不再落入 B 通道。 */
+        memset(context->speed_step_buf, 0, sizeof(context->speed_step_buf)); /* 读取失败只清本通道缓存，仍使用原 1000/2000 兜底。 */
     }
-
-    if (channel == CHANNEL_B)
-    {
-        read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_SPEED_STEP_PAGE_INDEX, s_b_context.speed_step_buf); /* B 通道从 I2C3 读取 Page6 多档位速度页。 */
-        if (read_status == 0U)
-        {
-            memset(s_b_context.speed_step_buf, 0, sizeof(s_b_context.speed_step_buf)); /* B 通道 Page6 失败同样不阻断手柄上线，避免现场旧 EEPROM 无 Page6 时报错。 */
-        }
-        Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? s_b_context.speed_step_buf : NULL); /* 把 B 通道 Page6 转成正反往复三组步进。 */
-    }
+    Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? context->speed_step_buf : NULL); /* 把本通道 Page6 转成三方向步进。 */
 }
 
 /*
@@ -1682,44 +1623,31 @@ static void Handlescan_LoadPage6SpeedStep(uint8_t channel, ChannelrecognizeMessa
  * 输入参数：channel 为 A/B 通道；message 为当前通道识别缓存。
  * 返回参数：true 表示 Page3 和 Page4 都读取成功；false 表示至少一页失败，调用方继续使用兜底参数。
  */
-static bool Handlescan_LoadSplitBaseEepromRuntime(uint8_t channel, ChannelrecognizeMessage_t *message)
+static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding *binding)
 {
+    HandlescanChannelContext *context;                       /* 指向绑定通道的 Page3/Page4 缓存。 */
+    ChannelrecognizeMessage_t *message;                      /* 指向绑定通道的识别结果。 */
     uint8_t tool_read_status = 0U;                            /* Page3 读取结果，成功后用于恢复手柄自身减速比/增速比。 */
     uint8_t initial_read_status = 0U;                         /* Page4 读取结果，成功后用于恢复手柄自身速度上下限、默认速度、频率和泵流量。 */
 
-    if (message == NULL)
+    if (binding == NULL)
     {
-        return false;                                         /* 识别缓存为空时不能恢复运行参数，避免误写全局状态。 */
+        return false;                                         /* 绑定无效时不读取任意 EEPROM，避免串通道。 */
     }
 
+    context = binding->context;                              /* 后续读写只使用本通道缓存。 */
+    message = binding->message;                              /* 后续参数只写本通道识别结果。 */
     AT24CS32_ClearLastDebugInfo();                            /* 读取 Page3 前清调试缓存，现场排查时可直接看到本次失败页。 */
-    if (channel == CHANNEL_A)
+    tool_read_status = Handlescan_ReadEepromBytes(binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从绑定通道读取 Page3 倍率。 */
+    AT24CS32_ClearLastDebugInfo();                            /* Page3 读取结束后切换到 Page4 调试上下文。 */
+    initial_read_status = Handlescan_ReadEepromPage(binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX, context->initial_info_buf); /* 从绑定通道读取 Page4 运行参数。 */
+    Handlescan_UpdateToolRatioMessage(message, (tool_read_status != 0U) ? context->tool_info_buf : NULL); /* Page3 失败时按 1 倍保护。 */
+    if (initial_read_status != 0U)
     {
-        tool_read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* A 通道读取手柄 Page3，手动模式倍率来自手柄 EEPROM。 */
-        AT24CS32_ClearLastDebugInfo();                        /* Page3 读取结束后切换到 Page4 调试上下文。 */
-        initial_read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_context.initial_info_buf); /* A 通道读取 Page4，手动模式速度边界来自手柄 EEPROM。 */
-        Handlescan_UpdateToolRatioMessage(message, (tool_read_status != 0U) ? s_a_context.tool_info_buf : NULL); /* Page3 失败时倍率按 1 倍保护，不沿用上一次 RFID 标签。 */
-        if (initial_read_status != 0U)
-        {
-            Handlescan_UpdateInitialInfoMessage(message, s_a_context.initial_info_buf); /* Page4 成功时恢复默认速度、最小速度、最大速度、方向、频率和阈值。 */
-        }
-        return (bool)((tool_read_status != 0U) && (initial_read_status != 0U)); /* 返回完整恢复结果，便于调用方需要时做诊断。 */
+        Handlescan_UpdateInitialInfoMessage(message, context->initial_info_buf); /* Page4 成功时恢复本通道默认运行参数。 */
     }
 
-    if (channel == CHANNEL_B)
-    {
-        tool_read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* B 通道读取手柄 Page3，避免 A/B 手柄倍率串用。 */
-        AT24CS32_ClearLastDebugInfo();                        /* Page3 读取结束后切换到 Page4 调试上下文。 */
-        initial_read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_context.initial_info_buf); /* B 通道读取 Page4，恢复 B 手柄自己的速度范围。 */
-        Handlescan_UpdateToolRatioMessage(message, (tool_read_status != 0U) ? s_b_context.tool_info_buf : NULL); /* Page3 失败时 B 通道也按 1 倍保护。 */
-        if (initial_read_status != 0U)
-        {
-            Handlescan_UpdateInitialInfoMessage(message, s_b_context.initial_info_buf); /* Page4 成功时恢复 B 通道默认运行参数。 */
-        }
-        return (bool)((tool_read_status != 0U) && (initial_read_status != 0U)); /* 返回 B 通道完整恢复结果。 */
-    }
-
-    return false;                                             /* 非 A/B 通道没有独立 EEPROM，不能恢复运行参数。 */
+    return (bool)((tool_read_status != 0U) && (initial_read_status != 0U)); /* 返回完整恢复结果，调用方当前只作诊断。 */
 }
 
 /*
@@ -1729,24 +1657,19 @@ static bool Handlescan_LoadSplitBaseEepromRuntime(uint8_t channel, Channelrecogn
  */
 bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type)
 {
+    const HandlescanChannelBinding *binding;                  /* 固定当前通道的 EEPROM、缓存和硬件归属。 */
     ChannelrecognizeMessage_t *message = NULL;                /* 指向当前通道识别缓存，后续把 EEPROM 运行参数写回该缓存。 */
     uint8_t handle_type = 0U;                                  /* 保存当前分体式基座型号，重建基座缓存后继续保留。 */
     uint8_t raw_type_major = 0U;                               /* 保存 EEPROM Page2 原始主类型，供上位机心跳继续显示真实基座。 */
     uint8_t raw_type_minor = 0U;                               /* 保存 EEPROM Page2 原始子类型，区分 PXBA/PXBB。 */
     bool eeprom_loaded = false;                                /* 记录 Page3/Page4 是否完整恢复成功。 */
 
-    if (channel == CHANNEL_A)
-    {
-        message = &ChannelrecognizeMessageA;                  /* A 通道手动切换时只修改 A 通道识别缓存。 */
-    }
-    else if (channel == CHANNEL_B)
-    {
-        message = &ChannelrecognizeMessageB;                  /* B 通道手动切换时只修改 B 通道识别缓存。 */
-    }
-    else
+    binding = Handlescan_GetBinding(channel);                 /* 非 A/B 通道会得到 NULL，不允许继续访问 EEPROM。 */
+    if (binding == NULL)
     {
         return false;                                         /* 未选中 A/B 通道时不恢复，避免污染全局运行参数。 */
     }
+    message = binding->message;                               /* 识别参数只写回所选通道。 */
 
     handle_type = message->handle_type;                       /* 缓存当前基座型号，后续清刀具字段时需要重新写回。 */
     raw_type_major = message->hand_type_raw_major;            /* 缓存 Page2 原始主类型，避免手动模式丢失手柄身份。 */
@@ -1765,8 +1688,8 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
     message->diameter = 0U;                                   /* 手动模式没有刀具头标签规格，屏幕规格区应保持空。 */
     message->length = 0U;                                     /* 手动模式不显示 RFID 长度，防止沿用上一把刀具。 */
     message->draw = 0U;                                       /* 手动模式不显示 RFID 角度，避免旧规格残留。 */
-    eeprom_loaded = Handlescan_LoadSplitBaseEepromRuntime(channel, message); /* 恢复手柄 EEPROM Page3/Page4，用于后续速度和倍率计算。 */
-    Handlescan_LoadPage6SpeedStep(channel, message);          /* Page6 步进也跟随手柄 EEPROM，屏幕加减速不使用 RFID 标签缓存。 */
+    eeprom_loaded = Handlescan_LoadSplitBaseEepromRuntime(binding); /* 恢复本通道手柄 EEPROM Page3/Page4。 */
+    Handlescan_LoadPage6SpeedStep(binding);                   /* Page6 步进也跟随本通道手柄 EEPROM。 */
 
     return eeprom_loaded;                                     /* 返回恢复结果，调用方当前不阻断手动切换，只作为诊断依据。 */
 }
@@ -1776,21 +1699,14 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
  * 输入参数：channel 为 A/B 通道；message 为目标通道识别缓存。
  * 返回参数：无。
  */
-static void Handlescan_ReloadSpeedStepMessage(uint8_t channel, ChannelrecognizeMessage_t *message)
+static void Handlescan_ReloadSpeedStepMessage(const HandlescanChannelBinding *binding)
 {
-    if (message == NULL)
+    if (binding == NULL)
     {
-        return;                                               /* 识别缓存为空时不写字段，避免 RFID 掉线清理路径误操作。 */
+        return;                                               /* 绑定无效时不写步进，避免误操作另一通道。 */
     }
 
-    if (channel == CHANNEL_A)
-    {
-        Handlescan_UpdateSpeedStepMessage(message, s_a_context.speed_step_buf); /* A 通道复用最近一次 Page6 缓存，支持不拔基座直接换刀具头。 */
-    }
-    else if (channel == CHANNEL_B)
-    {
-        Handlescan_UpdateSpeedStepMessage(message, s_b_context.speed_step_buf); /* B 通道复用自己的 Page6 缓存，避免 A/B 步进串用。 */
-    }
+    Handlescan_UpdateSpeedStepMessage(binding->message, binding->context->speed_step_buf); /* 只把本通道最近 Page6 缓存写回本通道识别结果。 */
 }
 
 /*
@@ -1899,28 +1815,23 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
  * 输入参数：channel 需要清空的通道号，CHANNEL_A 表示 A 通道，其它值按 B 通道处理。
  * 返回参数：无。
  */
-static void Handlescan_ClearChannelState(uint8_t channel)
+static void Handlescan_ClearChannelState(const HandlescanChannelBinding *binding)
 {
-    if (channel == CHANNEL_A)
+    HandlescanChannelContext *context;                       /* 指向需要复位的通道运行状态。 */
+
+    if (binding == NULL)
     {
-        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageA); /* 扫描层只清 A 通道识别缓存，MemoryMsg/WorkMessage 由插拔事件统一处理。 */
-        s_a_context.rfid_last_sequence = 0U;                                 /* A 通道离线或插入取消后，下一次相同 RFID 标签也必须重新消费。 */
-        s_a_context.rfid_last_presence_sequence = 0U;                         /* A 通道离线时同步清存在序号，避免旧标签读到状态延续到下一次插入。 */
-        s_a_context.rfid_miss_count = 0U;                                      /* A 通道离线时清掉在线缺失计数。 */
-        s_a_context.rfid_monitor_pending = 0U;                                 /* A 通道离线时清掉在线监测等待标志。 */
-        s_a_context.rfid_tool_online = 0U;                                     /* A 通道基座离线或重新识别时，刀具头边沿状态回到未在线。 */
-        Rfid_ClearChannelResult(CHANNEL_A);                          /* 同步清除 A 通道 RFID 模块缓存，避免旧标签序号挡住新上线。 */
+        return;                                               /* 非 A/B 通道不清任何全局缓存。 */
     }
-    else
-    {
-        Handlescan_ClearRecognizeMessage(&ChannelrecognizeMessageB); /* 扫描层只清 B 通道识别缓存，实际离线状态由 PlugORunPLUGActive 生效。 */
-        s_b_context.rfid_last_sequence = 0U;                                 /* B 通道离线或插入取消后，下一次相同 RFID 标签也必须重新消费。 */
-        s_b_context.rfid_last_presence_sequence = 0U;                         /* B 通道离线时同步清存在序号，避免旧标签读到状态延续到下一次插入。 */
-        s_b_context.rfid_miss_count = 0U;                                      /* B 通道离线时清掉在线缺失计数。 */
-        s_b_context.rfid_monitor_pending = 0U;                                 /* B 通道离线时清掉在线监测等待标志。 */
-        s_b_context.rfid_tool_online = 0U;                                     /* B 通道基座离线或重新识别时，刀具头边沿状态回到未在线。 */
-        Rfid_ClearChannelResult(CHANNEL_B);                          /* 同步清除 B 通道 RFID 模块缓存，避免旧标签序号挡住新上线。 */
-    }
+
+    context = binding->context;                              /* 只复位绑定通道的 RFID 边沿状态。 */
+    Handlescan_ClearRecognizeMessage(binding->message);      /* 扫描层只清识别缓存，通道记忆和工作态仍由插拔事件处理。 */
+    context->rfid_last_sequence = 0U;                        /* 下一次相同标签也必须重新消费。 */
+    context->rfid_last_presence_sequence = 0U;               /* 清存在序号，避免旧标签状态延续。 */
+    context->rfid_miss_count = 0U;                           /* 清在线缺失计数。 */
+    context->rfid_monitor_pending = 0U;                      /* 清在线监测等待标志。 */
+    context->rfid_tool_online = 0U;                          /* 刀具头边沿状态回到未在线。 */
+    Rfid_ClearChannelResult(binding->channel);               /* 同步清本通道 RFID 结果，避免旧序号挡住新上线。 */
 }
 
 /*
@@ -2221,17 +2132,15 @@ static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
  * 清空某个通道的认证重试状态。
  * 说明：成功上线、拔出复位或新一轮插入开始时都必须调用，避免上一次失败次数影响下一只手柄。
  */
-static void Handlescan_ResetVerifyRetry(uint8_t *retry_count, uint16_t *retry_wait_ticks)
+static void Handlescan_ResetVerifyRetry(HandlescanChannelContext *context)
 {
-    if (retry_count != NULL)
+    if (context == NULL)
     {
-        *retry_count = 0U;                                    /* 清掉连续失败次数，下一次认证重新从第 1 次开始。 */
+        return;                                               /* 上下文无效时不写任何通道状态。 */
     }
 
-    if (retry_wait_ticks != NULL)
-    {
-        *retry_wait_ticks = 0U;                               /* 清掉快速/慢速重试等待计数，避免复用旧等待时间。 */
-    }
+    context->verify_retry_count = 0U;                         /* 清掉连续失败次数，下一次认证重新从第 1 次开始。 */
+    context->verify_retry_wait_ticks = 0U;                    /* 清掉快速/慢速重试等待计数，避免复用旧等待时间。 */
 }
 
 /*
@@ -2240,28 +2149,25 @@ static void Handlescan_ResetVerifyRetry(uint8_t *retry_count, uint16_t *retry_wa
  * 返回参数：无。
  */
 static void Handlescan_EnterRetryOrFailWithLimit(uint8_t channel,
-                                                 HandlescanStage *stage,
-                                                 uint8_t *retry_count,
-                                                 uint16_t *retry_wait_ticks,
-                                                 uint8_t *last_alarm,
+                                                 HandlescanChannelContext *context,
                                                  uint8_t alarm_value,
                                                  uint8_t retry_max)
 {
-    if ((stage == NULL) || (retry_count == NULL) || (retry_wait_ticks == NULL) || (last_alarm == NULL) || (retry_max == 0U))
+    if ((context == NULL) || (retry_max == 0U))
     {
         return;                                               /* 运行时参数异常或重试上限无效时保持当前状态，避免空指针写入。 */
     }
 
-    if (*retry_count < retry_max)
+    if (context->verify_retry_count < retry_max)
     {
-        ++(*retry_count);                                     /* 记录本次失败，达到上限后才进入最终报警保持。 */
+        ++context->verify_retry_count;                        /* 记录本次失败，达到上限后才进入最终报警保持。 */
     }
 
-    if (*retry_count < retry_max)
+    if (context->verify_retry_count < retry_max)
     {
-        *retry_wait_ticks = 0U;                               /* 快速重试从当前周期重新计时。 */
-        *stage = HANDLESCAN_STAGE_RETRY_WAIT;                 /* 保持插入态，稍后重新进入 VERIFY，不要求用户再次插拔。 */
-        Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_VERIFY_RETRY, *retry_count);
+        context->verify_retry_wait_ticks = 0U;                /* 快速重试从当前周期重新计时。 */
+        context->stage = HANDLESCAN_STAGE_RETRY_WAIT;         /* 保持插入态，稍后重新进入 VERIFY，不要求用户再次插拔。 */
+        Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_VERIFY_RETRY, context->verify_retry_count);
         return;
     }
 
@@ -2269,25 +2175,25 @@ static void Handlescan_EnterRetryOrFailWithLimit(uint8_t channel,
     {
         if (Handlescan_ShouldUseTransientHandleAlarm(channel, alarm_value) != 0U)
         {
-            if (*last_alarm != alarm_value)
+            if (context->last_alarm != alarm_value)
             {
-                *last_alarm = alarm_value;                    /* 记录另一路坏手柄归属，但不写 WorkMessage，避免影响当前运行通道。 */
+                context->last_alarm = alarm_value;            /* 记录另一路坏手柄归属，但不写 WorkMessage。 */
                 Handlescan_RaiseTransientHandleAlarm(channel, alarm_value); /* 第一次最终失败时只提示 3 秒。 */
             }
         }
-        else if ((*last_alarm != alarm_value) || (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) == 0U))
+        else if ((context->last_alarm != alarm_value) || (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) == 0U))
         {
-            *last_alarm = alarm_value;                        /* 第一次达到最终失败或从临时提示转为持续报警时记录报警归属。 */
-            Handlescan_RaiseAlarm(channel, *last_alarm);      /* 最终失败才写 WorkMessage.alarm_value 并触发蜂鸣提示。 */
+            context->last_alarm = alarm_value;                /* 第一次达到最终失败或转为持续报警时记录归属。 */
+            Handlescan_RaiseAlarm(channel, context->last_alarm); /* 最终失败才写报警并触发蜂鸣。 */
         }
         else
         {
-            *last_alarm = alarm_value;                        /* 已经处于同类报警保持时，只刷新归属，不重复触发蜂鸣。 */
+            context->last_alarm = alarm_value;                /* 同类报警保持时只刷新归属，不重复蜂鸣。 */
         }
     }
 
-    *retry_wait_ticks = 0U;                                   /* 最终报警保持里的慢速自恢复重试也从当前周期重新计时。 */
-    *stage = HANDLESCAN_STAGE_VERIFY_FAIL;                    /* 最终失败保持态：继续监视拔出，同时慢速自恢复重试。 */
+    context->verify_retry_wait_ticks = 0U;                    /* 最终报警保持里的慢速自恢复重试从当前周期计时。 */
+    context->stage = HANDLESCAN_STAGE_VERIFY_FAIL;            /* 最终失败保持态继续监视拔出并慢速重试。 */
 }
 
 /*
@@ -2296,17 +2202,11 @@ static void Handlescan_EnterRetryOrFailWithLimit(uint8_t channel,
  * 返回参数：无。
  */
 static void Handlescan_EnterRetryOrFail(uint8_t channel,
-                                        HandlescanStage *stage,
-                                        uint8_t *retry_count,
-                                        uint16_t *retry_wait_ticks,
-                                        uint8_t *last_alarm,
+                                        HandlescanChannelContext *context,
                                         uint8_t alarm_value)
 {
     Handlescan_EnterRetryOrFailWithLimit(channel,
-                                         stage,
-                                         retry_count,
-                                         retry_wait_ticks,
-                                         last_alarm,
+                                         context,
                                          alarm_value,
                                          HANDLESCAN_VERIFY_RETRY_MAX); /* 普通手柄认证继续保留原 3 次容错。 */
 }
@@ -2317,17 +2217,11 @@ static void Handlescan_EnterRetryOrFail(uint8_t channel,
  * 返回参数：无。
  */
 static void Handlescan_EnterRfidRetryOrFail(uint8_t channel,
-                                            HandlescanStage *stage,
-                                            uint8_t *retry_count,
-                                            uint16_t *retry_wait_ticks,
-                                            uint8_t *last_alarm,
+                                            HandlescanChannelContext *context,
                                             uint8_t alarm_value)
 {
     Handlescan_EnterRetryOrFailWithLimit(channel,
-                                         stage,
-                                         retry_count,
-                                         retry_wait_ticks,
-                                         last_alarm,
+                                         context,
                                          alarm_value,
                                          HANDLESCAN_RFID_VERIFY_RETRY_MAX); /* RFID 刀具头等待最多 2 轮，整体约 2 秒后退出等待。 */
 }
@@ -2384,1007 +2278,844 @@ static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
  * 3. 认证失败后保持安静，但仍持续监视拔出边沿；
  * 4. 拔出稳定后只输出一次离线报文，并清理 A 通道扫描识别缓存。
  */
-void HandlescanA_Fun_SSC(void)
+/*
+ * 函数功能：按通道选择 EEPROM CRC 认证总线。
+ * 输入参数：binding 为固定通道绑定；result 保存底层认证明细。
+ * 返回参数：返回原 AT24CS32 认证状态，不改变错误码含义。
+ */
+static AT24CS32_CRC_Status Handlescan_VerifyEeprom(const HandlescanChannelBinding *binding,
+                                                   AT24CS32_CRC_Result *result)
 {
-    uint8_t is_inserted;                                      /* 当前采样到的 A 通道插入状态，1 表示短接成立，0 表示短接断开。 */
-    AT24CS32_CRC_Result verify_result;                       /* 保存 EEPROM 认证函数输出的中间结果，便于底层后续扩展。 */
-    AT24CS32_CRC_Status verify_status;                       /* 保存当前这次 EEPROM 认证返回的状态码。 */
-    uint8_t read_status;                                     /* 保存信息区读取是否成功，1 成功，0 失败。 */
-    uint8_t raw_type_major;                                  /* EEPROM 信息区第 1 个字节，表示手柄主类型。 */
-    uint8_t raw_type_minor;                                  /* EEPROM 信息区第 2 个字节，表示手柄子类型。 */
-    uint8_t raw_tool_major;                                  /* EEPROM 刀具信息区第 1 个字节，表示刀具主类型。 */
-    uint8_t raw_tool_minor;                                  /* EEPROM 刀具信息区第 2 个字节，表示刀具子类型。 */
-    uint8_t mapped_model;                                    /* 查表后的系统内部手柄型号值。 */
-    uint8_t mapped_tool_model;                               /* 查表后的系统内部刀具类型值。 */
-    uint16_t tool_diameter_tenth;                            /* 刀具直径，单位 0.1。 */
-    uint16_t tool_length_tenth;                              /* 刀具长度，单位 0.1。 */
-    uint16_t tool_angle_tenth;                               /* 刀具角度，单位 0.1。 */
-    const HandlescanHandleTypeConfig *handle_type_cfg;       /* 指向命中的手柄类型配置表项。 */
-    const HandlescanHandleTypeConfig *tool_type_cfg;         /* 指向命中的刀具类型配置表项。 */
-
-    /*
-     * A 通道短接检测脚当前按“低电平表示插入成立”处理。
-     * 因此这里读取到 `GPIO_PIN_RESET` 时，表示 A 通道已经检测到短接插入。
-     */
-    is_inserted = (uint8_t)(Bsp_GpioRead(HANDLESCAN_A_SHORT_GPIO, HANDLESCAN_A_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 A 通道短接成立。 */
-
-    if (is_inserted == 0U)
+    if (binding->channel == CHANNEL_A)
     {
-        s_a_context.debounce.in_debounce_ticks = 0U;           /* 一旦检测到拔出候选，就清掉插入去抖计数。 */
-        s_a_context.verify_start_wait_ticks = 0U;                    /* 同时清掉认证前等待计数，避免下次误续跑。 */
-        Handlescan_ResetVerifyRetry(&s_a_context.verify_retry_count, &s_a_context.verify_retry_wait_ticks); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
-
-        /*
-         * A 通道已经上线，或者已经进入认证失败保持态时，如果此时短接线被拔掉，
-         * 需要切到拔出去抖阶段，并在稳定后输出离线报文。
-         */
-        if ((s_a_context.stage == HANDLESCAN_STAGE_ONLINE) ||
-            (s_a_context.stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
-            (s_a_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL))
-        {
-            if (s_a_context.stage != HANDLESCAN_STAGE_DEBOUNCE_OUT)
-            {
-                s_a_context.debounce.out_debounce_ticks = 0U;  /* 首次进入拔出去抖时，先把拔出去抖计数清零。 */
-                s_a_context.stage = HANDLESCAN_STAGE_DEBOUNCE_OUT;   /* 状态机切到“拔出去抖”阶段。 */
-            }
-
-            if (s_a_context.debounce.out_debounce_ticks < HANDLESCAN_REMOVE_DEBOUNCE_TICKS)
-            {
-                ++s_a_context.debounce.out_debounce_ticks;     /* 拔出去抖未满阈值时，仅累计次数后返回。 */
-                return;                                      /* 本轮不做其他动作，等待下一个扫描周期。 */
-            }
-
-            s_a_context.debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉计数器。 */
-            Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_context.last_alarm); /* A 通道坏手柄拔出后，释放本通道手柄型号错误报警。 */
-            s_a_context.stage = HANDLESCAN_STAGE_IDLE;               /* A 通道状态机回到空闲态。 */
-            s_a_context.last_alarm = 0U;                             /* 清掉 A 通道最近一次报警缓存。 */
-            s_a_context.tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 基座拔出后刀具来源回到默认，历史 RFID 缓存只作记忆不直接上线。 */
-            s_a_context.rfid_wait_ticks = 0U;                         /* 清掉 A 通道 RFID 等待计数。 */
-            s_a_context.rfid_monitor_ticks = 0U;                      /* 清掉 A 通道 RFID 低频监测计数。 */
-            Handlescan_ClearChannelState(CHANNEL_A);         /* 清空 A 通道新的在线与识别状态容器。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 同步清空 A 通道刀具规格缓存，避免 UI 残留旧值。 */
-            s_a_context.rfid_wait_started=0;                 /* A 基座拔出后结束本轮 RFID 等待，下次插入必须从第一轮重新开始。 */
-            SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_A); /* 通知新按键行为模块：A 手柄已拔出。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出“离线完成”报文。 */
-          //  (void)Handlescan_HandleRunningPlugAlarm(1U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
-            Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 A 通道拔出确认单响。 */
-            return;                                          /* A 通道离线处理完成，本轮到此结束。 */
-        }
-
-        /*
-         * 其余情况下说明当前还没有形成有效上线，直接把 A 通道状态机静默复位即可，
-         * 不需要通知 UI，也不需要输出离线报文。
-         */
-        s_a_context.debounce.out_debounce_ticks = 0U;          /* 静默复位时也要把拔出去抖计数清零。 */
-        s_a_context.stage = HANDLESCAN_STAGE_IDLE;                   /* 回到空闲态，等待下一次真实插入。 */
-        s_a_context.tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 插入取消后恢复默认来源。 */
-        s_a_context.rfid_wait_ticks = 0U;                             /* 插入取消后清掉 RFID 等待计数。 */
-        s_a_context.rfid_monitor_ticks = 0U;                          /* 插入取消后清掉 RFID 监测计数。 */
-        Handlescan_ClearChannelState(CHANNEL_A);             /* 保证 A 通道新接口状态保持关闭。 */
-        Handlescan_ClearToolSpecValues(paoxueSpeciValue_A);  /* 插入未完成时也清空 A 通道刀具规格缓存。 */
-        return;                                              /* 当前只是插入取消，不做 UI 和报文更新。 */
+        return AT24CS32_VerifyCrc_I2C2(result); /* A 通道固定走 I2C2。 */
     }
 
-    /*
-     * 当前已经检测到 A 通道短接成立。
-     * 如果系统存在普通阻塞报警，此时只保持短接状态，不进入 EEPROM 认证。
-     */
-    if (Handlescan_ShouldDeferRecognition(CHANNEL_A) != 0U)
-    {
-        return;                                             /* 普通报警未解除前暂停识别，坏手柄 EEPROM 报警除外。 */
-    }
-
-    /*
-     * 如果状态机还在空闲态，则说明这是一次新的插入开始，先进入插入去抖阶段。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_IDLE)
-    {
-        s_a_context.debounce.in_debounce_ticks = 0U;           /* 新一轮插入开始时，先清空插入去抖计数。 */
-        s_a_context.debounce.out_debounce_ticks = 0U;          /* 同时清空拔出去抖计数，避免带入上一次状态。 */
-        s_a_context.verify_start_wait_ticks = 0U;                    /* 清空认证前等待计数。 */
-        Handlescan_ResetVerifyRetry(&s_a_context.verify_retry_count, &s_a_context.verify_retry_wait_ticks); /* 新手柄插入从 0 次失败开始认证。 */
-        s_a_context.stage = HANDLESCAN_STAGE_DEBOUNCE_IN;            /* 状态机切到“插入去抖”阶段。 */
-    }
-
-    /*
-     * 插入去抖阶段。
-     * 只有连续多个扫描周期都维持插入有效，才认为本次插入稳定成立。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_DEBOUNCE_IN)
-    {
-        if (s_a_context.debounce.in_debounce_ticks < HANDLESCAN_INSERT_DEBOUNCE_TICKS)
-        {
-            ++s_a_context.debounce.in_debounce_ticks;          /* 插入信号仍稳定时，累计插入去抖计数。 */
-            return;                                          /* 未到阈值前，不进入认证阶段。 */
-        }
-
-        s_a_context.debounce.in_debounce_ticks = 0U;           /* 插入去抖达标后，清掉计数器。 */
-        s_a_context.verify_start_wait_ticks = 0U;                    /* 开始认证前等待前，先把等待计数清零。 */
-        s_a_context.stage = HANDLESCAN_STAGE_WAIT_VERIFY;            /* 状态机切到“认证前等待”阶段。 */
-        Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INSERT_PASS, HANDLESCAN_INSERT_DEBOUNCE_TICKS); /* 输出“插入稳定”报文。 */
-        return;                                              /* 本轮插入确认完成，等待下一轮进入认证。 */
-    }
-
-    /*
-     * 插入稳定后的认证前等待阶段。
-     * 这里保留 200ms 的稳定时间，避免手柄刚插入时立刻访问 EEPROM 导致首包失败。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_WAIT_VERIFY)
-    {
-        if (s_a_context.verify_start_wait_ticks < HANDLESCAN_VERIFY_START_DELAY_TICKS)
-        {
-            ++s_a_context.verify_start_wait_ticks;                   /* 每个扫描周期把认证前等待计数加一。 */
-            return;                                          /* 等待未满 200ms 前，不访问 EEPROM。 */
-        }
-
-        s_a_context.verify_start_wait_ticks = 0U;                    /* 等待完成后，把等待计数器清零。 */
-        s_a_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 状态机切到“认证执行”阶段。 */
-    }
-
-    /*
-     * 快速重试等待阶段。
-     * 认证或信息读取失败后，先等待一小段时间再重新进 VERIFY，避免 I2C 刚恢复时连续撞总线。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_RETRY_WAIT)
-    {
-        if (s_a_context.verify_retry_wait_ticks < HANDLESCAN_VERIFY_RETRY_DELAY_TICKS)
-        {
-            ++s_a_context.verify_retry_wait_ticks;                   /* 每 10ms 累计一次快速重试等待时间。 */
-            return;                                          /* 未到重试间隔前，不访问 EEPROM。 */
-        }
-
-        s_a_context.verify_retry_wait_ticks = 0U;                    /* 快速重试等待结束，清零计数。 */
-        s_a_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 重新进入认证阶段，不需要重新插拔。 */
-    }
-
-    /*
-     * A 通道认证阶段。
-     * 认证失败后先做有限重试，多次失败后才进入最终报警保持。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_VERIFY)
-    {
-        AT24CS32_ClearLastDebugInfo();                       /* 认证前先清掉上一轮底层 I2C 调试信息。 */
-        verify_status = AT24CS32_VerifyCrc_I2C2(&verify_result); /* 调用 A 通道 I2C2 EEPROM 认证接口。 */
-        Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_VERIFY_STATUS, (uint8_t)verify_status); /* 输出当前认证结果码。 */
-
-        if (verify_status != AT24CS32_CRC_STATUS_OK)
-        {
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         Handlescan_MapVerifyStatusToAlarm(CHANNEL_A, verify_status)); /* 先快速重试，最终失败才按 A 通道报警。 */
-            Handlescan_DebugTraceI2cDetail(1U);              /* 输出最近一次底层 I2C 访问细节。 */
-            return;                                          /* 本轮不再继续读信息区。 */
-        }
-
-        s_a_context.stage = HANDLESCAN_STAGE_READ_INFO;              /* 认证通过后，进入信息区读取阶段。 */
-    }
-
-    /*
-     * A 通道信息读取阶段。
-     * 认证通过后，先从第 2 页读取手柄类型，再从第 3 页读取刀具类型和规格参数。
-     */
-    if (s_a_context.stage == HANDLESCAN_STAGE_READ_INFO)
-    {
-        AT24CS32_ClearLastDebugInfo();                       /* 读信息区前同样先清调试缓存。 */
-        read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_INFO_ADDR, s_a_context.info_buf, HANDLESCAN_INFO_SIZE); /* 从 A 通道 EEPROM 读出 16 字节信息区。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出信息区读取失败报文。 */
-            Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         0U);                /* 信息区瞬时读取失败只重试，不报手柄型号错误。 */
-            return;                                         /* 本轮停止后续处理。 */
-        }
-
-        raw_type_major = s_a_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 取出信息区第 1 字节作为手柄主类型。 */
-        raw_type_minor = s_a_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 取出信息区第 2 字节作为手柄子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找型号配置表。 */
-        if (handle_type_cfg == NULL)
-        {
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出“手柄类型无法识别”报文。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         0U);                /* 型号页读到异常值时允许后续重试，避免热插拔瞬间误判。 */
-            return;                                         /* 等待重新插拔。 */
-        }
-
-        mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
-        s_a_context.tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 A 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_a_context.tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
-        {
-            if ((s_a_context.rfid_wait_started != 0U) && (s_a_context.verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX))
-            {
-                Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* RFID 两轮未读到刀具头时清空规格缓存，避免 PXBA/PXBB 继续落入 Page3 解析并把基座 EEPROM 当成刀具。 */
-                Rfid_ClearChannelResult(CHANNEL_A); /* 作废 A 通道当前 RFID 结果和晚到请求，保证后续在线监测从干净状态重新读取真实刀具头。 */
-                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageA,
-                                                           mapped_model,
-                                                           raw_type_major,
-                                                           raw_type_minor); /* 只保留 A 通道 RFID 基座信息，刀具类型和规格继续保持空状态。 */
-                if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
-                {
-                    (void)Handlescan_LoadSplitBaseEepromRuntime(CHANNEL_A, &ChannelrecognizeMessageA); /* PXBA/PXBB 未识别到标签时先装载手柄 EEPROM 运行参数，供手动模式使用。 */
-                }
-                Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* 重新装入 A 通道基座 Page6 步进，后续真正 RFID 刀具上线时继续继承。 */
-                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A); /* 刷新 A 通道基座在线状态，让屏幕关闭规格区并显示等待 RFID 刀具头。 */
-                Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_context.last_alarm); /* RFID 无刀具头不是坏手柄，退出等待后释放本通道历史认证报警。 */
-                Handlescan_ResetVerifyRetry(&s_a_context.verify_retry_count, &s_a_context.verify_retry_wait_ticks); /* 基座已按无刀具在线处理，清掉本轮 RFID 快速重试计数。 */
-                s_a_context.last_alarm = 0U; /* 清掉最近报警缓存，避免后续在线监测被旧报警状态阻塞。 */
-                s_a_context.rfid_wait_ticks = 0U; /* 清掉等待计数，进入在线监测后由低频监测重新计时。 */
-                s_a_context.rfid_last_sequence = 0U; /* 没有有效刀具头时清掉已消费结果序号，下一次真实标签必须重新装载。 */
-                s_a_context.rfid_last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 影响后续刀具头上线判断。 */
-                s_a_context.rfid_miss_count = 0U; /* 无刀具基座在线后从 0 开始做低频缺失监测，避免立刻触发掉线清理。 */
-                s_a_context.rfid_monitor_pending = 0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
-                s_a_context.rfid_tool_online = 0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
-                s_a_context.stage = HANDLESCAN_STAGE_ONLINE; /* A 通道进入基座在线保持态，后续只由 RFID 在线监测刷新真实刀具。 */
-                s_a_context.rfid_wait_started = 0U; /* 本轮 RFID 上线等待结束，防止该临时标志影响下一次插拔识别。 */
-                return; /* RFID 来源手柄无论是否有刀具头，都不能继续执行普通 EEPROM Page3 解析。 */
-            }
-            s_a_context.rfid_wait_started=1;                 /* 记录 A 通道已经启动第一轮 RFID 等待，下一轮失败后才能按原规则上线空基座。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
-            if (Handlescan_StartRfidWait(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         s_a_context.tool_source,
-                                         &s_a_context.rfid_last_sequence,
-                                         &s_a_context.rfid_wait_ticks,
-                                         true) != false) /* 基座刚上线时快速读取 RFID 标签。 */
-            {
-                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageA,
-                                                           mapped_model,
-                                                           raw_type_major,
-                                                           raw_type_minor); /* 只写基座字段，刀具字段等待 RFID 真实结果。 */
-                if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
-                {
-                    (void)Handlescan_LoadSplitBaseEepromRuntime(CHANNEL_A, &ChannelrecognizeMessageA); /* 分体式进入 RFID 等待时先恢复手柄 EEPROM 参数，关闭自动识别时可直接使用。 */
-                }
-                Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* 可拆式 A 基座先装入 Page6 步进，后续 RFID 刀具头成功时继承。 */
-                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A); /* 先上报 RFID 基座在线，刀具头数据到达后再二次刷新通道记忆。 */
-                SendKeyBeepMessage(1);
-            }
-            return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
-        }
-
-        if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
-        {
-            AT24CS32_ClearLastDebugInfo();                       /* 一体式手柄不再用 Page3 识别刀具类型，但仍要读取 Page4 运行初始值。 */
-            read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_context.initial_info_buf); /* A 通道读取 Page4 默认速度、频率、方向和泵流量。 */
-            if (read_status == 0U)
-            {
-                Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 A 通道 Page4 读取或页校验失败报文。 */
-                Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
-                Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                             &s_a_context.stage,
-                                             &s_a_context.verify_retry_count,
-                                             &s_a_context.verify_retry_wait_ticks,
-                                             &s_a_context.last_alarm,
-                                             0U);                /* Page4 瞬时读取失败只重试，不立刻锁死一体式手柄。 */
-                return;                                         /* 本轮停止后续处理，等待下一次重新读取 Page4。 */
-            }
-
-            Handlescan_UpdateSelfTypedHandleRecognizeMessage(&ChannelrecognizeMessageA,
-                                                             mapped_model,
-                                                             raw_type_major,
-                                                             raw_type_minor); /* 0x7C 一体式型号直接写入 A 通道手柄和刀具能力字段。 */
-            read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 一体式手柄仍读取 Page3 规格和 Page3[8]/[9] 倍率字段，失败不影响上线。 */
-            Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageA,
-                                              (read_status != 0U) ? s_a_context.tool_info_buf : NULL); /* Page3 倍率无效时按 1 倍保护，避免机械变速字段写错导致超速。 */
-            Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
-                                                s_a_context.initial_info_buf); /* 同步 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
-            Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* A 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
-            if ((read_status != 0U) &&
-                (Handlescan_IsIntegratedToolSpecHandleModel(mapped_model) != false))
-            {
-                tool_diameter_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* A 一体式手柄 Page3[2..3] 保存刀具直径，单位沿用 0.1。 */
-                tool_length_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* A 一体式手柄 Page3[4..5] 保存刀具长度，按现有规格窗口格式缓存。 */
-                tool_angle_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* A 一体式手柄 Page3[6..7] 保存刀具角度，屏幕规格区直接显示角度值。 */
-                Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
-                                                tool_diameter_tenth,
-                                                tool_length_tenth,
-                                                tool_angle_tenth,
-                                                Handlescan_MapRawToolTypeToBusinessType(mapped_model)); /* 一体式手柄规格来自自身 EEPROM Page3，不再清掉直径、长度、角度显示缓存。 */
-            }
-            else
-            {
-                Handlescan_ClearToolSpecValues(paoxueSpeciValue_A); /* 非四类一体式或 Page3 读取失败时清空 A 规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
-            }
-            MemoryMsgA.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
-            SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道按手柄型号上线并装载到通道记忆。 */
-            Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_context.last_alarm); /* 自恢复成功时清掉 A 通道历史手柄校验报警。 */
-            Handlescan_ResetVerifyRetry(&s_a_context.verify_retry_count, &s_a_context.verify_retry_wait_ticks); /* 上线成功后清空 A 通道失败重试状态。 */
-            s_a_context.last_alarm = 0U;                                /* 上线成功后清掉 A 通道最近一次报警缓存。 */
-            s_a_context.stage = HANDLESCAN_STAGE_ONLINE;                /* A 通道切到在线保持态，后续只做拔出和 RFID 在线监测判断。 */
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文，值为手柄型号。 */
-            Handlescan_DebugTraceHandleName(1U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 A 通道 0x7C 手柄名称报文。 */
-            Handlescan_BeepOnceIfNoAlarm();                     /* A 通道认证并上线成功后，给使用者一个确认单响。 */
-            return;                                             /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
-        }
-
-        AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到当前这一次访问。 */
-        read_status = AT24CS32_ReadBytes_I2C2(HANDLESCAN_TOOL_INFO_ADDR, s_a_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 A 通道 EEPROM 读出第 3 页刀具信息区。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出刀具信息区读取失败报文。 */
-            Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮失败对应的底层 I2C 细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         0U);                /* 刀具页瞬时读取失败只重试，不立刻锁死。 */
-            return;                                         /* 本轮停止后续处理。 */
-        }
-
-        AT24CS32_ClearLastDebugInfo();                       /* 读取初始值页之前，先把调试缓存切到 Page4 访问。 */
-        read_status = AT24CS32_ReadPage_I2C2(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_a_context.initial_info_buf); /* 从 A 通道 EEPROM 读取 Page4 初始值信息区，并校验页尾。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 A 通道初始值页读取或页校验失败报文。 */
-            Handlescan_DebugTraceI2cDetail(1U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         0U);                /* 初始值页瞬时读取失败只重试，不立刻锁死手柄。 */
-            return;                                         /* 本轮停止后续处理，等待下一次重新读取完整业务页。 */
-        }
-
-        raw_tool_major = s_a_context.tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出刀具信息区第 1 字节作为刀具主类型。 */
-        raw_tool_minor = s_a_context.tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出刀具信息区第 2 字节作为刀具子类型。 */
-        tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
-        if (tool_type_cfg == NULL)
-        {
-            // Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出“刀具类型无法识别”报文。 */
-            // // Handlescan_EnterRetryOrFail(CHANNEL_A,
-            //                              &s_a_context.stage,
-            //                              &s_a_context.verify_retry_count,
-            //                              &s_a_context.verify_retry_wait_ticks,
-            //                              &s_a_context.last_alarm,
-            //                              0U);                /* 刀具页读到异常值时允许后续重试。 */
-            // return;                                         /* 等待重新插拔。 */
-        }
-
-        tool_diameter_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
-        tool_length_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* 解析刀具长度，单位 0.1。 */
-        tool_angle_tenth = Handlescan_ReadUint16BE(s_a_context.tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* 解析刀具角度，单位 0.1。 */
-
-        mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageA,
-                                          mapped_model,
-                                          raw_type_major,
-                                          raw_type_minor,
-                                          mapped_tool_model,
-                                          tool_diameter_tenth,
-                                          tool_length_tenth,
-                                          tool_angle_tenth); /* 同步更新 A 通道识别结果。 */
-        Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageA, s_a_context.tool_info_buf); /* A 通道按 Page3[8]/[9] 装入减速/增速比，供驱动统一换算。 */
-                                          WorkMessage.auto_identify= MemoryMsgA.auto_identify=1;
-        Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageA,
-                                            s_a_context.initial_info_buf); /* 同步更新 A 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
-        Handlescan_LoadPage6SpeedStep(CHANNEL_A, &ChannelrecognizeMessageA); /* A 通道普通 EEPROM 刀具上线后读取 Page6，供新屏快慢调速键使用。 */
-        Handlescan_UpdateToolSpecValues(paoxueSpeciValue_A,
-                                        tool_diameter_tenth,
-                                        tool_length_tenth,
-                                        tool_angle_tenth,
-                                        Handlescan_MapRawToolTypeToBusinessType(mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP 不再直接暴露旧码给 UI。 */
-                                        WorkMessage.auto_identify=0;
-        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A);    /* 通知插拔事件链：A 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
-        Handlescan_ClearChannelAlarm(CHANNEL_A, s_a_context.last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
-        Handlescan_ResetVerifyRetry(&s_a_context.verify_retry_count, &s_a_context.verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
-        s_a_context.last_alarm = 0U;                                /* 上线成功后清掉最近一次报警缓存。 */
-        s_a_context.stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到在线保持态。 */
-        Handlescan_DebugTrace(1U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 A 通道上线报文。 */
-        Handlescan_DebugTraceHandleName(1U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 A 通道手柄名称报文。 */
-        Handlescan_DebugTraceToolInfo(1U,
-                                      raw_tool_major,
-                                      raw_tool_minor,
-                                      tool_type_cfg->handle_name,
-                                      tool_diameter_tenth,
-                                      tool_length_tenth,
-                                      tool_angle_tenth);    /* 输出 A 通道刀具名称和规格报文。 */
-        Handlescan_BeepOnceIfNoAlarm();                     /* A 通道认证并上线成功后，给使用者一个确认单响。 */
-        return;                                             /* A 通道本轮流程结束，后续等待拔出。 */
-    }
-
-    if (s_a_context.stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL)
-    {
-        raw_type_major = s_a_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 等待 RFID 期间复用已读到的 EEPROM 第二页主类型。 */
-        raw_type_minor = s_a_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 等待 RFID 期间复用已读到的 EEPROM 第二页子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 重新查表，避免局部变量跨周期丢失。 */
-        if (handle_type_cfg == NULL)
-        {
-            Handlescan_EnterRetryOrFail(CHANNEL_A,
-                                         &s_a_context.stage,
-                                         &s_a_context.verify_retry_count,
-                                         &s_a_context.verify_retry_wait_ticks,
-                                         &s_a_context.last_alarm,
-                                         0U); /* 等待期间基座信息异常时回到原有重试流程。 */
-            return; /* 本轮等待处理结束。 */
-        }
-        mapped_model = handle_type_cfg->mapped_handle_type; /* 取出 A 通道基座型号。 */
-        s_a_context.tool_source = Handlescan_GetToolSource(mapped_model); /* 重新确认 A 通道 RFID 来源。 */
-        if (Handlescan_ProcessRfidWait(CHANNEL_A,
-                                       &s_a_context.stage,
-                                       s_a_context.tool_source,
-                                       &ChannelrecognizeMessageA,
-                                       paoxueSpeciValue_A,
-                                       mapped_model,
-                                       raw_type_major,
-                                       raw_type_minor,
-                                       &s_a_context.rfid_last_sequence,
-                                       &s_a_context.rfid_last_presence_sequence,
-                                       &s_a_context.rfid_miss_count,
-                                       &s_a_context.rfid_monitor_pending,
-                                       &s_a_context.rfid_tool_online,
-                                       &s_a_context.rfid_wait_ticks,
-                                       &s_a_context.verify_retry_count,
-                                       &s_a_context.verify_retry_wait_ticks,
-                                       &s_a_context.last_alarm,
-                                       SCREENKey_PLUG_A) != false)
-        {
-            return; /* RFID 等待阶段本轮已经处理。 */
-        }
-    }
-
-    if (s_a_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL)
-    {
-        if (s_a_context.verify_retry_wait_ticks < HANDLESCAN_VERIFY_ALARM_RETRY_TICKS)
-        {
-            ++s_a_context.verify_retry_wait_ticks;                   /* 最终报警保持时慢速计时，避免反复高频读 EEPROM。 */
-            return;                                          /* 等待 1000ms 后再尝试自恢复认证。 */
-        }
-
-        s_a_context.verify_retry_wait_ticks = 0U;                    /* 慢速自恢复时间到，清掉等待计数。 */
-        s_a_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 仍插着时重新认证一次，正确手柄可自动恢复上线。 */
-        return;
-    }
-
-    if (s_a_context.stage == HANDLESCAN_STAGE_ONLINE)
-    {
-        raw_type_major = s_a_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 在线监测时复用 EEPROM 第二页基座主类型。 */
-        raw_type_minor = s_a_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 在线监测时复用 EEPROM 第二页基座子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 在线阶段重新查表，避免局部变量跨周期丢失。 */
-        if (handle_type_cfg != NULL)
-        {
-            mapped_model = handle_type_cfg->mapped_handle_type; /* 取出 A 通道当前基座型号。 */
-            s_a_context.tool_source = Handlescan_GetToolSource(mapped_model); /* 判断 A 通道是否需要 RFID 低频监测。 */
-            Handlescan_RequestOnlineRfidMonitor(CHANNEL_A,
-                                                s_a_context.tool_source,
-                                                &s_a_context.rfid_monitor_ticks,
-                                                &s_a_context.rfid_miss_count,
-                                                &s_a_context.rfid_monitor_pending); /* 空闲时周期请求 RFID，运行中自动暂停。 */
-            Handlescan_ProcessOnlineRfidResult(CHANNEL_A,
-                                               s_a_context.tool_source,
-                                               &ChannelrecognizeMessageA,
-                                               paoxueSpeciValue_A,
-                                               mapped_model,
-                                               raw_type_major,
-                                               raw_type_minor,
-                                               &s_a_context.rfid_last_sequence,
-                                               &s_a_context.rfid_last_presence_sequence,
-                                               &s_a_context.rfid_miss_count,
-                                               &s_a_context.rfid_monitor_pending,
-                                               &s_a_context.rfid_tool_online,
-                                               SCREENKey_PLUG_A); /* 消费新的 RFID 标签结果并刷新通道记忆。 */
-        }
-        return;                                             /* 在线保持态保持静默，只等待拔出。 */
-    }
+    return AT24CS32_VerifyCrc_I2C3(result); /* B 通道固定走 I2C3。 */
 }
 
 /*
- * B 通道 SSC 扫描函数。
- * 函数功能：执行 B 通道手柄插拔去抖、EEPROM 认证和识别缓存更新，认证通过后只发布插拔事件。
+ * 函数功能：按通道从 EEPROM 连续读取指定字节。
+ * 输入参数：binding 为固定通道绑定；addr/len 为 EEPROM 地址和长度；data 为接收缓存。
+ * 返回参数：原样返回底层读取结果，1 表示成功，0 表示失败。
+ */
+static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *binding,
+                                          uint16_t addr,
+                                          uint8_t *data,
+                                          uint16_t len)
+{
+    if (binding->channel == CHANNEL_A)
+    {
+      return AT24CS32_ReadBytes_I2C2(addr, data, len); /* A 通道固定走 I2C2。 */
+    }
+
+    return AT24CS32_ReadBytes_I2C3(addr, data, len); /* B 通道固定走 I2C3。 */
+}
+
+/*
+ * 函数功能：按通道读取并校验一整页 EEPROM 数据。
+ * 输入参数：binding
+ * 为固定通道绑定；page_index 为页号；page_buf 为接收缓存。
+ *
+ * 返回参数：原样返回底层页读取结果，1 表示成功，0 表示失败。
+
+ */
+static uint8_t
+Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding,
+                          uint16_t page_index, uint8_t *page_buf) {
+  if (binding->channel == CHANNEL_A) {
+    return AT24CS32_ReadPage_I2C2(page_index,
+                                  page_buf); /* A 通道固定走 I2C2。 */
+  }
+
+  return AT24CS32_ReadPage_I2C3(page_index, page_buf); /* B 通道固定走 I2C3。 */
+}
+
+/*
+ * 函数功能：处理短接线断开、拔出去抖和离线清理。
+ * 输入参数：binding
+ * 为固定通道资源；is_inserted 为本轮短接采样结果。
+ * 返回参数：true
+ * 表示本轮已在拔出路径处理完成，false 表示仍处于插入状态。
+
+ */
+static bool
+Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
+                             uint8_t is_inserted) {
+  HandlescanChannelContext *context =
+      binding->context; /* 所有拔出计数只写本通道上下文。 */
+  uint32_t *spec_values =
+      binding->spec_values; /* 离线时只清本通道规格显示缓存。 */
+
+  if (is_inserted == 0U) {
+    context->debounce.in_debounce_ticks =
+        0U; /* 一旦检测到拔出候选，就清掉插入去抖计数。 */
+    context->verify_start_wait_ticks =
+        0U; /* 同时清掉认证前等待计数，避免下次误续跑。 */
+    Handlescan_ResetVerifyRetry(
+        context); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
+
+    /*
+         * A
+     * 通道已经上线，或者已经进入认证失败保持态时，如果此时短接线被拔掉，
+
+     * * 需要切到拔出去抖阶段，并在稳定后输出离线报文。
+
+     */
+    if ((context->stage == HANDLESCAN_STAGE_ONLINE) ||
+        (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
+        (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL)) {
+      if (context->stage != HANDLESCAN_STAGE_DEBOUNCE_OUT) {
+        context->debounce.out_debounce_ticks =
+            0U; /* 首次进入拔出去抖时，先把拔出去抖计数清零。 */
+        context->stage =
+            HANDLESCAN_STAGE_DEBOUNCE_OUT; /* 状态机切到“拔出去抖”阶段。 */
+      }
+
+      if (context->debounce.out_debounce_ticks <
+          HANDLESCAN_REMOVE_DEBOUNCE_TICKS) {
+        ++context->debounce
+              .out_debounce_ticks; /* 拔出去抖未满阈值时，仅累计次数后返回。 */
+        return true;               /* 本轮不做其他动作，等待下一个扫描周期。 */
+      }
+
+      context->debounce.out_debounce_ticks =
+          0U; /* 拔出去抖完成后，清掉计数器。 */
+      Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* A
+                                                                              通道坏手柄拔出后，释放本通道手柄型号错误报警。
+                                                                            */
+      context->stage = HANDLESCAN_STAGE_IDLE; /* 本通道状态机回到空闲态。 */
+      context->last_alarm = 0U; /* 清掉本通道最近一次报警缓存。 */
+      context->tool_source =
+          HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 基座拔出后刀具来源回到默认，历史
+                                                  RFID 缓存只作记忆不直接上线。
+                                                */
+      context->rfid_wait_ticks = 0U;    /* 清掉本通道 RFID 等待计数。 */
+      context->rfid_monitor_ticks = 0U; /* 清掉本通道 RFID 低频监测计数。 */
+      Handlescan_ClearChannelState(binding); /* 清空本通道在线与识别状态。 */
+      Handlescan_ClearToolSpecValues(
+          spec_values); /* 同步清空本通道刀具规格缓存，避免 UI 残留旧值。 */
+      context->rfid_wait_started = 0; /* 本通道基座拔出后结束本轮 RFID
+                                         等待，下次插入必须从第一轮重新开始。 */
+      SendKeyBehMessage(
+          PLUGunPLUG,
+          binding->unplug_key); /* 通知按键行为模块：本通道手柄已拔出。 */
+      Handlescan_DebugTrace(
+          binding->channel, HANDLESCAN_DBG_STEP_REMOVE_PASS,
+          HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
+      Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_OFFLINE,
+                            0U); /* 输出“离线完成”报文。 */
+      //  (void)Handlescan_HandleRunningPlugAlarm(1U);     /*
+      //  如果电机仍在运行，则补充触发运行中插拔报警。 */
+      Handlescan_BeepOnceIfNoAlarm(); /* 没有运行中插拔或其他报警时，给 A
+                                         通道拔出确认单响。 */
+      return true;                    /* 本通道离线处理完成，本轮到此结束。 */
+    }
+
+    /*
+         * 其余情况下说明当前还没有形成有效上线，直接把 A
+     * 通道状态机静默复位即可，
+         * 不需要通知
+     * UI，也不需要输出离线报文。
+         */
+    context->debounce.out_debounce_ticks =
+        0U; /* 静默复位时也要把拔出去抖计数清零。 */
+    context->stage =
+        HANDLESCAN_STAGE_IDLE; /* 回到空闲态，等待下一次真实插入。 */
+    context->tool_source =
+        HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 插入取消后恢复默认来源。 */
+    context->rfid_wait_ticks = 0U;         /* 插入取消后清掉 RFID 等待计数。 */
+    context->rfid_monitor_ticks = 0U;      /* 插入取消后清掉 RFID 监测计数。 */
+    Handlescan_ClearChannelState(binding); /* 保证本通道识别状态保持关闭。 */
+    Handlescan_ClearToolSpecValues(
+        spec_values); /* 插入未完成时也清空本通道刀具规格缓存。 */
+    return true;      /* 当前只是插入取消，不做 UI 和报文更新。 */
+  }
+
+  return false; /* 短接仍成立时交给插入和认证阶段继续处理。 */
+}
+
+/*
+ * 函数功能：处理插入消抖、认证等待、快速重试和 EEPROM CRC 认证。
+ *
+ * 输入参数：binding 为固定通道资源。
+ * 返回参数：true 表示本轮必须停止，false
+ * 表示认证已通过并可在同一周期读取信息。
+ */
+static bool
+Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
+  HandlescanChannelContext *context =
+      binding->context; /* 认证阶段只维护本通道计数和状态。 */
+  AT24CS32_CRC_Result
+      verify_result; /* 保存底层 CRC 认证明细，便于现场定位 EEPROM 失败页。 */
+  AT24CS32_CRC_Status
+      verify_status; /* 保存本轮认证结果，原错误码和报警映射保持不变。 */
+
+  if (context->stage == HANDLESCAN_STAGE_IDLE) {
+    context->debounce.in_debounce_ticks =
+        0U; /* 新一轮插入开始时，先清空插入去抖计数。 */
+    context->debounce.out_debounce_ticks =
+        0U; /* 同时清空拔出去抖计数，避免带入上一次状态。 */
+    context->verify_start_wait_ticks = 0U; /* 清空认证前等待计数。 */
+    Handlescan_ResetVerifyRetry(context);  /* 新手柄插入从 0 次失败开始认证。 */
+    context->stage =
+        HANDLESCAN_STAGE_DEBOUNCE_IN; /* 状态机切到“插入去抖”阶段。 */
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_DEBOUNCE_IN) {
+    if (context->debounce.in_debounce_ticks <
+        HANDLESCAN_INSERT_DEBOUNCE_TICKS) {
+      ++context->debounce
+            .in_debounce_ticks; /* 插入信号仍稳定时，累计插入去抖计数。 */
+      return true;              /* 未到阈值前，不进入认证阶段。 */
+    }
+
+    context->debounce.in_debounce_ticks = 0U; /* 插入去抖达标后，清掉计数器。 */
+    context->verify_start_wait_ticks =
+        0U; /* 开始认证前等待前，先把等待计数清零。 */
+    context->stage =
+        HANDLESCAN_STAGE_WAIT_VERIFY; /* 状态机切到“认证前等待”阶段。 */
+    Handlescan_DebugTrace(
+        binding->channel, HANDLESCAN_DBG_STEP_INSERT_PASS,
+        HANDLESCAN_INSERT_DEBOUNCE_TICKS); /* 输出“插入稳定”报文。 */
+    return true; /* 本轮插入确认完成，等待下一轮进入认证。 */
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_WAIT_VERIFY) {
+    if (context->verify_start_wait_ticks <
+        HANDLESCAN_VERIFY_START_DELAY_TICKS) {
+      ++context
+            ->verify_start_wait_ticks; /* 每个扫描周期把认证前等待计数加一。 */
+      return true;                     /* 等待未满 200ms 前，不访问 EEPROM。 */
+    }
+
+    context->verify_start_wait_ticks = 0U; /* 等待完成后，把等待计数器清零。 */
+    context->stage = HANDLESCAN_STAGE_VERIFY; /* 状态机切到“认证执行”阶段。 */
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_RETRY_WAIT) {
+    if (context->verify_retry_wait_ticks <
+        HANDLESCAN_VERIFY_RETRY_DELAY_TICKS) {
+      ++context
+            ->verify_retry_wait_ticks; /* 每 10ms 累计一次快速重试等待时间。 */
+      return true;                     /* 未到重试间隔前，不访问 EEPROM。 */
+    }
+
+    context->verify_retry_wait_ticks = 0U; /* 快速重试等待结束，清零计数。 */
+    context->stage =
+        HANDLESCAN_STAGE_VERIFY; /* 重新进入认证阶段，不需要重新插拔。 */
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_VERIFY) {
+    AT24CS32_ClearLastDebugInfo(); /* 认证前先清掉上一轮底层 I2C 调试信息。 */
+    verify_status = Handlescan_VerifyEeprom(
+        binding, &verify_result); /* 按固定绑定选择 A/I2C2 或 B/I2C3 完成 EEPROM
+                                     认证。 */
+    Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_VERIFY_STATUS,
+                          (uint8_t)verify_status); /* 输出当前认证结果码。 */
+
+    if (verify_status != AT24CS32_CRC_STATUS_OK) {
+      Handlescan_EnterRetryOrFail(
+          binding->channel, context,
+          Handlescan_MapVerifyStatusToAlarm(
+              binding->channel,
+              verify_status)); /* 先快速重试，最终失败才按绑定通道报警。 */
+      Handlescan_DebugTraceI2cDetail(
+          binding->channel); /* 输出最近一次底层 I2C 访问细节。 */
+      return true;           /* 本轮不再继续读信息区。 */
+    }
+
+    context->stage =
+        HANDLESCAN_STAGE_READ_INFO; /* 认证通过后，进入信息区读取阶段。 */
+  }
+
+  return false; /* VERIFY 成功会切到 READ_INFO，允许本周期继续读取，保持原时序。
+                 */
+}
+
+/*
+ * 函数功能：Page2 确认是 RFID
+ * 基座后，启动刀具头读取或按超时规则上线空基座。
+ * 输入参数：binding
+ * 为固定通道资源；mapped_model 和 raw_type_* 为已确认的基座型号。
+ *
+ * 返回参数：始终返回 true，表示 RFID 基座分支已处理，本轮不得再解析普通 Page3
+ * 刀具。
+ */
+static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
+                                       uint8_t mapped_model,
+                                       uint8_t raw_type_major,
+                                       uint8_t raw_type_minor) {
+  HandlescanChannelContext *context =
+      binding->context; /* 保存本通道 RFID 等待、重试和在线状态。 */
+  ChannelrecognizeMessage_t *message =
+      binding->message; /* 空基座或刀具上线结果只写本通道识别缓存。 */
+  uint32_t *spec_values =
+      binding->spec_values; /* 等待刀具头期间清本通道旧规格。 */
+
+  if ((context->rfid_wait_started != 0U) &&
+      (context->verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX)) {
+    Handlescan_ClearToolSpecValues(
+        spec_values); /* RFID 两轮未读到刀具头时清空规格缓存，避免 PXBA/PXBB
+                         继续落入 Page3 解析并把基座 EEPROM 当成刀具。 */
+    Rfid_ClearChannelResult(binding->channel); /* 作废本通道当前 RFID
+                                                  结果和晚到请求，保证后续在线监测从干净状态重新读取真实刀具头。
+                                                */
+    Handlescan_PrepareRfidBaseRecognizeMessage(
+        message, mapped_model, raw_type_major,
+        raw_type_minor); /* 只保留本通道 RFID
+                            基座信息，刀具类型和规格继续保持空状态。 */
+    if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) {
+      (void)Handlescan_LoadSplitBaseEepromRuntime(
+          binding); /* PXBA/PXBB 未识别到标签时先装载本通道 EEPROM 运行参数。 */
+    }
+    Handlescan_LoadPage6SpeedStep(
+        binding); /* 重新装入本通道基座 Page6 步进，后续 RFID 刀具上线继续继承。
+                   */
+    SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 刷新 A
+                                                         通道基座在线状态，让屏幕关闭规格区并显示等待
+                                                         RFID 刀具头。 */
+    Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* RFID
+                                                                            无刀具头不是坏手柄，退出等待后释放本通道历史认证报警。
+                                                                          */
+    Handlescan_ResetVerifyRetry(
+        context); /* 基座已按无刀具在线处理，清掉本轮 RFID 快速重试计数。 */
+    context->last_alarm =
+        0U; /* 清掉最近报警缓存，避免后续在线监测被旧报警状态阻塞。 */
+    context->rfid_wait_ticks =
+        0U; /* 清掉等待计数，进入在线监测后由低频监测重新计时。 */
+    context->rfid_last_sequence = 0U; /* 没有有效刀具头时清掉已消费结果序号，下一次真实标签必须重新装载。
+                                       */
+    context->rfid_last_presence_sequence =
+        0U; /* 清掉存在序号，避免旧 presence 影响后续刀具头上线判断。 */
+    context->rfid_miss_count =
+        0U; /* 无刀具基座在线后从 0 开始做低频缺失监测，避免立刻触发掉线清理。
+             */
+    context->rfid_monitor_pending =
+        0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
+    context->rfid_tool_online =
+        0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
+    context->stage =
+        HANDLESCAN_STAGE_ONLINE; /* 本通道进入基座在线保持态，后续只由 RFID
+                                    在线监测刷新真实刀具。 */
+    context->rfid_wait_started =
+        0U; /* 本轮 RFID 上线等待结束，防止该临时标志影响下一次插拔识别。 */
+    return true; /* RFID 来源手柄无论是否有刀具头，都不能继续执行普通 EEPROM
+                    Page3 解析。 */
+  }
+  context->rfid_wait_started =
+      1; /* 记录本通道已经启动第一轮 RFID
+            等待，下一轮失败后才能按原规则上线空基座。 */
+  Handlescan_ClearToolSpecValues(
+      spec_values); /* 可拆刀具头等待 RFID
+                       前先清屏幕规格缓存，避免显示旧刀具头。 */
+  if (Handlescan_StartRfidWait(binding, true) !=
+      false) /* 基座刚上线时快速读取 RFID 标签。 */
+  {
+    Handlescan_PrepareRfidBaseRecognizeMessage(
+        message, mapped_model, raw_type_major,
+        raw_type_minor); /* 只写基座字段，刀具字段等待 RFID 真实结果。 */
+    if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) {
+      (void)Handlescan_LoadSplitBaseEepromRuntime(
+          binding); /* 分体式进入 RFID 等待时先恢复本通道 EEPROM 参数。 */
+    }
+    Handlescan_LoadPage6SpeedStep(
+        binding); /* 可拆式基座先装入本通道 Page6 步进。 */
+    SendKeyBehMessage(
+        PLUGunPLUG,
+        binding->plug_key); /* 先上报 RFID
+                               基座在线，刀具头数据到达后再二次刷新通道记忆。 */
+    SendKeyBeepMessage(1);
+  }
+  return true; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。
+                */
+}
+
+/*
+ * 函数功能：读取一体式手柄的 Page3/Page4/Page6 参数，并发布本通道上线事件。
+
+ * * 输入参数：binding 为固定通道资源；handle_type_cfg
+ * 和型号参数来自已通过认证的 Page2。
+ * 返回参数：始终返回
+ * true，表示一体式手柄本轮已处理完毕或已进入重试。
+ */
+static bool Handlescan_ProcessIntegratedHandle(
+    const HandlescanChannelBinding *binding,
+    const HandlescanHandleTypeConfig *handle_type_cfg, uint8_t mapped_model,
+    uint8_t raw_type_major, uint8_t raw_type_minor) {
+  HandlescanChannelContext *context =
+      binding->context; /* 保存本通道 EEPROM 页缓存和扫描阶段。 */
+  ChannelrecognizeMessage_t *message =
+      binding->message; /* 一体式手柄参数只写本通道识别缓存。 */
+  ChannelMemoryMessagr_t *memory =
+      binding->memory; /* 清本通道旧 RFID 自动识别记忆。 */
+  uint32_t *spec_values =
+      binding->spec_values;     /* 一体式刀具规格只刷新本通道。 */
+  uint8_t read_status;          /* 保存 Page3 或 Page4 读取结果。 */
+  uint16_t tool_diameter_tenth; /* Page3 刀具直径，单位 0.1。 */
+  uint16_t tool_length_tenth;   /* Page3 刀具长度，单位 0.1。 */
+  uint16_t tool_angle_tenth;    /* Page3 刀具角度，单位 0.1。 */
+
+  AT24CS32_ClearLastDebugInfo(); /* 一体式手柄不再用 Page3
+                                    识别刀具类型，但仍要读取 Page4 运行初始值。
+                                  */
+  read_status = Handlescan_ReadEepromPage(
+      binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX,
+      context->initial_info_buf); /* 从本通道读取 Page4
+                                     默认速度、频率、方向和泵流量。 */
+  if (read_status == 0U) {
+    Handlescan_DebugTrace(
+        binding->channel, HANDLESCAN_DBG_STEP_INFO_FAIL,
+        read_status); /* 输出本通道 Page4 读取或页校验失败报文。 */
+    Handlescan_DebugTraceI2cDetail(
+        binding->channel); /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+    Handlescan_EnterRetryOrFail(
+        binding->channel, context,
+        0U);     /* Page4 瞬时读取失败只重试，不立刻锁死一体式手柄。 */
+    return true; /* 本轮停止后续处理，等待下一次重新读取 Page4。 */
+  }
+
+  Handlescan_UpdateSelfTypedHandleRecognizeMessage(
+      message, mapped_model, raw_type_major,
+      raw_type_minor); /* 0x7C 一体式型号直接写入本通道手柄和刀具能力字段。 */
+  read_status = Handlescan_ReadEepromBytes(
+      binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf,
+      HANDLESCAN_TOOL_INFO_SIZE); /* 一体式手柄仍读取本通道 Page3
+                                     规格和倍率字段，失败不影响上线。 */
+  Handlescan_UpdateToolRatioMessage(
+      message, (read_status != 0U)
+                   ? context->tool_info_buf
+                   : NULL); /* Page3 倍率无效时按 1
+                               倍保护，避免机械变速字段写错导致超速。 */
+  Handlescan_UpdateInitialInfoMessage(
+      message,
+      context
+          ->initial_info_buf); /* 同步本通道 Page4
+                                  默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+  Handlescan_LoadPage6SpeedStep(
+      binding); /* 一体式手柄读取本通道 Page6 调速步进。 */
+  if ((read_status != 0U) &&
+      (Handlescan_IsIntegratedToolSpecHandleModel(mapped_model) != false)) {
+    tool_diameter_tenth = Handlescan_ReadUint16BE(
+        context->tool_info_buf,
+        HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 本通道一体式手柄 Page3[2..3]
+                                             保存刀具直径，单位沿用 0.1。 */
+    tool_length_tenth = Handlescan_ReadUint16BE(
+        context->tool_info_buf,
+        HANDLESCAN_TOOL_LENGTH_OFFSET); /* 本通道一体式手柄 Page3[4..5]
+                                           保存刀具长度，按现有规格窗口格式缓存。
+                                         */
+    tool_angle_tenth = Handlescan_ReadUint16BE(
+        context->tool_info_buf,
+        HANDLESCAN_TOOL_ANGLE_OFFSET); /* 本通道一体式手柄 Page3[6..7]
+                                          保存刀具角度，屏幕规格区直接显示角度值。
+                                        */
+    Handlescan_UpdateToolSpecValues(
+        spec_values, tool_diameter_tenth, tool_length_tenth, tool_angle_tenth,
+        Handlescan_MapRawToolTypeToBusinessType(
+            mapped_model)); /* 一体式手柄规格来自自身 EEPROM
+                               Page3，不再清掉直径、长度、角度显示缓存。 */
+  } else {
+    Handlescan_ClearToolSpecValues(
+        spec_values); /* 非四类一体式或 Page3 读取失败时清空 A
+                         规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
+  }
+  memory->auto_identify =
+      0U; /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
+  SendKeyBehMessage(
+      PLUGunPLUG, binding->plug_key); /* 通知插拔事件链：A
+                                         通道按手柄型号上线并装载到通道记忆。 */
+  Handlescan_ClearChannelAlarm(
+      binding->channel,
+      context->last_alarm); /* 自恢复成功时清掉本通道历史手柄校验报警。 */
+  Handlescan_ResetVerifyRetry(context); /* 上线成功后清空本通道失败重试状态。 */
+  context->last_alarm = 0U; /* 上线成功后清掉本通道最近一次报警缓存。 */
+  context->stage =
+      HANDLESCAN_STAGE_ONLINE; /* 本通道切到在线保持态，后续只做拔出和 RFID
+                                  在线监测判断。 */
+  Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_ONLINE,
+                        mapped_model); /* 输出本通道上线报文，值为手柄型号。 */
+  Handlescan_DebugTraceHandleName(
+      binding->channel, raw_type_major, raw_type_minor,
+      handle_type_cfg->handle_name); /* 输出本通道 0x7C 手柄名称报文。 */
+  Handlescan_BeepOnceIfNoAlarm();    /* A
+                                        通道认证并上线成功后，给使用者一个确认单响。
+                                      */
+  return true; /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
+}
+
+/*
+ * 函数功能：读取普通 EEPROM 手柄的
+ * Page3/Page4/Page6，并发布本通道上线事件。
+ * 输入参数：binding
+ * 为固定通道资源；handle_type_cfg 和型号参数来自已通过认证的 Page2。
+ *
+ * 返回参数：始终返回 true，表示普通 EEPROM 分支已完成上线或已进入重试。
+
+ */
+static bool Handlescan_ProcessOrdinaryEepromHandle(
+    const HandlescanChannelBinding *binding,
+    const HandlescanHandleTypeConfig *handle_type_cfg, uint8_t mapped_model,
+    uint8_t raw_type_major, uint8_t raw_type_minor) {
+  HandlescanChannelContext *context =
+      binding->context; /* 保存本通道 EEPROM 页缓存和扫描阶段。 */
+  ChannelrecognizeMessage_t *message =
+      binding->message; /* 普通手柄参数只写本通道识别缓存。 */
+  ChannelMemoryMessagr_t *memory =
+      binding->memory; /* 保留本通道原有 auto_identify 更新顺序。 */
+  uint32_t *spec_values = binding->spec_values; /* 普通刀具规格只刷新本通道。 */
+  uint8_t read_status;          /* 保存 Page3 或 Page4 读取结果。 */
+  uint8_t raw_tool_major;       /* Page3 刀具主类型原始字节。 */
+  uint8_t raw_tool_minor;       /* Page3 刀具子类型原始字节。 */
+  uint8_t mapped_tool_model;    /* 配置表映射后的内部刀具型号。 */
+  uint16_t tool_diameter_tenth; /* Page3 刀具直径，单位 0.1。 */
+  uint16_t tool_length_tenth;   /* Page3 刀具长度，单位 0.1。 */
+  uint16_t tool_angle_tenth;    /* Page3 刀具角度，单位 0.1。 */
+  const HandlescanHandleTypeConfig
+      *tool_type_cfg; /* 命中的刀具类型配置表项。 */
+
+  AT24CS32_ClearLastDebugInfo(); /* 读取刀具页之前，先把调试缓存切到当前这一次访问。
+                                  */
+  read_status = Handlescan_ReadEepromBytes(
+      binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf,
+      HANDLESCAN_TOOL_INFO_SIZE); /* 从本通道 EEPROM 读出第 3 页刀具信息。 */
+  if (read_status == 0U) {
+    Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_INFO_FAIL,
+                          read_status); /* 输出刀具信息区读取失败报文。 */
+    Handlescan_DebugTraceI2cDetail(
+        binding->channel); /* 输出本轮失败对应的底层 I2C 细节。 */
+    Handlescan_EnterRetryOrFail(
+        binding->channel, context,
+        0U);     /* 刀具页瞬时读取失败只重试，不立刻锁死。 */
+    return true; /* 本轮停止后续处理。 */
+  }
+
+  AT24CS32_ClearLastDebugInfo(); /* 读取初始值页之前，先把调试缓存切到 Page4
+                                    访问。 */
+  read_status = Handlescan_ReadEepromPage(
+      binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX,
+      context->initial_info_buf); /* 从本通道 EEPROM 读取 Page4
+                                     初始值并校验页尾。 */
+  if (read_status == 0U) {
+    Handlescan_DebugTrace(
+        binding->channel, HANDLESCAN_DBG_STEP_INFO_FAIL,
+        read_status); /* 输出本通道初始值页读取或页校验失败报文。 */
+    Handlescan_DebugTraceI2cDetail(
+        binding->channel); /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
+    Handlescan_EnterRetryOrFail(
+        binding->channel, context,
+        0U);     /* 初始值页瞬时读取失败只重试，不立刻锁死手柄。 */
+    return true; /* 本轮停止后续处理，等待下一次重新读取完整业务页。 */
+  }
+
+  raw_tool_major =
+      context
+          ->tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出刀具信息区第 1
+                                                            字节作为刀具主类型。
+                                                          */
+  raw_tool_minor =
+      context
+          ->tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出刀具信息区第 2
+                                                            字节作为刀具子类型。
+                                                          */
+  tool_type_cfg = Handlescan_FindToolTypeConfig(
+      raw_tool_major, raw_tool_minor); /* 按两个原始字节查找刀具配置表。 */
+  if (tool_type_cfg == NULL) {
+    // Handlescan_DebugTrace(binding->channel,
+    // HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /*
+    // 输出“刀具类型无法识别”报文。 */
+    // // Handlescan_EnterRetryOrFail(binding->channel,
+    //                              &context->stage,
+    //                              &context->verify_retry_count,
+    //                              &context->verify_retry_wait_ticks,
+    //                              &context->last_alarm,
+    //                              0U);                /*
+    //                              刀具页读到异常值时允许后续重试。 */
+    // return true;                                         /* 等待重新插拔。 */
+  }
+
+  tool_diameter_tenth = Handlescan_ReadUint16BE(
+      context->tool_info_buf,
+      HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
+  tool_length_tenth = Handlescan_ReadUint16BE(
+      context->tool_info_buf,
+      HANDLESCAN_TOOL_LENGTH_OFFSET); /* 解析刀具长度，单位 0.1。 */
+  tool_angle_tenth = Handlescan_ReadUint16BE(
+      context->tool_info_buf,
+      HANDLESCAN_TOOL_ANGLE_OFFSET); /* 解析刀具角度，单位 0.1。 */
+
+  mapped_tool_model =
+      tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
+  Handlescan_UpdateRecognizeMessage(
+      message, mapped_model, raw_type_major, raw_type_minor, mapped_tool_model,
+      tool_diameter_tenth, tool_length_tenth,
+      tool_angle_tenth); /* 同步更新本通道识别结果。 */
+  Handlescan_UpdateToolRatioMessage(
+      message, context->tool_info_buf); /* 本通道按 Page3[8]/[9]
+                                           装入减速/增速比，供驱动统一换算。 */
+  WorkMessage.auto_identify = memory->auto_identify = 1;
+  Handlescan_UpdateInitialInfoMessage(
+      message,
+      context
+          ->initial_info_buf); /* 同步更新本通道 Page4
+                                  默认速度、频率、方向、注水流量和蜂鸣阈值。 */
+  Handlescan_LoadPage6SpeedStep(
+      binding); /* 普通 EEPROM 手柄上线后读取本通道 Page6。 */
+  Handlescan_UpdateToolSpecValues(
+      spec_values, tool_diameter_tenth, tool_length_tenth, tool_angle_tenth,
+      Handlescan_MapRawToolTypeToBusinessType(
+          mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP
+                                  不再直接暴露旧码给 UI。 */
+  if (binding->channel == CHANNEL_A) {
+    WorkMessage.auto_identify =
+        0U; /* A 通道保留原顺序：先清工作态自动识别，再发送上线事件。 */
+  }
+  SendKeyBehMessage(
+      PLUGunPLUG,
+      binding->plug_key); /* 沿用原插入事件链装载通道记忆和工作态。 */
+  if (binding->channel == CHANNEL_B) {
+    WorkMessage.auto_identify =
+        0U; /* B 通道保留原顺序：上线事件处理完成后再清工作态自动识别。 */
+  } /* 通知插拔事件链：本通道上线，实际 WorkMessage/MemoryMsg 装载在
+       PlugORunPLUGActive 中完成。 */
+  Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。
+                                                                        */
+  Handlescan_ResetVerifyRetry(context); /* 上线成功后清空失败重试状态。 */
+  context->last_alarm = 0U;             /* 上线成功后清掉最近一次报警缓存。 */
+  context->stage = HANDLESCAN_STAGE_ONLINE; /* 状态机切到在线保持态。 */
+  Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_ONLINE,
+                        mapped_model); /* 输出本通道上线报文。 */
+  Handlescan_DebugTraceHandleName(
+      binding->channel, raw_type_major, raw_type_minor,
+      handle_type_cfg->handle_name); /* 输出本通道手柄名称报文。 */
+  Handlescan_DebugTraceToolInfo(
+      binding->channel, raw_tool_major, raw_tool_minor,
+      tool_type_cfg->handle_name, tool_diameter_tenth, tool_length_tenth,
+      tool_angle_tenth);          /* 输出本通道刀具名称和规格报文。 */
+  Handlescan_BeepOnceIfNoAlarm(); /* A
+                                     通道认证并上线成功后，给使用者一个确认单响。
+                                   */
+  return true;                    /* 本通道本轮流程结束，后续等待拔出。 */
+}
+
+/*
+ * 函数功能：读取 Page2 手柄身份，并分派到 RFID 基座、一体式或普通 EEPROM
+ * 处理函数。
+ * 输入参数：binding 为固定通道资源。
+ * 返回参数：true 表示
+ * READ_INFO 已处理，false 表示当前不是信息读取阶段。
+ */
+static bool
+Handlescan_ProcessReadInfo(const HandlescanChannelBinding *binding) {
+  HandlescanChannelContext *context =
+      binding->context;   /* Page2 缓存和阶段只使用本通道上下文。 */
+  uint8_t read_status;    /* 保存 Page2 读取结果。 */
+  uint8_t raw_type_major; /* Page2 手柄主类型原始字节。 */
+  uint8_t raw_type_minor; /* Page2 手柄子类型原始字节。 */
+  uint8_t mapped_model;   /* 配置表映射后的内部手柄型号。 */
+  const HandlescanHandleTypeConfig
+      *handle_type_cfg; /* 命中的手柄类型配置表项。 */
+
+  if (context->stage != HANDLESCAN_STAGE_READ_INFO) {
+    return false; /* 其它阶段不读取 EEPROM，交给对应阶段处理函数。 */
+  }
+
+  AT24CS32_ClearLastDebugInfo(); /* 读取 Page2
+                                    前清底层调试记录，失败时可定位本轮总线访问。
+                                  */
+  read_status = Handlescan_ReadEepromBytes(
+      binding, HANDLESCAN_INFO_ADDR, context->info_buf,
+      HANDLESCAN_INFO_SIZE); /* 从绑定通道读取 Page2 身份。 */
+  if (read_status == 0U) {
+    Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_INFO_FAIL,
+                          read_status); /* 输出本通道身份读取失败。 */
+    Handlescan_DebugTraceI2cDetail(
+        binding->channel); /* 输出底层 I2C 失败细节。 */
+    Handlescan_EnterRetryOrFail(binding->channel, context,
+                                0U); /* 瞬时失败进入原快速重试，不立即报警。 */
+    return true;                     /* 本轮停止，等待下一次认证重试。 */
+  }
+
+  raw_type_major =
+      context
+          ->info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 取 Page2 手柄主类型。 */
+  raw_type_minor =
+      context
+          ->info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 取 Page2 手柄子类型。 */
+  handle_type_cfg = Handlescan_FindHandleTypeConfig(
+      raw_type_major, raw_type_minor); /* 按原始双字节查型号表。 */
+  if (handle_type_cfg == NULL) {
+    Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_MODEL_INVALID,
+                          raw_type_minor); /* 输出无法识别的型号字节。 */
+    Handlescan_EnterRetryOrFail(binding->channel, context,
+                                0U); /* 保留原重试策略，避免热插拔瞬间误判。 */
+    return true;                     /* 型号未确认时不读取后续业务页。 */
+  }
+
+  mapped_model =
+      handle_type_cfg->mapped_handle_type; /* 取得系统内部手柄型号。 */
+  context->tool_source = Handlescan_GetToolSource(
+      mapped_model); /* 型号决定刀具来自 RFID 还是 EEPROM。 */
+  if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3) {
+    return Handlescan_ProcessRfidBase(
+        binding, mapped_model, raw_type_major,
+        raw_type_minor); /* RFID 基座不得落入普通 Page3 刀具解析。 */
+  }
+  if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false) {
+    return Handlescan_ProcessIntegratedHandle(
+        binding, handle_type_cfg, mapped_model, raw_type_major,
+        raw_type_minor); /* 一体式手柄由自身型号直接给出刀具能力。 */
+  }
+
+  return Handlescan_ProcessOrdinaryEepromHandle(
+      binding, handle_type_cfg, mapped_model, raw_type_major,
+      raw_type_minor); /* 其余型号按原 Page3/Page4 流程上线。 */
+}
+
+/*
+ * 函数功能：处理 RFID 上线等待、认证失败慢速恢复和在线低频监测。
+ *
+ * 输入参数：binding 为固定通道资源。
+ * 返回参数：true
+ * 表示当前阶段已处理，false 表示本轮没有 RFID 或在线阶段动作。
+
+ */
+static bool
+Handlescan_ProcessRfidStage(const HandlescanChannelBinding *binding) {
+  HandlescanChannelContext *context =
+      binding->context;   /* RFID 序号和缺失计数只使用本通道上下文。 */
+  uint8_t raw_type_major; /* 复用已缓存的 Page2 手柄主类型。 */
+  uint8_t raw_type_minor; /* 复用已缓存的 Page2 手柄子类型。 */
+  uint8_t mapped_model;   /* 当前 RFID 基座映射型号。 */
+  const HandlescanHandleTypeConfig
+      *handle_type_cfg; /* 当前 RFID 基座配置表项。 */
+
+  if (context->stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL) {
+    raw_type_major =
+        context->info_buf
+            [HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 等待 RFID 期间复用已读到的
+                                                EEPROM 第二页主类型。 */
+    raw_type_minor =
+        context->info_buf
+            [HANDLESCAN_MODEL_MINOR_OFFSET]; /* 等待 RFID 期间复用已读到的
+                                                EEPROM 第二页子类型。 */
+    handle_type_cfg = Handlescan_FindHandleTypeConfig(
+        raw_type_major,
+        raw_type_minor); /* 重新查表，避免局部变量跨周期丢失。 */
+    if (handle_type_cfg == NULL) {
+      Handlescan_EnterRetryOrFail(
+          binding->channel, context,
+          0U);     /* 等待期间基座信息异常时回到原有重试流程。 */
+      return true; /* 本轮等待处理结束。 */
+    }
+    mapped_model =
+        handle_type_cfg->mapped_handle_type; /* 取出本通道基座型号。 */
+    context->tool_source = Handlescan_GetToolSource(
+        mapped_model); /* 重新确认本通道 RFID 来源。 */
+    if (Handlescan_ProcessRfidWait(binding, mapped_model, raw_type_major,
+                                   raw_type_minor) != false) {
+      return true; /* RFID 等待阶段本轮已经处理。 */
+    }
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL) {
+    if (context->verify_retry_wait_ticks <
+        HANDLESCAN_VERIFY_ALARM_RETRY_TICKS) {
+      ++context->verify_retry_wait_ticks; /* 最终报警保持时慢速计时，避免反复高频读
+                                             EEPROM。 */
+      return true;                        /* 等待 1000ms 后再尝试自恢复认证。 */
+    }
+
+    context->verify_retry_wait_ticks =
+        0U; /* 慢速自恢复时间到，清掉等待计数。 */
+    context->stage = HANDLESCAN_STAGE_VERIFY; /* 仍插着时重新认证一次，正确手柄可自动恢复上线。
+                                               */
+    return true;
+  }
+
+  if (context->stage == HANDLESCAN_STAGE_ONLINE) {
+    raw_type_major =
+        context
+            ->info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 在线监测时复用 EEPROM
+                                                          第二页基座主类型。 */
+    raw_type_minor =
+        context
+            ->info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 在线监测时复用 EEPROM
+                                                          第二页基座子类型。 */
+    handle_type_cfg = Handlescan_FindHandleTypeConfig(
+        raw_type_major,
+        raw_type_minor); /* 在线阶段重新查表，避免局部变量跨周期丢失。 */
+    if (handle_type_cfg != NULL) {
+      mapped_model =
+          handle_type_cfg->mapped_handle_type; /* 取出本通道当前基座型号。 */
+      context->tool_source = Handlescan_GetToolSource(
+          mapped_model); /* 判断本通道是否需要 RFID 低频监测。 */
+      Handlescan_RequestOnlineRfidMonitor(
+          binding); /* 空闲时周期请求本通道 RFID，运行中自动暂停。 */
+      Handlescan_ProcessOnlineRfidResult(
+          binding, mapped_model, raw_type_major,
+          raw_type_minor); /* 消费本通道 RFID 新结果并刷新通道记忆。 */
+    }
+    return true; /* 在线保持态保持静默，只等待拔出。 */
+  }
+
+  return false; /* 其它阶段不在这里处理。 */
+}
+
+/*
+ * 函数功能：执行指定通道一次 10ms 扫描，并按拔出、认证、信息和 RFID
+ * 顺序分派。
+ * 输入参数：binding 为 A 或 B 通道固定资源绑定。
+ *
+ * 返回参数：无。
+ */
+static void Handlescan_RunChannel(const HandlescanChannelBinding *binding) {
+  uint8_t is_inserted; /* 当前短接采样，低电平换算为 1 表示已插入。 */
+
+  is_inserted =
+      (uint8_t)(Bsp_GpioRead(binding->short_gpio, binding->short_pin) ==
+                GPIO_PIN_RESET); /* 只读取绑定通道的短接脚。 */
+  if (Handlescan_ProcessDisconnect(binding, is_inserted) != false) {
+    return; /* 拔出候选、去抖或离线清理已经处理，本轮不再认证。 */
+  }
+
+  if (Handlescan_ShouldDeferRecognition(binding->channel) != 0U) {
+    return; /* 普通阻塞报警未解除前保持当前阶段，不访问 EEPROM。 */
+  }
+
+  if (Handlescan_ProcessInsertAndVerify(binding) != false) {
+    return; /* 插入消抖、等待、失败或重试要求本轮停止。 */
+  }
+
+  if (Handlescan_ProcessReadInfo(binding) != false) {
+    return; /* 信息读取阶段已经完成上线、等待分流或失败处理。 */
+  }
+
+  (void)Handlescan_ProcessRfidStage(
+      binding); /* RFID 等待、失败恢复和在线监测在末段串行执行。 */
+}
+
+/*
+ * 函数功能：执行 A 通道一次 10ms 手柄扫描，保留该入口便于现场单独下断点。
+ *
  * 输入参数：无。
  * 返回参数：无。
- * B 通道沿用与 A 通道一致的状态机流程，但底层资源切换为：
- * 1. 短接检测脚使用 B 通道输入脚；
- * 2. EEPROM 认证和信息区读取使用 I2C3；
- * 3. 在线状态和手柄型号由 PlugORunPLUGActive 统一写回；
- * 4. 串口报文通道号使用 `CH=02`。
+ */
+void HandlescanA_Fun_SSC(void)
+{
+    Handlescan_RunChannel(&s_a_binding);
+}
+
+/*
+ * 函数功能：执行 B 通道一次 10ms 手柄扫描，保留该入口便于现场单独下断点。
+ * 输入参数：无。
+ * 返回参数：无。
  */
 void HandlescanB_Fun_SSC(void)
 {
-    uint8_t is_inserted;                                      /* 当前采样到的 B 通道插入状态，1 表示短接成立，0 表示短接断开。 */
-    AT24CS32_CRC_Result verify_result;                       /* 保存 B 通道 EEPROM 认证输出结果。 */
-    AT24CS32_CRC_Status verify_status;                       /* 保存 B 通道当前这次认证返回的状态码。 */
-    uint8_t read_status;                                     /* 保存 B 通道信息区读取结果。 */
-    uint8_t raw_type_major;                                  /* EEPROM 信息区第 1 个字节，表示手柄主类型。 */
-    uint8_t raw_type_minor;                                  /* EEPROM 信息区第 2 个字节，表示手柄子类型。 */
-    uint8_t raw_tool_major;                                  /* EEPROM 刀具信息区第 1 个字节，表示刀具主类型。 */
-    uint8_t raw_tool_minor;                                  /* EEPROM 刀具信息区第 2 个字节，表示刀具子类型。 */
-    uint8_t mapped_model;                                    /* 查表映射后的系统内部型号值。 */
-    uint8_t mapped_tool_model;                               /* 查表映射后的系统内部刀具型号值。 */
-    uint16_t tool_diameter_tenth;                            /* 刀具直径，单位 0.1。 */
-    uint16_t tool_length_tenth;                              /* 刀具长度，单位 0.1。 */
-    uint16_t tool_angle_tenth;                               /* 刀具角度，单位 0.1。 */
-    const HandlescanHandleTypeConfig *handle_type_cfg;       /* 指向命中的 B 通道手柄配置表项。 */
-    const HandlescanHandleTypeConfig *tool_type_cfg;         /* 指向命中的 B 通道刀具配置表项。 */
-
-    /*
-     * B 通道短接检测脚同样按“低电平表示插入成立”处理。
-     * 这里直接在 B 通道函数内实现，不再通过通用 helper 转发。
-     */
-    is_inserted = (uint8_t)(Bsp_GpioRead(HANDLESCAN_B_SHORT_GPIO, HANDLESCAN_B_SHORT_PIN) == GPIO_PIN_RESET); /* 低电平代表 B 通道短接成立。 */
-
-    if (is_inserted == 0U)
-    {
-        s_b_context.debounce.in_debounce_ticks = 0U;           /* 一旦检测到拔出候选，就清掉 B 通道插入去抖计数。 */
-        s_b_context.verify_start_wait_ticks = 0U;                    /* 同时清掉 B 通道认证前等待计数。 */
-        Handlescan_ResetVerifyRetry(&s_b_context.verify_retry_count, &s_b_context.verify_retry_wait_ticks); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
-
-        /*
-         * 如果 B 通道之前已经在线，或者认证失败后仍保持插入态，
-         * 此时检测到拔出，就进入拔出去抖并在稳定后输出离线报文。
-         */
-        if ((s_b_context.stage == HANDLESCAN_STAGE_ONLINE) ||
-            (s_b_context.stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
-            (s_b_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL))
-        {
-            if (s_b_context.stage != HANDLESCAN_STAGE_DEBOUNCE_OUT)
-            {
-                s_b_context.debounce.out_debounce_ticks = 0U;  /* 首次进入 B 通道拔出去抖时，先清计数。 */
-                s_b_context.stage = HANDLESCAN_STAGE_DEBOUNCE_OUT;   /* B 通道状态机切到“拔出去抖”阶段。 */
-            }
-
-            if (s_b_context.debounce.out_debounce_ticks < HANDLESCAN_REMOVE_DEBOUNCE_TICKS)
-            {
-                ++s_b_context.debounce.out_debounce_ticks;     /* B 通道拔出去抖未满阈值时，仅累计次数。 */
-                return;                                      /* 等待下一次扫描继续判断。 */
-            }
-
-            s_b_context.debounce.out_debounce_ticks = 0U;      /* 拔出去抖完成后，清掉 B 通道计数器。 */
-            Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_context.last_alarm); /* B 通道坏手柄拔出后，释放本通道手柄型号错误报警。 */
-            s_b_context.stage = HANDLESCAN_STAGE_IDLE;               /* B 通道状态机回到空闲态。 */
-            s_b_context.last_alarm = 0U;                             /* 清掉 B 通道最近一次报警缓存。 */
-            s_b_context.tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 基座拔出后刀具来源回到默认，历史 RFID 缓存只作记忆不直接上线。 */
-            s_b_context.rfid_wait_ticks = 0U;                         /* 清掉 B 通道 RFID 等待计数。 */
-            s_b_context.rfid_monitor_ticks = 0U;                      /* 清掉 B 通道 RFID 低频监测计数。 */
-            Handlescan_ClearChannelState(CHANNEL_B);         /* 清空 B 通道新的在线与识别状态容器。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 同步清空 B 通道刀具规格缓存。 */
-            s_b_context.rfid_wait_started=0;                 /* B 基座拔出后结束本轮 RFID 等待，下次插入必须从第一轮重新开始。 */
-            SendKeyBehMessage(PLUGunPLUG, SCREENKey_UNPLUG_B); /* 通知新按键行为模块：B 手柄已拔出。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_REMOVE_PASS, HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出 B 通道“拔出去抖通过”报文。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_OFFLINE, 0U); /* 输出 B 通道“离线完成”报文。 */
-         //   (void)Handlescan_HandleRunningPlugAlarm(2U);     /* 如果电机仍在运行，则补充触发运行中插拔报警。 */
-            Handlescan_BeepOnceIfNoAlarm();                  /* 没有运行中插拔或其他报警时，给 B 通道拔出确认单响。 */
-            return;                                          /* B 通道离线处理结束。 */
-        }
-
-        /*
-         * 如果还没有形成有效上线，说明只是插入过程中取消或接触抖动，
-         * 此时对 B 通道做静默复位即可。
-         */
-        s_b_context.debounce.out_debounce_ticks = 0U;          /* 静默复位时，也把 B 通道拔出去抖计数清零。 */
-        s_b_context.stage = HANDLESCAN_STAGE_IDLE;                   /* 回到空闲态。 */
-        s_b_context.tool_source = HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3; /* 插入取消后恢复默认来源。 */
-        s_b_context.rfid_wait_ticks = 0U;                             /* 插入取消后清掉 RFID 等待计数。 */
-        s_b_context.rfid_monitor_ticks = 0U;                          /* 插入取消后清掉 RFID 监测计数。 */
-        Handlescan_ClearChannelState(CHANNEL_B);             /* 保证 B 通道新接口状态保持关闭。 */
-        Handlescan_ClearToolSpecValues(paoxueSpeciValue_B);  /* 插入未完成时也清空 B 通道刀具规格缓存。 */
-        return;                                              /* 当前不形成有效离线事件，只做静默收尾。 */
-    }
-
-    /*
-     * B 通道检测到插入后，先判断当前报警是否允许继续识别。
-     * 普通系统报警未解除前不访问 B 通道 EEPROM；手柄校验报警允许另一通道继续识别。
-     */
-    if (Handlescan_ShouldDeferRecognition(CHANNEL_B) != 0U)
-    {
-        return;                                             /* 保持当前阶段，等报警解除后继续本通道识别流程。 */
-    }
-    /* 报警允许识别后，如果 B 状态机还在空闲态，则进入插入去抖阶段。 */
-    if (s_b_context.stage == HANDLESCAN_STAGE_IDLE)
-    {
-        s_b_context.debounce.in_debounce_ticks = 0U;           /* 新一轮 B 通道插入开始时，先清空插入去抖计数。 */
-        s_b_context.debounce.out_debounce_ticks = 0U;          /* 清空 B 通道拔出去抖计数。 */
-        s_b_context.verify_start_wait_ticks = 0U;                    /* 清空 B 通道认证前等待计数。 */
-        Handlescan_ResetVerifyRetry(&s_b_context.verify_retry_count, &s_b_context.verify_retry_wait_ticks); /* 新手柄插入从 0 次失败开始认证。 */
-        s_b_context.stage = HANDLESCAN_STAGE_DEBOUNCE_IN;            /* 状态机切到“B 通道插入去抖”阶段。 */
-    }
-
-    /*
-     * B 通道插入去抖阶段。
-     * 只有连续多个扫描周期都检测到短接成立，才进入后续认证流程。
-     */
-    if (s_b_context.stage == HANDLESCAN_STAGE_DEBOUNCE_IN)
-    {
-        if (s_b_context.debounce.in_debounce_ticks < HANDLESCAN_INSERT_DEBOUNCE_TICKS)
-        {
-            ++s_b_context.debounce.in_debounce_ticks;          /* B 通道插入稳定时，累计去抖次数。 */
-            return;                                          /* 未达到阈值前，继续等待。 */
-        }
-
-        s_b_context.debounce.in_debounce_ticks = 0U;           /* 插入去抖达标后，清掉 B 通道计数器。 */
-        s_b_context.verify_start_wait_ticks = 0U;                    /* 开始认证前等待前，先把等待计数清零。 */
-        s_b_context.stage = HANDLESCAN_STAGE_WAIT_VERIFY;            /* 切到“B 通道认证前等待”阶段。 */
-        Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INSERT_PASS, HANDLESCAN_INSERT_DEBOUNCE_TICKS); /* 输出 B 通道“插入稳定”报文。 */
-        return;                                              /* 本轮到此结束。 */
-    }
-
-    /*
-     * B 通道认证前等待阶段。
-     * 等待时间与 A 通道保持一致，都是 200ms。
-     */
-    if (s_b_context.stage == HANDLESCAN_STAGE_WAIT_VERIFY)
-    {
-        if (s_b_context.verify_start_wait_ticks < HANDLESCAN_VERIFY_START_DELAY_TICKS)
-        {
-            ++s_b_context.verify_start_wait_ticks;                   /* 每个扫描周期把 B 通道认证前等待计数加一。 */
-            return;                                          /* 等待未满 200ms 前，不访问 B 通道 EEPROM。 */
-        }
-
-        s_b_context.verify_start_wait_ticks = 0U;                    /* 等待完成后清零计数器。 */
-        s_b_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 切到“B 通道认证执行”阶段。 */
-    }
-
-    /*
-     * B 通道快速重试等待阶段。
-     * 认证或信息读取失败后，先等待一小段时间再重新访问 EEPROM。
-     */
-    if (s_b_context.stage == HANDLESCAN_STAGE_RETRY_WAIT)
-    {
-        if (s_b_context.verify_retry_wait_ticks < HANDLESCAN_VERIFY_RETRY_DELAY_TICKS)
-        {
-            ++s_b_context.verify_retry_wait_ticks;                   /* 每 10ms 累计一次快速重试等待时间。 */
-            return;                                          /* 未到重试间隔前，不访问 EEPROM。 */
-        }
-
-        s_b_context.verify_retry_wait_ticks = 0U;                    /* 快速重试等待结束，清零计数。 */
-        s_b_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 重新进入认证阶段，不需要重新插拔。 */
-    }
-
-    /*
-     * B 通道认证阶段。
-     * 认证接口切换为 I2C3，失败后先有限重试，多次失败后才最终报警。
-     */
-    if (s_b_context.stage == HANDLESCAN_STAGE_VERIFY)
-    {
-        AT24CS32_ClearLastDebugInfo();                       /* 认证前清掉上一轮底层 I2C 调试信息。 */
-        verify_status = AT24CS32_VerifyCrc_I2C3(&verify_result); /* 调用 B 通道 I2C3 EEPROM 认证接口。 */
-        Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_VERIFY_STATUS, (uint8_t)verify_status); /* 输出 B 通道认证结果码。 */
-
-        if (verify_status != AT24CS32_CRC_STATUS_OK)
-        {
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         Handlescan_MapVerifyStatusToAlarm(CHANNEL_B, verify_status)); /* 先快速重试，最终失败才按 B 通道报警。 */
-            Handlescan_DebugTraceI2cDetail(2U);              /* 输出本轮 B 通道失败的 I2C 细节。 */
-            return;                                          /* 停止后续信息区读取。 */
-        }
-
-        s_b_context.stage = HANDLESCAN_STAGE_READ_INFO;              /* 认证通过后进入 B 通道信息区读取阶段。 */
-    }
-
-    /*
-     * B 通道信息读取阶段。
-     * 从 B 通道 EEPROM 先读第 2 页手柄信息，再读第 3 页刀具信息。
-     */
-    if (s_b_context.stage == HANDLESCAN_STAGE_READ_INFO)
-    {
-        AT24CS32_ClearLastDebugInfo();                       /* 读信息区前先清掉底层调试缓存。 */
-        read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_INFO_ADDR, s_b_context.info_buf, HANDLESCAN_INFO_SIZE); /* 从 B 通道 EEPROM 读取 16 字节信息区。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道信息区读取失败报文。 */
-            Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         0U);                /* 信息区瞬时读取失败只重试，不报手柄型号错误。 */
-            return;                                         /* 本轮停止后续处理。 */
-        }
-
-        raw_type_major = s_b_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 取出 B 通道信息区第 1 字节作为主类型。 */
-        raw_type_minor = s_b_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 取出 B 通道信息区第 2 字节作为子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 按两个原始字节查找配置表。 */
-        if (handle_type_cfg == NULL)
-        {
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_type_minor); /* 输出 B 通道“手柄类型无法识别”报文。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         0U);                /* 型号页读到异常值时允许后续重试，避免热插拔瞬间误判。 */
-            return;                                         /* 等待重新插拔。 */
-        }
-
-        mapped_model = handle_type_cfg->mapped_handle_type; /* 先取出基座型号，后续用它判断刀具信息来源。 */
-        s_b_context.tool_source = Handlescan_GetToolSource(mapped_model); /* EEPROM 第二页决定 B 通道刀具信息来自 EEPROM 还是 RFID。 */
-        if (s_b_context.tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
-        {
-            if ((s_b_context.rfid_wait_started != 0U) && (s_b_context.verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX))
-            {
-                Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* RFID 两轮未读到刀具头时清空 B 通道规格缓存，避免可拆基座误走 Page3 刀具解析。 */
-                Rfid_ClearChannelResult(CHANNEL_B); /* 作废 B 通道当前 RFID 结果和晚到请求，后续只接受新一轮真实标签回包。 */
-                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageB,
-                                                           mapped_model,
-                                                           raw_type_major,
-                                                           raw_type_minor); /* 只保留 B 通道 RFID 基座信息，刀具字段保持 0 表示等待标签。 */
-                if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
-                {
-                    (void)Handlescan_LoadSplitBaseEepromRuntime(CHANNEL_B, &ChannelrecognizeMessageB); /* PXBA/PXBB 未识别到标签时先装载手柄 EEPROM 运行参数，供手动模式使用。 */
-                }
-                Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* 重新装入 B 通道基座 Page6 步进，等待真实 RFID 刀具上线继承。 */
-                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B); /* 刷新 B 通道基座在线状态，让屏幕关闭规格区并显示等待 RFID 刀具头。 */
-                Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_context.last_alarm); /* RFID 无刀具头不是坏手柄，退出等待后释放本通道历史认证报警。 */
-                Handlescan_ResetVerifyRetry(&s_b_context.verify_retry_count, &s_b_context.verify_retry_wait_ticks); /* 基座已按无刀具在线处理，清掉本轮 RFID 快速重试计数。 */
-                s_b_context.last_alarm = 0U; /* 清掉最近报警缓存，避免后续在线监测被旧报警状态阻塞。 */
-                s_b_context.rfid_wait_ticks = 0U; /* 清掉等待计数，进入在线监测后由低频监测重新计时。 */
-                s_b_context.rfid_last_sequence = 0U; /* 没有有效刀具头时清掉已消费结果序号，下一次真实标签必须重新装载。 */
-                s_b_context.rfid_last_presence_sequence = 0U; /* 清掉存在序号，避免旧 presence 影响后续刀具头上线判断。 */
-                s_b_context.rfid_miss_count = 0U; /* 无刀具基座在线后从 0 开始做低频缺失监测，避免立刻触发掉线清理。 */
-                s_b_context.rfid_monitor_pending = 0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
-                s_b_context.rfid_tool_online = 0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
-                s_b_context.stage = HANDLESCAN_STAGE_ONLINE; /* B 通道进入基座在线保持态，后续只由 RFID 在线监测刷新真实刀具。 */
-                s_b_context.rfid_wait_started = 0U; /* 本轮 RFID 上线等待结束，防止该临时标志影响下一次插拔识别。 */
-                return; /* RFID 来源手柄无论是否有刀具头，都不能继续执行普通 EEPROM Page3 解析。 */
-            }
-            s_b_context.rfid_wait_started=1;                 /* 记录 B 通道已经启动第一轮 RFID 等待，下一轮失败后才能按原规则上线空基座。 */
-            Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 可拆刀具头等待 RFID 前先清屏幕规格缓存，避免显示旧刀具头。 */
-            if (Handlescan_StartRfidWait(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         s_b_context.tool_source,
-                                         &s_b_context.rfid_last_sequence,
-                                         &s_b_context.rfid_wait_ticks,
-                                         true) != false) /* 基座刚上线时快速读取 RFID 标签。 */
-            {
-                Handlescan_PrepareRfidBaseRecognizeMessage(&ChannelrecognizeMessageB,
-                                                           mapped_model,
-                                                           raw_type_major,
-                                                           raw_type_minor); /* 只写基座字段，刀具字段等待 RFID 真实结果。 */
-                if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
-                {
-                    (void)Handlescan_LoadSplitBaseEepromRuntime(CHANNEL_B, &ChannelrecognizeMessageB); /* 分体式进入 RFID 等待时先恢复手柄 EEPROM 参数，关闭自动识别时可直接使用。 */
-                }
-                Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* 可拆式 B 基座先装入 Page6 步进，避免 B 通道沿用固定默认步进。 */
-                SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B); /* 先上报 RFID 基座在线，刀具头数据到达后再二次刷新通道记忆。 */
-                  SendKeyBeepMessage(1);
-            }
-            return; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。 */
-        }
-
-        if (Handlescan_IsSelfTypedHandleModel(mapped_model) != false)
-        {
-            AT24CS32_ClearLastDebugInfo();                       /* 一体式手柄不再用 Page3 识别刀具类型，但仍要读取 Page4 运行初始值。 */
-            read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_context.initial_info_buf); /* B 通道读取 Page4 默认速度、频率、方向和泵流量。 */
-            if (read_status == 0U)
-            {
-                Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道 Page4 读取或页校验失败报文。 */
-                Handlescan_DebugTraceI2cDetail(2U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
-                Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                             &s_b_context.stage,
-                                             &s_b_context.verify_retry_count,
-                                             &s_b_context.verify_retry_wait_ticks,
-                                             &s_b_context.last_alarm,
-                                             0U);                /* Page4 瞬时读取失败只重试，不立刻锁死一体式手柄。 */
-                return;                                         /* 本轮停止后续处理，等待下一次重新读取 Page4。 */
-            }
-
-            Handlescan_UpdateSelfTypedHandleRecognizeMessage(&ChannelrecognizeMessageB,
-                                                             mapped_model,
-                                                             raw_type_major,
-                                                             raw_type_minor); /* 0x7C 一体式型号直接写入 B 通道手柄和刀具能力字段。 */
-            read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 一体式 B 手柄同样读取 Page3 规格和倍率字段，读不到则只按 1 倍并清规格。 */
-            Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageB,
-                                              (read_status != 0U) ? s_b_context.tool_info_buf : NULL); /* Page3 同时写减速和增速时 helper 会保护为无变速。 */
-            Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
-                                                s_b_context.initial_info_buf); /* 同步 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
-            Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* B 通道继续读取 Page6 调速步进，保证新屏快慢调速键可用。 */
-            if ((read_status != 0U) &&
-                (Handlescan_IsIntegratedToolSpecHandleModel(mapped_model) != false))
-            {
-                tool_diameter_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* B 一体式手柄 Page3[2..3] 保存刀具直径，单位沿用 0.1。 */
-                tool_length_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* B 一体式手柄 Page3[4..5] 保存刀具长度，按现有规格窗口格式缓存。 */
-                tool_angle_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* B 一体式手柄 Page3[6..7] 保存刀具角度，屏幕规格区直接显示角度值。 */
-                Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
-                                                tool_diameter_tenth,
-                                                tool_length_tenth,
-                                                tool_angle_tenth,
-                                                Handlescan_MapRawToolTypeToBusinessType(mapped_model)); /* 一体式手柄规格来自自身 EEPROM Page3，不再清掉直径、长度、角度显示缓存。 */
-            }
-            else
-            {
-                Handlescan_ClearToolSpecValues(paoxueSpeciValue_B); /* 非四类一体式或 Page3 读取失败时清空 B 规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
-            }
-            MemoryMsgB.auto_identify = 0U;                      /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
-            SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道按手柄型号上线并装载到通道记忆。 */
-            Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_context.last_alarm); /* 自恢复成功时清掉 B 通道历史手柄校验报警。 */
-            Handlescan_ResetVerifyRetry(&s_b_context.verify_retry_count, &s_b_context.verify_retry_wait_ticks); /* 上线成功后清空 B 通道失败重试状态。 */
-            s_b_context.last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
-            s_b_context.stage = HANDLESCAN_STAGE_ONLINE;                /* B 通道切到在线保持态，后续只做拔出和 RFID 在线监测判断。 */
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文，值为手柄型号。 */
-            Handlescan_DebugTraceHandleName(2U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 B 通道 0x7C 手柄名称报文。 */
-            Handlescan_BeepOnceIfNoAlarm();                     /* B 通道认证并上线成功后，给使用者一个确认单响。 */
-            return;                                             /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
-        }
-
-        AT24CS32_ClearLastDebugInfo();                       /* 读取刀具页之前，先把调试缓存切到这一次访问。 */
-        read_status = AT24CS32_ReadBytes_I2C3(HANDLESCAN_TOOL_INFO_ADDR, s_b_context.tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从 B 通道 EEPROM 读取第 3 页刀具信息区。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出刀具信息区读取失败报文。 */
-            Handlescan_DebugTraceI2cDetail(2U);             /* 输出最近一次底层 I2C 访问细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         0U);                /* 刀具页瞬时读取失败只重试，不立刻锁死。 */
-            return;                                         /* 本轮停止后续处理。 */
-        }
-
-        AT24CS32_ClearLastDebugInfo();                       /* 读取初始值页之前，先把调试缓存切到 Page4 访问。 */
-        read_status = AT24CS32_ReadPage_I2C3(HANDLESCAN_INITIAL_INFO_PAGE_INDEX, s_b_context.initial_info_buf); /* 从 B 通道 EEPROM 读取 Page4 初始值信息区，并校验页尾。 */
-        if (read_status == 0U)
-        {
-            Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_INFO_FAIL, read_status); /* 输出 B 通道初始值页读取或页校验失败报文。 */
-            Handlescan_DebugTraceI2cDetail(2U);             /* 输出本轮 Page4 失败对应的底层 I2C 细节。 */
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         0U);                /* 初始值页瞬时读取失败只重试，不立刻锁死手柄。 */
-            return;                                         /* 本轮停止后续处理，等待下一次重新读取完整业务页。 */
-        }
-
-        raw_tool_major = s_b_context.tool_info_buf[HANDLESCAN_TOOL_MAJOR_OFFSET]; /* 取出 B 通道刀具主类型。 */
-        raw_tool_minor = s_b_context.tool_info_buf[HANDLESCAN_TOOL_MINOR_OFFSET]; /* 取出 B 通道刀具子类型。 */
-        tool_type_cfg = Handlescan_FindToolTypeConfig(raw_tool_major, raw_tool_minor); /* 按原始字节查找刀具配置表。 */
-        if (tool_type_cfg == NULL)
-        {
-            // Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_MODEL_INVALID, raw_tool_minor); /* 输出 B 通道“刀具类型无法识别”报文。 */
-            // Handlescan_EnterRetryOrFail(CHANNEL_B,
-            //                              &s_b_context.stage,
-            //                              &s_b_context.verify_retry_count,
-            //                              &s_b_context.verify_retry_wait_ticks,
-            //                              &s_b_context.last_alarm,
-            //                              0U);                /* 刀具页读到异常值时允许后续重试。 */
-            // return;                                         /* 等待重新插拔。 */
-        }
-
-        tool_diameter_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 解析刀具直径，单位 0.1。 */
-        tool_length_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_LENGTH_OFFSET); /* 解析刀具长度，单位 0.1。 */
-        tool_angle_tenth = Handlescan_ReadUint16BE(s_b_context.tool_info_buf, HANDLESCAN_TOOL_ANGLE_OFFSET); /* 解析刀具角度，单位 0.1。 */
-
-        mapped_tool_model = tool_type_cfg->mapped_handle_type; /* 取出查表后的系统内部刀具类型值。 */
-        Handlescan_UpdateRecognizeMessage(&ChannelrecognizeMessageB,
-                                          mapped_model,
-                                          raw_type_major,
-                                          raw_type_minor,
-                                          mapped_tool_model,
-                                          tool_diameter_tenth,
-                                          tool_length_tenth,
-                                          tool_angle_tenth); /* 同步更新 B 通道识别结果。 */
-        Handlescan_UpdateToolRatioMessage(&ChannelrecognizeMessageB, s_b_context.tool_info_buf); /* B 通道按 Page3[8]/[9] 装入减速/增速比，避免继续按型号写死。 */
-                                            WorkMessage.auto_identify= MemoryMsgB.auto_identify=1;
-        Handlescan_UpdateInitialInfoMessage(&ChannelrecognizeMessageB,
-                                            s_b_context.initial_info_buf); /* 同步更新 B 通道 Page4 默认速度、频率、方向、注水流量和蜂鸣阈值。 */
-        Handlescan_LoadPage6SpeedStep(CHANNEL_B, &ChannelrecognizeMessageB); /* B 通道普通 EEPROM 刀具上线后读取 Page6，保证 A/B 调速步进独立。 */
-        Handlescan_UpdateToolSpecValues(paoxueSpeciValue_B,
-                                        tool_diameter_tenth,
-                                        tool_length_tenth,
-                                        tool_angle_tenth,
-                                        Handlescan_MapRawToolTypeToBusinessType(mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP 不再直接暴露旧码给 UI。 */
-        SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B);    /* 通知插拔事件链：B 通道上线，实际 WorkMessage/MemoryMsg 装载在 PlugORunPLUGActive 中完成。 */
-        WorkMessage.auto_identify=0;
-        Handlescan_ClearChannelAlarm(CHANNEL_B, s_b_context.last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。 */
-        Handlescan_ResetVerifyRetry(&s_b_context.verify_retry_count, &s_b_context.verify_retry_wait_ticks); /* 上线成功后清空失败重试状态。 */
-        s_b_context.last_alarm = 0U;                                /* 上线成功后清掉 B 通道最近一次报警缓存。 */
-        s_b_context.stage = HANDLESCAN_STAGE_ONLINE;                /* 状态机切到 B 通道在线保持态。 */
-        Handlescan_DebugTrace(2U, HANDLESCAN_DBG_STEP_ONLINE, mapped_model); /* 输出 B 通道上线报文。 */
-        Handlescan_DebugTraceHandleName(2U, raw_type_major, raw_type_minor, handle_type_cfg->handle_name); /* 输出 B 通道手柄名称报文。 */
-        Handlescan_DebugTraceToolInfo(2U,
-                                      raw_tool_major,
-                                      raw_tool_minor,
-                                      tool_type_cfg->handle_name,
-                                      tool_diameter_tenth,
-                                      tool_length_tenth,
-                                      tool_angle_tenth);    /* 输出 B 通道刀具名称和规格报文。 */
-        Handlescan_BeepOnceIfNoAlarm();                     /* B 通道认证并上线成功后，给使用者一个确认单响。 */
-        return;                                             /* B 通道本轮处理结束。 */
-    }
-
-    if (s_b_context.stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL)
-    {
-        raw_type_major = s_b_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 等待 RFID 期间复用已读到的 EEPROM 第二页主类型。 */
-        raw_type_minor = s_b_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 等待 RFID 期间复用已读到的 EEPROM 第二页子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 重新查表，避免局部变量跨周期丢失。 */
-        if (handle_type_cfg == NULL)
-        {
-            Handlescan_EnterRetryOrFail(CHANNEL_B,
-                                         &s_b_context.stage,
-                                         &s_b_context.verify_retry_count,
-                                         &s_b_context.verify_retry_wait_ticks,
-                                         &s_b_context.last_alarm,
-                                         0U); /* 等待期间基座信息异常时回到原有重试流程。 */
-            return; /* 本轮等待处理结束。 */
-        }
-        mapped_model = handle_type_cfg->mapped_handle_type; /* 取出 B 通道基座型号。 */
-        s_b_context.tool_source = Handlescan_GetToolSource(mapped_model); /* 重新确认 B 通道 RFID 来源。 */
-        if (Handlescan_ProcessRfidWait(CHANNEL_B,
-                                       &s_b_context.stage,
-                                       s_b_context.tool_source,
-                                       &ChannelrecognizeMessageB,
-                                       paoxueSpeciValue_B,
-                                       mapped_model,
-                                       raw_type_major,
-                                       raw_type_minor,
-                                       &s_b_context.rfid_last_sequence,
-                                       &s_b_context.rfid_last_presence_sequence,
-                                       &s_b_context.rfid_miss_count,
-                                       &s_b_context.rfid_monitor_pending,
-                                       &s_b_context.rfid_tool_online,
-                                       &s_b_context.rfid_wait_ticks,
-                                       &s_b_context.verify_retry_count,
-                                       &s_b_context.verify_retry_wait_ticks,
-                                       &s_b_context.last_alarm,
-                                       SCREENKey_PLUG_B) != false)
-        {
-            return; /* RFID 等待阶段本轮已经处理。 */
-        }
-    }
-
-    if (s_b_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL)
-    {
-        if (s_b_context.verify_retry_wait_ticks < HANDLESCAN_VERIFY_ALARM_RETRY_TICKS)
-        {
-            ++s_b_context.verify_retry_wait_ticks;                   /* 最终报警保持时慢速计时，避免反复高频读 EEPROM。 */
-            return;                                          /* 等待 1000ms 后再尝试自恢复认证。 */
-        }
-
-        s_b_context.verify_retry_wait_ticks = 0U;                    /* 慢速自恢复时间到，清掉等待计数。 */
-        s_b_context.stage = HANDLESCAN_STAGE_VERIFY;                 /* 仍插着时重新认证一次，正确手柄可自动恢复上线。 */
-        return;
-    }
-
-    if (s_b_context.stage == HANDLESCAN_STAGE_ONLINE)
-    {
-        raw_type_major = s_b_context.info_buf[HANDLESCAN_MODEL_MAJOR_OFFSET]; /* 在线监测时复用 EEPROM 第二页基座主类型。 */
-        raw_type_minor = s_b_context.info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 在线监测时复用 EEPROM 第二页基座子类型。 */
-        handle_type_cfg = Handlescan_FindHandleTypeConfig(raw_type_major, raw_type_minor); /* 在线阶段重新查表，避免局部变量跨周期丢失。 */
-        if (handle_type_cfg != NULL)
-        {
-            mapped_model = handle_type_cfg->mapped_handle_type; /* 取出 B 通道当前基座型号。 */
-            s_b_context.tool_source = Handlescan_GetToolSource(mapped_model); /* 判断 B 通道是否需要 RFID 低频监测。 */
-            Handlescan_RequestOnlineRfidMonitor(CHANNEL_B,
-                                                s_b_context.tool_source,
-                                                &s_b_context.rfid_monitor_ticks,
-                                                &s_b_context.rfid_miss_count,
-                                                &s_b_context.rfid_monitor_pending); /* 空闲时周期请求 RFID，运行中自动暂停。 */
-            Handlescan_ProcessOnlineRfidResult(CHANNEL_B,
-                                               s_b_context.tool_source,
-                                               &ChannelrecognizeMessageB,
-                                               paoxueSpeciValue_B,
-                                               mapped_model,
-                                               raw_type_major,
-                                               raw_type_minor,
-                                               &s_b_context.rfid_last_sequence,
-                                               &s_b_context.rfid_last_presence_sequence,
-                                               &s_b_context.rfid_miss_count,
-                                               &s_b_context.rfid_monitor_pending,
-                                               &s_b_context.rfid_tool_online,
-                                               SCREENKey_PLUG_B); /* 消费新的 RFID 标签结果并刷新通道记忆。 */
-        }
-        return;                                             /* 在线保持态保持静默，只等待拔出。 */
-    }
+    Handlescan_RunChannel(&s_b_binding);
 }
+
 
 //============================================================================
 // 函数名称: Handlescan_Fun()
