@@ -140,6 +140,7 @@ virtualFolder:
             - path: ../User/Application/ExternalComm/external_comm_task.c
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
+            - path: ../User/Application/Pump/pump_behavior_core.c
             - path: ../User/Application/Pump/pump_pressure_control.c
             - path: ../User/Application/ScreenKey/screenkey.c
             - path: ../User/Application/Led/sysrunled.c

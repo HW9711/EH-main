@@ -17,9 +17,7 @@
 #define SOFT_UART_ISR_BUFFER_SIZE      64U
 #define SOFT_UART_QUEUE_DEPTH          128U
 #define SOFT_UART_DEFAULT_BAUDRATE     9600U
-#define SOFT_UART_TIMER_INSTANCE       TIM11
-#define SOFT_UART_TIMER_IRQn           TIM1_TRG_COM_TIM11_IRQn
-#define SOFT_UART_IRQ_PRIORITY         4U  /* 软串口位采样必须高于 FreeRTOS 临界区屏蔽阈值 5，避免 TIM11 采样被任务临界区延迟导致错帧。 */
+#define SOFT_UART_IRQ_PRIORITY         4U  /* 两路位采样都高于 FreeRTOS 屏蔽阈值 5，避免 TIM11/TIM13 被任务临界区延迟导致错帧。 */
 #define SOFT_UART_DIAG_LED             0
 
 #define CS1237_FRAME_LENGTH            21U
@@ -49,7 +47,8 @@ typedef enum {
 } SoftUartRxStage;
 
 /* 单通道上下文。
- * 每路都保存自身 GPIO 配置、消息队列、ISR 环形缓冲和诊断计数。 */
+ * 每路都保存自身 GPIO、采样定时器、接收状态、消息缓冲和诊断计数；
+ * A/B 两路同时上报时，各自推进自己的接收状态，不再互相丢弃起始位。 */
 typedef struct {
     GPIO_TypeDef *tx_port;
     uint16_t tx_pin;
@@ -58,6 +57,13 @@ typedef struct {
     uint32_t baudrate;
     uint16_t bit_time_us;
     uint16_t half_bit_time_us;
+
+    TIM_TypeDef *rx_timer;             /* 本通道独占的位采样定时器；PE4 用 TIM11，PE6 用 TIM13。 */
+    IRQn_Type rx_timer_irq;            /* 本通道采样定时器对应的 NVIC 中断号。 */
+    uint8_t rx_timer_on_apb2;          /* 1 表示定时器在 APB2，0 表示在 APB1，用于计算真实 1MHz 预分频。 */
+    volatile SoftUartRxStage rx_stage; /* 本通道独立接收阶段，两路同时发帧时互不抢占。 */
+    volatile uint8_t rx_bit_index;     /* 本通道当前正在接收的数据位序号。 */
+    volatile uint8_t rx_current_byte;  /* 本通道正在拼装的 8 位数据。 */
 
     QueueHandle_t queue_handle;
     StaticQueue_t queue_control;
@@ -74,17 +80,7 @@ typedef struct {
     volatile uint32_t overlap_drop_count;
     volatile uint32_t framing_error_count;
 
-    volatile uint8_t exti_suppressed;
 } SoftUartChannelContext;
-
-/* 全局接收器状态。
- * 依据用户约束，两路不会正常同时上报，因此任意时刻只允许一个 active channel。 */
-typedef struct {
-    volatile sim_uart_channel_t active_channel;
-    volatile SoftUartRxStage stage;
-    volatile uint8_t bit_index;
-    volatile uint8_t current_byte;
-} SoftUartReceiverState;
 
 /* 每路协议帧解析状态。
  * 任务层按字节寻找 AA55 帧头，拼满固定长度后再校验字段和 CRC。 */
@@ -100,6 +96,10 @@ static SoftUartChannelContext s_channels[SIM_UART_COUNT] = {
         .rx_port = GPIOE,
         .rx_pin = GPIO_PIN_4,
         .baudrate = SOFT_UART_DEFAULT_BAUDRATE,
+        .rx_timer = TIM11,
+        .rx_timer_irq = TIM1_TRG_COM_TIM11_IRQn,
+        .rx_timer_on_apb2 = 1U,
+        .rx_stage = SOFT_UART_RX_STAGE_IDLE,
     },
     {
         .tx_port = GPIOE,
@@ -107,14 +107,11 @@ static SoftUartChannelContext s_channels[SIM_UART_COUNT] = {
         .rx_port = GPIOE,
         .rx_pin = GPIO_PIN_6,
         .baudrate = SOFT_UART_DEFAULT_BAUDRATE,
+        .rx_timer = TIM13,
+        .rx_timer_irq = TIM8_UP_TIM13_IRQn,
+        .rx_timer_on_apb2 = 0U,
+        .rx_stage = SOFT_UART_RX_STAGE_IDLE,
     }
-};
-
-static SoftUartReceiverState s_receiver = {
-    .active_channel = SIM_UART_NONE,
-    .stage = SOFT_UART_RX_STAGE_IDLE,
-    .bit_index = 0U,
-    .current_byte = 0U
 };
 
 static kernel_task_t sSimUartTaskHandle;
@@ -122,7 +119,7 @@ static uint8_t s_initialized = 0U;
 static uint8_t s_task_created = 0U;
 static uint8_t s_dwt_ready = 0U;
 static uint8_t s_tim7_ready = 0U;
-static uint8_t s_timer_initialized = 0U;
+static uint8_t s_rx_timers_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
 static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 记录每路最近一次有效帧时间，用于拔泵后无数据场景的离线判定。 */
 static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 记录每路首次进入疑似丢失的时间，用于连续确认后再清在线状态。 */
@@ -130,20 +127,20 @@ static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 记录每路首�
 /* 私有函数声明区：
  * 这些函数按“时基/硬件控制 -> 缓冲区 -> 状态机 -> 对外接口”的顺序组织。 */
 static void SoftUart_InitTimingBase(void);
-static void SoftUart_InitRxTimer(void);
+static void SoftUart_InitRxTimers(void);
 static void SoftUart_InitChannelGpio(sim_uart_channel_t channel);
-static void SoftUart_StartSampleTimer(uint16_t delay_us);
-static void SoftUart_StopSampleTimer(void);
+static void SoftUart_StartSampleTimer(SoftUartChannelContext *ctx, uint16_t delay_us);
+static void SoftUart_StopSampleTimer(SoftUartChannelContext *ctx);
 static void SoftUart_EnableExti(sim_uart_channel_t channel);
 static void SoftUart_DisableExti(sim_uart_channel_t channel);
-static void SoftUart_RearmExtiLines(void);
 static void SoftUart_RingPushFromIsr(sim_uart_channel_t channel, uint8_t data);
 static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data);
-static void SoftUart_FinishReceive(bool byte_valid);
-static void SoftUart_ProcessSample(void);
+static void SoftUart_FinishReceive(sim_uart_channel_t channel, bool byte_valid);
+static void SoftUart_ProcessSample(sim_uart_channel_t channel);
 static void SimUartTaskFunc(uint32_t event);
 static SoftUartChannelContext *SoftUart_GetChannel(sim_uart_channel_t channel);
-static uint32_t SoftUart_GetTimerClockHz(void);
+static uint32_t SoftUart_GetTimerClockHz(const SoftUartChannelContext *ctx);
+static bool SoftUart_AnyReceiverBusy(void);
 static void SoftUart_WriteTx(const SoftUartChannelContext *channel, GPIO_PinState level);
 static GPIO_PinState SoftUart_ReadRx(const SoftUartChannelContext *channel);
 static bool SoftUart_TestForwardChannelSelected(sim_uart_channel_t channel);
@@ -176,6 +173,24 @@ static SoftUartChannelContext *SoftUart_GetChannel(sim_uart_channel_t channel)
     }
 
     return &s_channels[(uint32_t)channel];
+}
+
+/*
+ * 函数功能：检查两路软串口是否有任一路正在接收，用于发送前避免 TX 关中断破坏 RX 采样。
+ * 输入参数：无。
+ * 返回参数：任一路不在空闲阶段时返回 true，两路都空闲时返回 false。
+ */
+static bool SoftUart_AnyReceiverBusy(void)
+{
+    for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
+    {
+        if (s_channels[i].rx_stage != SOFT_UART_RX_STAGE_IDLE)
+        {
+            return true; /* 任一路正在收起始位、数据位或停止位时都不能执行阻塞式发送。 */
+        }
+    }
+
+    return false; /* 两路都空闲，发送侧可安全临时关中断输出。 */
 }
 
 /*
@@ -354,123 +369,163 @@ static void delay_us(uint32_t us)
     }
 }
 
-static uint32_t SoftUart_GetTimerClockHz(void)
+/*
+ * 函数功能：取得指定通道采样定时器的真实输入时钟，用于配置 1MHz 微秒计数。
+ * 输入参数：ctx 为通道上下文，内部用 rx_timer_on_apb2 区分 TIM11 和 TIM13 所在总线。
+ * 返回参数：定时器输入时钟，单位 Hz；参数为空时返回 0。
+ */
+static uint32_t SoftUart_GetTimerClockHz(const SoftUartChannelContext *ctx)
 {
     RCC_ClkInitTypeDef clkconfig;
     uint32_t pFLatency = 0U;
-    uint32_t apb2_prescaler;
+    uint32_t apb_prescaler;
     uint32_t tim_clock;
 
-    HAL_RCC_GetClockConfig(&clkconfig, &pFLatency);
-    apb2_prescaler = clkconfig.APB2CLKDivider;
-
-    if (apb2_prescaler == RCC_HCLK_DIV1)
+    if (ctx == NULL)
     {
-        tim_clock = HAL_RCC_GetPCLK2Freq();
+        return 0U; /* 非法通道不能配置定时器，避免后续除零或写错外设。 */
+    }
+
+    HAL_RCC_GetClockConfig(&clkconfig, &pFLatency);
+    if (ctx->rx_timer_on_apb2 != 0U)
+    {
+        apb_prescaler = clkconfig.APB2CLKDivider; /* TIM11 位于 APB2，读取 APB2 分频和外设时钟。 */
+        tim_clock = HAL_RCC_GetPCLK2Freq();       /* APB2 未分频时定时器时钟等于 PCLK2。 */
     }
     else
     {
-        tim_clock = 2UL * HAL_RCC_GetPCLK2Freq();
+        apb_prescaler = clkconfig.APB1CLKDivider; /* TIM13 位于 APB1，不能继续沿用 TIM11 的 APB2 时钟。 */
+        tim_clock = HAL_RCC_GetPCLK1Freq();       /* APB1 未分频时定时器时钟等于 PCLK1。 */
+    }
+
+    if (apb_prescaler != RCC_HCLK_DIV1)
+    {
+        tim_clock *= 2UL; /* STM32 定时器所在 APB 分频不为 1 时，定时器时钟自动乘 2。 */
     }
 
     return tim_clock;
 }
 
-/* 初始化专用 RX 采样定时器 TIM11。
- * 定时器预分频到 1MHz，便于直接使用“微秒”为单位装载 ARR。 */
-static void SoftUart_InitRxTimer(void)
+/*
+ * 函数功能：初始化两路独立 RX 采样定时器，PE4 使用 TIM11，PE6 使用 TIM13。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void SoftUart_InitRxTimers(void)
 {
-    uint32_t prescaler;
-
-    if (s_timer_initialized)
+    if (s_rx_timers_initialized != 0U)
     {
-        return;
+        return; /* 两路定时器只初始化一次，重复调用不打断正在运行的接收状态。 */
     }
 
+    /* 两个定时器分别属于 APB2 和 APB1，均只作为内部单次计时器，不占用 GPIO 复用功能。 */
     __HAL_RCC_TIM11_CLK_ENABLE();
+    __HAL_RCC_TIM13_CLK_ENABLE();
 
-    prescaler = (SoftUart_GetTimerClockHz() / 1000000U);
-    if (prescaler == 0U)
-    {
-        prescaler = 1U;
-    }
-
-    SOFT_UART_TIMER_INSTANCE->CR1 = 0U;
-    SOFT_UART_TIMER_INSTANCE->PSC = (uint16_t)(prescaler - 1U);
-    SOFT_UART_TIMER_INSTANCE->ARR = 0xFFFFU;
-    SOFT_UART_TIMER_INSTANCE->CNT = 0U;
-    SOFT_UART_TIMER_INSTANCE->SR = 0U;
-    SOFT_UART_TIMER_INSTANCE->DIER = 0U;
-    SOFT_UART_TIMER_INSTANCE->EGR = TIM_EGR_UG;
-    SOFT_UART_TIMER_INSTANCE->SR = 0U;
-
-    HAL_NVIC_SetPriority(SOFT_UART_TIMER_IRQn, SOFT_UART_IRQ_PRIORITY, 0U);
-    HAL_NVIC_EnableIRQ(SOFT_UART_TIMER_IRQn);
-
-    s_timer_initialized = 1U;
-}
-
-/* 启动一次单次采样。
- * 第一次采样使用半位时间对齐，之后每次按 1bit 周期触发。 */
-static void SoftUart_StartSampleTimer(uint16_t delay_us)
-{
-    if (delay_us == 0U)
-    {
-        delay_us = 1U;
-    }
-
-    SOFT_UART_TIMER_INSTANCE->CR1 = 0U;
-    SOFT_UART_TIMER_INSTANCE->CNT = 0U;
-    SOFT_UART_TIMER_INSTANCE->ARR = (uint32_t)delay_us - 1U;
-    SOFT_UART_TIMER_INSTANCE->EGR = TIM_EGR_UG;
-    SOFT_UART_TIMER_INSTANCE->SR = 0U;
-    SOFT_UART_TIMER_INSTANCE->DIER = TIM_DIER_UIE;
-    SOFT_UART_TIMER_INSTANCE->CR1 = TIM_CR1_OPM | TIM_CR1_CEN;
-}
-
-/* 停止采样定时器，结束当前字节接收。 */
-static void SoftUart_StopSampleTimer(void)
-{
-    SOFT_UART_TIMER_INSTANCE->CR1 &= ~TIM_CR1_CEN;
-    SOFT_UART_TIMER_INSTANCE->DIER = 0U;
-    SOFT_UART_TIMER_INSTANCE->SR = 0U;
-}
-
-static void SoftUart_EnableExti(sim_uart_channel_t channel)
-{
-    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
-
-    if (ctx == NULL)
-    {
-        return;
-    }
-
-    __HAL_GPIO_EXTI_CLEAR_IT(ctx->rx_pin);
-    EXTI->IMR |= ctx->rx_pin;
-    ctx->exti_suppressed = 0U;
-}
-
-/* 忙期间关闭指定通道 EXTI，防止重复进入或跨通道抢占。 */
-static void SoftUart_DisableExti(sim_uart_channel_t channel)
-{
-    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
-
-    if (ctx == NULL)
-    {
-        return;
-    }
-
-    EXTI->IMR &= ~(uint32_t)ctx->rx_pin;
-    __HAL_GPIO_EXTI_CLEAR_IT(ctx->rx_pin);
-}
-
-/* 一个字节接收结束后重新开放两路线的起始位捕获。 */
-static void SoftUart_RearmExtiLines(void)
-{
     for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
     {
-        SoftUart_EnableExti((sim_uart_channel_t)i);
+        SoftUartChannelContext *ctx = &s_channels[i]; /* 每次只配置当前通道独占的采样定时器。 */
+        uint32_t timer_clock_hz = SoftUart_GetTimerClockHz(ctx); /* 按所在 APB 取得真实定时器时钟。 */
+        uint32_t prescaler = timer_clock_hz / 1000000U;          /* 预分频到 1MHz，使 ARR 直接使用微秒。 */
+
+        if (prescaler == 0U)
+        {
+            prescaler = 1U; /* 防御异常时钟配置，避免 PSC 无符号下溢。 */
+        }
+
+        ctx->rx_timer->CR1 = 0U;                              /* 初始化时保持定时器停止。 */
+        ctx->rx_timer->PSC = (uint16_t)(prescaler - 1U);      /* 装载当前总线对应的 1MHz 预分频。 */
+        ctx->rx_timer->ARR = 0xFFFFU;                         /* 空闲期保持最大重装值，实际接收时按半位/一位覆盖。 */
+        ctx->rx_timer->CNT = 0U;                              /* 清计数器，避免继承上电随机值。 */
+        ctx->rx_timer->SR = 0U;                               /* 清历史更新标志。 */
+        ctx->rx_timer->DIER = 0U;                             /* 起始位到来前不允许更新中断。 */
+        ctx->rx_timer->EGR = TIM_EGR_UG;                      /* 立即把 PSC/ARR 写入影子寄存器。 */
+        ctx->rx_timer->SR = 0U;                               /* UG 会产生更新标志，必须再次清除。 */
+
+        HAL_NVIC_SetPriority(ctx->rx_timer_irq, SOFT_UART_IRQ_PRIORITY, 0U); /* 两路采样保持同一高优先级。 */
+        HAL_NVIC_EnableIRQ(ctx->rx_timer_irq);                 /* 允许本通道独立采样中断。 */
     }
+
+    s_rx_timers_initialized = 1U; /* 两路都配置完成后再置位，避免只初始化一半。 */
+}
+
+/*
+ * 函数功能：启动当前通道的一次单次采样计时，起始位用半位时间，后续使用一位时间。
+ * 输入参数：ctx 为当前通道上下文；delay_us 为本次等待微秒数。
+ * 返回参数：无。
+ */
+static void SoftUart_StartSampleTimer(SoftUartChannelContext *ctx, uint16_t delay_us)
+{
+    if (ctx == NULL)
+    {
+        return; /* 非法通道没有定时器可写，保持其它通道接收不受影响。 */
+    }
+
+    if (delay_us == 0U)
+    {
+        delay_us = 1U; /* ARR 不能装载无符号负值，最短等待固定为 1 微秒。 */
+    }
+
+    ctx->rx_timer->CR1 = 0U;                                  /* 重新装载前先停当前通道定时器。 */
+    ctx->rx_timer->CNT = 0U;                                  /* 每次采样等待都从零开始。 */
+    ctx->rx_timer->ARR = (uint32_t)delay_us - 1U;              /* 1MHz 下 ARR 直接对应等待微秒数减一。 */
+    ctx->rx_timer->EGR = TIM_EGR_UG;                           /* 立即应用新的重装值。 */
+    ctx->rx_timer->SR = 0U;                                    /* 清 UG 产生的更新标志。 */
+    ctx->rx_timer->DIER = TIM_DIER_UIE;                        /* 只开放更新中断。 */
+    ctx->rx_timer->CR1 = TIM_CR1_OPM | TIM_CR1_CEN;            /* 单脉冲模式到点自动停止。 */
+}
+
+/*
+ * 函数功能：停止当前通道采样定时器并清中断状态，结束本字节接收。
+ * 输入参数：ctx 为当前通道上下文。
+ * 返回参数：无。
+ */
+static void SoftUart_StopSampleTimer(SoftUartChannelContext *ctx)
+{
+    if (ctx == NULL)
+    {
+        return; /* 空通道无需停止，避免访问非法定时器地址。 */
+    }
+
+    ctx->rx_timer->CR1 &= ~TIM_CR1_CEN; /* 只停止本通道定时器，另一通道可继续采样。 */
+    ctx->rx_timer->DIER = 0U;            /* 关闭本通道更新中断。 */
+    ctx->rx_timer->SR = 0U;              /* 清除本通道剩余更新标志。 */
+}
+
+/*
+ * 函数功能：开放指定通道的下降沿中断，使该通道可以捕获下一个串口起始位。
+ * 输入参数：channel 为需要恢复起始位检测的模拟串口通道。
+ * 返回参数：无。
+ */
+static void SoftUart_EnableExti(sim_uart_channel_t channel)
+{
+    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel); /* 只获取指定通道，不能改动另一通道的中断线。 */
+
+    if (ctx == NULL)
+    {
+        return; /* 非法通道没有可开放的接收引脚，直接退出。 */
+    }
+
+    __HAL_GPIO_EXTI_CLEAR_IT(ctx->rx_pin); /* 先清历史下降沿，避免刚开放就误进入接收状态。 */
+    EXTI->IMR |= ctx->rx_pin;             /* 只开放本通道起始位检测，另一通道保持原运行状态。 */
+}
+
+/*
+ * 函数功能：关闭指定通道的下降沿中断，避免接收数据位时被重复当成起始位。
+ * 输入参数：channel 为当前正在接收字节的模拟串口通道。
+ * 返回参数：无。
+ */
+static void SoftUart_DisableExti(sim_uart_channel_t channel)
+{
+    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel); /* 只关闭当前通道，不能阻断另一泵的并行上报。 */
+
+    if (ctx == NULL)
+    {
+        return; /* 非法通道没有可关闭的接收引脚，直接退出。 */
+    }
+
+    EXTI->IMR &= ~(uint32_t)ctx->rx_pin;   /* 接收本字节期间屏蔽本通道后续下降沿。 */
+    __HAL_GPIO_EXTI_CLEAR_IT(ctx->rx_pin); /* 清本通道残留标志，避免字节结束后产生假起始位。 */
 }
 
 /* 初始化单路 GPIO。
@@ -540,7 +595,7 @@ static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
     }
 
     primask = __get_PRIMASK(); /* 软串口 ISR 优先级高于 FreeRTOS 屏蔽阈值，BASEPRI 不能保护下面的环形缓冲共享索引。 */
-    __disable_irq(); /* 暂停所有中断，防止 TIM11 ISR 正在写 ring_count/head 时任务同时修改 tail/count。 */
+    __disable_irq(); /* 暂停所有中断，防止 TIM11/TIM13 ISR 写索引时任务同时修改同一通道计数。 */
     if (ctx->ring_count > 0U)
     {
         *data = ctx->ring_buffer[ctx->ring_tail];
@@ -556,87 +611,95 @@ static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
     return has_data;
 }
 
-/* 结束本次字节接收流程。
- * 若停止位合法，则把组好的字节写入对应通道的 ISR 缓冲。 */
-static void SoftUart_FinishReceive(bool byte_valid)
+/*
+ * 函数功能：结束指定通道的一次字节接收；停止位正确时提交字节，错误时只清状态。
+ * 输入参数：channel 为本次接收所属通道；byte_valid 表示停止位是否有效。
+ * 返回参数：无。
+ */
+static void SoftUart_FinishReceive(sim_uart_channel_t channel, bool byte_valid)
 {
-    sim_uart_channel_t channel = s_receiver.active_channel;
+    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel); /* 只结束触发本次中断的通道，不能重置另一通道。 */
 
-    if (SoftUart_ChannelValid(channel) && byte_valid)
+    if (ctx == NULL)
     {
-        SoftUart_RingPushFromIsr(channel, s_receiver.current_byte);
+        return; /* 非法通道没有接收状态可结束。 */
     }
 
-    SoftUart_StopSampleTimer();
-    s_receiver.active_channel = SIM_UART_NONE;
-    s_receiver.stage = SOFT_UART_RX_STAGE_IDLE;
-    s_receiver.bit_index = 0U;
-    s_receiver.current_byte = 0U;
+    if (byte_valid)
+    {
+        SoftUart_RingPushFromIsr(channel, ctx->rx_current_byte); /* 停止位有效才把本通道完整字节写入环形缓冲。 */
+    }
 
-    SoftUart_RearmExtiLines();
+    SoftUart_StopSampleTimer(ctx);              /* 停止本通道采样，不影响另一通道正在运行的定时器。 */
+    ctx->rx_stage = SOFT_UART_RX_STAGE_IDLE;    /* 本通道回到等待下一个起始位状态。 */
+    ctx->rx_bit_index = 0U;                     /* 清本通道数据位序号。 */
+    ctx->rx_current_byte = 0U;                  /* 清本通道临时字节。 */
+    SoftUart_EnableExti(channel);                /* 只重新开放本通道起始位，另一通道保持自己的接收状态。 */
 }
 
-/* 位级采样状态机核心。
- * 该函数由 TIM11 中断驱动，每次只处理一个采样点，直到完成 1 字节。 */
-static void SoftUart_ProcessSample(void)
+/*
+ * 函数功能：推进指定通道的位级接收状态机，TIM11/TIM13 每次中断各处理自己的一个采样点。
+ * 输入参数：channel 为本次采样所属的模拟串口通道。
+ * 返回参数：无。
+ */
+static void SoftUart_ProcessSample(sim_uart_channel_t channel)
 {
-    SoftUartChannelContext *ctx = SoftUart_GetChannel(s_receiver.active_channel);
+    SoftUartChannelContext *ctx = SoftUart_GetChannel(channel); /* 由独立定时器中断明确选择通道。 */
     GPIO_PinState pin_state;
 
     if (ctx == NULL)
     {
-        SoftUart_FinishReceive(false);
         return;
     }
 
     pin_state = SoftUart_ReadRx(ctx);
 
-    switch (s_receiver.stage)
+    switch (ctx->rx_stage)
     {
         case SOFT_UART_RX_STAGE_START:
             if (pin_state != GPIO_PIN_RESET)
             {
                 ctx->framing_error_count++;
-                SoftUart_FinishReceive(false);
+                SoftUart_FinishReceive(channel, false); /* 半位处已经回高说明不是有效起始位，只结束本通道。 */
                 return;
             }
 
-            s_receiver.stage = SOFT_UART_RX_STAGE_DATA;
-            s_receiver.bit_index = 0U;
-            s_receiver.current_byte = 0U;
-            SoftUart_StartSampleTimer(ctx->bit_time_us);
+            ctx->rx_stage = SOFT_UART_RX_STAGE_DATA; /* 起始位有效，进入本通道 8 位数据采样。 */
+            ctx->rx_bit_index = 0U;                  /* 第一位从 bit0 开始。 */
+            ctx->rx_current_byte = 0U;               /* 新字节开始前清临时值。 */
+            SoftUart_StartSampleTimer(ctx, ctx->bit_time_us); /* 下一次在 bit0 中心采样。 */
             break;
 
         case SOFT_UART_RX_STAGE_DATA:
             if (pin_state != GPIO_PIN_RESET)
             {
-                s_receiver.current_byte |= (uint8_t)(1U << s_receiver.bit_index);
+                ctx->rx_current_byte |= (uint8_t)(1U << ctx->rx_bit_index); /* UART 低位先发，当前高电平写入对应位。 */
             }
 
-            s_receiver.bit_index++;
-            if (s_receiver.bit_index >= 8U)
+            ctx->rx_bit_index++; /* 推进到下一数据位。 */
+            if (ctx->rx_bit_index >= 8U)
             {
-                s_receiver.stage = SOFT_UART_RX_STAGE_STOP;
+                ctx->rx_stage = SOFT_UART_RX_STAGE_STOP; /* 8 位收完后下一采样点检查停止位。 */
             }
 
-            SoftUart_StartSampleTimer(ctx->bit_time_us);
+            SoftUart_StartSampleTimer(ctx, ctx->bit_time_us); /* 按一位时间继续本通道采样。 */
             break;
 
         case SOFT_UART_RX_STAGE_STOP:
             if (pin_state == GPIO_PIN_SET)
             {
-                SoftUart_FinishReceive(true);
+                SoftUart_FinishReceive(channel, true); /* 停止位为高，提交本通道完整字节。 */
             }
             else
             {
                 ctx->framing_error_count++;
-                SoftUart_FinishReceive(false);
+                SoftUart_FinishReceive(channel, false); /* 停止位为低，丢弃本通道错误字节。 */
             }
             break;
 
         case SOFT_UART_RX_STAGE_IDLE:
         default:
-            SoftUart_FinishReceive(false);
+            SoftUart_FinishReceive(channel, false); /* 空闲状态误进定时器中断时只清本通道残留。 */
             break;
     }
 }
@@ -1013,12 +1076,10 @@ static void SimUartTaskFunc(uint32_t event)
     Cs1237_ServicePumpLossTimeout(); /* 两路字节搬运结束后统一检查有效帧超时，处理拔泵无数据的离线边沿。 */
 }
 
-/* 初始化两路模拟串口的全部底层资源。
- * 该函数是幂等的，多次调用只会在第一次真正完成初始化。 */
-/**
- * @brief 初始化所有模拟UART通道
- * @note 该函数会初始化所有模拟UART通道的GPIO、定时器、队列等资源
- * @note 如果已经初始化过，则直接返回
+/*
+ * 函数功能：初始化两路模拟串口的 GPIO、独立采样定时器、接收缓冲和消息队列；重复调用不重新初始化。
+ * 输入参数：无。
+ * 返回参数：无。
  */
 void SimUart_InitAll(void)
 {
@@ -1033,7 +1094,7 @@ void SimUart_InitAll(void)
 
     /* 初始化软定时器基准和接收定时器 */
     SoftUart_InitTimingBase();
-    SoftUart_InitRxTimer();
+    SoftUart_InitRxTimers();
 
     /* 遍历并初始化所有UART通道 */
     for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
@@ -1055,7 +1116,9 @@ void SimUart_InitAll(void)
         ctx->buffer_overflow_count = 0U;
         ctx->overlap_drop_count = 0U;
         ctx->framing_error_count = 0U;
-        ctx->exti_suppressed = 0U;
+        ctx->rx_stage = SOFT_UART_RX_STAGE_IDLE; /* 每路初始化为独立空闲态，允许两路同时捕获各自起始位。 */
+        ctx->rx_bit_index = 0U;                  /* 清本通道位序号。 */
+        ctx->rx_current_byte = 0U;               /* 清本通道临时字节。 */
         s_cs1237_parsers[i].length = 0U;
 
         /* 创建静态队列，用于存储接收到的数据 */
@@ -1075,8 +1138,9 @@ void SimUart_InitAll(void)
     HAL_NVIC_SetPriority(EXTI9_5_IRQn, SOFT_UART_IRQ_PRIORITY, 0U);
     HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-    /* 重新配置外部中断线 */
-    SoftUart_RearmExtiLines();
+    /* 两路起始位分别开放；后续每个字节结束也只重开自己的 EXTI，不再互相清 pending 位。 */
+    SoftUart_EnableExti(SIM_UART_1);
+    SoftUart_EnableExti(SIM_UART_2);
     /* 标记初始化完成 */
     s_initialized = 1U;
 }
@@ -1097,8 +1161,11 @@ void SimUartTask_Init(void)
     s_task_created = 1U;
 }
 
-/* 发送 1 字节。
- * 为保证位宽准确，发送期间临时关总中断，避免比特周期被其他中断拉长。 */
+/*
+ * 函数功能：通过指定模拟串口阻塞发送 1 字节；任一路正在接收时拒绝发送，防止破坏压力帧采样。
+ * 输入参数：channel 为发送通道；data 为需要发送的字节。
+ * 返回参数：发送成功返回 SOFT_UART_OK，通道无效返回 SOFT_UART_ERROR，接收忙返回 SOFT_UART_BUSY。
+ */
 SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
@@ -1111,9 +1178,9 @@ SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data)
 
     SimUart_InitAll();
 
-    if (s_receiver.active_channel != SIM_UART_NONE)
+    if (SoftUart_AnyReceiverBusy())
     {
-        return SOFT_UART_BUSY;
+        return SOFT_UART_BUSY; /* 任一路正在接收时不执行关中断发送，避免破坏 9600bps 位采样。 */
     }
 
 #if SOFT_UART_DIAG_LED
@@ -1290,9 +1357,11 @@ uint32_t SimUart_GetOverlapDropCount(sim_uart_channel_t channel)
     return stats.overlap_drop_count;
 }
 
-/* EXTI 起始位入口。
- * 若当前接收器空闲，则锁定该通道并启动半位延时采样；
- * 若另一通道正在接收，则仅增加 overlap 计数并抑制当前线重复中断。 */
+/*
+ * 函数功能：处理 PE4/PE6 起始位下降沿，并启动该通道自己的半位采样定时器。
+ * 输入参数：GPIO_Pin 为本次触发的 EXTI 引脚，PE4 对应 SIM_UART_1，PE6 对应 SIM_UART_2。
+ * 返回参数：无。
+ */
 void SimUart_HandleExti(uint16_t GPIO_Pin)
 {
     sim_uart_channel_t channel;
@@ -1322,50 +1391,49 @@ void SimUart_HandleExti(uint16_t GPIO_Pin)
         return;
     }
 
-    if (s_receiver.active_channel == SIM_UART_NONE)
+    if (ctx->rx_stage == SOFT_UART_RX_STAGE_IDLE)
     {
-        s_receiver.active_channel = channel;
-        s_receiver.stage = SOFT_UART_RX_STAGE_START;
-        s_receiver.bit_index = 0U;
-        s_receiver.current_byte = 0U;
+        ctx->rx_stage = SOFT_UART_RX_STAGE_START; /* 只占用本通道接收状态，另一通道可同时进入 START。 */
+        ctx->rx_bit_index = 0U;                   /* 新字节从 bit0 开始。 */
+        ctx->rx_current_byte = 0U;                /* 新字节开始前清临时值。 */
 
-        SoftUart_DisableExti(channel);
-        SoftUart_StartSampleTimer(ctx->half_bit_time_us);
-        return;
-    }
-
-    if (s_receiver.active_channel != channel)
-    {
-        ctx->overlap_drop_count++;
-        if (!ctx->exti_suppressed)
-        {
-            SoftUart_DisableExti(channel);
-            ctx->exti_suppressed = 1U;
-        }
+        SoftUart_DisableExti(channel);                   /* 接收本字节期间关闭本通道 EXTI，避免数据位下降沿重复触发。 */
+        SoftUart_StartSampleTimer(ctx, ctx->half_bit_time_us); /* 半位后确认本通道起始位仍为低。 */
     }
 }
 
-/* TIM11 中断服务入口。
- * 只在确认更新中断有效时才推进状态机，避免误处理中断源。 */
-void SimUart_TimerIrqHandler(void)
+/*
+ * 函数功能：处理指定通道的采样定时器更新中断，并推进该通道自己的位接收状态机。
+ * 输入参数：channel 为定时器固定绑定的 SIM_UART_1 或 SIM_UART_2。
+ * 返回参数：无。
+ */
+void SimUart_TimerIrqHandler(sim_uart_channel_t channel)
 {
+    SoftUartChannelContext *ctx; /* 当前中断对应的固定通道上下文。 */
+
     if (!s_initialized)
     {
         return;
     }
 
-    if ((SOFT_UART_TIMER_INSTANCE->DIER & TIM_DIER_UIE) == 0U)
+    ctx = SoftUart_GetChannel(channel);
+    if (ctx == NULL)
     {
-        return;
+        return; /* 非法中断映射不访问定时器寄存器。 */
     }
 
-    if ((SOFT_UART_TIMER_INSTANCE->SR & TIM_SR_UIF) == 0U)
+    if ((ctx->rx_timer->DIER & TIM_DIER_UIE) == 0U)
     {
-        return;
+        return; /* 本通道更新中断未开放，忽略共享向量上的其它来源。 */
     }
 
-    SOFT_UART_TIMER_INSTANCE->SR = 0U;
-    SoftUart_ProcessSample();
+    if ((ctx->rx_timer->SR & TIM_SR_UIF) == 0U)
+    {
+        return; /* 本通道没有更新标志，不推进状态机。 */
+    }
+
+    ctx->rx_timer->SR = 0U;          /* 只清当前通道定时器更新标志。 */
+    SoftUart_ProcessSample(channel); /* 只推进当前通道，另一通道可在自己的 IRQ 中独立运行。 */
 }
 
 /* 以下为历史兼容包装接口，统一映射到 SIM_UART_1。 */

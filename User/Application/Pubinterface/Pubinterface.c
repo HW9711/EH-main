@@ -898,7 +898,7 @@ static void Pubinterface_SendPumpDisplay(uint8_t pump_area_id, uint8_t button_ar
 	display_value[0] = (uint8_t)pump_message->type; /* 按钮刷新同样携带泵类型，按钮图标按泵类型显示不同资源。 */
 	display_value[1] = pump_message->run_flag ? 1U : 0U; /* Value[1] 表示运行态，启动显示运行按钮，停止显示待启动按钮。 */
 	display_value[2] = 0U; /* 按钮消息不使用速度低字节，清零避免复用上一次数值消息残留。 */
-	if(pump_message->type==INJECTWATER&&display_speed<100)return;
+	/* 注水泵排空固定使用 70 档，不能再按“速度小于 100”提前返回，否则泵已启动但排空按钮收不到黄色运行图消息。 */
 	SendUIDSMessage(button_area_id, pump_available, display_value); /* 同步按钮黄/黑状态，补齐副工程屏幕交互反馈。 */
 }
 
@@ -4274,7 +4274,7 @@ void PUMPActive(uint8_t key_value)
 			}
 		}
 
-		//Pubinterface_RefreshPumpADisplay(); /* A 泵启停后立即刷新数值和按钮运行态，运行数据仍由 pumpMessageA 驱动。 */
+		Pubinterface_RefreshPumpADisplay(); /* A 泵启停或进入排空后立即刷新按钮，注水泵运行态显示 205 号黄色排空图。 */
 		break;
 	case JTKey_right_short:
 		PumpB_Gear++;
@@ -4369,7 +4369,7 @@ void PUMPActive(uint8_t key_value)
 			}
 		}
 
-		//Pubinterface_RefreshPumpBDisplay(); /* B 泵启停后立即刷新数值和按钮运行态，运行数据仍由 pumpMessageB 驱动。 */
+		Pubinterface_RefreshPumpBDisplay(); /* B 泵启停或进入排空后立即刷新按钮，注水泵运行态显示 205 号黄色排空图。 */
 		break;
 	case HMIkey_APUMP_Add:
 	case SCREENKey_APUMP_Add:

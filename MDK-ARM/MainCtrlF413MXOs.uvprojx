@@ -986,6 +986,11 @@
                 <FilePath>..\User\Application\Pump\pump.c</FilePath>
               </File>
               <File>
+                <FileName>pump_behavior_core.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\User\Application\Pump\pump_behavior_core.c</FilePath>
+              </File>
+              <File>
                 <FileName>pump_pressure_control.c</FileName>
                 <FileType>1</FileType>
                 <FilePath>..\User\Application\Pump\pump_pressure_control.c</FilePath>

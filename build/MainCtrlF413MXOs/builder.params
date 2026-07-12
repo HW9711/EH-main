@@ -110,6 +110,7 @@
         "../User/Application/Pedal/pedal.c",
         "../User/Application/Pubinterface/Pubinterface.c",
         "../User/Application/Pump/pump.c",
+        "../User/Application/Pump/pump_behavior_core.c",
         "../User/Application/Pump/pump_pressure_control.c",
         "../User/Application/ScreenKey/screenkey.c",
         "../User/Application/Src/userparser.c",

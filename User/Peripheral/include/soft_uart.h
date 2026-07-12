@@ -48,12 +48,12 @@ typedef struct {
     uint32_t received_bytes;
     uint32_t queue_overflow_count;
     uint32_t buffer_overflow_count;
-    uint32_t overlap_drop_count;
+    uint32_t overlap_drop_count; /* 兼容旧诊断接口；双定时器接收后正常应保持为 0。 */
     uint32_t framing_error_count;
 } SimUartStats;
 
 /* 初始化两路模拟串口底层资源。
- * 包括 GPIO、EXTI、TIM11 采样定时器、环形缓冲和静态消息队列。 */
+ * 包括 GPIO、EXTI、A 路 TIM11、B 路 TIM13、环形缓冲和静态消息队列。 */
 void SimUart_InitAll(void);
 
 /* 创建并启动模拟串口后台任务。
@@ -90,9 +90,9 @@ uint32_t SimUart_GetOverlapDropCount(sim_uart_channel_t channel);
  * 该函数负责识别软串口起始位下降沿并启动接收状态机。 */
 void SimUart_HandleExti(uint16_t GPIO_Pin);
 
-/* 在 TIM11 中断入口中调用。
- * 该函数负责执行位级采样并驱动单活动通道接收状态机。 */
-void SimUart_TimerIrqHandler(void);
+/* 在 TIM11/TIM13 中断入口中调用。
+ * channel 固定指定本次要推进的 PE4 或 PE6 接收状态，两路可同时采样。 */
+void SimUart_TimerIrqHandler(sim_uart_channel_t channel);
 
 /* 以下为单通道历史兼容接口，默认映射到通道 1。 */
 SoftUART_Status Soft_UART_Init(void);

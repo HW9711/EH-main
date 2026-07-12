@@ -312,10 +312,24 @@ void TIM1_TRG_COM_TIM11_IRQHandler(void)
   /* USER CODE BEGIN TIM1_TRG_COM_TIM11_IRQn 0 */
 
   /* USER CODE END TIM1_TRG_COM_TIM11_IRQn 0 */
-  SimUart_TimerIrqHandler();
+  SimUart_TimerIrqHandler(SIM_UART_1); /* TIM11 专门推进 PE4/A 泵压力软串口，和 PE6 接收状态完全独立。 */
   /* USER CODE BEGIN TIM1_TRG_COM_TIM11_IRQn 1 */
 
   /* USER CODE END TIM1_TRG_COM_TIM11_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM8 update interrupt and TIM13 global interrupt.
+  */
+void TIM8_UP_TIM13_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM8_UP_TIM13_IRQn 0 */
+
+  /* USER CODE END TIM8_UP_TIM13_IRQn 0 */
+  SimUart_TimerIrqHandler(SIM_UART_2); /* TIM13 专门推进 PE6/B 泵压力软串口，允许两块压力板同时上报。 */
+  /* USER CODE BEGIN TIM8_UP_TIM13_IRQn 1 */
+
+  /* USER CODE END TIM8_UP_TIM13_IRQn 1 */
 }
 
 /**
