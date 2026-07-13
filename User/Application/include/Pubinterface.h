@@ -367,6 +367,7 @@ typedef struct
   volatile bool     run_flag;//泵开始
    volatile uint16_t timingDrainage_times;//定时排空时间，100ms任务中累计时需要大于1位
   volatile bool     timingDrainage_flag;//定时排空，优先级在run_flag运行后，遇到run_flag=true则切为false
+  volatile bool     pedalDrainage_flag;//双脚踏轻踩排空临时状态：输出固定70但不改speed_work，也不进入10秒计时
   volatile uint8_t  step_value;//步进值
   volatile uint8_t  associated_channel;//关联通道，如果
   volatile uint16_t  type;//业务泵类型：DRAWWATER/INJECTWATER/POURWATER，不能保存 CS1237 霍尔设备码

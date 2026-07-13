@@ -36,6 +36,7 @@
 #include "sscBEEP.h"
 #include "sscPUMPA.h"
 #include "sscPUMPB.h"
+#include "pump.h"
 
 
 
@@ -54,6 +55,8 @@ static uint16_t jtb_adcvalue = 0;
 static uint16_t jtd_adcvalue_l = 0;
 static uint16_t jtd_adcvalue_r = 0;
 static uint8_t s_double_pedal_release_before_run_channel = CHANNEL_NONE;
+static uint8_t s_double_left_gently_pump_channel = CHANNEL_NONE; /* 记录左脚踏轻踩实际启动的泵，松脚时不能再按泵类型重新猜测。 */
+static uint8_t s_double_right_gently_pump_channel = CHANNEL_NONE; /* 记录右脚踏轻踩实际启动的泵，A/B 都是注水泵时确保停止 B。 */
 static bool s_common_socket_missing_wait_release = false; /* 公共接头缺刀具触发后等待脚踏真实释放，防止同一次长踩反复弹 80。 */
 
 
@@ -213,42 +216,79 @@ static void Foot_Queue_Init(void)
     FootMsgQueue = Kernel_QueueCreate(5, sizeof(FootMessage_t), "FootMsgQueue");
 }
 
-static void Foot_StartPumpAInjection(uint16_t speed_work)
+/*
+ * 函数功能：按指定脚踏侧启动 A 注水泵；双脚踏轻踩时只打开临时排空态，不覆盖屏幕保存的速度。
+ * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏固定70轻排。
+ * 返回参数：无。
+ */
+static void Foot_StartPumpAInjection(uint16_t speed_work, bool right_pedal, bool pedal_drainage)
 {
     /* 脚踏启动 A 注水泵时，定时排空必须让位，避免排空计时同时改写泵输出。 */
     pumpMessageA.timingDrainage_flag=false;
     /* 排空时间清零，保证下次排空从完整周期重新开始计时。 */
     pumpMessageA.timingDrainage_times=0U;
     /* 记录本次脚踏正在联动轻排泵，松开脚踏时才会进入对应停泵分支。 */
-    ControlSignalMessage.jtL_gentlypump_flag=true;
-    /* 保存脚踏本次要求的 A 泵速度，泵任务下一周期从公共 pumpMessageA 读取。 */
-    pumpMessageA.speed_work=speed_work;
+    if(right_pedal)
+    {
+        ControlSignalMessage.jtR_gentlypump_flag=true; /* 右脚启动 A 泵时标记右侧，松右脚才能结束本次请求。 */
+    }
+    else
+    {
+        ControlSignalMessage.jtL_gentlypump_flag=true; /* 左脚启动 A 泵时保持原左侧轻排标记。 */
+    }
+    /* 双脚踏轻踩只置临时排空标志，泵任务据此固定输出 70，不能覆盖屏幕长期设定速度。 */
+    pumpMessageA.pedalDrainage_flag=pedal_drainage;
+    if(pedal_drainage==false)
+    {
+        pumpMessageA.speed_work=speed_work; /* 普通两段脚踏联动仍按原规则更新设定速度。 */
+    }
     /* run_flag 是 sscPUMPA 任务真正允许输出非零速度的门控，脚踏启动必须置位。 */
     pumpMessageA.run_flag=true;
-    /* 队列消息只兼容旧接口同步速度；泵类型仍以模拟串口设备码写入的 pumpMessageA.type 为准。 */
-    SendPumpAMessage(INJECTWATER,pumpMessageA.speed_work);
+    if(pedal_drainage==false)
+    {
+        SendPumpAMessage(INJECTWATER,pumpMessageA.speed_work); /* 普通联动继续通过旧队列同步速度。 */
+    }
 }
 
-static void Foot_StartPumpBInjection(uint16_t speed_work)
+/*
+ * 函数功能：按指定脚踏侧启动 B 注水泵；双脚踏轻踩时只打开临时排空态，不覆盖屏幕保存的速度。
+ * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏固定70轻排。
+ * 返回参数：无。
+ */
+static void Foot_StartPumpBInjection(uint16_t speed_work, bool right_pedal, bool pedal_drainage)
 {
     /* 脚踏启动 B 注水泵时，先关闭定时排空，避免两种泵动作同时抢占 B 泵输出。 */
     pumpMessageB.timingDrainage_flag=false;
     /* 清掉历史排空计数，下一次排空动作不能沿用脚踏前的剩余时间。 */
     pumpMessageB.timingDrainage_times=0U;
     /* 记录脚踏轻排已经启动，松开脚踏时按同一标志关闭联动泵。 */
-    ControlSignalMessage.jtL_gentlypump_flag=true;
-    /* 保存脚踏本次要求的 B 泵速度，泵任务下一周期从公共 pumpMessageB 读取。 */
-    pumpMessageB.speed_work=speed_work;
+    if(right_pedal)
+    {
+        ControlSignalMessage.jtR_gentlypump_flag=true; /* 右脚启动 B 泵时必须置右侧标记，修正松右脚无法停泵。 */
+    }
+    else
+    {
+        ControlSignalMessage.jtL_gentlypump_flag=true; /* 左脚启动 B 泵时保持原左侧轻排标记。 */
+    }
+    /* 双脚踏轻踩只置临时排空标志，保证松脚或进入手柄联动后仍能恢复屏幕设定速度。 */
+    pumpMessageB.pedalDrainage_flag=pedal_drainage;
+    if(pedal_drainage==false)
+    {
+        pumpMessageB.speed_work=speed_work; /* 普通两段脚踏联动继续保存本次要求的速度。 */
+    }
     /* run_flag 是 sscPUMPB 任务真正允许输出非零速度的门控，脚踏启动必须置位。 */
     pumpMessageB.run_flag=true;
-    /* 队列消息只兼容旧接口同步速度；泵类型仍以模拟串口设备码写入的 pumpMessageB.type 为准。 */
-    SendPumpBMessage(INJECTWATER,pumpMessageB.speed_work);
+    if(pedal_drainage==false)
+    {
+        SendPumpBMessage(INJECTWATER,pumpMessageB.speed_work); /* 普通联动继续通过旧队列同步速度。 */
+    }
 }
 
 static void Foot_StopPumpAInjection(void)
 {
     /* 松开脚踏后关闭 A 泵运行门控，sscPUMPA 下一周期会按 run_flag=false 下发 0 速。 */
     pumpMessageA.run_flag=false;
+    pumpMessageA.pedalDrainage_flag=false; /* 松脚结束临时70档，后续启动重新使用屏幕设定速度。 */
     /* 脚踏停泵不进入排空模式，必须同步清除排空标志。 */
     pumpMessageA.timingDrainage_flag=false;
     /* 排空计数清零，避免下一次排空或脚踏启动继承旧计数。 */
@@ -259,6 +299,7 @@ static void Foot_StopPumpBInjection(void)
 {
     /* 松开脚踏后关闭 B 泵运行门控，sscPUMPB 下一周期会按 run_flag=false 下发 0 速。 */
     pumpMessageB.run_flag=false;
+    pumpMessageB.pedalDrainage_flag=false; /* 松脚结束 B 泵临时70档，不能把轻排状态带到下一次联动。 */
     /* 脚踏停泵不进入排空模式，必须同步清除排空标志。 */
     pumpMessageB.timingDrainage_flag=false;
     /* 排空计数清零，避免下一次排空或脚踏启动继承旧计数。 */
@@ -276,6 +317,8 @@ static void Foot_ClearRunRequestAfterGateFail(void)
     WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免屏幕或驱动继续沿用本周期脚踏比例速度。 */
     ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行标志，避免 gate 失败后释放分支误认为左脚已经启动。 */
     ControlSignalMessage.jtR_control_flag=false;    /* 清右脚踏运行标志，双脚踏任一侧失败都不能留下运行来源。 */
+    s_double_left_gently_pump_channel=CHANNEL_NONE; /* 门禁失败会停掉两台泵，左侧实际泵记录必须同步失效。 */
+    s_double_right_gently_pump_channel=CHANNEL_NONE; /* 清右侧实际泵记录，避免松脚时误停后续其它来源启动的泵。 */
     ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT); /* 如果本周期已临时占用脚踏 owner，电机未运行时立即释放给其它控制源。 */
     if(ControlSignalMessage.jtL_gentlypump_flag||ControlSignalMessage.jtR_gentlypump_flag)
     {
@@ -593,6 +636,8 @@ static bool Foot_BlockRunIfPressureStopLatched(void)
     ControlSignalMessage.jtR_control_flag=false;    /* 清右脚踏运行来源，双脚踏两侧都不能靠保持踩踏自动恢复。 */
     ControlSignalMessage.jtL_gentlypump_flag=false; /* 清左侧轻踩泵联动来源，防止压力保护后轻踩段重新开泵。 */
     ControlSignalMessage.jtR_gentlypump_flag=false; /* 清右侧轻踩泵联动来源，防止右脚保持踩下时泵自动恢复。 */
+    s_double_left_gently_pump_channel=CHANNEL_NONE; /* 压力停机已撤销泵输出，左侧实际泵记录同步清除。 */
+    s_double_right_gently_pump_channel=CHANNEL_NONE; /* 清右侧实际泵记录，必须重新踩下才能建立新请求。 */
     return true;                                    /* 通知调用处退出本次脚踏启动分支，等待真实松脚。 */
 }
 
@@ -722,6 +767,92 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
         ControlSignalMessage.jt_enable_flag=true;
        (void)Pubinterface_ApplyFootControlPriorityOnConnect(); /* 脚踏上线时统一按脚控优先处理，未运行且未被屏幕手动锁住时会覆盖手控/触控。 */
        Pubinterface_RefreshControlModeDisplay();//脚踏上线后统一刷新三种控制方式，避免其它图标残留高亮
+    }
+}
+
+/*
+ * 函数功能：按双脚踏左右侧的固定优先级启动实际注水泵，并保存本侧泵通道。
+ * 输入参数：right_pedal 为 false 时处理左脚 A 优先，为 true 时处理右脚 B 优先。
+ * 返回参数：无。
+ */
+static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
+{
+    uint8_t pump_channel = CHANNEL_NONE; /* 本次真正启动的泵通道，无注水泵时保持 NONE。 */
+
+    if(right_pedal)
+    {
+        if(pumpMessageB.type==INJECTWATER)
+        {
+            Foot_StartPumpBInjection(PUMP_TIMING_DRAINAGE_SPEED, true, true); /* 右脚优先启动 B 泵，临时固定70且不覆盖屏幕设定。 */
+            pump_channel = CHANNEL_B; /* 保存实际启动 B，松右脚时只处理 B。 */
+        }
+        else if(pumpMessageA.type==INJECTWATER)
+        {
+            Foot_StartPumpAInjection(PUMP_TIMING_DRAINAGE_SPEED, true, true); /* B 不是注水泵时回退 A，临时固定70且不覆盖屏幕设定。 */
+            pump_channel = CHANNEL_A; /* 保存回退启动的 A，停止时不能再按泵类型优先级判断。 */
+        }
+        s_double_right_gently_pump_channel = pump_channel; /* 每周期刷新右侧实际泵记录，松脚依据该记录停止。 */
+        if(pump_channel==CHANNEL_NONE)
+        {
+            ControlSignalMessage.jtR_gentlypump_flag=false; /* 没有可启动注水泵时不保留右侧轻排运行标志。 */
+        }
+    }
+    else
+    {
+        if(pumpMessageA.type==INJECTWATER)
+        {
+            Foot_StartPumpAInjection(PUMP_TIMING_DRAINAGE_SPEED, false, true); /* 左脚优先启动 A 泵，临时固定70且不覆盖屏幕设定。 */
+            pump_channel = CHANNEL_A; /* 保存实际启动 A，松左脚时只处理 A。 */
+        }
+        else if(pumpMessageB.type==INJECTWATER)
+        {
+            Foot_StartPumpBInjection(PUMP_TIMING_DRAINAGE_SPEED, false, true); /* A 不是注水泵时回退 B，临时固定70且不覆盖屏幕设定。 */
+            pump_channel = CHANNEL_B; /* 保存回退启动的 B，松脚时准确停止 B。 */
+        }
+        s_double_left_gently_pump_channel = pump_channel; /* 每周期刷新左侧实际泵记录。 */
+        if(pump_channel==CHANNEL_NONE)
+        {
+            ControlSignalMessage.jtL_gentlypump_flag=false; /* 没有可启动注水泵时不保留左侧轻排运行标志。 */
+        }
+    }
+}
+
+/*
+ * 函数功能：释放指定双脚踏侧记录的注水泵；另一侧仍使用同一泵时保持运行。
+ * 输入参数：right_pedal 为 false 表示松开左脚，为 true 表示松开右脚。
+ * 返回参数：无。
+ */
+static void Foot_StopDoublePedalGentlyPump(bool right_pedal)
+{
+    uint8_t released_channel; /* 保存本次松脚需要释放的实际泵通道。 */
+    uint8_t other_channel; /* 保存另一侧仍在保持的泵通道，避免提前停掉共享泵。 */
+
+    if(right_pedal)
+    {
+        released_channel = s_double_right_gently_pump_channel; /* 读取右脚实际启动的泵。 */
+        s_double_right_gently_pump_channel = CHANNEL_NONE; /* 右脚已经松开，先结束右侧泵所有权。 */
+        ControlSignalMessage.jtR_gentlypump_flag=false; /* 清右侧轻排标志，下一次踩下重新建立记录。 */
+        other_channel = s_double_left_gently_pump_channel; /* 左脚若仍踩住同一泵，本次不能停。 */
+    }
+    else
+    {
+        released_channel = s_double_left_gently_pump_channel; /* 读取左脚实际启动的泵。 */
+        s_double_left_gently_pump_channel = CHANNEL_NONE; /* 左脚已经松开，结束左侧泵所有权。 */
+        ControlSignalMessage.jtL_gentlypump_flag=false; /* 清左侧轻排标志，防止释放分支重复停泵。 */
+        other_channel = s_double_right_gently_pump_channel; /* 右脚若仍使用同一泵则继续保持输出。 */
+    }
+
+    if(released_channel==other_channel)
+    {
+        return; /* 两侧共同使用同一台注水泵时，只释放本侧记录，等待另一侧也松开。 */
+    }
+    if(released_channel==CHANNEL_A)
+    {
+        Foot_StopPumpAInjection(); /* 本侧实际启动 A 且另一侧未使用 A，准确停止 A。 */
+    }
+    else if(released_channel==CHANNEL_B)
+    {
+        Foot_StopPumpBInjection(); /* 本侧实际启动 B 且另一侧未使用 B，准确停止 B。 */
     }
 }
 
@@ -889,12 +1020,12 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
             if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
             {
                  /* A 泵是注水泵时按当前手柄 Page4 默认流量启动；旧代码误写 B 泵会导致脚踏踩下后目标泵不转。 */
-                 Foot_StartPumpAInjection(Pubinterface_GetCurrentDefaultInjectionFlow());
+                 Foot_StartPumpAInjection(Pubinterface_GetCurrentDefaultInjectionFlow(), false, false);
             }
             else if(pumpMessageB.type==INJECTWATER)
             {
                  /* B 泵是注水泵时启动 B 泵，并同步打开 B 泵任务门控。 */
-                 Foot_StartPumpBInjection(pumpMessageB.speed_work);
+                 Foot_StartPumpBInjection(pumpMessageB.speed_work, false, false);
             }
             ControlSignalMessage.jtL_control_flag=true;
     }
@@ -1028,16 +1159,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
 
             /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
-            if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
-            {
-                 /* 双踏板左侧轻排启动 A 注水泵，并确保 A 泵 run_flag 已打开。 */
-                 Foot_StartPumpAInjection(pumpMessageA.speed_work);
-            }
-            else if(pumpMessageB.type==INJECTWATER)
-            {
-                 /* 双踏板左侧轻排启动 B 注水泵，并确保 B 泵 run_flag 已打开。 */
-                 Foot_StartPumpBInjection(pumpMessageB.speed_work);
-            }
+            Foot_StartDoublePedalGentlyPump(false); /* 左脚按 A 优先规则启动并记录实际泵，固定 70 档且不进入 10 秒定时排空。 */
 
             if(adValue<msg->MValue_Left)adValue=msg->MValue_Left;
           if(adValue-msg->MValue_Left>JT_threshold)
@@ -1143,17 +1265,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                }
             }
              if(ControlSignalMessage.jtL_gentlypump_flag)
-                 {
-                   ControlSignalMessage.jtL_gentlypump_flag=false;
-                  if(pumpMessageA.type==INJECTWATER)
-                  {
-                   Foot_StopPumpAInjection();
-                  }
-                  else if(pumpMessageB.type==INJECTWATER)
-                  {
-                    Foot_StopPumpBInjection();
-                   }
-                 }
+             {
+                 Foot_StopDoublePedalGentlyPump(false); /* 松左脚只释放左侧实际启动的泵，不能按当前泵类型重新猜。 */
+             }
              if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
              {
                  Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警；双踏板必须确认右侧也已释放。 */
@@ -1212,16 +1326,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
 
        /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
-       if(pumpMessageB.type==INJECTWATER)
-        {
-            /* 双踏板右侧轻排启动 B 注水泵，并确保 B 泵 run_flag 已打开。 */
-            Foot_StartPumpBInjection(pumpMessageB.speed_work);
-        }
-        else  if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
-        {
-             /* A 泵是注水泵时启动 A 泵，并确保 A 泵 run_flag 已打开。 */
-             Foot_StartPumpAInjection(pumpMessageA.speed_work);
-        }
+       Foot_StartDoublePedalGentlyPump(true); /* 右脚按 B 优先规则启动并记录实际泵，固定 70 档且不进入 10 秒定时排空。 */
      if(adValue_r<msg->MValue_Right)adValue_r=msg->MValue_Right;
       if(adValue_r-msg->MValue_Right>JT_threshold)
         {
@@ -1328,17 +1433,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
            }
         }
         if(ControlSignalMessage.jtR_gentlypump_flag)
-            {
-              ControlSignalMessage.jtR_gentlypump_flag=false;
-              if(pumpMessageA.type==INJECTWATER)
-              {
-               Foot_StopPumpAInjection();
-              }
-              else if(pumpMessageB.type==INJECTWATER)
-              {
-               Foot_StopPumpBInjection();
-              }
-            }
+        {
+            Foot_StopDoublePedalGentlyPump(true); /* 松右脚只释放右侧实际启动的泵；A/B 都是注水泵时准确停止 B。 */
+        }
         if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left))
         {
             Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警；双踏板必须确认左侧也已释放。 */

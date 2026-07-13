@@ -896,6 +896,7 @@ static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_ar
 {
 	uint8_t display_value[10] = {0U}; /* 复用 UIDP 队列协议的 10 字节参数格式，保证直接预绘和运行期刷新解释一致。 */
 	bool pump_available = false; /* 泵类型为 0 时表示尚未识别，开机预绘要显示禁用态而不是误显示抽吸泵。 */
+	bool button_active = false; /* 注水泵按钮只显示排空来源，不能根据普通冷却运行状态高亮。 */
 	uint16_t display_speed = 0U; /* 显示速度使用 Pubinterface 的统一换算，运行态显示实际输出，停止态显示设定值。 */
 
 	if(pump_message == NULL)
@@ -905,6 +906,11 @@ static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_ar
 
 	pump_available = (pump_message->type != 0U); /* 只有 CS1237 已识别出业务泵类型时，泵区才按可用态显示。 */
 	display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 保持与 Pubinterface_RefreshPumpADisplay/BDisplay 的速度口径一致。 */
+	button_active = pump_message->run_flag; /* 抽吸和灌注泵仍按普通运行状态预绘按钮。 */
+	if (pump_message->type == INJECTWATER)
+	{
+		button_active = (pump_message->timingDrainage_flag || pump_message->pedalDrainage_flag); /* 注水泵只有屏幕定时排空或脚踏轻排才预绘黄色按钮。 */
+	}
 
 	display_value[0] = (uint8_t)pump_message->type; /* Value[0] 传泵类型，UIPUMPADP/UIPUMPBDP 用它选择注水、灌注或抽吸图标。 */
 	display_value[1] = (uint8_t)(display_speed >> 8); /* Value[1] 传显示速度高字节，保证 16 位流量值完整。 */
@@ -918,7 +924,7 @@ static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_ar
 		UIPUMPBDP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* B 泵同样直接预绘，解决 B 区按钮/流量区后加载的可见闪动。 */
 	}
 
-	display_value[1] = pump_message->run_flag ? 1U : 0U; /* 启停按钮参数改为运行标志，保持 UI_PUMPABUTTON_ID/UI_PUMPBBUTTON_ID 协议。 */
+	display_value[1] = button_active ? 1U : 0U; /* 预绘参数使用排空业务状态，手柄冷却联动时保持白色。 */
 	display_value[2] = 0U; /* 按钮刷新不使用速度低字节，清零避免复用上面的流量参数。 */
 	if(button_area_id == UI_PUMPABUTTON_ID)
 	{

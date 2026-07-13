@@ -336,42 +336,16 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
   }
 }
 
-//============================================================================
-//1.屏”按键“
-//============================================================================
+#define SCREENKEY_MIN_FRAME_SIZE     9U  /* 当前按键帧至少包含帧头、命令、地址和 dat1[8] 键值。 */
+#define SCREENKEY_FRAME_BUFFER_SIZE 16U  /* 保持原局部帧缓存容量，超长声明帧直接丢弃，禁止覆盖任务栈。 */
 
-//============================================================================
-// 函数名称: ScreenKey_Scan()
-// 功能描述:
-// 输　  入:
-// 输    出:
-// 函数说明: 长按操作150ms
-//============================================================================
-void ScreenKey_Scan(void)
+/*
+ * 函数功能：把已经通过长度检查的屏幕按键帧转换为原有业务按键事件。
+ * 输入参数：dat1 为完整屏幕帧，调用前已保证长度处于 9~16 字节。
+ * 返回参数：无。
+ */
+static void ScreenKey_DispatchFrame(const uint8_t *dat1)
 {
-  uint8_t rlen = 0, slen = 0, i = 0, len = 0;
-  uint8_t dat[UART6_MAX_PACKET_SIZE] = { 0 }, dat1[16] = { 0 };
-
-  //读取串口数据
-  rlen = Uart6_DMARecvDataPeek(dat);
-  if (rlen < 9)   //不够一个数据包大小
-    return;
-
-  slen = rlen;
-
-  //查询本帧数据包的帧头0x5A 0xA5
-  for (i = 0; i < (rlen - 8); i++)
-  {
-	  if ((dat[i] == 0x5A) && (dat[i + 1] == 0xA5) && (dat[i + 3] == 0x83))  //帧头 指令
-	  {
-	    len = dat[i + 2] + 3;
-
-	    if (slen < len)  //剩余长度应满足数据帧长度
-		    break ;
-
-	    Common_CopyData(&dat[i], dat1, len);    //截取数据
-
-	    //键值...
 	    switch (dat1[4])
 	    {
 		    case 0x20 :  //第一幅图“LOGO连续点击”进入管理者模式 0_开机界面
@@ -512,14 +486,69 @@ void ScreenKey_Scan(void)
 				
 	    }
 
-//	    //参数设置---键值范围
-//	      ScreenKey_ParamSet();
+}
 
-	    Common_Memset(0, dat1, 15);
-  	  i += (len - 1);
-	    slen -= len;
-	  }
+/*
+ * 函数功能：在本次 UART6 DMA 数据中逐字节寻找完整按键帧，并过滤短帧、超长帧和前导噪声。
+ * 输入参数：data 为 DMA 数据副本；data_len 为本次实际收到的字节数。
+ * 返回参数：无。
+ */
+static void ScreenKey_ParseReceivedData(uint8_t *data, uint16_t data_len)
+{
+  uint16_t offset = 0U;                                 /* 当前搜索位置，遇到噪声时只前进一个字节。 */
+  uint16_t remaining = 0U;                              /* 当前搜索位置到有效数据末尾的真实剩余长度。 */
+  uint16_t frame_len = 0U;                              /* 使用 16 位保存“长度字段+3”，避免 0xFD~0xFF 加法回绕。 */
+  uint8_t frame[SCREENKEY_FRAME_BUFFER_SIZE] = { 0U }; /* 只存放已经通过边界检查的一帧数据。 */
+
+  if (data == NULL)
+  {
+    return; /* 调用方没有提供数据缓冲时不访问内存，也不产生任何按键事件。 */
   }
+
+  while ((data_len - offset) >= SCREENKEY_MIN_FRAME_SIZE)
+  {
+    remaining = data_len - offset; /* 每次按当前偏移重新计算，不能沿用未扣除噪声字节的总长度。 */
+
+    if ((data[offset] != 0x5AU) || (data[offset + 1U] != 0xA5U) ||
+        (data[offset + 3U] != 0x83U))
+    {
+      offset++; /* 当前字节不是合法帧头，继续寻找后面的 0x5A 0xA5，允许 DMA 数据带前导噪声。 */
+      continue;
+    }
+
+    frame_len = (uint16_t)data[offset + 2U] + 3U; /* DWIN 长度字段不含两个帧头字节和自身，整帧需再加 3。 */
+    if ((frame_len < SCREENKEY_MIN_FRAME_SIZE) ||
+        (frame_len > SCREENKEY_FRAME_BUFFER_SIZE) ||
+        (frame_len > remaining))
+    {
+      offset++; /* 长度声明异常时跳过当前伪帧头，继续寻找同一 DMA 数据中后续的合法按键帧。 */
+      continue;
+    }
+
+    Common_CopyData(&data[offset], frame, frame_len);            /* 复制前已同时校验源区剩余长度和目标缓存容量。 */
+    ScreenKey_DispatchFrame(frame);                              /* 按原有映射投递一个合法屏幕按键事件。 */
+    Common_Memset(0U, frame, SCREENKEY_FRAME_BUFFER_SIZE);       /* 清掉上一帧内容，避免短数据字段沿用旧字节。 */
+    offset += frame_len;                                         /* 完整帧按声明长度跳过，继续处理同一 DMA 包内的粘连帧。 */
+  }
+}
+
+/*
+ * 函数功能：读取 UART6 本周期稳定下来的 DMA 数据，并交给屏幕帧扫描函数处理。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void ScreenKey_Scan(void)
+{
+  uint16_t rlen = 0U;                              /* UART6 驱动返回的本次实际接收长度，最大 150 字节。 */
+  uint8_t dat[UART6_MAX_PACKET_SIZE] = { 0U };     /* 保存 DMA 数据副本，驱动取数后会立即重启接收。 */
+
+  rlen = Uart6_DMARecvDataPeek(dat);               /* 只读取已经连续三个检查周期不再增长的数据。 */
+  if (rlen < SCREENKEY_MIN_FRAME_SIZE)
+  {
+    return; /* 少于 9 字节不可能包含当前业务按键帧，本周期不产生事件。 */
+  }
+
+  ScreenKey_ParseReceivedData(dat, rlen);          /* 统一完成噪声跳过、长度检查和合法帧分发。 */
 }
 
 //============================================================================
