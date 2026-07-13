@@ -47,8 +47,8 @@
 - 已运行读者称呼类字样扫描，未发现命中。
 - 根据用户进一步反馈，已把“手柄同等深度”的要求扩展到其它复杂模块，而不是只补手柄相关内容。
 - 已在 `docs/product-software-handoff.md` 补充电机函数调用流程图和电机数据流向图，覆盖 `SscDriveMotorTask_Init()`、`MOTORRUNTask()`、`MOTORRUN()`、`MotorStart()/MotorStops()`、`MotorUartData_Init()`、`MOTORUARTTaskFunc()`、`BrushlessMotorUartData_ReceiveData()` 和驱动回包报警链路。
-- 已补充泵函数调用流程图和泵/压力数据流向图，覆盖 A/B 泵 25ms/100ms 周期任务、队列兼容入口、`pumpMessageA/B`、压力闭环、硬停不清 `run_flag`、UART5/UART7 物理口互换和外控心跳字段来源。
-- 已补充软 UART 压力函数调用流程图和压力帧数据流向图，覆盖 `SimUartTask_Init()`、EXTI/TIM11 位采样、单 active receiver、`overlap_drop_count`、环形缓冲、CS1237 帧校验和 `pumpMessageA/B` 压力字段写入。
+- 已补充泵函数调用流程图和泵/压力数据流向图，覆盖 A/B 泵统一 25ms 周期、队列兼容入口、`pumpMessageA/B`、新启动沿解除压力锁止、UART5/UART7 物理口映射和外控心跳字段来源。
+- 已补充软 UART 压力函数调用流程图和压力帧数据流向图，覆盖 `SimUartTask_Init()`、PE4/TIM11 与 PE6/TIM13 独立位采样、双通道接收状态、环形缓冲、CS1237 帧校验和 `pumpMessageA/B` 压力字段写入。
 - 已补充外控函数调用流程图和外控数据流向图，覆盖 UART2 DMA、RX FIFO 半包/粘包重同步、协议解析、授权/owner、业务分发、链路看门狗、动态心跳和 EEPROM 读写数据走向。
 - 已运行读者称呼类字样扫描，未发现命中。
 - 已运行文档占位符、乱码标记、历史路径和常见错字扫描，未发现命中。

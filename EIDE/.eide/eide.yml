@@ -30,7 +30,6 @@ virtualFolder:
           folders: []
         - name: Bsp
           files:
-            - path: ../User/Hardware/Bsp/hw_bootstrap.c
             - path: ../User/Hardware/Bsp/bsp_uart.c
           folders: []
         - name: Startup
@@ -103,7 +102,6 @@ virtualFolder:
         - name: RTOS Bridge
           files:
             - path: ../Src/app_task.c
-            - path: ../User/Kernel/Scheduler/kernel_entry.c
             - path: ../User/Kernel/Scheduler/kernel_scheduler.c
           folders: []
         - name: FreeRTOS
@@ -122,18 +120,20 @@ virtualFolder:
     - name: Application
       files: []
       folders:
-        - name: Bootstrap
+        - name: Initialization
           files:
-            - path: ../User/App/Bootstrap/app_bootstrap.c
             - path: ../User/Application/Src/userparser.c
           folders: []
         - name: Modules
           files:
             - path: ../User/Application/Common/common.c
+            - path: ../User/Application/Common/control_arbitration.c
+            - path: ../User/Application/Common/work_alarm.c
             - path: ../User/Application/DriveCtrl/drivectrl_adapter.c
             - path: ../User/Application/FootPedal/footpedal_ui_adapter.c
             - path: ../User/Application/Handle/handlekey.c
             - path: ../User/Application/Handle/handlescan.c
+            - path: ../User/Application/Handle/handle_control.c
             - path: ../User/Application/Motor/motor.c
             - path: ../User/Application/MotorUartData/motoruartdata.c
             - path: ../User/Application/ExternalComm/external_comm_protocol.c
@@ -141,6 +141,7 @@ virtualFolder:
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
             - path: ../User/Application/Pump/pump_behavior_core.c
+            - path: ../User/Application/Pump/pump_control.c
             - path: ../User/Application/Pump/pump_pressure_control.c
             - path: ../User/Application/ScreenKey/screenkey.c
             - path: ../User/Application/Led/sysrunled.c
@@ -222,7 +223,6 @@ targets:
         - ../User/Hardware/include
         - ../User/Driver/include
         - ../User/Kernel/include
-        - ../User/App/include
         - ../User/Application/include
         - ../User/Data
         - ../User/Peripheral/include

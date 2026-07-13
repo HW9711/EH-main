@@ -200,11 +200,10 @@ void SCREENKeyBehanior(uint8_t key_value)
 		break;
 		// case SCREENKey_PLUG_A:
 		// case SCREENKey_PLUG_B:
-		// case SCREENKey_UNPLUG_A:
-		// case SCREENKey_UNPLUG_B:
-		// PlugORunPLUGActive(key_value);
-		break;
-		case SCREENKey_PlanerH: 
+                // case SCREENKey_UNPLUG_A:
+                // case SCREENKey_UNPLUG_B:
+                // PlugORunPLUGActive(key_value);
+                case SCREENKey_PlanerH:
 		case SCREENKey_GrindH: 
 		PlanerGridH(key_value);
 		break;

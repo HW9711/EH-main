@@ -51,15 +51,8 @@ typedef struct
 
 static uint8_t NO_MASK3_WRITE_EPC[7] = {0XBB, 0X00, 0X22, 0X00, 0X00, 0X22, 0X7E}; /* 无掩码读取 EPC 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
-static unsigned char pa_gain0[] = {0XBB, 0X00, 0XB6, 0X00, 0X02, 0X00, 0X00, 0XB8, 0X7E}; /* 发射功率设为 0。 */
-static unsigned char  pa_gain15[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X05, 0XDC, 0Xea, 0X7E};//发射功率
 static unsigned char  pa_gain10[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X03, 0Xe8, 0Xa3, 0X7E};//发射功率
-static unsigned char  pa_gain13[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X05, 0X14, 0XE5, 0X7E}; //发射功率
-static unsigned char region_set_europe[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x03 ,0x0B ,0x7E};//欧洲频段865.1-867.9M
-static unsigned char region_set_us[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x02 ,0x0A ,0x7E};//美国频段902.25-927.75M
 static unsigned char region_set_CHAIN[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x01 ,0x09 ,0x7E};//中国1-920.125-924.875M
-static unsigned char region_set_CHAINS[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x04 ,0x0C ,0x7E};//中国2-840.125-844.875M
-static unsigned char region_set_K[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x06 ,0x0E ,0x7E};//韩国-917.1-923.3M
 
 static kernel_task_t AUTOMODEGETDATATaskHandle;     /* RFID 轮询任务句柄，任务实际按请求工作。 */
 static kernel_task_t CUTTERSCANTaskHandle;          /* 预留旧句柄，不启动，避免破坏工程外部引用假设。 */
@@ -477,43 +470,6 @@ static void Rfid_ReceiveRequestMessage(void)
 }
 
 /*
- * 函数功能：丢弃 RFID 队列中指定通道的旧请求，保留其它通道请求。
- * 输入参数：channel 为需要清理的 A/B 通道。
- * 返回参数：无。
- */
-static void Rfid_DiscardQueuedMessagesForChannel(uint8_t channel)
-{
-    RFIDMessage_t msg; /* 暂存从 RFID 队列取出的请求。 */
-    RFIDMessage_t keep_msgs[RFID_QUEUE_LENGTH]; /* 队列最多 4 项，先保存其它通道请求再放回，避免边取边放反复读到同一项。 */
-    uint8_t keep_count = 0U; /* 记录需要放回队列的其它通道请求数量。 */
-    uint8_t scan_count; /* 限定最多扫描队列容量次，避免并发投递时在清理函数内停留过久。 */
-
-    if (RFIDMsgQueue == NULL)
-    {
-        return; /* 队列未初始化时没有排队请求可清。 */
-    }
-
-    for (scan_count = 0U; scan_count < RFID_QUEUE_LENGTH; scan_count++)
-    {
-        if (Kernel_QueueReceive(RFIDMsgQueue, &msg, 0) != pdTRUE)
-        {
-            break; /* 当前队列已经取空，本轮清理完成。 */
-        }
-
-        if ((msg.channel != channel) && (keep_count < RFID_QUEUE_LENGTH))
-        {
-            keep_msgs[keep_count] = msg; /* 非目标通道请求暂存，避免清 A 时误丢 B 的识别请求。 */
-            ++keep_count; /* 增加待恢复请求数量。 */
-        }
-    }
-
-    for (scan_count = 0U; scan_count < keep_count; scan_count++)
-    {
-        (void)Kernel_QueueSend(RFIDMsgQueue, &keep_msgs[scan_count], pdMS_TO_TICKS(0)); /* 把其它通道请求放回 RFID 队列，放回失败不影响目标通道清理。 */
-    }
-}
-
-/*
  * 函数功能：初始化 RFID 请求队列。
  * 输入参数：无。
  * 返回参数：无。
@@ -838,7 +794,6 @@ void Rfid_ClearChannelResult(uint8_t channel)
     s_result_sequence[index] = 0U; /* 清除结果序号，下一次成功从 1 开始。 */
     s_presence_sequence[index] = 0U; /* 同步清除存在序号，下一次读到标签会被视为新的在线状态变化。 */
     s_request_generation[index]++; /* 清通道会作废清理前所有排队请求，防止旧请求稍后重新启动 RFID 读取。 */
- //   Rfid_DiscardQueuedMessagesForChannel(channel); /* 同步丢弃该通道已排队但未执行的旧请求，避免清刀具后又启动一次旧读。 */
     if ((s_request_active != false) && (s_request_channel == channel))
     {
         s_request_active = false; /* 清刀具时同步取消该通道未完成读取，避免丢失判定后晚到回包复活旧刀具。 */

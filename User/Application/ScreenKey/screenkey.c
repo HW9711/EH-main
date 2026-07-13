@@ -339,153 +339,169 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
 #define SCREENKEY_MIN_FRAME_SIZE     9U  /* 当前按键帧至少包含帧头、命令、地址和 dat1[8] 键值。 */
 #define SCREENKEY_FRAME_BUFFER_SIZE 16U  /* 保持原局部帧缓存容量，超长声明帧直接丢弃，禁止覆盖任务栈。 */
 
+/* 主运行页各区域的按键顺序与 DWIN 0x2400~0x2404 表格一致，数组下标为 key-1。 */
+static const uint8_t s_screen_handle_actions[] = {24U, 25U, 22U, 23U, 20U, 21U, 36U};
+static const uint8_t s_screen_speed_actions[] = {30U, 31U, 32U, 33U};
+static const uint8_t s_screen_direction_actions[] = {13U, 15U, 14U};
+static const uint8_t s_screen_frequency_actions[] = {9U, 10U};
+static const uint8_t s_screen_control_mode_actions[] = {16U, 17U, 18U, 43U};
+
 /*
- * 函数功能：把已经通过长度检查的屏幕按键帧转换为原有业务按键事件。
- * 输入参数：dat1 为完整屏幕帧，调用前已保证长度处于 9~16 字节。
+ * 函数功能：按 DWIN 区域内的 key 编号从固定映射表取得旧业务按键号。
+ * 输入参数：actions 为映射表；action_count 为表项数；key_index 为从 1 开始的屏幕 key 编号。
+ * 返回参数：返回映射后的旧业务按键号；越界时返回 0。
+ */
+static uint8_t ScreenKey_GetMappedAction(const uint8_t *actions,
+                                         uint8_t action_count,
+                                         uint8_t key_index)
+{
+  if ((key_index == 0U) || (key_index > action_count))
+  {
+    return 0U; /* 屏幕按键编号越界时不投递任何业务消息。 */
+  }
+
+  return actions[key_index - 1U]; /* DWIN key 从 1 开始，数组从 0 开始。 */
+}
+
+/*
+ * 函数功能：把屏幕 A/B 泵区按键映射到逻辑 A/B 泵业务按键。
+ * 输入参数：section 为 0x05 或 0x06 泵区；key_index 为加、减、启停编号。
+ * 返回参数：返回旧业务按键号；无效按键返回 0。
+ */
+static uint8_t ScreenKey_GetPumpAction(uint8_t section, uint8_t key_index)
+{
+  if ((key_index == 0U) || (key_index > 3U))
+  {
+    return 0U; /* 泵区只定义加、减、启停三个按键。 */
+  }
+
+#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
+  if (section == 0x05U)
+  {
+    static const uint8_t pump_b_actions[] = {5U, 6U, 11U};
+    return pump_b_actions[key_index - 1U]; /* 镜像开启时屏幕原 A 区控制逻辑 B 泵。 */
+  }
+  else
+  {
+    static const uint8_t pump_a_actions[] = {7U, 8U, 12U};
+    return pump_a_actions[key_index - 1U]; /* 镜像开启时屏幕原 B 区控制逻辑 A 泵。 */
+  }
+#else
+  if (section == 0x05U)
+  {
+    static const uint8_t pump_a_actions[] = {7U, 8U, 12U};
+    return pump_a_actions[key_index - 1U]; /* 默认屏幕 A 区控制逻辑 A 泵。 */
+  }
+  else
+  {
+    static const uint8_t pump_b_actions[] = {5U, 6U, 11U};
+    return pump_b_actions[key_index - 1U]; /* 默认屏幕 B 区控制逻辑 B 泵。 */
+  }
+#endif
+}
+
+/*
+ * 函数功能：投递脚踏定标页的低值、高值和中值存储事件。
+ * 输入参数：key_index 为 DWIN 0x2420 区域内的按键编号。
  * 返回参数：无。
  */
-static void ScreenKey_DispatchFrame(const uint8_t *dat1)
+static void ScreenKey_DispatchCalibrationKey(uint8_t key_index)
 {
-	    switch (dat1[4])
-	    {
-		    case 0x20 :  //第一幅图“LOGO连续点击”进入管理者模式 0_开机界面
-		    {
-		      /* 新屏不再保留老屏入口，启动页 0x2001 只消费串口帧不进入业务。 */
-		    }
-		   break;
-		  	case 0x24 :  // 
-		    {
-		      switch (dat1[5])
-		      {				
-            case 0x00 : // 主运行页顶部：手柄、开口定位、磨/刨、自动识别
-						{
-			         switch (dat1[8])
-							 {
-									case 0x01 : ScreenKey_PostLegacyAction(24U);  break;//A 手柄
-									case 0x02 : ScreenKey_PostLegacyAction(25U);  break;//B 手柄
-									case 0x03 : ScreenKey_PostLegacyAction(22U); break;	//开口定位减
-									case 0x04 : ScreenKey_PostLegacyAction(23U); break;	//开口定位加
-									case 0x05 : ScreenKey_PostLegacyAction(20U); break;	//选择磨头模式
-									case 0x06 : ScreenKey_PostLegacyAction(21U); break;	//选择刨刀模式
-									case 0x07 : ScreenKey_PostLegacyAction(36U); break;	//自动识别刀具
-									default : break;
-							 }
-             }break; 
-            case 0x01 : // 主运行页速度：快减、慢减、慢加、快加
-						{
-			         switch (dat1[8])
-							 {
-									case 0x01 : ScreenKey_PostLegacyAction(30U); break;	//EX8 表格 key1 是快减，按当前方向步进两倍减少
-									case 0x02 : ScreenKey_PostLegacyAction(31U); break;  //EX8 表格 key2 是慢减，按当前方向步进减少
-									case 0x03 : ScreenKey_PostLegacyAction(32U); break;	//EX8 表格 key3 是慢加，按当前方向步进增加
-									case 0x04 : ScreenKey_PostLegacyAction(33U); break;	//EX8 表格 key4 是快加，按当前方向步进两倍增加
-									default : break;
-							 }
-						}break;						
-            case 0x02 :// 主运行页方向：正转、往复、反转
-						{ 
-									switch (dat1[8])
-									{
-										case 0x01 : ScreenKey_PostLegacyAction(13U); break;    //正转
-										case 0x02 : ScreenKey_PostLegacyAction(15U); break;    //往复
-										case 0x03 : ScreenKey_PostLegacyAction(14U); break;    //反转
-										default : break;
-									}
-							}break;
-            case 0x03 :// 主运行页频率：减、加
-								{ 
-									switch (dat1[8])
-									{
-										case 0x01 : ScreenKey_PostLegacyAction(9U); break;      //EX8 表格 key1 是频率加
-										case 0x02 : ScreenKey_PostLegacyAction(10U);	 break;      //EX8 表格 key2 是频率减
-										default : break;
-									}
-								}break;
-						case 0x04 :// 主运行页控制方式：脚控、手控、触控、外部通信
-									{ 
-										switch (dat1[8])
-										{
-											case 0x01 : ScreenKey_PostLegacyAction(16U); break;    //脚控
-											case 0x02 : ScreenKey_PostLegacyAction(17U); break;    //手控
-											case 0x03 : ScreenKey_PostLegacyAction(18U); break;    //触控
-											case 0x04 : ScreenKey_PostLegacyAction(43U); break;    //外部通信/外控退出
-											default : break;
-										}
-								}break;	
-            case 0x05 :// A 泵加、减、启停
-						{
+  switch (key_index)
+  {
+    case 0x01U:
+      ScreenKey_LegacyEventPost(KEY_STORAGEMIN); /* 保存左侧低值。 */
+      break;
+    case 0x02U:
+      ScreenKey_LegacyEventPost(KEY_STORAGEMAX); /* 保存左侧高值。 */
+      break;
+    case 0x03U:
+      ScreenKey_LegacyEventPost(KEY_STORAGEMIN2); /* 保存右侧低值。 */
+      break;
+    case 0x04U:
+      ScreenKey_LegacyEventPost(KEY_STORAGEMAX2); /* 保存右侧高值。 */
+      break;
+    case 0x07U:
+      ScreenKey_LegacyEventPost(KEY_STORAMEDIAN); /* 保存左侧中值。 */
+      break;
+    case 0x08U:
+      ScreenKey_LegacyEventPost(KEY_STORAMEDIAN2); /* 保存右侧中值。 */
+      break;
+    default:
+      break; /* 未定义定标键不改变一次性旧事件。 */
+  }
+}
 
-								switch (dat1[8])
-								{
-#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
-									case 0x01 : ScreenKey_PostLegacyAction(5U); break;  // 显示镜像开启时，屏幕原 A 区实际对应逻辑 B 泵加。
-									case 0x02 : ScreenKey_PostLegacyAction(6U); break;  // 显示镜像开启时，屏幕原 A 区实际对应逻辑 B 泵减。
-									case 0x03 : ScreenKey_PostLegacyAction(11U); break; // 显示镜像开启时，屏幕原 A 区实际对应逻辑 B 泵启停。
-#else
-									case 0x01 : ScreenKey_PostLegacyAction(7U); break;  //A 泵加
-									case 0x02 : ScreenKey_PostLegacyAction(8U); break;  //A 泵减
-									case 0x03 : ScreenKey_PostLegacyAction(12U); break; //A 泵启停
-#endif
-									default : break;
-								}
-						}break;
+/*
+ * 函数功能：按 DWIN 地址区和 key 编号分派一帧已经通过长度校验的屏幕按键。
+ * 输入参数：frame 指向完整屏幕帧，至少包含 9 字节。
+ * 返回参数：无。
+ */
+static void ScreenKey_DispatchFrame(const uint8_t *frame)
+{
+  uint8_t action = 0U; /* 0 表示当前地址没有对应业务动作。 */
+  uint8_t section = frame[5]; /* DWIN 地址低字节决定主运行页功能区。 */
+  uint8_t key_index = frame[8]; /* 数据区第一个字节是该功能区内的按键编号。 */
 
-					case 0x06 :// B 泵加、减、启停
-								{ 
-									switch (dat1[8])
-									{
-#if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
-										case 0x01 : ScreenKey_PostLegacyAction(7U); break;  // 显示镜像开启时，屏幕原 B 区实际对应逻辑 A 泵加。
-										case 0x02 : ScreenKey_PostLegacyAction(8U); break;  // 显示镜像开启时，屏幕原 B 区实际对应逻辑 A 泵减。
-										case 0x03 : ScreenKey_PostLegacyAction(12U); break; // 显示镜像开启时，屏幕原 B 区实际对应逻辑 A 泵启停。
-#else
-										case 0x01 : ScreenKey_PostLegacyAction(5U); break;  //B 泵加
-										case 0x02 : ScreenKey_PostLegacyAction(6U); break;  //B 泵减
-										case 0x03 : ScreenKey_PostLegacyAction(11U); break; //B 泵启停
-#endif
-										default : break;
-									}
-							}break;
-            case 0x07 ://  触控工作区：key2 为触控退出
-						{
-							switch (dat1[8])
-							{
-								case 0x02 : ScreenKey_PostLegacyAction(42U); break;  //触控退出，释放屏幕控制
-								default : break;
-							}
-						}break;
-            case 0x20 ://  定标按键
-						{ 
-							switch (dat1[8])
-							{
-								case 0x01 : ScreenKey_LegacyEventPost(KEY_STORAGEMIN); break;  //存储小值(低值左边)
-								case 0x02 : ScreenKey_LegacyEventPost(KEY_STORAGEMAX); break;  //存储大值（高值左边）
-								case 0x03 : ScreenKey_LegacyEventPost(KEY_STORAGEMIN2); break;  //存储小值2（低值右边）
-								case 0x04 : ScreenKey_LegacyEventPost(KEY_STORAGEMAX2); break;  //存储大值2（高值右边）
-								case 0x07 : ScreenKey_LegacyEventPost(KEY_STORAMEDIAN); break;  //存储中间值（左边中间）
-								case 0x08 : ScreenKey_LegacyEventPost(KEY_STORAMEDIAN2); break;  //存储中间值2（右边中间）
-								
-								default : break;
-							}
-						}break; 
+  if (frame[4] == 0x55U)
+  {
+    if (section == 0x20U)
+    {
+      ScreenKey_PostLegacyAction(44U); /* 0x5520 为触控保活，按住期间持续运行。 */
+    }
+    return;
+  }
 
-						default : break;
-					}
-		    }
-		    break;
-			case 0x55:
-				 switch (dat1[5])
-					{
-						case 0x20 : ScreenKey_PostLegacyAction(44U); break;  //触控保活，按住期间持续运行
-            //ScreenKey_ResetTouchKeepAlive();
+  if (frame[4] != 0x24U)
+  {
+    return; /* 启动页 0x20 和其它未定义地址只消费串口帧，不进入业务。 */
+  }
 
-					//	case 0x30 : ScreenKey_PostLegacyAction(42U); break;  //触控停止
-					}
-					break;
-		    default : break;
-				
-	    }
+  switch (section)
+  {
+    case 0x00U:
+      action = ScreenKey_GetMappedAction(s_screen_handle_actions,
+                                         (uint8_t)sizeof(s_screen_handle_actions),
+                                         key_index);
+      break;
+    case 0x01U:
+      action = ScreenKey_GetMappedAction(s_screen_speed_actions,
+                                         (uint8_t)sizeof(s_screen_speed_actions),
+                                         key_index);
+      break;
+    case 0x02U:
+      action = ScreenKey_GetMappedAction(s_screen_direction_actions,
+                                         (uint8_t)sizeof(s_screen_direction_actions),
+                                         key_index);
+      break;
+    case 0x03U:
+      action = ScreenKey_GetMappedAction(s_screen_frequency_actions,
+                                         (uint8_t)sizeof(s_screen_frequency_actions),
+                                         key_index);
+      break;
+    case 0x04U:
+      action = ScreenKey_GetMappedAction(s_screen_control_mode_actions,
+                                         (uint8_t)sizeof(s_screen_control_mode_actions),
+                                         key_index);
+      break;
+    case 0x05U:
+    case 0x06U:
+      action = ScreenKey_GetPumpAction(section, key_index);
+      break;
+    case 0x07U:
+      action = (key_index == 0x02U) ? 42U : 0U; /* 触控工作区 key2 退出触控。 */
+      break;
+    case 0x20U:
+      ScreenKey_DispatchCalibrationKey(key_index);
+      return;
+    default:
+      return; /* 未定义功能区不产生业务按键。 */
+  }
 
+  if (action != 0U)
+  {
+    ScreenKey_PostLegacyAction(action); /* 所有主运行页动作统一进入现有按键队列。 */
+  }
 }
 
 /*

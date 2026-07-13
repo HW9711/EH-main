@@ -323,8 +323,11 @@ static void SoftUart_InitTimingBase(void)
     }
 }
 
-/* 微秒延时函数仅用于 TX bit-bang。
- * RX 时序统一由 TIM11 中断驱动，避免阻塞式接收占用 CPU。 */
+/*
+ * 函数功能：为软串口 TX 位发送提供微秒延时；RX 由 A 路 TIM11、B 路 TIM13 独立中断采样，不使用本函数阻塞接收。
+ * 输入参数：us 为需要等待的微秒数。
+ * 返回参数：无。
+ */
 static void delay_us(uint32_t us)
 {
     if (s_dwt_ready)

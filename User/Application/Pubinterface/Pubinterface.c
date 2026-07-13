@@ -20,15 +20,13 @@ ControlSigleMessage_t ControlSigleMssage;
 ControlSignalMessage_t ControlSignalMessage;
 
 WorkMessage_t WorkMessage;		   // 工作信息
-ChannelMemoryMessagr_t MemoryMsgA; // 通道记忆（增对可调节参数），用于切换手柄
-ChannelMemoryMessagr_t MemoryMsgB; //
+ChannelMemoryMessage_t MemoryMsgA; // A 通道记忆，用于切换通道后恢复识别参数和用户设置
+ChannelMemoryMessage_t MemoryMsgB; // B 通道记忆，字段含义与 A 通道完全一致
 pumpMessage_t pumpMessageA;
 pumpMessage_t pumpMessageB;
 uint32_t paoxueSpeciValue_A[4] = {0U}; /* A 通道刀具规格缓存从旧屏适配层迁出，供手柄识别和新 UI 读取。 */
 uint32_t paoxueSpeciValue_B[4] = {0U}; /* B 通道刀具规格缓存从旧屏适配层迁出，旧接口删除后仍保留业务数据。 */
 uint8_t paoxueSpeciValue_F[16] = {0U}; /* 分体刀具扩展缓存保留在业务层，避免旧屏文件被删除后丢失识别状态。 */
-/* 当前控制权持有者，四种控制方式必须等待当前持有者结束后才能重新申请。 */
-static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
 /* 脚踏在线周期内的屏幕手动选择锁存；置 1 后本次脚踏在线期间不再自动抢回脚控。 */
 static volatile uint8_t s_foot_priority_manual_lock = 0U;
 /* Page4 速度/频率阈值只驱动蜂鸣，不写 WorkMessage.alarm_flag，避免阈值提示阻塞降速操作。 */
@@ -64,24 +62,12 @@ static uint8_t s_handle_injection_pump_follow_mask = 0U;
 /* 注水泵压力堵塞导致手柄安全停机后的锁存位，用户明确停止/退出前禁止保活或重复启动把手柄重新拉起。 */
 static uint8_t s_handle_pressure_block_stop_latched = 0U;
 
-/* 电机反馈小于等于该阈值时认为机械输出已停止；0 表示必须等驱动反馈真实归零。 */
-#define CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD 0U
 /* 手柄运行联动注水泵的默认冷却流量；Page4 写 0、越界或未装载时统一回退到 30。 */
 #define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 30U
 /* 注水泵默认流量最小有效值，0 表示 EEPROM 未配置或非法，不能直接启动泵。 */
 #define HANDLE_INJECTION_PUMP_FLOW_MIN 1U
 /* 注水泵默认流量最大有效值，保持和注水泵业务 0~70ml 范围一致。 */
 #define HANDLE_INJECTION_PUMP_FLOW_MAX 70U
-/* 抽吸泵业务最大显示/设定速度，和 sscPUMPA/B.c 中最终输出限幅保持一致。 */
-#define PUMP_DRAWWATER_SPEED_MAX 15U
-/* 灌注泵业务最大显示/设定速度，和 sscPUMPA/B.c 中最终输出限幅保持一致。 */
-#define PUMP_POURWATER_SPEED_MAX 300U
-/* 抽吸泵 0 速启动时的兜底速度，避免只置 run_flag 但泵任务继续输出 0。 */
-#define PUMP_DRAWWATER_START_SPEED 3U
-/* 灌注泵 0 速启动时的兜底速度，对应屏幕一档灌注流量。 */
-#define PUMP_POURWATER_START_SPEED 50U
-/* 触控/外控退出后需要复用本机控制方式恢复规则，前置声明避免 AC5 按隐式 int 解析。 */
-static uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void);
 /* 新屏速度按键在旧通道记忆无步进时的兜底步进，避免初次插入或旧参数为空时按键无效。 */
 #define SCREEN_SPEED_STEP_FALLBACK 1000U
 /* 新屏速度大步进缺省值，只有 EEPROM Page6[2..3] 无效时才使用，正常情况直接用手柄配置。 */
@@ -135,7 +121,7 @@ static uint8_t Pubinterface_MapHandleModelToUiType(uint8_t handle_model)
 	}
 }
 
-static void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag)
+void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag)
 {
 	uint8_t display_value[10] = {0U};
 
@@ -149,7 +135,7 @@ static void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model
 	SendUIDSMessage(UI_HANDLE_ID, enable_flag, display_value);
 }
 
-static void Pubinterface_RefreshOnlineHandleDisplay(void)
+void Pubinterface_RefreshOnlineHandleDisplay(void)
 {
 	/* A 通道在线时刷新 A 手柄图标，并按当前工作通道决定是否高亮。 */
 	if (WorkMessage.Channel_Aonline)
@@ -175,7 +161,7 @@ static void Pubinterface_RefreshOnlineHandleDisplay(void)
  * 输入参数：hand_model EEPROM 识别出的手柄型号。
  * 返回参数：true 表示优先显示规格窗口，false 表示显示普通刀具图标。
  */
-static bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
+bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||
 			(hand_model == PXBB_ONLINES));
@@ -231,7 +217,7 @@ static bool Pubinterface_IsRfidToolSpecDisplayModel(uint8_t hand_model)
  * 输入参数：tool_type 当前通道识别或手动选择得到的刀具类型字段。
  * 返回参数：true 表示该刀具按刨刀能力开放往复；false 表示按普通磨头/未知刀具处理。
  */
-static bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
+bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
 {
 	return (tool_type == PLANER); /* 刀具能力只看归一后的 PLANER，MXYTP/PXYTP 只作为手柄型号参与往复能力判断。 */
 }
@@ -274,7 +260,7 @@ static bool Pubinterface_IsOscDirectionSupported(uint8_t hand_model, uint8_t too
  * 输入参数：hand_model 当前手柄基座型号；tool_type 当前刀具能力类型。
  * 返回参数：true 表示 PXBA/PXBB 且刀具为 PLANER，false 表示隐藏开口定位并拦截动作。
  */
-static bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type)
+bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type)
 {
 	return ((Pubinterface_IsSplitToolSpecDisplayModel(hand_model) == true) &&
 			(Pubinterface_IsPlanerCapabilityTool(tool_type) == true)); /* 开口定位只给 PXBA/PXBB 的 PLANER 刀具开放，PXP 只保留往复能力。 */
@@ -285,7 +271,7 @@ static bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t t
  * 输入参数：channel 为 A/B 通道；tool_type 为归一后的 PLANER/GRINDH 或兼容旧型号码。
  * 返回参数：无。
  */
-static void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type)
+void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type)
 {
 	if (channel == CHANNEL_A)
 	{
@@ -494,7 +480,7 @@ static void Pubinterface_RefreshToolDisplay(uint8_t channel, bool planer_selecte
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Pubinterface_ClearSelectedChannelDisplay(void)
+void Pubinterface_ClearSelectedChannelDisplay(void)
 {
 	uint8_t display_value[10] = {0U};
 
@@ -519,7 +505,7 @@ static void Pubinterface_ClearSelectedChannelDisplay(void)
  * 输入参数：hand_model 为 EEPROM 识别出的系统内部手柄型号。
  * 返回参数：true 表示界面允许显示手控入口，false 表示保持当前控制方式。
  */
-static bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
+bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||    /* EX8 表格确认 PXBA 分体手柄允许显示并进入手控。 */
 			(hand_model == PXBB_ONLINES) ||    /* EX8 表格确认 PXBB 分体手柄允许显示并进入手控。 */
@@ -544,7 +530,7 @@ static bool Pubinterface_IsCommonSocketReservedModel(uint8_t hand_model)
  */
 bool Pubinterface_IsCommonSocketToolReady(void)
 {
-	ChannelMemoryMessagr_t *memory = NULL; /* 当前通道记忆用于复核刀具类型，避免 WorkMessage 切换过程中的短暂字段不一致。 */
+	ChannelMemoryMessage_t *memory = NULL; /* 当前通道记忆用于复核刀具类型，避免 WorkMessage 切换过程中的短暂字段不一致。 */
 	ChannelrecognizeMessage_t *recognize = NULL; /* 扫描层缓存表示当前 RFID 刀具头是否仍被在线监测确认，不能只看历史 MemoryMsg。 */
 
 	if (WorkMessage.hand_model != COMMON_SOCKET_ONLINES)
@@ -632,7 +618,7 @@ bool Pubinterface_CheckCommonSocketToolReadyForRun(void)
  * 输入参数：无，直接读取公共接头就绪状态和 WorkMessage 报警状态。
  * 返回参数：无。
  */
-static void Pubinterface_ClearCommonSocketToolMissingAlarm(void)
+void Pubinterface_ClearCommonSocketToolMissingAlarm(void)
 {
 	if (s_common_socket_tool_missing_alarm_active == 0U)
 	{
@@ -692,7 +678,7 @@ static void Pubinterface_ServiceCommonSocketToolMissingAlarm(void)
  */
 static void Pubinterface_ApplyEx8ControlModeFallback(void)
 {
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前通道记忆，回落手控时要同步修改，避免下次切回通道又恢复脚控。 */
+	ChannelMemoryMessage_t *memory = NULL; /* 指向当前通道记忆，回落手控时要同步修改，避免下次切回通道又恢复脚控。 */
 
 	if (WorkMessage.hmiactive_work != 0U)
 	{
@@ -775,7 +761,7 @@ bool Pubinterface_ApplyFootControlPriorityOnConnect(void)
 		return false; /* 手柄正在运行时不抢控制模式，避免脚踏热插入改变正在执行的控制来源。 */
 	}
 
-	if (WorkMessage.driver_speed_feedback > CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD)
+	if (WorkMessage.driver_speed_feedback > 0U)
 	{
 		return false; /* 停止命令刚下发但电机反馈还未归零时，仍视为未停稳，不允许脚踏抢模式。 */
 	}
@@ -975,7 +961,7 @@ static void Pubinterface_SendDirectionDisplay(uint8_t ui_dir_id, bool enable_fla
  * 输入参数：channel 本次刚被选中的通道。
  * 返回参数：无。
  */
-static void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
+void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 {
 	uint8_t display_value[10] = {0U}; /* 所有 UI 消息都使用 10 字节缓冲，保持 UIDP 队列拷贝格式稳定。 */
 	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* 只有归一后的 PLANER 才按刨刀能力显示往复相关入口。 */
@@ -1128,7 +1114,7 @@ static void Pubinterface_StopHandleInjectionPumpByMask(uint8_t stop_mask)
 	{
 		pumpMessageA.run_flag = false;			 /* A 注水泵由手柄冷却触发时必须立即撤销运行请求，避免无冷却对象后继续出水。 */
 		pumpMessageA.timingDrainage_flag = false; /* 压力堵塞安全停机优先级高于排空，必须退出 A 排空状态。 */
-		pumpMessageA.pedalDrainage_flag = false; /* 安全停机同时退出脚踏临时70档，防止下次普通联动继承。 */
+		pumpMessageA.pedalDrainage_flag = false; /* 安全停机同时退出脚踏轻踩来源，防止下次普通联动继承。 */
 		pumpMessageA.timingDrainage_times = 0U;   /* 清零 A 排空计数，后续排空必须重新开始完整周期。 */
 		s_handle_injection_pump_follow_mask &= (uint8_t)(~HANDLE_INJECTION_FOLLOW_PUMP_A); /* 释放 A 跟随标记，后续停止手柄不再重复处理 A 泵。 */
 		Pubinterface_UpdatePumpAOutputSpeed(0U);  /* A 泵实际输出已经被压到 0，立即同步给屏幕和上位机显示。 */
@@ -1139,7 +1125,7 @@ static void Pubinterface_StopHandleInjectionPumpByMask(uint8_t stop_mask)
 	{
 		pumpMessageB.run_flag = false;			 /* B 注水泵由手柄冷却触发时必须立即撤销运行请求，避免无冷却对象后继续出水。 */
 		pumpMessageB.timingDrainage_flag = false; /* 压力堵塞安全停机优先级高于排空，必须退出 B 排空状态。 */
-		pumpMessageB.pedalDrainage_flag = false; /* B 泵安全停机时同步退出脚踏临时70档。 */
+		pumpMessageB.pedalDrainage_flag = false; /* B 泵安全停机时同步退出脚踏轻踩来源。 */
 		pumpMessageB.timingDrainage_times = 0U;   /* 清零 B 排空计数，后续排空必须重新开始完整周期。 */
 		s_handle_injection_pump_follow_mask &= (uint8_t)(~HANDLE_INJECTION_FOLLOW_PUMP_B); /* 释放 B 跟随标记，后续停止手柄不再重复处理 B 泵。 */
 		Pubinterface_UpdatePumpBOutputSpeed(0U);  /* B 泵实际输出已经被压到 0，立即同步给屏幕和上位机显示。 */
@@ -1158,7 +1144,7 @@ static void Pubinterface_StopPumpByPressureMask(uint8_t blocked_mask)
 	{
 		pumpMessageA.run_flag = false;            /* A 泵压力到阈值后撤销运行门控，下一周期不能再按旧控制源输出。 */
 		pumpMessageA.timingDrainage_flag = false; /* 压力保护优先级高于排空，必须同步退出 A 泵排空状态。 */
-		pumpMessageA.pedalDrainage_flag = false;  /* 压力停泵同时关闭脚踏临时70档，松脚前不能继续向堵塞水路输出。 */
+		pumpMessageA.pedalDrainage_flag = false;  /* 压力停泵同时关闭脚踏轻踩来源，松脚前不能继续向堵塞水路输出。 */
 		pumpMessageA.timingDrainage_times = 0U;   /* A 泵排空计数清零，下一次排空必须由新的控制源重新触发。 */
 		Pubinterface_UpdatePumpAOutputSpeed(0U);  /* A 泵实际输出已停，显示值和上位机运行值必须同步为 0。 */
 		Pubinterface_RefreshPumpADisplay();       /* 立即刷新 A 泵按钮和数值，避免屏幕仍显示运行态。 */
@@ -1394,7 +1380,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		bool drainage_was_active = (pumpMessageA.timingDrainage_flag || pumpMessageA.pedalDrainage_flag); /* 记录 A 泵是否正从屏幕或脚踏排空切入手柄联动。 */
 
 		pumpMessageA.timingDrainage_flag = false; /* 手柄运行联动不是定时排空，先清 A 排空标志，避免后台排空计时抢写输出。 */
-		pumpMessageA.pedalDrainage_flag = false; /* 进入手柄联动后取消临时70档，下一泵周期直接使用屏幕 speed_work。 */
+		pumpMessageA.pedalDrainage_flag = false; /* 进入手柄联动后结束脚踏轻踩来源，下一泵周期继续使用屏幕 speed_work。 */
 		pumpMessageA.timingDrainage_times = 0U;   /* A 排空计数清零，保证后续真正进入排空时从完整周期开始。 */
 
 		pumpMessageA.run_flag = true;			   /* 打开 A 泵任务运行门控，下一周期按注水公式和压力闭环输出。 */
@@ -1418,7 +1404,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		bool drainage_was_active = (pumpMessageB.timingDrainage_flag || pumpMessageB.pedalDrainage_flag); /* 记录 B 泵任一排空来源到手柄联动的切换边沿。 */
 
 		pumpMessageB.timingDrainage_flag = false; /* 手柄运行联动不是定时排空，先清 B 排空标志，避免后台排空计时抢写输出。 */
-		pumpMessageB.pedalDrainage_flag = false; /* B 泵进入手柄冷却后恢复屏幕设定速度，不继续固定70。 */
+		pumpMessageB.pedalDrainage_flag = false; /* B 泵进入手柄冷却后结束脚踏轻踩来源，继续使用屏幕设定速度。 */
 		pumpMessageB.timingDrainage_times = 0U;   /* B 排空计数清零，保证后续真正进入排空时从完整周期开始。 */
 		pumpMessageB.run_flag = true;			   /* 打开 B 泵任务运行门控，下一周期按注水公式和压力闭环输出。 */
 		s_handle_injection_pump_follow_mask |= HANDLE_INJECTION_FOLLOW_PUMP_B; /* 记录 B 泵由手柄冷却跟随启动，停止时才允许本函数释放。 */
@@ -1442,7 +1428,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
  * 输入参数：无。
  * 返回参数：true 表示本次确实清除了手柄未连接报警；false 表示当前不是该报警。
  */
-static bool Pubinterface_ClearHandleNotConnectedAlarm(void)
+bool Pubinterface_ClearHandleNotConnectedAlarm(void)
 {
 	if (WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED))
 	{
@@ -1499,11 +1485,23 @@ static void Pubinterface_ServiceRunningHandleUnplugTimedAlarm(void)
 }
 
 /*
+ * 函数功能：周期维护公共接头缺刀具、泵压力堵塞和运行中拔手柄三类限时报警。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Pubinterface_ServiceTransientAlarms(void)
+{
+	Pubinterface_ServiceCommonSocketToolMissingAlarm(); /* 维护公共接头缺刀具弹窗的保持和退出时机。 */
+	Pubinterface_ServicePumpPressureBlockedTimedAlarm(); /* 维护泵压力堵塞弹窗的保持和退出时机。 */
+	Pubinterface_ServiceRunningHandleUnplugTimedAlarm(); /* 维护运行中拔手柄弹窗的保持和退出时机。 */
+}
+
+/*
  * 函数功能：手柄拔出清屏或队列复位后，重新补发当前仍有效的掉线报警弹窗。
  * 输入参数：无，读取手控临时报警归属和全局手柄未连接报警状态。
  * 返回参数：无。
  */
-static void Pubinterface_RefreshHandleUnplugAlarmDisplay(void)
+void Pubinterface_RefreshHandleUnplugAlarmDisplay(void)
 {
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 固定只使用 Value[0] 传报警码，补发时也保持同一协议。 */
 
@@ -1545,7 +1543,7 @@ void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void)
  * 输入参数：无，函数读取当前 WorkMessage、ControlSignalMessage 和 A/B 泵状态。
  * 返回参数：无。
  */
-static void Pubinterface_StopRunningHandleOnUnplug(void)
+void Pubinterface_StopRunningHandleOnUnplug(void)
 {
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只使用 Value[0] 保存报警码，其余字节清零避免旧值残留。 */
 	uint8_t unplug_drive_type = WorkMessage.drivetype_work; /* 先保存掉线前控制方式，后面清运行标志后还要按来源决定报警生命周期。 */
@@ -1576,14 +1574,14 @@ static void Pubinterface_StopRunningHandleOnUnplug(void)
 	{
 		pumpMessageA.run_flag = false;           /* A 为注水泵时强制停泵，手柄已经掉线不再需要冷却供水。 */
 		pumpMessageA.timingDrainage_flag = false; /* 掉线停泵优先级高于排空，必须同步退出排空计时。 */
-		pumpMessageA.pedalDrainage_flag = false;  /* 手柄掉线时退出 A 泵脚踏临时排空，防止报警解除后沿用70档。 */
+		pumpMessageA.pedalDrainage_flag = false;  /* 手柄掉线时退出 A 泵脚踏轻踩来源，防止报警解除后沿用旧状态。 */
 		pumpMessageA.timingDrainage_times = 0U;  /* 清掉 A 排空计数，避免下次启动继承掉线前的排空时间。 */
 	}
 	if (pumpMessageB.type == INJECTWATER)
 	{
 		pumpMessageB.run_flag = false;           /* B 为注水泵时同样强制停泵，覆盖 B 唯一注水泵和双注水泵场景。 */
 		pumpMessageB.timingDrainage_flag = false; /* B 注水泵掉线停泵时退出排空模式，防止泵任务继续输出。 */
-		pumpMessageB.pedalDrainage_flag = false;  /* B 泵掉线停机时同步清除脚踏临时70档。 */
+		pumpMessageB.pedalDrainage_flag = false;  /* B 泵掉线停机时同步清除脚踏轻踩来源。 */
 		pumpMessageB.timingDrainage_times = 0U;  /* 清掉 B 排空计数，保证下次运行从干净状态开始。 */
 	}
 	Pubinterface_RefreshPumpADisplay();          /* A 泵实际运行状态已改变，立即刷新屏幕显示，保证显示值和输出一致。 */
@@ -1662,83 +1660,13 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 }
 
 /*
- * 函数功能：按泵业务类型取得 0 速启动时可直接写入 speed_work 的兜底速度。
- * 输入参数：pump_message 指向 A/B 泵运行状态，函数只读取 type 字段判断泵类型。
- * 返回参数：有效泵类型返回非零启动速度；无效类型或空指针返回 0。
- */
-uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message)
-{
-	if (pump_message == NULL)
-	{
-		return 0U; /* 防御空指针，避免异常调用把未知泵类型误补成有效速度。 */
-	}
-
-	switch (pump_message->type)
-	{
-	case DRAWWATER:
-		return PUMP_DRAWWATER_START_SPEED; /* 抽吸泵从一档小流量启动，避免 0 速只亮运行态。 */
-	case INJECTWATER:
-		return Pubinterface_GetInjectionPumpStartFlow(); /* 注水泵沿用当前通道 Page4 默认流量，非法值回退 30。 */
-	case POURWATER:
-		return PUMP_POURWATER_START_SPEED; /* 灌注泵从一档 50ml 启动，解决屏幕直接启动时不转的问题。 */
-	default:
-		return 0U; /* 未识别泵不能补速度，避免屏幕或上位机误启动未知设备。 */
-	}
-}
-
-/*
- * 函数功能：取得屏幕加减速使用的泵速度上限。
- * 输入参数：pump_message 指向 A/B 泵运行状态，优先读取已配置 speed_Max，未配置时按泵类型回退。
- * 返回参数：当前泵类型允许的最大速度；未知类型返回 0。
- */
-static uint16_t Pubinterface_GetPumpSpeedMax(const pumpMessage_t *pump_message)
-{
-	if (pump_message == NULL)
-	{
-		return 0U; /* 防御空指针，防止调速入口异常时写出不可控速度。 */
-	}
-
-	if (pump_message->speed_Max != 0U)
-	{
-		return pump_message->speed_Max; /* 若后续 EEPROM 或参数表配置了上限，则优先服从配置值。 */
-	}
-
-	switch (pump_message->type)
-	{
-	case DRAWWATER:
-		return PUMP_DRAWWATER_SPEED_MAX; /* 抽吸泵上限与泵任务 15 档限幅一致。 */
-	case INJECTWATER:
-		return PUMP_INJECTWATER_SPEED_MAX; /* 注水泵上限与 pump.h 中统一宏一致。 */
-	case POURWATER:
-		return PUMP_POURWATER_SPEED_MAX; /* 灌注泵上限与泵任务 300ml 限幅一致。 */
-	default:
-		return 0U; /* 未识别泵类型不允许加速，避免残留步进值改坏状态。 */
-	}
-}
-
-/*
- * 函数功能：取得屏幕加减速使用的泵速度下限。
- * 输入参数：pump_message 指向 A/B 泵运行状态，读取 speed_Min 作为配置下限。
- * 返回参数：当前泵速度下限；空指针返回 0。
- */
-static uint16_t Pubinterface_GetPumpSpeedMin(const pumpMessage_t *pump_message)
-{
-	if (pump_message == NULL)
-	{
-		return 0U; /* 防御空指针，下限按 0 处理可保证不会出现负速度。 */
-	}
-
-	return pump_message->speed_Min; /* 当前工程未初始化 speed_Min 时自然为 0，后续配置非零时可自动生效。 */
-}
-
-/*
  * 函数功能：读取当前工作通道当前方向的默认电机速度，供脚踏启动时替代旧的固定 60000。
  * 输入参数：无，函数内部读取 WorkMessage.channel_work 和 WorkMessage.dir_work。
  * 返回参数：当前方向默认速度，单位沿用 WorkMessage.speed_set_work 的实际 rpm；无有效通道时返回 0。
  */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void)
 {
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前工作通道记忆结构，后续按方向读取该通道 Page4 默认速度。 */
+	ChannelMemoryMessage_t *memory = NULL; /* 指向当前工作通道记忆结构，后续按方向读取该通道 Page4 默认速度。 */
 
 	if (WorkMessage.channel_work == CHANNEL_A)
 	{
@@ -1771,7 +1699,7 @@ uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void)
  * 输入参数：flow 为待装载的默认流量；0 或越界时按程序默认 30 处理。
  * 返回参数：无。
  */
-static void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
+void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
 {
 	uint16_t default_flow = Pubinterface_BuildInjectionPumpStartFlow(flow); /* 统一规整默认流量，保证无手柄或 EEPROM 异常时都回到 30。 */
 
@@ -1793,7 +1721,7 @@ static void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
  * 输入参数：channel 本次成为当前选中手柄的通道。
  * 返回参数：无。
  */
-static void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
+void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
 {
 	Pubinterface_ApplyInjectionPumpDefaultFlow(Pubinterface_GetChannelDefaultInjectionFlow(channel)); /* 只在通道成为当前选中时装载 Page4 默认流量，避免普通运行周期覆盖用户手动调节。 */
 }
@@ -1817,7 +1745,7 @@ bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value)
  */
 void Pubinterface_LoadChannelMemory(uint8_t channel)
 {
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向即将成为当前工作快照的通道记忆结构。 */
+	ChannelMemoryMessage_t *memory = NULL; /* 指向即将成为当前工作快照的通道记忆结构。 */
 
 	if (channel == CHANNEL_A)
 	{
@@ -1872,7 +1800,7 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
  * 输入参数：channel 本次插入并已写入 MemoryMsg 的通道。
  * 返回参数：true 表示可以自动选中，false 表示只更新通道记忆等待用户手动切换。
  */
-static bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel)
+bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel)
 {
 	if (((channel == CHANNEL_A) && (WorkMessage.Channel_Aonline == false)) ||
 		((channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == false)))
@@ -1898,10 +1826,10 @@ static bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel)
  * 输入参数：channel 本次插入并认证通过的通道。
  * 返回参数：无。
  */
-static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
+void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层刚刚完成认证的临时识别缓存。 */
-	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向要更新的 A/B 通道记忆结构。 */
+	ChannelMemoryMessage_t *memory = NULL;		  /* 指向要更新的 A/B 通道记忆结构。 */
 	uint8_t keep_auto_identify = 0U;				  /* RFID 二次刷新前保留通道自动识别状态，避免新刀具参数覆盖该模式记忆。 */
 	uint32_t keep_zz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的正转速度，避免标签默认值覆盖屏幕调节结果。 */
 	uint32_t keep_fz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的反转速度，保证异常掉线恢复后仍按用户设置运行。 */
@@ -2032,7 +1960,7 @@ static void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层通道识别缓存，用于清掉心跳有效性判断会读取的刀具字段。 */
-	ChannelMemoryMessagr_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时保留速度等历史参数，但当前可运行刀具必须清零。 */
+	ChannelMemoryMessage_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时保留速度等历史参数，但当前可运行刀具必须清零。 */
 	uint8_t keep_drive_type = WorkMessage.drivetype_work; /* 保留原控制方式记忆，刀具头移开不应把脚控/触控/外控显示重置。 */
 	uint8_t keep_auto_identify = WorkMessage.auto_identify; /* 保留用户选择的自动/手动识别模式，刀具掉线不应改模式或清通道记忆。 */
 	uint8_t keep_raw_tool_type = 0U; /* 保留最近一次原始刀具型号，避免扫描层清零后通道记忆丢失驱动兼容字段。 */
@@ -2134,7 +2062,7 @@ static uint16_t Pubinterface_BuildSpeedAlarmThreshold(uint16_t alarm_value)
  */
 void Pubinterface_CheckSpeedThresholdAlarm(void)
 {
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前工作通道的 Page4 阈值记忆，用于区分 A/B 手柄。 */
+	ChannelMemoryMessage_t *memory = NULL; /* 指向当前工作通道的 Page4 阈值记忆，用于区分 A/B 手柄。 */
 	uint16_t threshold_alarm = 0U;		   /* 保存当前方向下 Page4 配置的速度/频率报警阈值，0 表示不报警。 */
 	uint8_t should_beep = 0U;			   /* 保存本周期是否需要速度/频率阈值蜂鸣。 */
 
@@ -2203,31 +2131,6 @@ void Pubinterface_CheckSpeedThresholdAlarm(void)
 	}
 }
 
-void WorkAlarm_Set(uint8_t alarm_value)
-{
-	/* 所有新报警统一写 WorkMessage，避免再通过旧报警字段分散传递。 */
-	WorkMessage.alarm_value = alarm_value;
-	WorkMessage.alarm_flag = (alarm_value != WORK_ALARM_NONE);
-}
-
-void WorkAlarm_Clear(void)
-{
-	WorkAlarm_Set(WORK_ALARM_NONE);
-}
-
-void WorkAlarm_ClearIf(uint8_t alarm_value)
-{
-	/* 只清理调用方拥有的报警，避免一个模块恢复时误清另一个模块仍存在的故障。 */
-	if ((WorkMessage.alarm_flag == true) && (WorkMessage.alarm_value == alarm_value))
-	{
-		WorkAlarm_Clear();
-	}
-}
-
-bool WorkAlarm_Is(uint8_t alarm_value)
-{
-	return ((WorkMessage.alarm_flag == true) && (WorkMessage.alarm_value == alarm_value));
-}
 
 /*
  * 控制信号结构体目前仍处于新旧模块并行迁移阶段，保留 ChannelMessageInit()
@@ -2240,630 +2143,6 @@ static void ControlMessageInit(void)
 	memset(&ControlSigleMssage, 0, sizeof(ControlSigleMssage));
 }
 
-/*
- * 函数功能：清除当前电机、脚踏、外控和 A/B 泵输出状态，用于外控进入、退出和超时安全停机。
- * 输入参数：无。
- * 返回参数：无。
- */
-/*
- * 函数功能：仲裁切换或释放控制权时统一停止电机、脚踏/外控标志和 A/B 泵输出。
- * 输入参数：无，函数直接清理 WorkMessage、ControlSignalMessage 和 pumpMessageA/B。
- * 返回参数：无。
- */
-static void ControlArbitration_StopMotionOutput(void)
-{
-	/* 仲裁切换控制权时，先停电机，避免上一个控制源留下运行状态。 */
-	WorkMessage.runflag_work = false;
-	/* 实际输出速度清零，驱动任务下一周期会按停止状态下发。 */
-	WorkMessage.speed_work = 0U;
-	/* 清除手柄按键运行标志，防止退出外控后沿用旧的手柄启动状态。 */
-	ControlSignalMessage.handle_control_flag = false;
-	/* 清除外部控制运行标志，真正的控制权由 s_control_owner 统一表达。 */
-	ControlSignalMessage.HMI_control_flag = false;
-	/* 清除左右脚踏电机控制标志，避免外控期间脚踏状态残留。 */
-	ControlSignalMessage.jtL_control_flag = false;
-	ControlSignalMessage.jtR_control_flag = false;
-	/* 清除三类轻排泵运行标志，使泵状态和电机状态一起回到空闲。 */
-	ControlSignalMessage.jtL_gentlypump_flag = false;
-	ControlSignalMessage.jtR_gentlypump_flag = false;
-	ControlSignalMessage.HMI_gentlypump_flag = false;
-	/* 清除外控泵启动标志，避免 A/B 泵被旧外控请求继续占用。 */
-	ControlSignalMessage.HMIL_pump_flag = false;
-	ControlSignalMessage.HMIR_pump_flag = false;
-	/* 停止 A 泵输出，并取消排空计时，避免退出外控后继续出水。 */
-	pumpMessageA.run_flag = false;
-	pumpMessageA.timingDrainage_flag = false;
-	pumpMessageA.timingDrainage_times = 0U;
-	/* 外控申请只停止 A 泵输出，不清除 speed_work 设定值，避免屏幕在外控授权后把泵速度显示成 0。 */
-	/* 停止 B 泵输出，并取消排空计时，保持两路泵的仲裁动作一致。 */
-	pumpMessageB.run_flag = false;
-	pumpMessageB.timingDrainage_flag = false;
-	pumpMessageB.timingDrainage_times = 0U;
-	/* 外控申请只停止 B 泵输出，不清除 speed_work 设定值，保证停止态仍显示原来的泵速度参数。 */
-	Pubinterface_RefreshPumpADisplay(); /* 仲裁停泵后刷新 A 泵数值和按钮，避免退出外控后屏幕保留旧速度。 */
-	Pubinterface_RefreshPumpBDisplay(); /* 仲裁停泵后刷新 B 泵数值和按钮，避免泵已停但屏幕仍显示运行。 */
-}
-
-/*
- * 函数功能：触控或外部控制退出后，按“脚踏优先、手控次之”的规则计算本机控制模式。
- * 输入参数：无，读取脚踏在线标志、当前手柄型号和当前通道记忆。
- * 返回参数：JTWORK/HANDLEWORK/NOWORK，表示退出占用后的本机驱动方式。
- */
-static uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
-{
-	uint8_t drive_type = NOWORK; /* 默认保持无控制方式，只有明确满足脚踏或手控条件时才恢复本机入口。 */
-
-	if (ControlSignalMessage.jt_enable_flag == true)
-	{
-		drive_type = JTWORK; /* 脚踏在线时优先回到脚控选中，满足触控退出后的脚控优先级要求。 */
-	}
-	else if (Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model))
-	{
-		drive_type = HANDLEWORK; /* 脚踏不在线且当前手柄支持手控时，回到手控选中。 */
-	}
-	else
-	{
-		drive_type = NOWORK; /* 没有脚踏也没有可手控手柄时，不虚亮任何控制方式。 */
-	}
-
-	if (WorkMessage.channel_work == CHANNEL_A)
-	{
-		MemoryMsgA.drive_type = drive_type; /* A 通道同步新的回落结果，避免退出触控后仍记着 TOUCHWORK。 */
-	}
-	else if (WorkMessage.channel_work == CHANNEL_B)
-	{
-		MemoryMsgB.drive_type = drive_type; /* B 通道同步新的回落结果，保证后续切回通道时显示一致。 */
-	}
-
-	return drive_type;
-}
-
-/*
- * 函数功能：判断驱动板反馈的实际转速是否仍表示电机在转动。
- * 输入参数：无，直接读取 WorkMessage.driver_speed_feedback。
- * 返回参数：true 表示驱动反馈转速仍大于停止阈值；false 表示反馈已经低于停止阈值。
- */
-static bool ControlArbitration_IsMotorFeedbackActive(void)
-{
-	/* 反馈转速来自 UART1 驱动板回包，用于避免刚下发停止命令但电机还未真实停稳时提前释放控制权。 */
-	return (WorkMessage.driver_speed_feedback > CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD);
-}
-
-/*
- * 函数功能：判断手柄电机当前是否处于忙状态。
- * 输入参数：无，读取 runflag_work 命令标志和 driver_speed_feedback 实际反馈。
- * 返回参数：true 表示电机被要求运行或反馈仍在转动；false 表示命令停止且反馈已停稳。
- */
-static bool ControlArbitration_IsMotorBusy(void)
-{
-	/* runflag_work 是主控下发运行帧的命令源，置位时必须认为电机正在被控制。 */
-	if (WorkMessage.runflag_work == true)
-	{
-		return true;
-	}
-
-	/* runflag_work 清零后继续看驱动反馈，保证仲裁释放跟真实停转绑定。 */
-	return ControlArbitration_IsMotorFeedbackActive();
-}
-
-/*
- * 函数功能：当本地电机已经停稳时自动释放脚踏、屏幕或手柄的电机控制权。
- * 输入参数：无，读取当前 owner 和电机忙状态。
- * 返回参数：无；满足释放条件时把 s_control_owner 置为 CONTROL_OWNER_NONE。
- */
-static void ControlArbitration_ReleaseLocalOwnerIfMotorIdle(void)
-{
-	/* 外部通信必须由主动退出、超时释放或急停释放，不能因为本地电机停稳自动退出。 */
-	if (s_control_owner == CONTROL_OWNER_EXTERNAL)
-	{
-		return;
-	}
-
-	/* 没有本地 owner 时不用处理，保持空闲状态。 */
-	if (s_control_owner == CONTROL_OWNER_NONE)
-	{
-		return;
-	}
-
-	/* 电机命令和反馈都已经停止时，本地控制源结束，本地三种方式可以重新竞争。 */
-	if (ControlArbitration_IsMotorBusy() == false)
-	{
-		s_control_owner = CONTROL_OWNER_NONE;
-	}
-}
-
-/*
- * 函数功能：校验传入的控制源编号是否合法。
- * 输入参数：owner 控制源编号，取 CONTROL_OWNER_EXTERNAL/FOOT/SCREEN/HANDLE。
- * 返回参数：true 表示控制源合法；false 表示非法编号，不能参与仲裁。
- */
-static bool ControlArbitration_IsValidOwner(uint8_t owner)
-{
-	/* 只接受四种正式控制来源，防止错误参数把仲裁锁写成未知状态。 */
-	return ((owner == CONTROL_OWNER_EXTERNAL) ||
-			(owner == CONTROL_OWNER_FOOT) ||
-			(owner == CONTROL_OWNER_SCREEN) ||
-			(owner == CONTROL_OWNER_HANDLE));
-}
-
-/*
- * 函数功能：把按键队列中的控制来源类型转换为电机仲裁 owner。
- * 输入参数：control_type 按键消息来源，取 JTKey/HANDLEKey/SCREENKey/HMIkey/PLUGunPLUG 等。
- * 返回参数：CONTROL_OWNER_*；插拔和未知来源返回 CONTROL_OWNER_NONE。
- */
-static uint8_t ControlArbitration_GetOwnerByKeySource(uint8_t control_type)
-{
-	/* 脚踏队列消息统一归属脚踏控制来源。 */
-	if (control_type == JTKey)
-	{
-		return CONTROL_OWNER_FOOT;
-	}
-
-	/* 手柄按键队列消息统一归属手柄按键控制来源。 */
-	if (control_type == HANDLEKey)
-	{
-		return CONTROL_OWNER_HANDLE;
-	}
-
-	/* 屏幕按钮和触控启动统一归属屏幕控制来源。 */
-	if (control_type == SCREENKey)
-	{
-		return CONTROL_OWNER_SCREEN;
-	}
-
-	/* 历史 HMIkey 仍按外部链路处理，避免它在脚踏/屏幕/手柄占用时绕过互斥。 */
-	if (control_type == HMIkey)
-	{
-		return CONTROL_OWNER_EXTERNAL;
-	}
-
-	/* 插拔和未知消息不参与运行控制权竞争。 */
-	return CONTROL_OWNER_NONE;
-}
-
-/*
- * 函数功能：判断泵控制按键是否需要占用电机仲裁 owner。
- * 输入参数：key_value 业务按键值，包含脚踏泵键、屏幕泵键和外控 HMI 泵键。
- * 返回参数：本地泵键返回 CONTROL_OWNER_NONE；外控泵键返回 CONTROL_OWNER_EXTERNAL。
- */
-static uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
-{
-	/* 脚踏泵按键和脚踏轻排按键只影响泵输出，不应该因为泵运行占用手柄电机 owner。 */
-	if ((key_value == JTkey_left_short) ||
-		(key_value == JTKey_left_long) ||
-		(key_value == JTKey_right_short) ||
-		(key_value == JTKey_right_long) ||
-		(key_value == JTKey_Gently_left_start) ||
-		(key_value == JTKey_Gently_left_stop) ||
-		(key_value == JTKey_Gently_right_start) ||
-		(key_value == JTKey_Gently_rigth_stop))
-	{
-		/* 脚踏泵键只控制泵，不占用手柄电机 owner；脚踏真正启动电机时由 FootControlTask 申请 FOOT owner。 */
-		return CONTROL_OWNER_NONE;
-	}
-
-	/* 屏幕泵按钮只影响泵输出，不应该因为屏幕点过泵就锁住脚踏或手柄电机控制。 */
-	if ((key_value == SCREENKey_APUMP_Add) ||
-		(key_value == SCREENKey_APUMP_Sub) ||
-		(key_value == SCREENKey_APUMP_control) ||
-		(key_value == SCREENKey_BPUMP_Add) ||
-		(key_value == SCREENKey_BPUMP_Sub) ||
-		(key_value == SCREENKey_BPUMP_control))
-	{
-		/* 屏幕泵键只控制泵，不占用手柄电机 owner；屏幕触控启动电机时才申请 SCREEN owner。 */
-		return CONTROL_OWNER_NONE;
-	}
-
-	/* 历史 HMI 泵按钮由外部来源占用。 */
-	if ((key_value == HMIkey_APUMP_Add) ||
-		(key_value == HMIkey_APUMP_Sub) ||
-		(key_value == HMIkey_APUMP_control) ||
-		(key_value == HMIkey_BPUMP_Add) ||
-		(key_value == HMIkey_BPUMP_Sub) ||
-		(key_value == HMIkey_BPUMP_control) ||
-		(key_value == HMIkey_Gently_start) ||
-		(key_value == HMIkey_Gently_stop))
-	{
-		return CONTROL_OWNER_EXTERNAL;
-	}
-
-	/* 其它泵函数入口不改变控制权。 */
-	return CONTROL_OWNER_NONE;
-}
-
-/*
- * 函数功能：判断当前按键是否只是运行参数调节，不应被电机运行 owner 互斥丢弃。
- * 输入参数：control_type 为按键来源；control_key 为来源内的业务按键值。
- * 返回参数：true 表示该键只调整速度、频率或泵流量；false 表示仍按普通运行控制键仲裁。
- */
-static bool ControlArbitration_IsRuntimeAdjustmentKey(uint8_t control_type, uint8_t control_key)
-{
-	/* 手柄实体速度加减只修改当前目标速度，不改变脚控、手控、触控或外控的运行归属。 */
-	if (control_type == HANDLEKey)
-	{
-		return ((control_key == HANDLEKey_speed_add) ||
-				(control_key == HANDLEKey_speed_sub));
-	}
-
-	/* 外部通信的速度、频率、A/B 泵加减属于参数调节，运行中也需要交给业务层刷新设定值。 */
-	if (control_type == HMIkey)
-	{
-		return ((control_key == HMIkey_SPEED_Add) ||
-				(control_key == HMIkey_SPEED_Sub) ||
-				(control_key == HMIkey_FREQ_Add) ||
-				(control_key == HMIkey_FREQ_Sub) ||
-				(control_key == HMIkey_APUMP_Add) ||
-				(control_key == HMIkey_APUMP_Sub) ||
-				(control_key == HMIkey_BPUMP_Add) ||
-				(control_key == HMIkey_BPUMP_Sub));
-	}
-
-	/* 新屏的速度四键、频率键和泵流量加减键都只是改参数，不能因为电机正在运行被队列层丢弃。 */
-	if (control_type == SCREENKey)
-	{
-		return ((control_key == SCREENKey_SPEED_Add) ||
-				(control_key == SCREENKey_SPEED_Sub) ||
-				(control_key == SCREENKey_SPEED_Sub_Large) ||
-				(control_key == SCREENKey_SPEED_Sub_Small) ||
-				(control_key == SCREENKey_SPEED_Add_Small) ||
-				(control_key == SCREENKey_SPEED_Add_Large) ||
-				(control_key == SCREENKey_FREQ_Add) ||
-				(control_key == SCREENKey_FREQ_Sub) ||
-				(control_key == SCREENKey_APUMP_Add) ||
-				(control_key == SCREENKey_APUMP_Sub) ||
-				(control_key == SCREENKey_BPUMP_Add) ||
-				(control_key == SCREENKey_BPUMP_Sub));
-	}
-
-	/* 脚踏短按由 Foot_ParseDataS 转成 A/B 泵调档键，本质也是泵流量调节。 */
-	if (control_type == JTKey)
-	{
-		return ((control_key == JTkey_left_short) ||
-				(control_key == JTKey_right_short));
-	}
-
-	/* 其它来源或其它键仍交给普通 owner 仲裁，避免误放行启动/模式切换类动作。 */
-	return false;
-}
-
-/*
- * 函数功能：判断当前按键是否属于泵业务入口，泵输出不应被手柄电机 owner 直接拦截。
- * 输入参数：control_type 为按键来源；control_key 为来源内的泵业务按键值。
- * 返回参数：true 表示应进入 PUMPActive 继续按泵类型、在线状态和排空状态判断；false 表示不是泵业务键。
- */
-static bool ControlArbitration_IsPumpBusinessKey(uint8_t control_type, uint8_t control_key)
-{
-	/* 脚踏短按调档、长按启停/排空、轻排开始/停止都通过同一个泵业务函数处理。 */
-	if (control_type == JTKey)
-	{
-		return ((control_key == JTkey_left_short) ||
-				(control_key == JTKey_left_long) ||
-				(control_key == JTKey_right_short) ||
-				(control_key == JTKey_right_long) ||
-				(control_key == JTKey_Gently_left_start) ||
-				(control_key == JTKey_Gently_left_stop) ||
-				(control_key == JTKey_Gently_right_start) ||
-				(control_key == JTKey_Gently_rigth_stop));
-	}
-
-	/* 外部通信泵加减、启停和轻排命令都要进入 PUMPActive，再由泵业务层决定是否真正生效。 */
-	if (control_type == HMIkey)
-	{
-		return ((control_key == HMIkey_APUMP_Add) ||
-				(control_key == HMIkey_APUMP_Sub) ||
-				(control_key == HMIkey_APUMP_control) ||
-				(control_key == HMIkey_BPUMP_Add) ||
-				(control_key == HMIkey_BPUMP_Sub) ||
-				(control_key == HMIkey_BPUMP_control) ||
-				(control_key == HMIkey_Gently_start) ||
-				(control_key == HMIkey_Gently_stop));
-	}
-
-	/* 屏幕 A/B 泵加减和启停也只属于泵业务，不占用手柄电机运行 owner。 */
-	if (control_type == SCREENKey)
-	{
-		return ((control_key == SCREENKey_APUMP_Add) ||
-				(control_key == SCREENKey_APUMP_Sub) ||
-				(control_key == SCREENKey_APUMP_control) ||
-				(control_key == SCREENKey_BPUMP_Add) ||
-				(control_key == SCREENKey_BPUMP_Sub) ||
-				(control_key == SCREENKey_BPUMP_control));
-	}
-
-	/* 非泵键不能绕过电机 owner 仲裁。 */
-	return false;
-}
-
-/*
- * 函数功能：判断指定控制源是否为当前仲裁 owner。
- * 输入参数：owner 待查询的控制源编号。
- * 返回参数：true 表示当前 owner 与输入来源一致；false 表示不一致。
- */
-bool ControlArbitration_IsOwner(uint8_t owner)
-{
-	/* 当前持有者和查询来源一致时，允许该来源继续控制或主动停止。 */
-	return (s_control_owner == owner);
-}
-
-/*
- * 函数功能：判断指定控制源是否被其它控制源阻塞。
- * 输入参数：owner 当前准备执行动作的控制源编号。
- * 返回参数：true 表示需要阻塞当前动作；false 表示当前动作可以继续处理。
- */
-bool ControlArbitration_IsBusyByOther(uint8_t owner)
-{
-	/* 查询前先释放已经停稳的本地 owner，避免停止后残留锁挡住下一种本地控制方式。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
-
-	/* 没有 owner 时表示电机仲裁空闲，任意本地来源都可以尝试控制。 */
-	if (s_control_owner == CONTROL_OWNER_NONE)
-	{
-		return false;
-	}
-
-	/* 当前来源就是 owner 时允许继续控制或发送停止命令。 */
-	if (s_control_owner == owner)
-	{
-		return false;
-	}
-
-	/* 外部通信授权期间，本地脚踏、屏幕、手柄都必须等待外控主动退出或超时释放。 */
-	if (s_control_owner == CONTROL_OWNER_EXTERNAL)
-	{
-		return true;
-	}
-
-	/* 本地三种方式只在手柄电机忙时互斥；泵运行不参与电机控制权阻塞。 */
-	return ControlArbitration_IsMotorBusy();
-}
-
-/*
- * 函数功能：尝试让指定控制源取得电机控制权。
- * 输入参数：owner 申请控制权的来源编号。
- * 返回参数：true 表示申请成功或已经持有；false 表示无效来源或被其它来源阻塞。
- */
-bool ControlArbitration_TryEnter(uint8_t owner)
-{
-	/* 无效来源不能写入 owner，避免未知按键把仲裁状态写乱。 */
-	if (ControlArbitration_IsValidOwner(owner) == false)
-	{
-		return false;
-	}
-
-	/* 申请前先清掉已经停稳的本地 owner，保证电机停止后其它本地模式能接管。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
-
-	/* 已经持有控制权时重复申请按成功处理。 */
-	if (s_control_owner == owner)
-	{
-		return true;
-	}
-
-	/* 外部通信授权期间，只有外部通信自己能继续控制。 */
-	if (s_control_owner == CONTROL_OWNER_EXTERNAL)
-	{
-		return false;
-	}
-
-	/* 电机命令仍在运行或驱动反馈仍在转动时，不允许不同来源抢占。 */
-	if (ControlArbitration_IsMotorBusy())
-	{
-		return false;
-	}
-
-	/* 电机已经空闲时记录新的控制源；本地泵动作不会调用本路径占用 owner。 */
-	s_control_owner = owner;
-	return true;
-}
-
-/*
- * 函数功能：释放指定控制源持有的仲裁 owner，只允许当前持有者释放自己。
- * 输入参数：owner 请求释放控制权的来源编号。
- * 返回参数：无。
- */
-void ControlArbitration_Exit(uint8_t owner)
-{
-	/* 只有当前持有者本人才能释放，避免其它来源误清正在运行的控制权。 */
-	if (s_control_owner == owner)
-	{
-		s_control_owner = CONTROL_OWNER_NONE;
-	}
-}
-
-/*
- * 函数功能：当本地控制源对应的电机已经停止时释放本地电机控制权。
- * 输入参数：owner 请求释放的本地控制源编号。
- * 返回参数：无。
- */
-void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner)
-{
-	/* 外部通信必须由外控退出、链路超时或急停释放，不能由本地空闲逻辑释放。 */
-	if (owner == CONTROL_OWNER_EXTERNAL)
-	{
-		return;
-	}
-
-	/* 电机命令仍在运行或驱动反馈仍未归零时，本地来源还没有真正结束。 */
-	if (ControlArbitration_IsMotorBusy())
-	{
-		return;
-	}
-
-	/* 电机停稳后释放当前本地来源；泵状态不再影响手柄电机仲裁。 */
-	ControlArbitration_Exit(owner);
-}
-
-/*
- * 函数功能：周期刷新电机控制权释放状态。
- * 输入参数：无，由电机输出任务或反馈任务周期调用。
- * 返回参数：无；本地 owner 停稳后自动释放，外部 owner 不自动释放。
- */
-void ControlArbitration_RefreshMotorOwner(void)
-{
-	Pubinterface_ServiceCommonSocketToolMissingAlarm(); /* 电机任务周期维护公共接头缺刀具 80 号临时弹窗，到设置时间后自动关闭。 */
-	Pubinterface_ServicePumpPressureBlockedTimedAlarm(); /* 电机任务周期维护压力报警 89 号临时弹窗，到 3 秒后自动关闭。 */
-	Pubinterface_ServiceRunningHandleUnplugTimedAlarm(); /* 电机任务周期顺带维护手控掉线 3 秒临时弹窗，到期自动清屏。 */
-	/* 统一复用本地 owner 释放逻辑，保证手柄、脚踏、屏幕停止后不因反馈延迟永久占用。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
-}
-
-/*
- * 函数功能：系统级强制释放当前仲裁 owner，用于急停或全局清状态。
- * 输入参数：无。
- * 返回参数：无。
- */
-void ControlArbitration_ForceRelease(void)
-{
-	/* 急停或系统级清状态使用强制释放，让任何来源都不能继续占用控制权。 */
-	s_control_owner = CONTROL_OWNER_NONE;
-}
-
-/*
- * 函数功能：判断外部通信控制权是否处于有效占用状态。
- * 输入参数：无，读取 s_control_owner 和 WorkMessage.hmiactive_work。
- * 返回参数：true 表示外控已持有仲裁且界面状态仍有效；false 表示外控未激活。
- */
-bool ControlArbitration_IsExternalActive(void)
-{
-	/* 外控是否有效以仲裁持有者为准，hmiactive_work 只作为界面/状态同步标志。 */
-	return ((s_control_owner == CONTROL_OWNER_EXTERNAL) && (WorkMessage.hmiactive_work != 0U));
-}
-
-/*
- * 函数功能：申请进入外部通信控制模式，并初始化外控占用状态。
- * 输入参数：无。
- * 返回参数：true 表示外控取得控制权；false 表示本机电机仍忙或其它来源占用。
- */
-bool ControlArbitration_EnterExternalControl(void)
-{
-	bool already_external = ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL);
-
-	/* 若脚踏、屏幕或手柄正在控制，上位机申请直接失败，不能抢停当前来源。 */
-	if (ControlArbitration_TryEnter(CONTROL_OWNER_EXTERNAL) == false)
-	{
-		return false;
-	}
-
-	/* 首次进入外控时清理空闲残留输出；重复申请外控时不打断已在进行的外控动作。 */
-	if (already_external == false)
-	{
-		ControlArbitration_StopMotionOutput();
-		ControlSignalMessage.HMI_control_flag = false; /* 首次进入外控时确认电机未启动；重复保活申请不能清运行标志，否则小电脑会从 40 退回 39。 */
-	}
-
-	/* 置位外部控制权锁，脚踏、屏幕、手柄按键会在各自入口被拦截。 */
-	WorkMessage.hmiactive_work = 1U;
-	/* 触控/外控占用标志同步置位，屏幕模式切换逻辑也能看到外控占用。 */
-	WorkMessage.touchactive_work = TOUCHWORK;
-	/* 当前驱动方式切到外部控制，心跳和驱动状态可以看到外控来源。 */
-	WorkMessage.drivetype_work = TOUCHWORK;
-	/* 外部控制已使能，但申请阶段不直接启动电机。 */
-	ControlSignalMessage.HMI_enable_flag = true;
-	/* 申请成功只表示外控 owner 已取得，不能再打开 UI_TOUCH_ID，否则屏幕会弹出 70 号触控工作区。 */
-	Pubinterface_RefreshControlModeDisplay(); /* 外控内部复用 TOUCHWORK 做互斥，但显示层仍按小电脑图标表达外控状态。 */
-	if (already_external == false)
-	{
-		Pubinterface_RefreshExternalCommDisplay(true, false); /* 首次申请外控成功但尚未控制输出时只显示 39 白色小电脑。 */
-	}
-	return true;
-}
-
-/*
- * 函数功能：退出外部通信控制模式，停止外控遗留输出并恢复本机可接管状态。
- * 输入参数：无。
- * 返回参数：无。
- */
-void ControlArbitration_ReleaseExternalControl(void)
-{
-	uint8_t data[10] = {0U}; /* 退出外控时给 UI_TOUCH_ID 发送全零参数，确保触控弹窗关闭。 */
-
-	/* 当前不是外控时，退出外控只清理外控显示残留，不能影响脚踏、屏幕或手柄正在进行的控制。 */
-	if (s_control_owner != CONTROL_OWNER_EXTERNAL)
-	{
-		WorkMessage.hmiactive_work = 0U; /* 非外控 owner 时只清界面外控标志，不能停本机脚踏/手柄/触控运行。 */
-		ControlSignalMessage.HMI_enable_flag = false; /* 上位机退出命令到来后撤销外控可用标志，避免状态继续显示为外控占用。 */
-		if (WorkMessage.touchactive_work != TOUCHWORK)
-		{
-			SendUIDSMessage(UI_TOUCH_ID, false, data); /* 未处于本机触控时才清理残留外控弹窗，避免误关本机触控工作区。 */
-		}
-		Pubinterface_RefreshControlModeDisplay(); /* UITOUCHDP(false) 会把触控主按钮置暗，这里重绘为当前本机白/黄状态。 */
-		Pubinterface_RefreshExternalCommDisplay(false, false); /* 退出外部通信后不再保留 39/40 小电脑图标，避免误提示仍在线。 */
-		return;
-	}
-
-	/* 释放外控时必须先停全部外控输出，防止泵或电机继续沿用上位机请求。 */
-	ControlArbitration_StopMotionOutput();
-	/* 清除外部控制权锁，允许后续脚踏、屏幕和手柄重新参与控制。 */
-	WorkMessage.hmiactive_work = 0U;
-	/* 清除触控/外控占用标志，使本机模式切换可以重新生效。 */
-	WorkMessage.touchactive_work = 0U;
-	/* 外控使能同步撤销，界面状态不再显示外部控制已占用。 */
-	ControlSignalMessage.HMI_enable_flag = false;
-	/* 恢复到本机可接管的控制方式，避免退出后仍停在 TOUCHWORK。 */
-	WorkMessage.drivetype_work = ControlArbitration_GetLocalDriveTypeAfterExit();
-	/* 外控完整退出后才释放公共控制权。 */
-	ControlArbitration_Exit(CONTROL_OWNER_EXTERNAL);
-	SendUIDSMessage(UI_TOUCH_ID, false, data); /* 外控释放完成后关闭触控/外控窗口，UI 不再显示占用状态。 */
-	Pubinterface_RefreshControlModeDisplay(); /* 外控退出后按本机状态重绘脚控/手控/触控，清掉外控期间的残留高亮。 */
-	Pubinterface_RefreshExternalCommDisplay(false, false); /* 主动退出外控后按需求隐藏小电脑图标，不再显示白色在线态。 */
-}
-
-/*
- * 函数功能：按键队列分发前判断当前消息是否应被仲裁阻塞。
- * 输入参数：control_type 按键来源类型；control_key 具体业务按键值。
- * 返回参数：true 表示本消息应丢弃等待当前 owner 结束；false 表示可继续分发。
- */
-bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t control_key)
-{
-	uint8_t key_owner = ControlArbitration_GetOwnerByKeySource(control_type);
-
-	/* 手柄插拔事件只维护在线状态和通道记忆，不属于运行控制，互斥期间仍要接收。 */
-	if (control_type == PLUGunPLUG)
-	{
-		return false;
-	}
-
-	/* 外控持有期间允许旧 HMI 和屏幕上的外控退出键通过，便于主动释放上位机控制。 */
-	if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) &&
-		(((control_type == HMIkey) && (control_key == HMIkey_HMI_EXIT)) ||
-		 ((control_type == SCREENKey) && (control_key == SCREENKey_HMI_EXIT))))
-	{
-		return false;
-	}
-
-	/* 运行参数调节允许跨本地 owner 生效；但外控已独占时，本地脚踏/屏幕/手柄不能绕过外控锁。 */
-	if (ControlArbitration_IsRuntimeAdjustmentKey(control_type, control_key))
-	{
-		if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && key_owner != CONTROL_OWNER_EXTERNAL)
-		{
-			if (control_type == SCREENKey)
-			{
-				return false; /* 外控 owner 期间允许屏幕修改速度/频率/泵流量参数，但屏幕启停键仍走后面的业务键拦截。 */
-			}
-			return true; /* 外部控制占用时只允许外部来源继续调参，防止本地按键改变外控运行设定。 */
-		}
-		return false; /* 非外控独占时放行到 SpeedActive/FreqActive/PUMPActive，由业务函数刷新设定值。 */
-	}
-
-	/* 泵业务和手柄电机 owner 分离，先放行到 PUMPActive，再由泵类型、在线状态和排空状态判断。 */
-	if (ControlArbitration_IsPumpBusinessKey(control_type, control_key))
-	{
-		if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && key_owner != CONTROL_OWNER_EXTERNAL)
-		{
-			return true; /* 外控占用期间本地泵键也不能抢改泵状态，保持外部控制一致性。 */
-		}
-		return false; /* 脚踏、屏幕和外部泵键都进入统一泵业务入口，不再被电机运行 owner 丢弃。 */
-	}
-
-	/* 不属于四类控制来源的消息不参与仲裁。 */
-	if (key_owner == CONTROL_OWNER_NONE)
-	{
-		return false;
-	}
-
-	/* 当前已有其它来源占用时，丢弃该按键，必须等当前控制方式结束。 */
-	return ControlArbitration_IsBusyByOther(key_owner);
-}
 
 void ChannelMessageInit(void)
 {
@@ -3094,7 +2373,7 @@ void ControlTypeActive(uint8_t key_value)
 		/* 屏幕触控退出时先停电机，再清触控占用，控制权释放要继续等待驱动反馈归零。 */
 		Pubinterface_SetHandleInjectionPumpRun(false); /* 触控退出属于用户确认停机，必须再次关闭手柄联动注水泵，防止故障恢复后泵状态残留。 */
 		WorkMessage.runflag_work = false;
-			
+
 		WorkMessage.speed_work = 0U;
 		WorkMessage.touchactive_work = 0U;
 		WorkMessage.drivetype_work = ControlArbitration_GetLocalDriveTypeAfterExit(); /* 触控退出后恢复本机可接管控制方式，避免图标继续停在黄色触控。 */
@@ -3294,7 +2573,7 @@ void SpeedActive(uint8_t key_value)
 
 	if(WorkMessage.drivetype_work != JTWORK) /* 触控模式下速度键直接影响当前输出速度，非触控模式仅修改设定值等待后续运行命令生效。 */
 	{
-		WorkMessage.speed_work = WorkMessage.speed_set_work; 
+		WorkMessage.speed_work = WorkMessage.speed_set_work;
 	}
 }
 /*
@@ -3454,1379 +2733,5 @@ void DirActive(uint8_t key_value)
 	if ((WorkMessage.channel_work == CHANNEL_A) || (WorkMessage.channel_work == CHANNEL_B))
 	{
 		Pubinterface_RefreshSelectedChannelDisplay(WorkMessage.channel_work); /* 方向切换后同步刷新方向高亮、频率窗口和当前方向速度值。 */
-	}
-}
-
-/*
- * 函数功能：关闭 PXBA/PXBB 当前通道的 RFID 自动识别运行状态。
- * 输入参数：channel 为当前工作通道；memory 指向该通道记忆。
- * 返回参数：无。
- */
-static void Pubinterface_DisableSplitHandleAutoIdentify(uint8_t channel, ChannelMemoryMessagr_t *memory)
-{
-	if (memory == NULL)
-	{
-		return; /* 没有通道记忆时不能安全修改自动识别状态，避免 A/B 记忆串写。 */
-	}
-
-	WorkMessage.auto_identify = 0U; /* 当前工作快照进入手动模式，屏幕刷新时不再显示自动识别等待/结果区。 */
-	memory->auto_identify = 0U;	   /* 通道记忆同步进入手动模式，切换通道后不会再次自动恢复 RFID。 */
-	WorkMessage.raw_tool_type = 0U; /* 手动刀具不再使用 RFID 原始型号，避免驱动和上位机继续按旧标签判断。 */
-	memory->raw_tool_type = 0U;	   /* 记忆层同步清旧 RFID 原始型号，保证后续切回通道仍是手动刀具来源。 */
-
-	if (channel == CHANNEL_A)
-	{
-		s_rfid_last_tool_type_a = 0U;							   /* A 通道手动模式不显示 RFID 掉线历史图标。 */
-		memset(paoxueSpeciValue_A, 0, sizeof(paoxueSpeciValue_A)); /* A 通道手动模式不显示 RFID 刀具规格窗口。 */
-		Rfid_ClearChannelResult(CHANNEL_A);						   /* 清 A 通道 RFID 缓存并作废已排队的旧请求，防止晚到回包复活自动识别。 */
-		SendKeyRFIDMessageAdown();								   /* 通知 RFID 任务停止 A 通道当前读取，立即关闭自动识别动作。 */
-	}
-	else if (channel == CHANNEL_B)
-	{
-		s_rfid_last_tool_type_b = 0U;							   /* B 通道手动模式不显示 RFID 掉线历史图标。 */
-		memset(paoxueSpeciValue_B, 0, sizeof(paoxueSpeciValue_B)); /* B 通道手动模式不显示 RFID 刀具规格窗口。 */
-		Rfid_ClearChannelResult(CHANNEL_B);						   /* 清 B 通道 RFID 缓存并作废已排队的旧请求，防止晚到回包复活自动识别。 */
-		SendKeyRFIDMessageBdown();								   /* 通知 RFID 任务停止 B 通道当前读取，立即关闭自动识别动作。 */
-	}
-}
-
-/*
- * 函数功能：按通道取得扫描层识别缓存。
- * 输入参数：channel 为 A/B 通道。
- * 返回参数：对应通道的 ChannelrecognizeMessage；无效通道返回 NULL。
- */
-static ChannelrecognizeMessage_t *Pubinterface_GetRecognizeMessageByChannel(uint8_t channel)
-{
-	if (channel == CHANNEL_A)
-	{
-		return &ChannelrecognizeMessageA; /* A 通道手动模式读取 A 扫描缓存，避免使用 B 手柄 EEPROM 参数。 */
-	}
-
-	if (channel == CHANNEL_B)
-	{
-		return &ChannelrecognizeMessageB; /* B 通道手动模式读取 B 扫描缓存，保证 A/B 参数独立。 */
-	}
-
-	return NULL; /* 非 A/B 通道没有有效识别缓存，调用方必须保持原状态。 */
-}
-
-/*
- * 函数功能：按方向取得识别缓存中的默认速度。
- * 输入参数：recognize 为扫描层识别缓存；direction 为目标运行方向。
- * 返回参数：目标方向默认速度；参数无效时返回 0。
- */
-static uint32_t Pubinterface_GetManualDirectionDefaultSpeed(const ChannelrecognizeMessage_t *recognize, uint8_t direction)
-{
-	if (recognize == NULL)
-	{
-		return 0U; /* 识别缓存缺失时不能读取 EEPROM 默认速度，由调用方使用本地兜底。 */
-	}
-
-	if (direction == FZDIR)
-	{
-		return recognize->speed_fzdefault; /* 反转手动速度来自 Page4 恢复后的反转默认速度。 */
-	}
-
-	if (direction == OSCDIR)
-	{
-		return recognize->speed_oscdefault; /* 往复手动速度来自 Page4 恢复后的往复默认速度。 */
-	}
-
-	return recognize->speed_zzdefault; /* 正转和异常方向按正转默认速度处理。 */
-}
-
-/*
- * 函数功能：按方向取得识别缓存中的速度下限。
- * 输入参数：recognize 为扫描层识别缓存；direction 为目标运行方向。
- * 返回参数：目标方向最小速度；参数无效时返回 0。
- */
-static uint32_t Pubinterface_GetManualDirectionMinSpeed(const ChannelrecognizeMessage_t *recognize, uint8_t direction)
-{
-	if (recognize == NULL)
-	{
-		return 0U; /* 无识别缓存时不做下限约束，避免误把速度夹到错误值。 */
-	}
-
-	if (direction == FZDIR)
-	{
-		return recognize->speed_fzmin; /* 反转最小速度来自手柄 EEPROM Page4。 */
-	}
-
-	if (direction == OSCDIR)
-	{
-		return recognize->speed_oscmin; /* 往复最小速度来自手柄 EEPROM Page4。 */
-	}
-
-	return recognize->speed_zzmin; /* 正转最小速度来自手柄 EEPROM Page4。 */
-}
-
-/*
- * 函数功能：按方向取得识别缓存中的速度上限。
- * 输入参数：recognize 为扫描层识别缓存；direction 为目标运行方向。
- * 返回参数：目标方向最大速度；参数无效时返回 0。
- */
-static uint32_t Pubinterface_GetManualDirectionMaxSpeed(const ChannelrecognizeMessage_t *recognize, uint8_t direction)
-{
-	if (recognize == NULL)
-	{
-		return 0U; /* 无识别缓存时不做上限约束，调用方使用兜底速度。 */
-	}
-
-	if (direction == FZDIR)
-	{
-		return recognize->speed_fzmax; /* 反转最大速度来自手柄 EEPROM Page4。 */
-	}
-
-	if (direction == OSCDIR)
-	{
-		return recognize->speed_oscmax; /* 往复最大速度来自手柄 EEPROM Page4。 */
-	}
-
-	return recognize->speed_zzmax; /* 正转最大速度来自手柄 EEPROM Page4。 */
-}
-
-/*
- * 函数功能：把手动模式速度钳位到当前方向的 EEPROM 上下限内。
- * 输入参数：recognize 为扫描层识别缓存；direction 为目标方向；speed 为候选速度；fallback_speed 为 EEPROM 缺失时的兜底速度。
- * 返回参数：可写入 MemoryMsg/WorkMessage 的合法速度。
- */
-static uint32_t Pubinterface_ClampManualSpeedByRecognize(const ChannelrecognizeMessage_t *recognize,
-														 uint8_t direction,
-														 uint32_t speed,
-														 uint32_t fallback_speed)
-{
-	uint32_t speed_min = Pubinterface_GetManualDirectionMinSpeed(recognize, direction); /* 读取当前方向 EEPROM 最小速度，手动模式调速边界必须跟随它。 */
-	uint32_t speed_max = Pubinterface_GetManualDirectionMaxSpeed(recognize, direction); /* 读取当前方向 EEPROM 最大速度，避免手动模式继续使用 RFID 上限。 */
-
-	if (speed == 0U)
-	{
-		speed = fallback_speed; /* EEPROM 默认速度为 0 或读取失败时使用原手动模式兜底速度。 */
-	}
-
-	if ((speed_max != 0U) && (speed_max < speed_min))
-	{
-		speed_max = speed_min; /* 上下限异常时把上限抬到下限，避免后续夹取出现反向区间。 */
-	}
-
-	if (speed < speed_min)
-	{
-		speed = speed_min; /* 候选速度低于 EEPROM 下限时抬到下限，保证实际运行不会低于手柄配置。 */
-	}
-
-	if ((speed_max != 0U) && (speed > speed_max))
-	{
-		speed = speed_max; /* 候选速度超过 EEPROM 上限时压到上限，保证显示值和可运行值一致。 */
-	}
-
-	return speed; /* 返回已经按手柄 EEPROM 边界处理后的速度。 */
-}
-
-/*
- * 函数功能：分体式手柄手动模式下，把手柄 EEPROM 运行参数装载到通道记忆和当前工作快照。
- * 输入参数：channel 为 A/B 通道；memory 为通道记忆；tool_type 为手动刀具能力；direction 为手动默认方向；fallback_speed 为 EEPROM 缺失时兜底速度。
- * 返回参数：无。
- */
-static void Pubinterface_ApplySplitManualEepromRuntime(uint8_t channel,
-													   ChannelMemoryMessagr_t *memory,
-													   uint8_t tool_type,
-													   uint8_t direction,
-													   uint32_t fallback_speed)
-{
-	ChannelrecognizeMessage_t *recognize = Pubinterface_GetRecognizeMessageByChannel(channel); /* 获取当前通道扫描缓存，里面保存 EEPROM 恢复后的速度边界。 */
-	uint32_t zz_speed = 0U; /* 保存手动模式正转速度，来自 EEPROM 默认值并按正转边界钳位。 */
-	uint32_t fz_speed = 0U; /* 保存手动模式反转速度，来自 EEPROM 默认值并按反转边界钳位。 */
-	uint32_t osc_speed = 0U; /* 保存手动模式往复速度，来自 EEPROM 默认值并按往复边界钳位。 */
-
-	if ((memory == NULL) || (recognize == NULL))
-	{
-		return; /* 缺少通道记忆或识别缓存时不改当前运行态，避免半更新导致屏幕和实际速度不一致。 */
-	}
-
-	(void)Handlescan_RestoreSplitHandleEepromRuntime(channel, tool_type); /* 先让扫描层重新从手柄 EEPROM 装载倍率、速度上下限和步进。 */
-	recognize = Pubinterface_GetRecognizeMessageByChannel(channel); /* 重新取得缓存指针，确保后续读取的是恢复后的识别结构。 */
-	if (recognize == NULL)
-	{
-		return; /* 理论上不会发生，保留防御，避免空指针写通道记忆。 */
-	}
-
-	recognize->tool_type = tool_type; /* 手动模式刀具能力由用户选择，覆盖自动识别留下的标签类型。 */
-	recognize->raw_tool_type = 0U; /* 手动模式没有 RFID 原始刀具型号，清掉旧标签码。 */
-	recognize->run_direction = direction; /* 手动刨刀默认往复、手动磨头默认正转，保持旧 UI 交互习惯。 */
-	zz_speed = Pubinterface_ClampManualSpeedByRecognize(recognize,
-														 ZZDIR,
-														 Pubinterface_GetManualDirectionDefaultSpeed(recognize, ZZDIR),
-														 fallback_speed); /* 正转速度按手柄 EEPROM 默认值和上下限生成。 */
-	fz_speed = Pubinterface_ClampManualSpeedByRecognize(recognize,
-														 FZDIR,
-														 Pubinterface_GetManualDirectionDefaultSpeed(recognize, FZDIR),
-														 fallback_speed); /* 反转速度按手柄 EEPROM 默认值和上下限生成。 */
-	osc_speed = Pubinterface_ClampManualSpeedByRecognize(recognize,
-														  OSCDIR,
-														  Pubinterface_GetManualDirectionDefaultSpeed(recognize, OSCDIR),
-														  fallback_speed); /* 往复速度按手柄 EEPROM 默认值和上下限生成。 */
-
-	memory->tool_type = tool_type; /* 通道记忆同步手动刀具能力，切通道后仍保持手动磨/刨选择。 */
-	memory->raw_tool_type = 0U; /* 通道记忆清 RFID 原始型号，避免上位机把手动模式当自动标签显示。 */
-	memory->auto_identify = 0U; /* 通道记忆进入手动模式，后续切回该通道不自动恢复 RFID。 */
-	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* 手动模式倍率来自手柄 EEPROM Page3，不再使用 RFID 标签倍率。 */
-	memory->default_injection_flow = recognize->default_injection_flow; /* 手动模式仍使用手柄 Page4 默认注水流量，保证泵显示和运行一致。 */
-	memory->speed_alarm_for = recognize->speed_alarm_for; /* 手动模式同步手柄 EEPROM 正转速度报警阈值。 */
-	memory->speed_alarm_rev = recognize->speed_alarm_rev; /* 手动模式同步手柄 EEPROM 反转速度报警阈值。 */
-	memory->freq_alarm_osc = recognize->freq_alarm_osc; /* 手动模式同步手柄 EEPROM 往复频率报警阈值。 */
-	memory->freq = (recognize->freq_default != 0U) ? recognize->freq_default : 40U; /* 往复频率优先用 Page4 默认值，缺失时保持旧 4Hz 兜底。 */
-	memory->dir = direction; /* 通道记忆保存手动默认方向，切换通道后按该方向恢复速度。 */
-	memory->zz_speed = zz_speed; /* 正转记忆写入 EEPROM 默认速度和边界处理后的值。 */
-	memory->fz_speed = fz_speed; /* 反转记忆写入 EEPROM 默认速度和边界处理后的值。 */
-	memory->osc_speed = osc_speed; /* 往复记忆写入 EEPROM 默认速度和边界处理后的值。 */
-
-	if (channel == CHANNEL_A)
-	{
-		s_rfid_last_tool_type_a = 0U; /* A 手动模式不显示 RFID 掉线历史图标。 */
-		memset(paoxueSpeciValue_A, 0, sizeof(paoxueSpeciValue_A)); /* A 手动模式清刀具规格窗口，避免旧标签直径/长度/角度残留。 */
-	}
-	else if (channel == CHANNEL_B)
-	{
-		s_rfid_last_tool_type_b = 0U; /* B 手动模式不显示 RFID 掉线历史图标。 */
-		memset(paoxueSpeciValue_B, 0, sizeof(paoxueSpeciValue_B)); /* B 手动模式清刀具规格窗口，避免旧标签直径/长度/角度残留。 */
-	}
-
-	WorkMessage.tool_type = memory->tool_type; /* 当前工作快照同步手动刀具能力，屏幕按钮和运行判断读取这里。 */
-	WorkMessage.raw_tool_type = 0U; /* 当前工作快照清 RFID 原始型号，防止自动识别标签影响手动模式。 */
-	WorkMessage.auto_identify = 0U; /* 当前工作快照进入手动模式。 */
-	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 当前工作快照同步手柄 EEPROM 倍率，电机速度换算立即生效。 */
-	WorkMessage.freq_work = memory->freq; /* 当前工作快照同步往复频率，刨刀手动模式启动时直接使用该值。 */
-	WorkMessage.dir_work = memory->dir; /* 当前工作快照同步手动方向，速度显示和实际运行选择同一方向。 */
-	if (direction == FZDIR)
-	{
-		WorkMessage.speed_set_work = memory->fz_speed; /* 手动反转时当前设定速度来自反转记忆。 */
-	}
-	else if (direction == OSCDIR)
-	{
-		WorkMessage.speed_set_work = memory->osc_speed; /* 手动往复时当前设定速度来自往复记忆。 */
-	}
-	else
-	{
-		WorkMessage.speed_set_work = memory->zz_speed; /* 手动正转或异常方向时当前设定速度来自正转记忆。 */
-	}
-	WorkMessage.speed_work = WorkMessage.speed_set_work; /* 当前没有运行，实际速度同步为待设定速度，保证屏幕显示和后续启动一致。 */
-}
-
-/*
- * 函数功能：处理屏幕或上位机发起的磨头/刨刀切换，并同步刷新当前通道显示。
- * 输入参数：key_value 为磨头或刨刀按键值。
- * 返回参数：无。
- */
-void PlanerGridH(uint8_t key_value)
-{
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前工作通道记忆，手动切换时需要同步保存自动/手动状态。 */
-	uint8_t current_channel = WorkMessage.channel_work; /* 记录当前工作通道，后续关闭 RFID 和刷新界面都使用它。 */
-	bool auto_identify_was_enabled = (WorkMessage.auto_identify != 0U); /* 记录进入函数前是否处于自动识别，自动转手动时即使刀具类型相同也要刷新。 */
-	bool tool_changed = false; /* 只在本次确实完成磨/刨类型切换后刷新界面，避免无关按键误触发重绘。 */
-
-	if (WorkMessage.runflag_work == true || WorkMessage.alarm_flag == true)
-		return;
-	if ((key_value != SCREENKey_PlanerH) &&
-		(key_value != HMIkey_PlanerH) &&
-		(key_value != HMIkey_GrindH) &&
-		(key_value != SCREENKey_GrindH))
-	{
-		return; /* 只有明确的手动磨/刨键才允许关闭 RFID，异常键值不能改变当前自动识别模式。 */
-	}
-	if (Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model) == false)
-	{
-		return; /* 手动磨/刨切换只开放给 PXBA/PXBB，普通手柄和公共接头不允许误入手动刀具模式。 */
-	}
-	if (current_channel == CHANNEL_A)
-	{
-		memory = &MemoryMsgA; /* A 通道手动模式写 A 记忆，避免影响 B 通道自动识别状态。 */
-	}
-	else if (current_channel == CHANNEL_B)
-	{
-		memory = &MemoryMsgB; /* B 通道手动模式写 B 记忆，保持 A/B 模式互相独立。 */
-	}
-	else
-	{
-		return; /* 未选中 A/B 通道时不能切手动刀具，避免无归属参数污染 WorkMessage。 */
-	}
-	if (auto_identify_was_enabled != false)
-	{
-		Pubinterface_DisableSplitHandleAutoIdentify(current_channel, memory); /* 从自动识别切入手动刀具时先停止 RFID，防止旧回包覆盖手动选择。 */
-	}
-	switch (key_value)
-	{
-	case SCREENKey_PlanerH: // 屏幕平面磨床水平控制按键
-	case HMIkey_PlanerH:	// HMI平面磨床水平控制按键
-		if ((auto_identify_was_enabled == false) && Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type))
-		{
-			return; /* 已经是刨刀能力时不重复刷新，避免同一按钮连续触发造成无意义 UI 消息堆积。 */
-		}
-		Pubinterface_ApplySplitManualEepromRuntime(current_channel,
-												   memory,
-												   PLANER,
-												   OSCDIR,
-												   30000U); /* 手动刨刀默认往复，倍率/速度边界从手柄 EEPROM 装载，EEPROM 缺失时才用旧 30000 兜底。 */
-		tool_changed = true; /* 刨刀键已更新当前通道记忆，后续需要立即重绘刀具、方向、频率和开口定位。 */
-		// 刨头
-		break;
-	case HMIkey_GrindH:	   // HMI磨头水平控制按键
-	case SCREENKey_GrindH: // 屏幕磨头水平控制按键
-		if ((auto_identify_was_enabled == false) && (Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type) == false))
-		{
-			return; /* 当前已经不是刨刀能力时不重复切磨头，保持手动模式按钮幂等。 */
-		}
-		Pubinterface_ApplySplitManualEepromRuntime(current_channel,
-												   memory,
-												   GRINDH,
-												   ZZDIR,
-												   60000U); /* 手动磨头默认正转，倍率/速度边界从手柄 EEPROM 装载，EEPROM 缺失时才用旧 60000 兜底。 */
-		tool_changed = true; /* 磨头键已更新当前通道记忆，后续需要关闭频率和开口定位并重绘速度。 */
-		// 磨头
-		break;
-	}
-
-	if (tool_changed &&
-		((WorkMessage.channel_work == CHANNEL_A) || (WorkMessage.channel_work == CHANNEL_B)))
-	{
-		Pubinterface_RefreshSelectedChannelDisplay(WorkMessage.channel_work); /* 磨/刨切换后立即刷新 EX8 主运行页，避免按钮状态和内部 tool_type 不一致。 */
-	}
-}
-
-/*
- * 函数功能：处理新屏“自动识别刀具”按钮，按当前工作通道触发 RFID 读取。
- * 输入参数：key_value 为 SCREENKey_AutoIdentify；保留参数用于和其它按键处理函数保持一致。
- * 返回参数：无。
- */
-void AutoIdentifyActive(uint8_t key_value)
-{
-	ChannelMemoryMessagr_t *memory = NULL; /* 指向当前 A/B 通道记忆，自动/手动模式要和切通道后的恢复状态保持一致。 */
-	uint8_t current_channel = WorkMessage.channel_work; /* 记录当前工作通道，后续刷新界面和触发 RFID 都按这个通道执行。 */
-
-	if (key_value != SCREENKey_AutoIdentify)
-	{
-		return; /* 只接收新屏自动识别键，避免其它旧键误进入 RFID 流程。 */
-	}
-
-	if (WorkMessage.runflag_work == true)
-	{
-		return; /* 电机运行中不启动 RFID 识别，避免识别流程改变当前刀具参数。 */
-	}
-
-	if (WorkMessage.alarm_flag == true)
-	{
-		return; /* 系统报警未解除时不发起自动识别，保持报警优先级。 */
-	}
-
-	if (Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model) == false)
-	{
-		return; /* 自动/手动识别切换只开放给 PXBA/PXBB 分体手柄，其它手柄的刀具类型由 EEPROM 或 EPC 流程决定。 */
-	}
-
-	if (current_channel == CHANNEL_A)
-	{
-		memory = &MemoryMsgA; /* A 通道自动识别状态写入 A 记忆，切换到 B 再切回 A 时能恢复。 */
-	}
-	else if (current_channel == CHANNEL_B)
-	{
-		memory = &MemoryMsgB; /* B 通道自动识别状态写入 B 记忆，避免 A/B 通道模式串用。 */
-	}
-	else
-	{
-		return; /* 未选中 A/B 通道时不触发 RFID，避免识别结果没有通道归属。 */
-	}
-
-	if (WorkMessage.auto_identify != 0U)
-	{
-		Pubinterface_DisableSplitHandleAutoIdentify(current_channel, memory); /* 再次点击自动识别键时进入手动模式，并停止当前 RFID 读取。 */
-		Pubinterface_ApplySplitManualEepromRuntime(current_channel,
-												   memory,
-												   PLANER,
-												   OSCDIR,
-												   30000U); /* 自动识别关闭后默认回手动刨刀，并用手柄 EEPROM 恢复倍率和速度边界。 */
-		Pubinterface_RefreshSelectedChannelDisplay(current_channel); /* 手动模式立即刷新刨刀选中、自动识别关闭、规格窗口隐藏。 */
-		return;
-	}
-
-	WorkMessage.auto_identify = 1U; /* 从手动模式切到自动模式，当前工作态进入 RFID 自动识别。 */
-	memory->auto_identify = 1U; /* 通道记忆同步保存自动模式，切换通道后仍能按自动识别界面显示。 */
-	if (current_channel == CHANNEL_A)
-	{
-		s_rfid_last_tool_type_a = 0U; /* 用户主动重新进入自动识别时，从等待状态开始显示 63，不沿用上一次离线图标。 */
-	}
-	else if (current_channel == CHANNEL_B)
-	{
-		s_rfid_last_tool_type_b = 0U; /* B 通道同样清掉上一次离线图标，避免新一轮识别前误显示 61/62。 */
-	}
-	if (current_channel == CHANNEL_A)
-	{
-		SendKeyRFIDMessageAup(0U); /* A 通道 PXBA/PXBB 自动识别按新协议读取 EPC 区，刀具头参数来自 RFID 标签。 */
-	}
-	else
-	{
-		SendKeyRFIDMessageBup(0U); /* B 通道 PXBA/PXBB 自动识别按新协议读取 EPC 区，保持 A/B RFID 请求分离。 */
-	}
-	Pubinterface_RefreshSelectedChannelDisplay(current_channel); /* 自动模式立即隐藏手动磨/刨按钮，等待 RFID 规格刷新。 */
-}
-
-/*
- * 函数功能：处理屏幕、脚踏或上位机发起的 A/B 手柄手动切换。
- * 输入参数：key_value 切换按键值，支持 SCREENKey/HMIkey A/B 和脚踏中键长按。
- * 返回参数：无。
- */
-void HandleSwitchActive(uint8_t key_value) // 2026,4,19
-{
-	uint8_t target_channel = CHANNEL_NONE; /* 保存本次用户确认想切到的目标通道，默认不切换。 */
-
-	if ((WorkMessage.runflag_work == true) || (WorkMessage.alarm_flag == true))
-	{
-		return; /* 运行中或系统报警中不允许切换，避免两个手柄同时参与输出。 */
-	}
-
-	if ((key_value == HMIkey_HANDLE_A) || (key_value == SCREENKey_HANDLE_A))
-	{
-		target_channel = CHANNEL_A; /* 屏幕或上位机明确点 A 时，目标通道就是 A。 */
-	}
-	else if ((key_value == HMIkey_HANDLE_B) || (key_value == SCREENKey_HANDLE_B))
-	{
-		target_channel = CHANNEL_B; /* 屏幕或上位机明确点 B 时，目标通道就是 B。 */
-	}
-	else if (key_value == JTKey_middle_long)
-	{
-		if ((WorkMessage.channel_work == CHANNEL_A) && (WorkMessage.Channel_Bonline == true))
-		{
-			target_channel = CHANNEL_B; /* 当前选中 A 且 B 在线时，脚踏长按只切到 B。 */
-		}
-		else if ((WorkMessage.channel_work == CHANNEL_B) && (WorkMessage.Channel_Aonline == true))
-		{
-			target_channel = CHANNEL_A; /* 当前选中 B 且 A 在线时，脚踏长按只切到 A。 */
-		}
-	}
-
-	if ((target_channel == CHANNEL_A) && (WorkMessage.Channel_Aonline == true))
-	{
-		Pubinterface_LoadChannelMemory(CHANNEL_A); /* 用户确认切到 A 后，把 A 通道记忆装载为当前工作快照。 */
-		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* 按 A 通道工作快照刷新控制模式、刀具、方向、频率和速度显示。 */
-		Pubinterface_RefreshOnlineHandleDisplay(); /* 切换完成后刷新 A/B 手柄高亮，确保只有 A 被点亮。 */
-	}
-	else if ((target_channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == true))
-	{
-		Pubinterface_LoadChannelMemory(CHANNEL_B); /* 用户确认切到 B 后，把 B 通道记忆装载为当前工作快照。 */
-		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* 按 B 通道工作快照刷新控制模式、刀具、方向、频率和速度显示。 */
-		Pubinterface_RefreshOnlineHandleDisplay(); /* 切换完成后刷新 A/B 手柄高亮，确保只有 B 被点亮。 */
-	}
-}
-
-/*
- * 函数功能：最后一个手柄拔出后清空当前选中通道和参数显示。
- * 输入参数：无，直接复位 WorkMessage 当前工作快照。
- * 返回参数：无。
- */
-static void Pubinterface_ClearNoHandleSelection(void)
-{
-	WorkMessage.hand_model = 0U;					   /* 没有任何手柄在线时清掉当前手柄型号，防止一体式手柄拔出后仍按旧型号刷新方向按钮。 */
-	WorkMessage.tool_type = 0U;					   /* 没有任何手柄在线时清掉当前刀具能力，防止旧刨刀能力继续打开往复入口。 */
-	WorkMessage.raw_tool_type = 0U;				   /* 同步清掉原始刀具型号，避免后续驱动或上位机继续看到旧 EEPROM/RFID 代号。 */
-	WorkMessage.auto_identify = 0U;				   /* 无手柄状态不属于 RFID 自动识别模式，必须清掉自动识别标志以隐藏 0x1407 按钮。 */
-	WorkMessage.dir_work = 0U;					   /* 无手柄时当前方向无效，方向区应回到灰色初始状态。 */
-	WorkMessage.freq_work = 0U;					   /* 无手柄时往复频率无效，避免频率窗口沿用旧 PXYTP/MXYTP 参数。 */
-	WorkMessage.speed_set_work = 0U;			   /* 无手柄时清掉设定速度，防止速度栏在异步刷新后恢复旧值。 */
-	WorkMessage.speed_work = 0U;				   /* 无手柄时实际目标速度必须为 0，保持显示和驱动停止状态一致。 */
-	WorkMessage.channel_work = CHANNEL_NONE;		   /* 最后一个手柄离线后没有选中通道，后续屏幕触控和方向按键都不能落到 A/B。 */
-	UIDP_ForceNoHandleDisplay();				   /* 先清 UIDP 旧队列并直写无手柄控件，防止旧方向和自动识别消息晚到覆盖拔出状态。 */
-	Pubinterface_ClearSelectedChannelDisplay();	   /* 立即关闭方向、刀具识别、刀具规格、速度和频率区，清除屏幕旧控件残留。 */
-	Pubinterface_ApplyInjectionPumpDefaultFlow(0U); /* 无选中手柄时注水泵默认值回到程序默认 30，显示值和下一次运行目标保持一致。 */
-}
-
-/*
- * 函数功能：处理 A/B 手柄插入、拔出事件，维护在线标志、当前工作通道和屏幕显示。
- * 输入参数：key_value 插拔事件按键值，SCREENKey_PLUG_A/B 表示上线，SCREENKey_UNPLUG_A/B 表示离线。
- * 返回参数：无。
- */
-void PlugORunPLUGActive(uint8_t key_value)
-{
-	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于防止自动切到另一通道。 */
-	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
-
-	switch (key_value)
-	{
-	case SCREENKey_PLUG_A: // 插入A
-		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 先保存 A 原在线态，只有离线到在线这一跳才允许装载 Page4 默认流量。 */
-		WorkMessage.Channel_Aonline = true;					   /* A 通道校验通过后才置在线，后续心跳和显示都读取这个标志。 */
-		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* A 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
-		Pubinterface_SaveRecognizeToMemory(CHANNEL_A);		   /* 扫描结果只先进入 MemoryMsgA，运行中不会直接覆盖 WorkMessage。 */
-		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_A))
-		{
-			Pubinterface_LoadChannelMemory(CHANNEL_A);		   /* 非运行状态下最后插入且校验通过的 A 通道成为当前选中通道。 */
-			if (channel_was_online == 0U)
-			{
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A 首次接入并被选中时，才用 A 的 Page4 默认流量初始化注水泵。 */
-			}
-		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* A 自动成为当前通道后，同步刷新参数区和刀具规格。 */
-		}
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 无论是否自动选中，都刷新 A 在线图标和当前高亮状态。 */
-		Pubinterface_ClearCommonSocketToolMissingAlarm();	   /* A 通道 EPC 刀具信息装载成功后清除公共接头缺刀具临时报警。 */
-		break;
-
-	case SCREENKey_PLUG_B: // 插入B
-		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 先保存 B 原在线态，防止 RFID/识别重复刷新覆盖用户手动调节的泵流量。 */
-		WorkMessage.Channel_Bonline = true;					   /* B 通道校验通过后才置在线，坏手柄不会进入在线态。 */
-		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* B 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
-		Pubinterface_SaveRecognizeToMemory(CHANNEL_B);		   /* 扫描结果只先进入 MemoryMsgB，避免运行中插入 B 抢占 A。 */
-		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_B))
-		{
-			Pubinterface_LoadChannelMemory(CHANNEL_B);		   /* 非运行状态下最后插入且校验通过的 B 通道成为当前选中通道。 */
-			if (channel_was_online == 0U)
-			{
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B 首次接入并被选中时，才用 B 的 Page4 默认流量初始化注水泵。 */
-			}
-			Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* B 自动成为当前通道后，同步刷新参数区和刀具规格。 */
-		}
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 无论是否自动选中，都刷新 B 在线图标和当前高亮状态。 */
-		Pubinterface_ClearCommonSocketToolMissingAlarm();	   /* B 通道 EPC 刀具信息装载成功后清除公共接头缺刀具临时报警。 */
-		break;
-
-	case SCREENKey_UNPLUG_A: // 拔出A
-		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_A); /* 先记录拔出前 A 是否为当前选中通道。 */
-		WorkMessage.Channel_Aonline = false;					   /* A 拔出后立刻离线，心跳会报告 A 不可用。 */
-		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
-		if (current_channel_unplugged != 0U)
-		{
-			if ((WorkMessage.runflag_work == false) &&
-				(WorkMessage.alarm_flag == false) &&
-				(WorkMessage.Channel_Bonline == true))
-			{
-				Pubinterface_LoadChannelMemory(CHANNEL_B);		   /* 非工作状态拔掉当前 A 时，若 B 仍在线，则回落选中 B，保持“非工作态有在线手柄即有选中通道”。 */
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* 当前通道回落到 B 后，注水泵目标流量也同步改为 B 的 Page4 默认值。 */
-				Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* 回落到 B 后刷新参数区，清掉 A 通道残留显示。 */
-			}
-			else
-			{
-				if (WorkMessage.runflag_work == true)
-				{
-					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 A 手柄时，立即停电机、停联动注水泵并锁存报警。 */
-				}
-				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
-				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
-				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
-				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 B，等待用户手动确认。 */
-				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
-				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，显示值和下次实际运行目标保持一致。 */
-			}
-		}
-		if ((WorkMessage.Channel_Aonline == false) && (WorkMessage.Channel_Bonline == false))
-		{
-			Pubinterface_ClearNoHandleSelection(); /* 最后一个手柄拔出时强制进入无手柄状态，避免方向按钮和自动识别按钮残留。 */
-		}
-		Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false); /* A 通道拔出后立即暗灭 A 手柄区域。 */
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 B 仍在线，只显示 B 在线但不因 A 拔出自动高亮 B。 */
-		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
-		break;
-
-	case SCREENKey_UNPLUG_B: // 拔出B
-		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_B); /* 先记录拔出前 B 是否为当前选中通道。 */
-		WorkMessage.Channel_Bonline = false;					   /* B 拔出后立刻离线，心跳会报告 B 不可用。 */
-		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
-		if (current_channel_unplugged != 0U)
-		{
-			if ((WorkMessage.runflag_work == false) &&
-				(WorkMessage.alarm_flag == false) &&
-				(WorkMessage.Channel_Aonline == true))
-			{
-				Pubinterface_LoadChannelMemory(CHANNEL_A);		   /* 非工作状态拔掉当前 B 时，若 A 仍在线，则回落选中 A，匹配现场先插 A 再插 B 再拔 B 的预期。 */
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* 当前通道回落到 A 后，注水泵目标流量同步改为 A 的 Page4 默认值。 */
-				Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* B 拔出后回落到 A 时立即刷新参数区，避免继续显示 B 的方向和刀具状态。 */
-			}
-			else
-			{
-				if (WorkMessage.runflag_work == true)
-				{
-					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 B 手柄时，立即停电机、停联动注水泵并锁存报警。 */
-				}
-				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
-				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
-				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
-				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 A，等待用户手动确认。 */
-				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
-				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，避免拔掉最后手柄后残留 65。 */
-			}
-		}
-		if ((WorkMessage.Channel_Aonline == false) && (WorkMessage.Channel_Bonline == false))
-		{
-			Pubinterface_ClearNoHandleSelection(); /* 最后一个手柄拔出时强制清空当前通道，补齐 current_channel_unplugged 为 0 时的清屏路径。 */
-		}
-		Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false); /* B 通道拔出后立即暗灭 B 手柄区域。 */
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 A 仍在线，只显示 A 在线但不因 B 拔出自动高亮 A。 */
-		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
-		break;
-
-	default:
-		break;												   /* 其它按键不是插拔事件，本函数不处理。 */
-	}
-}
-
-void ToolPosActive(uint8_t key_value)
-{
-
-	if (WorkMessage.runflag_work == true || WorkMessage.alarm_flag == true)
-		return;
-	if (WorkMessage.hand_model == 0U)
-		return; /* 未识别有效手柄时不允许开口定位，避免屏幕残留刀具状态误触发驱动。 */
-	if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
-		return; /* ToolPosMay 底层非 A 会落到 B，所以上层必须先确认当前通道是 A 或 B。 */
-
-	if (Pubinterface_IsOpenPositionEnabledTool(WorkMessage.hand_model, WorkMessage.tool_type) == false)
-	{
-		return; /* 开口定位只给 PXBA/PXBB 且刀具为 PLANER 的组合开放，磨头或非分体手柄直接拦截。 */
-	}
-
-	switch (key_value)
-	{
-	case HMIkey_OpenPos_ClockWise:
-	case SCREENKey_OpenPos_ClockWise:
-		ToolPosMay(WorkMessage.channel_work, true, 1U); /* 顺时针开口定位，角度固定 1 度。 */
-		break;
-	case JTKey_middle_short:
-	case HMIkey_OpenPos_AntiClockWise:
-	case SCREENKey_OpenPos_AntiClockWise:
-		ToolPosMay(WorkMessage.channel_work, false, 1U); /* 逆时针开口定位，角度固定 1 度。 */
-		break;
-	default:
-		break; /* 其它按键不触发开口定位，避免误发驱动命令。 */
-	}
-}
-
-/*
- * 函数功能：按 EX8 屏幕交互表判断屏幕泵按键是否应被拒绝。
- * 输入参数：key_value 为屏幕解析后的 A/B 泵加、减、启停逻辑键值。
- * 返回参数：true 表示本次屏幕泵键不允许继续修改泵状态；false 表示可继续进入 PUMPActive 原有业务分支。
- */
-static bool Pubinterface_ShouldRejectScreenPumpKey(uint8_t key_value)
-{
-	switch (key_value)
-	{
-	case SCREENKey_APUMP_Add:
-	case SCREENKey_APUMP_Sub:
-		if (pumpMessageA.online_flag == false)
-		{
-			Pubinterface_RefreshPumpADisplay(); /* A 泵离线时只重刷为不可用状态，不允许屏幕用旧 type 残留继续调速。 */
-			return true; /* 屏幕表格要求 A 泵在线后加减流量才有效。 */
-		}
-		if (WorkMessage.alarm_flag == true)
-		{
-			return true; /* 全局报警期间屏幕 A 泵加减不生效，避免报警态继续改变输出设定。 */
-		}
-		if (pumpMessageA.timingDrainage_flag == true)
-		{
-			return true; /* A 注水泵排空期间禁止加减流量，保持排空过程稳定。 */
-		}
-		return false; /* A 泵在线、无报警、非排空时允许继续进入加减速分支。 */
-
-	case SCREENKey_BPUMP_Add:
-	case SCREENKey_BPUMP_Sub:
-		if (pumpMessageB.online_flag == false)
-		{
-			Pubinterface_RefreshPumpBDisplay(); /* B 泵离线时只刷新屏幕，避免旧速度被屏幕按钮继续修改。 */
-			return true; /* 屏幕表格要求 B 泵在线后加减流量才有效。 */
-		}
-		if (WorkMessage.alarm_flag == true)
-		{
-			return true; /* 报警态下 B 泵屏幕调速不生效，和 A 泵屏幕规则保持一致。 */
-		}
-		if (pumpMessageB.timingDrainage_flag == true)
-		{
-			return true; /* B 注水泵排空期间禁止加减流量，避免排空输出被现场误调。 */
-		}
-		return false; /* B 泵在线、无报警、非排空时允许继续进入加减速分支。 */
-
-	case SCREENKey_APUMP_control:
-		if (pumpMessageA.online_flag == false)
-		{
-			pumpMessageA.run_flag = false; /* A 泵离线时强制撤销屏幕侧运行状态，避免离线后按钮仍显示运行。 */
-			pumpMessageA.timingDrainage_flag = false; /* 同步取消 A 排空状态，下一次上线后重新按屏幕键开始。 */
-			Pubinterface_RefreshPumpADisplay(); /* 立即把 A 泵区域刷新为不可用。 */
-			return true; /* 屏幕表格要求 A 泵在线后启停才有效。 */
-		}
-		if (WorkMessage.alarm_flag == true)
-		{
-			return true; /* 全局报警期间屏幕 A 泵启停不生效，保持报警处理优先级。 */
-		}
-		if ((pumpMessageA.type == INJECTWATER) && (WorkMessage.runflag_work == true))
-		{
-			return true; /* 注水泵在手柄电机运行时可能被冷却联动占用，屏幕排空/启停必须等待手柄停机。 */
-		}
-		return false; /* A 泵在线、无报警且未被手柄运行占用时允许启停。 */
-
-	case SCREENKey_BPUMP_control:
-		if (pumpMessageB.online_flag == false)
-		{
-			pumpMessageB.run_flag = false; /* B 泵离线时撤销运行标志，防止屏幕继续显示可控运行态。 */
-			pumpMessageB.timingDrainage_flag = false; /* 同步取消 B 排空状态，避免离线期间计时残留。 */
-			Pubinterface_RefreshPumpBDisplay(); /* 立即把 B 泵区域刷新为不可用。 */
-			return true; /* 屏幕表格要求 B 泵在线后启停才有效。 */
-		}
-		if (WorkMessage.alarm_flag == true)
-		{
-			return true; /* 全局报警期间屏幕 B 泵启停不生效。 */
-		}
-		if ((pumpMessageB.type == INJECTWATER) && (WorkMessage.runflag_work == true))
-		{
-			return true; /* 注水泵在手柄运行时不能由屏幕进入排空/启停，避免和手柄冷却联动冲突。 */
-		}
-		return false; /* B 泵在线、无报警且未被手柄运行占用时允许启停。 */
-
-	default:
-		return false; /* 非屏幕泵键保持原有脚踏/HMI 处理路径。 */
-	}
-}
-
-/*
- * 函数功能：处理左右实体脚踏的泵档位循环，只调整对应泵的工作速度并刷新对应屏幕区域。
- * 输入参数：key_value 为左侧或右侧实体脚踏短按键值。
- * 返回参数：无。
- */
-static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
-{
-	static uint8_t PumpA_Gear = 0; /* 保存 A 泵实体脚踏档位，保持与原 PUMPActive 内静态变量相同的跨周期状态。 */
-	static uint8_t PumpB_Gear = 0; /* 保存 B 泵实体脚踏档位，左右泵继续各自独立循环。 */
-
-	switch (key_value)
-	{
-	case JTkey_left_short:
-		PumpA_Gear++;
-		if (PumpA_Gear > 5)
-			PumpA_Gear = 0;
-		if (pumpMessageA.type == 0)
-		{
-			PumpA_Gear = 0; // 队列通知界面暗黑
-			return;
-		}
-		else if (pumpMessageA.type == DRAWWATER) // 抽水
-		{
-			pumpMessageA.speed_work = 3 * PumpA_Gear; // 每一档位增加30ml水
-		}
-		else if (pumpMessageA.type == INJECTWATER) // 注水
-		{
-			if (pumpMessageA.timingDrainage_flag == true)
-				return;
-			switch (PumpA_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-				pumpMessageA.speed_work = PumpA_Gear * 10;
-				break;
-			case PUMPGEAR_IV:
-				pumpMessageA.speed_work = 50;
-				break;
-			case PUMPGEAR_V:
-				pumpMessageA.speed_work = 70;
-				break;
-			}
-		}
-		else if (pumpMessageA.type == POURWATER) // 灌注
-		{
-
-			switch (PumpA_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-			case PUMPGEAR_IV:
-				pumpMessageA.speed_work = 50 * PumpA_Gear; // 每一档位增加50ml水
-				break;
-			case PUMPGEAR_V:
-				pumpMessageA.speed_work = 300;
-				break;
-			}
-		}
-		Pubinterface_RefreshPumpADisplay(); /* A 泵加减速后同步刷新流量数值和按钮状态。 */
-		// 队列通知ui更新界面
-		break;
-	case JTKey_right_short:
-		PumpB_Gear++;
-		if (PumpB_Gear > 5)
-			PumpB_Gear = 0;
-		if (pumpMessageB.type == 0)
-		{
-			PumpB_Gear = 0;
-			// 队列通知界面暗黑
-		}
-		else if (pumpMessageB.type == DRAWWATER) // 抽水
-		{
-			pumpMessageB.speed_work = 3 * PumpB_Gear; // 每一档位增加30ml水
-		}
-		else if (pumpMessageB.type == INJECTWATER) // 注水
-		{
-			switch (PumpB_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-				pumpMessageB.speed_work = PumpB_Gear * 10;
-				break;
-			case PUMPGEAR_IV:
-				pumpMessageB.speed_work = 50;
-				break;
-			case PUMPGEAR_V:
-				pumpMessageB.speed_work = 70;
-				break;
-			}
-		}
-		else if (pumpMessageB.type == POURWATER) // 灌注
-		{
-			switch (PumpB_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-			case PUMPGEAR_IV:
-				pumpMessageB.speed_work = 50 * PumpB_Gear; // 每一档位增加50ml水
-				break;
-			case PUMPGEAR_V:
-				pumpMessageB.speed_work = 300; // 最大300ml水，记得宏定义
-				break;
-			}
-		}
-		Pubinterface_RefreshPumpBDisplay(); /* B 泵档位变化后同步刷新流量数值和按钮状态。 */
-		break;
-	default:
-		break; /* 调度入口只会传入档位键；保留默认分支防止误调用改变泵状态。 */
-	}
-}
-
-/*
- * 函数功能：处理 A/B 泵启停和注水泵排空请求，保持原控制权申请、计时清零和屏幕刷新顺序。
- * 输入参数：key_value 为泵启停键值，pump_owner 为该键对应的控制权来源。
- * 返回参数：无。
- */
-static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
-{
-	bool is_timed_drainage = false; /* 保留原启动分支的局部排空标志；当前 A/B 启动均按历史逻辑置为定时排空。 */
-
-	switch (key_value)
-	{
-	case JTKey_left_long:
-	case HMIkey_APUMP_control:
-	case SCREENKey_APUMP_control:
-		if (pumpMessageA.type == 0)
-		{
-			pumpMessageA.run_flag = false;
-			ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-			Pubinterface_RefreshPumpADisplay(); /* A 泵未识别时立即暗掉屏幕 A 泵区域和按钮，避免显示可启动。 */
-			// 队列A停止
-			return;
-		}
-		else
-		{
-			if (!pumpMessageA.run_flag)
-			{
-				/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
-				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
-					return;
-				if (pumpMessageA.speed_work == 0U)
-				{
-					//pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 按泵类型补启动速度，避免灌注/抽吸泵只置 run_flag 但 UART 输出 0 速。 */
-				}
-				//is_timed_drainage = (key_value == JTKey_left_long); /* A 泵只有脚踏长按才进入定时排空，上位机/屏幕普通启动保持连续运行。 */
-
-				is_timed_drainage=true;
-				pumpMessageA.run_flag = true;
-				if (pumpMessageA.type == INJECTWATER)
-				{
-					pumpMessageA.pedalDrainage_flag = false; /* 屏幕/长按排空开始前关闭脚踏临时态，排空来源只保留10秒计时。 */
-					pumpMessageA.timingDrainage_flag = is_timed_drainage;
-					pumpMessageA.timingDrainage_times = 0U; /* 每次重新启动都清排空计时，避免继承上一轮剩余计数导致刚启动就停泵。 */
-				}
-				// 队列发送界面按钮和数字变黄，A
-				// 队列发送泵运行设置数据
-			}
-			else
-			{
-				pumpMessageA.run_flag = false;
-				pumpMessageA.timingDrainage_flag = false;
-				pumpMessageA.pedalDrainage_flag = false; /* 屏幕停止 A 泵时同步结束所有排空来源。 */
-				pumpMessageA.timingDrainage_times = 0U;
-				ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-				// 队列发送界面按钮和数字变黑,A
-				// 队列发送泵停止设置数据（数据变为0）
-			}
-		}
-
-		Pubinterface_RefreshPumpADisplay(); /* A 泵启停或进入排空后立即刷新按钮，注水泵运行态显示 205 号黄色排空图。 */
-		break;
-	case JTKey_right_long:
-	case SCREENKey_BPUMP_control:
-	case HMIkey_BPUMP_control:
-		if (pumpMessageB.type == 0)
-		{
-			pumpMessageB.run_flag = false;
-			ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-			Pubinterface_RefreshPumpBDisplay(); /* B 泵未识别时立即暗掉屏幕 B 泵区域和按钮，避免显示可启动。 */
-			// 对列通知为0;
-			return;
-		}
-		else
-		{
-			if (!pumpMessageB.run_flag)
-			{
-				/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
-				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
-					return;
-				if (pumpMessageB.speed_work == 0U)
-				{
-					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 泵按类型补启动速度，保证屏幕直接启动灌注泵时能实际输出。 */
-				}
-				//is_timed_drainage = (key_value == JTKey_right_long); /* B 泵同样只有脚踏长按进入定时排空，普通外部/屏幕泵控制保持常规运行。 */
-				is_timed_drainage=true;
-				pumpMessageB.run_flag = true;
-				if (pumpMessageB.type == INJECTWATER)
-				{
-					pumpMessageB.pedalDrainage_flag = false; /* B 泵进入10秒排空前关闭脚踏临时态，避免来源叠加。 */
-					pumpMessageB.timingDrainage_flag = is_timed_drainage;
-					pumpMessageB.timingDrainage_times = 0U; /* 清掉旧排空计数，防止第二次启动被历史计时立即关断。 */
-				}
-				// 队列发送界面按钮和数字变黄
-				// 队列发送泵运行设置数据
-			}
-			else
-			{
-				pumpMessageB.timingDrainage_flag = false;
-				pumpMessageB.pedalDrainage_flag = false; /* 屏幕停止 B 泵时同步结束脚踏临时排空。 */
-				pumpMessageB.timingDrainage_times = 0U;
-				pumpMessageB.run_flag = false;
-				ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-				// 队列发送界面按钮和数字变黑
-				// 队列发送泵停止设置数据（数据变为0）
-			}
-		}
-
-		Pubinterface_RefreshPumpBDisplay(); /* B 泵启停或进入排空后立即刷新按钮，注水泵运行态显示 205 号黄色排空图。 */
-		break;
-	default:
-		break; /* 非启停键不修改运行、排空或控制权状态。 */
-	}
-}
-
-/*
- * 函数功能：处理屏幕和 HMI 的 A/B 泵加减速，按泵类型设置步进并限制在原上下限内。
- * 输入参数：key_value 为 A/B 泵加速或减速键值。
- * 返回参数：无。
- */
-static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
-{
-	uint16_t pump_speed_max = 0U; /* 当前泵类型允许的速度上限，防止加速越界。 */
-	uint16_t pump_speed_min = 0U; /* 当前泵类型允许的速度下限，防止无符号减法下溢。 */
-
-	switch (key_value)
-	{
-	case HMIkey_APUMP_Add:
-	case SCREENKey_APUMP_Add:
-	case HMIkey_APUMP_Sub:
-	case SCREENKey_APUMP_Sub:
-		switch (pumpMessageA.type)
-		{
-		case DRAWWATER: // 抽
-			pumpMessageA.speed_step_value = 1;
-			break;
-		case INJECTWATER: // 注
-			if (pumpMessageA.timingDrainage_flag == true)
-				return;
-			pumpMessageA.speed_step_value = 5;
-			break;
-		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = 30;
-			break;
-		default:
-			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
-			return;
-		}
-		pump_speed_max = Pubinterface_GetPumpSpeedMax(&pumpMessageA); /* A 泵调速上限按类型兜底，解决 speed_Max 未初始化导致加速回 0 的问题。 */
-		pump_speed_min = Pubinterface_GetPumpSpeedMin(&pumpMessageA); /* A 泵调速下限来自配置，当前未配置时保持 0。 */
-		if (key_value == HMIkey_APUMP_Add || key_value == SCREENKey_APUMP_Add)
-		{
-			if (pumpMessageA.speed_work >= pump_speed_max)
-			{
-				pumpMessageA.speed_work = pump_speed_max; /* 已到上限时保持上限，避免继续加速产生无效显示值。 */
-			}
-			else if ((uint16_t)(pump_speed_max - pumpMessageA.speed_work) <= pumpMessageA.speed_step_value)
-			{
-				pumpMessageA.speed_work = pump_speed_max; /* 距离上限不足一个步进时直接贴上限，避免无符号加法溢出。 */
-			}
-			else
-			{
-				pumpMessageA.speed_work += pumpMessageA.speed_step_value; /* 正常范围内按当前泵类型步进增加速度。 */
-			}
-		}
-		else
-		{
-			if (pumpMessageA.speed_work <= pump_speed_min)
-			{
-				pumpMessageA.speed_work = pump_speed_min; /* 已到下限时保持下限，避免继续减速发生无符号下溢。 */
-			}
-			else if ((uint16_t)(pumpMessageA.speed_work - pump_speed_min) <= pumpMessageA.speed_step_value)
-			{
-				pumpMessageA.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免 0 减 30 变成 65506。 */
-			}
-			else
-			{
-				pumpMessageA.speed_work -= pumpMessageA.speed_step_value; /* 正常范围内按当前泵类型步进降低速度。 */
-			}
-		}
-		if (pumpMessageA.run_flag == true)
-		{
-			// 队列通知A泵运行设置数据
-		}
-		Pubinterface_RefreshPumpADisplay(); /* A 泵加减速后同步刷新流量数值和按钮状态。 */
-		break;
-
-	case HMIkey_BPUMP_Add:
-	case SCREENKey_BPUMP_Add:
-	case HMIkey_BPUMP_Sub:
-	case SCREENKey_BPUMP_Sub:
-		switch (pumpMessageB.type)
-		{
-		case DRAWWATER: // 抽
-			pumpMessageB.speed_step_value = 1;
-			break;
-		case INJECTWATER: // 注
-			if (pumpMessageB.timingDrainage_flag == true)
-
-				return;
-			pumpMessageB.speed_step_value = 5;
-			break;
-		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = 30;
-			break;
-		default:
-			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
-			return;
-		}
-		pump_speed_max = Pubinterface_GetPumpSpeedMax(&pumpMessageB); /* B 泵调速上限按类型兜底，解决 speed_Max 未初始化导致屏幕加速仍显示 0 的问题。 */
-		pump_speed_min = Pubinterface_GetPumpSpeedMin(&pumpMessageB); /* B 泵调速下限来自配置，当前未配置时保持 0。 */
-		if (key_value == HMIkey_BPUMP_Add || key_value == SCREENKey_BPUMP_Add)
-		{
-			if (pumpMessageB.speed_work >= pump_speed_max)
-			{
-				pumpMessageB.speed_work = pump_speed_max; /* 已到上限时保持上限，避免继续加速产生无效显示值。 */
-			}
-			else if ((uint16_t)(pump_speed_max - pumpMessageB.speed_work) <= pumpMessageB.speed_step_value)
-			{
-				pumpMessageB.speed_work = pump_speed_max; /* 距离上限不足一个步进时直接贴上限，避免无符号加法溢出。 */
-			}
-			else
-			{
-				pumpMessageB.speed_work += pumpMessageB.speed_step_value; /* 正常范围内按当前泵类型步进增加速度。 */
-			}
-		}
-		else
-		{
-			if (pumpMessageB.speed_work <= pump_speed_min)
-			{
-				pumpMessageB.speed_work = pump_speed_min; /* 已到下限时保持下限，避免继续减速发生无符号下溢。 */
-			}
-			else if ((uint16_t)(pumpMessageB.speed_work - pump_speed_min) <= pumpMessageB.speed_step_value)
-			{
-				pumpMessageB.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免 0 减 30 变成 65506。 */
-			}
-			else
-			{
-				pumpMessageB.speed_work -= pumpMessageB.speed_step_value; /* 正常范围内按当前泵类型步进降低速度。 */
-			}
-		}
-
-		if (pumpMessageB.run_flag == true)
-		{
-			// 队列通知B泵运行设置数据
-		}
-		Pubinterface_RefreshPumpBDisplay(); /* B 泵加减速后同步刷新流量数值和按钮状态。 */
-		break;
-	default:
-		break; /* 非加减速键不读取旧步进值，也不刷新错误的泵通道。 */
-	}
-}
-
-/*
- * 函数功能：处理左右脚踏和 HMI 的轻排启停，保持注水泵选择顺序、控制权和双泵屏幕刷新不变。
- * 输入参数：key_value 为轻排启停键值，pump_owner 为该键对应的控制权来源。
- * 返回参数：无。
- */
-static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_owner)
-{
-	switch (key_value)
-	{
-	case JTKey_Gently_left_start: // 其实可以判断手柄类型决定是否给与注水
-		/* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
-		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
-			return;
-		if (pumpMessageA.type == INJECTWATER) // 注水
-		{
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
-			{
-				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageA.timingDrainage_flag = false;
-				}
-				if (pumpMessageA.speed_work == 0U)
-				{
-					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 轻排启动也要补非零注水流量，避免只置运行标志但泵不转。 */
-				}
-				pumpMessageA.run_flag = true;
-			}
-		}
-		else if (pumpMessageB.type == INJECTWATER)
-		{
-
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
-			{
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageB.timingDrainage_flag = false;
-				}
-				if (pumpMessageB.speed_work == 0U)
-				{
-					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 注水泵轻排启动时补非零流量，保持和屏幕/外控启泵一致。 */
-				}
-				pumpMessageB.run_flag = true;
-				// 队列发送启动B
-			}
-		}
-		Pubinterface_RefreshPumpADisplay(); /* 轻排可能启动 A 或 B 注水泵，两个泵区都刷新以避免状态残留。 */
-		Pubinterface_RefreshPumpBDisplay(); /* 轻排可能启动 A 或 B 注水泵，两个泵区都刷新以避免状态残留。 */
-		break;
-	case JTKey_Gently_left_stop:
-		if (pumpMessageA.type == INJECTWATER) // 注水
-		{
-			// 队列通知A泵停
-			pumpMessageA.run_flag = false;
-			;
-		}
-		else if (pumpMessageB.type == INJECTWATER)
-		{
-			// 队列通知B泵停
-			pumpMessageB.run_flag = false;
-			;
-		}
-		ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-		Pubinterface_RefreshPumpADisplay(); /* 轻排停止后同步 A 泵显示，避免按钮仍保持运行态。 */
-		Pubinterface_RefreshPumpBDisplay(); /* 轻排停止后同步 B 泵显示，避免按钮仍保持运行态。 */
-		break;
-	case JTKey_Gently_right_start:
-		/* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
-		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
-			return;
-		if (pumpMessageB.type == INJECTWATER) // 注水
-		{
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
-			{
-				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageB.timingDrainage_flag = false;
-				}
-				if (pumpMessageB.speed_work == 0U)
-				{
-					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* 右轻排启动 B 注水泵时补非零流量，避免 0 速不转。 */
-				}
-				pumpMessageB.run_flag = true;
-			}
-		}
-		else if (pumpMessageA.type == INJECTWATER)
-		{
-			// 队列发送
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
-			{
-				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageA.timingDrainage_flag = false;
-				}
-				if (pumpMessageA.speed_work == 0U)
-				{
-					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 右轻排回退启动 A 注水泵时补非零流量。 */
-				}
-				pumpMessageA.run_flag = true;
-			}
-		}
-
-		Pubinterface_RefreshPumpADisplay(); /* 右轻排可能影响 A 或 B 注水泵，两个泵区一起刷新。 */
-		Pubinterface_RefreshPumpBDisplay(); /* 右轻排可能影响 A 或 B 注水泵，两个泵区一起刷新。 */
-		break;
-	case JTKey_Gently_rigth_stop:
-		if (pumpMessageB.type == INJECTWATER) // 注水
-		{
-			// 队列通知A泵停
-			pumpMessageB.run_flag = false;
-			;
-		}
-		else if (pumpMessageA.type == INJECTWATER)
-		{
-			// 队列通知B泵停
-			pumpMessageA.run_flag = false;
-			;
-		}
-		ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-		Pubinterface_RefreshPumpADisplay(); /* 右轻排停止后同步 A 泵显示，避免按钮仍保持运行态。 */
-		Pubinterface_RefreshPumpBDisplay(); /* 右轻排停止后同步 B 泵显示，避免按钮仍保持运行态。 */
-		break;
-	case HMIkey_Gently_start:
-		/* 历史 HMI 轻排属于外部来源，启动前也必须通过统一控制权仲裁。 */
-		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
-			return;
-
-		if (WorkMessage.channel_work == 1)
-		{
-			if (pumpMessageA.type == INJECTWATER)
-			{
-				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageA.timingDrainage_flag = false;
-				}
-				if (pumpMessageA.speed_work == 0U)
-				{
-					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* HMI 轻排启动 A 注水泵时补非零流量。 */
-				}
-				pumpMessageA.run_flag = true;
-			}
-			else if (pumpMessageB.type == INJECTWATER)
-			{
-				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageB.timingDrainage_flag = false;
-				}
-				if (pumpMessageB.speed_work == 0U)
-				{
-					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* HMI 轻排启动 B 注水泵时补非零流量。 */
-				}
-				pumpMessageB.run_flag = true;
-			}
-		}
-		else if (WorkMessage.channel_work == 2)
-		{
-			if (pumpMessageB.type == INJECTWATER)
-			{
-				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageB.timingDrainage_flag = false;
-				}
-				if (pumpMessageB.speed_work == 0U)
-				{
-					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* HMI 当前 B 通道轻排时补 B 注水泵启动流量。 */
-				}
-				pumpMessageB.run_flag = true;
-			}
-			else if (pumpMessageA.type == INJECTWATER)
-			{
-				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
-				{
-					pumpMessageA.timingDrainage_flag = false;
-				}
-				if (pumpMessageA.speed_work == 0U)
-				{
-					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* HMI 当前 B 通道但 A 是注水泵时补 A 启动流量。 */
-				}
-				pumpMessageA.run_flag = true;
-			}
-		}
-
-		Pubinterface_RefreshPumpADisplay(); /* HMI 轻排启动后刷新 A 泵显示，保持上位机和屏幕状态一致。 */
-		Pubinterface_RefreshPumpBDisplay(); /* HMI 轻排启动后刷新 B 泵显示，保持上位机和屏幕状态一致。 */
-		break;
-	case HMIkey_Gently_stop:
-		if (WorkMessage.channel_work == 1)
-		{
-			if (pumpMessageA.type == INJECTWATER)
-			{
-				// 队列发送停止A
-				pumpMessageA.run_flag = false;
-			}
-			else if (pumpMessageB.type == INJECTWATER)
-			{
-				// 队列发送停止B
-				pumpMessageB.run_flag = false;
-			}
-		}
-		else if (WorkMessage.channel_work == 2)
-		{
-			if (pumpMessageB.type == INJECTWATER)
-			{
-				// 队列发送停止B
-				pumpMessageB.run_flag = false;
-			}
-			else if (pumpMessageA.type == INJECTWATER)
-			{
-				// 队列停止B
-				pumpMessageA.run_flag = false;
-			}
-		}
-		ControlArbitration_ExitLocalControlIfIdle(pump_owner);
-		Pubinterface_RefreshPumpADisplay(); /* HMI 轻排停止后刷新 A 泵显示，避免旧运行态残留。 */
-		Pubinterface_RefreshPumpBDisplay(); /* HMI 轻排停止后刷新 B 泵显示，避免旧运行态残留。 */
-
-		break;
-	default:
-		break; /* 非轻排键不修改任何泵运行状态。 */
-	}
-}
-
-/*
- * 函数功能：接收泵业务按键，先执行屏幕安全门禁，再按档位、启停、调速和轻排四类动作分派。
- * 输入参数：key_value 为脚踏、屏幕或 HMI 传入的泵控制键值。
- * 返回参数：无。
- */
-void PUMPActive(uint8_t key_value)
-{
-	uint8_t pump_owner = ControlArbitration_GetOwnerByPumpKey(key_value); /* 在业务分派前解析控制来源，保持原入口调用时机。 */
-
-	if (Pubinterface_ShouldRejectScreenPumpKey(key_value))
-	{
-		return; /* 屏幕键未通过在线、报警或手柄占用门禁时，不进入任何泵动作处理。 */
-	}
-
-	switch (key_value)
-	{
-	case JTkey_left_short:
-	case JTKey_right_short:
-		Pubinterface_HandlePumpGearKey(key_value); /* 实体脚踏短按只循环对应通道档位。 */
-		break;
-
-	case JTKey_left_long:
-	case HMIkey_APUMP_control:
-	case SCREENKey_APUMP_control:
-	case JTKey_right_long:
-	case SCREENKey_BPUMP_control:
-	case HMIkey_BPUMP_control:
-		Pubinterface_HandlePumpRunKey(key_value, pump_owner); /* 启停和排空集中处理，保留 A/B 历史差异。 */
-		break;
-
-	case HMIkey_APUMP_Add:
-	case SCREENKey_APUMP_Add:
-	case HMIkey_APUMP_Sub:
-	case SCREENKey_APUMP_Sub:
-	case HMIkey_BPUMP_Add:
-	case SCREENKey_BPUMP_Add:
-	case HMIkey_BPUMP_Sub:
-	case SCREENKey_BPUMP_Sub:
-		Pubinterface_HandlePumpSpeedKey(key_value); /* 上位机和屏幕调速按对应通道统一进入限幅处理。 */
-		break;
-
-	case JTKey_Gently_left_start:
-	case JTKey_Gently_left_stop:
-	case JTKey_Gently_right_start:
-	case JTKey_Gently_rigth_stop:
-	case HMIkey_Gently_start:
-	case HMIkey_Gently_stop:
-		Pubinterface_HandlePumpGentlyKey(key_value, pump_owner); /* 轻排保持左右优先泵和 HMI 当前通道选择顺序。 */
-		break;
-
-	default:
-		break; /* 非泵业务键保持原逻辑：直接返回且不改变任何状态。 */
 	}
 }

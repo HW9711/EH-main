@@ -21,7 +21,7 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
-#include "bsp_board.h"
+#include "board.h"
 
 /* USER CODE END 0 */
 

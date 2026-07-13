@@ -217,8 +217,8 @@ static void Foot_Queue_Init(void)
 }
 
 /*
- * 函数功能：按指定脚踏侧启动 A 注水泵；双脚踏轻踩时只打开临时排空态，不覆盖屏幕保存的速度。
- * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏固定70轻排。
+ * 函数功能：按指定脚踏侧启动 A 注水泵；双脚踏轻踩继续使用屏幕保存的速度。
+ * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏轻踩来源。
  * 返回参数：无。
  */
 static void Foot_StartPumpAInjection(uint16_t speed_work, bool right_pedal, bool pedal_drainage)
@@ -236,7 +236,7 @@ static void Foot_StartPumpAInjection(uint16_t speed_work, bool right_pedal, bool
     {
         ControlSignalMessage.jtL_gentlypump_flag=true; /* 左脚启动 A 泵时保持原左侧轻排标记。 */
     }
-    /* 双脚踏轻踩只置临时排空标志，泵任务据此固定输出 70，不能覆盖屏幕长期设定速度。 */
+    /* 双脚踏轻踩只记录控制来源，泵任务仍读取 speed_work，不进入屏幕固定速度排空。 */
     pumpMessageA.pedalDrainage_flag=pedal_drainage;
     if(pedal_drainage==false)
     {
@@ -251,8 +251,8 @@ static void Foot_StartPumpAInjection(uint16_t speed_work, bool right_pedal, bool
 }
 
 /*
- * 函数功能：按指定脚踏侧启动 B 注水泵；双脚踏轻踩时只打开临时排空态，不覆盖屏幕保存的速度。
- * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏固定70轻排。
+ * 函数功能：按指定脚踏侧启动 B 注水泵；双脚踏轻踩继续使用屏幕保存的速度。
+ * 输入参数：speed_work 为普通联动速度；right_pedal 为 false 表示左侧、true 表示右侧；pedal_drainage 为 true 表示双脚踏轻踩来源。
  * 返回参数：无。
  */
 static void Foot_StartPumpBInjection(uint16_t speed_work, bool right_pedal, bool pedal_drainage)
@@ -270,7 +270,7 @@ static void Foot_StartPumpBInjection(uint16_t speed_work, bool right_pedal, bool
     {
         ControlSignalMessage.jtL_gentlypump_flag=true; /* 左脚启动 B 泵时保持原左侧轻排标记。 */
     }
-    /* 双脚踏轻踩只置临时排空标志，保证松脚或进入手柄联动后仍能恢复屏幕设定速度。 */
+    /* 双脚踏轻踩只记录控制来源，实际输出继续使用屏幕保存的 speed_work。 */
     pumpMessageB.pedalDrainage_flag=pedal_drainage;
     if(pedal_drainage==false)
     {
@@ -288,7 +288,7 @@ static void Foot_StopPumpAInjection(void)
 {
     /* 松开脚踏后关闭 A 泵运行门控，sscPUMPA 下一周期会按 run_flag=false 下发 0 速。 */
     pumpMessageA.run_flag=false;
-    pumpMessageA.pedalDrainage_flag=false; /* 松脚结束临时70档，后续启动重新使用屏幕设定速度。 */
+    pumpMessageA.pedalDrainage_flag=false; /* 松脚结束 A 泵脚踏轻踩来源，后续屏幕排空不受旧状态影响。 */
     /* 脚踏停泵不进入排空模式，必须同步清除排空标志。 */
     pumpMessageA.timingDrainage_flag=false;
     /* 排空计数清零，避免下一次排空或脚踏启动继承旧计数。 */
@@ -299,7 +299,7 @@ static void Foot_StopPumpBInjection(void)
 {
     /* 松开脚踏后关闭 B 泵运行门控，sscPUMPB 下一周期会按 run_flag=false 下发 0 速。 */
     pumpMessageB.run_flag=false;
-    pumpMessageB.pedalDrainage_flag=false; /* 松脚结束 B 泵临时70档，不能把轻排状态带到下一次联动。 */
+    pumpMessageB.pedalDrainage_flag=false; /* 松脚结束 B 泵脚踏轻踩来源，不能把该状态带到下一次联动。 */
     /* 脚踏停泵不进入排空模式，必须同步清除排空标志。 */
     pumpMessageB.timingDrainage_flag=false;
     /* 排空计数清零，避免下一次排空或脚踏启动继承旧计数。 */
@@ -501,7 +501,6 @@ static void Foot_ClearFootValueErrorAlarm(void)
 
 static void Foot_ClearHandleOrOverloadAlarm(void)
 {
-    static uint8_t times=0;
     /* 脚踏释放动作只清手柄未连接/电机过载这两类可恢复提示，不能误清 UID、通讯、HALL 等故障。 */
     if(WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED))
     {
@@ -783,12 +782,12 @@ static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
     {
         if(pumpMessageB.type==INJECTWATER)
         {
-            Foot_StartPumpBInjection(PUMP_TIMING_DRAINAGE_SPEED, true, true); /* 右脚优先启动 B 泵，临时固定70且不覆盖屏幕设定。 */
+            Foot_StartPumpBInjection(pumpMessageB.speed_work, true, true); /* 右脚优先启动 B 泵，轻踩输出直接使用 B 泵屏幕设定速度。 */
             pump_channel = CHANNEL_B; /* 保存实际启动 B，松右脚时只处理 B。 */
         }
         else if(pumpMessageA.type==INJECTWATER)
         {
-            Foot_StartPumpAInjection(PUMP_TIMING_DRAINAGE_SPEED, true, true); /* B 不是注水泵时回退 A，临时固定70且不覆盖屏幕设定。 */
+            Foot_StartPumpAInjection(pumpMessageA.speed_work, true, true); /* B 不是注水泵时回退 A，轻踩输出使用 A 泵屏幕设定速度。 */
             pump_channel = CHANNEL_A; /* 保存回退启动的 A，停止时不能再按泵类型优先级判断。 */
         }
         s_double_right_gently_pump_channel = pump_channel; /* 每周期刷新右侧实际泵记录，松脚依据该记录停止。 */
@@ -801,12 +800,12 @@ static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
     {
         if(pumpMessageA.type==INJECTWATER)
         {
-            Foot_StartPumpAInjection(PUMP_TIMING_DRAINAGE_SPEED, false, true); /* 左脚优先启动 A 泵，临时固定70且不覆盖屏幕设定。 */
+            Foot_StartPumpAInjection(pumpMessageA.speed_work, false, true); /* 左脚优先启动 A 泵，轻踩输出直接使用 A 泵屏幕设定速度。 */
             pump_channel = CHANNEL_A; /* 保存实际启动 A，松左脚时只处理 A。 */
         }
         else if(pumpMessageB.type==INJECTWATER)
         {
-            Foot_StartPumpBInjection(PUMP_TIMING_DRAINAGE_SPEED, false, true); /* A 不是注水泵时回退 B，临时固定70且不覆盖屏幕设定。 */
+            Foot_StartPumpBInjection(pumpMessageB.speed_work, false, true); /* A 不是注水泵时回退 B，轻踩输出使用 B 泵屏幕设定速度。 */
             pump_channel = CHANNEL_B; /* 保存回退启动的 B，松脚时准确停止 B。 */
         }
         s_double_left_gently_pump_channel = pump_channel; /* 每周期刷新左侧实际泵记录。 */
@@ -1159,7 +1158,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
 
             /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
-            Foot_StartDoublePedalGentlyPump(false); /* 左脚按 A 优先规则启动并记录实际泵，固定 70 档且不进入 10 秒定时排空。 */
+            Foot_StartDoublePedalGentlyPump(false); /* 左脚按 A 优先规则启动并记录实际泵，使用屏幕设定速度且不进入10秒定时排空。 */
 
             if(adValue<msg->MValue_Left)adValue=msg->MValue_Left;
           if(adValue-msg->MValue_Left>JT_threshold)
@@ -1326,7 +1325,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
 
        /* 轻踩阶段只预启动注水泵，不占用手柄电机 owner；真正启动电机前再申请 FOOT owner。 */
 
-       Foot_StartDoublePedalGentlyPump(true); /* 右脚按 B 优先规则启动并记录实际泵，固定 70 档且不进入 10 秒定时排空。 */
+       Foot_StartDoublePedalGentlyPump(true); /* 右脚按 B 优先规则启动并记录实际泵，使用屏幕设定速度且不进入10秒定时排空。 */
      if(adValue_r<msg->MValue_Right)adValue_r=msg->MValue_Right;
       if(adValue_r-msg->MValue_Right>JT_threshold)
         {
@@ -1529,217 +1528,286 @@ void FootControlTask(uint32_t event)
 
 
 
+typedef struct
+{
+    uint8_t connected;             /* 1 表示脚踏已经完成定标校验并向行为队列发布上线。 */
+    volatile uint8_t silent_ticks; /* 连续无完整帧的 10ms 周期数，超过 100 后确认掉线。 */
+    uint8_t single_low_ready;      /* 单踏板低值已经读回，下一步等待高值。 */
+    uint8_t single_high_requested; /* 单踏板高值读取命令已经发送，防止重复发送。 */
+} FootParserState_t;
+
+/* UART4 解析状态只由 10ms 解析任务维护，集中存放便于插拔时一次清理。 */
+static FootParserState_t s_foot_parser_state = {0U};
+
 /*
- * 函数功能：周期读取脚踏串口数据，完成脚踏上线、掉线、定标值校验和脚踏状态解析。
- * 输入参数：event 为调度器传入的任务事件，本函数当前不依赖该值。
+ * 函数功能：处理 UART4 本周期没有完整脚踏帧的掉线确认。
+ * 输入参数：无。
  * 返回参数：无。
  */
-void Foot_ParseDataS(uint32_t event)//开个任务扫描预计10ms扫描一次
+static void Foot_HandleMissingUartFrame(void)
 {
+    if ((s_foot_parser_state.connected == 0U) &&
+        (WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR) == false))
+    {
+        return; /* 从未上线且没有定标报警时不累计掉线，避免空串口周期产生无意义状态变化。 */
+    }
 
-    uint8_t i;
-    uint16_t rlen = 0;
-    uint8_t dat[255] = { 0 };
-    static uint8_t footconnect_flag = 0;
-    //static uint8_t footconnect_times = 0;
-    static volatile uint8_t footDisconnect_times = 0;
+    ++s_foot_parser_state.silent_ticks; /* 每 10ms 无完整帧累计一次，保持原 100 次确认阈值。 */
+    if (s_foot_parser_state.silent_ticks <= 100U)
+    {
+        return; /* 尚未超过掉线阈值时保留当前脚踏状态。 */
+    }
 
+    s_foot_parser_state.silent_ticks = 0U; /* 掉线已经确认，清零计数供下次上线使用。 */
+    if (s_foot_parser_state.connected != 0U)
+    {
+        footmessage.connect_flag = false; /* 行为任务收到该消息后停止脚踏控制并释放控制权。 */
+        Foot_SendMessage(footmessage); /* 保持原队列通知顺序，先发布掉线再发提示蜂鸣。 */
+        SendKeyBeepMessage(1U); /* 脚踏真实掉线时保留一次按键蜂鸣提示。 */
+    }
 
-   static uint8_t first_connect_flag=0;
-     static uint8_t double_connect_flag=0;
+    s_foot_parser_state.connected = 0U; /* 回到未连接状态，下次插入必须重新校验定标值。 */
+    s_foot_parser_state.single_low_ready = 0U; /* 清除单踏板低值读取阶段。 */
+    s_foot_parser_state.single_high_requested = 0U; /* 清除单踏板高值读取阶段。 */
+    Foot_ClearFootValueErrorAlarm(); /* 错误值脚踏拔出后清除 83 号报警。 */
+}
 
-    //读取串口数据
-    rlen = Uart4_DMARecvDataPeek(dat);//脚踏链接和退出200ms表示，这里循环20次
-    if (rlen < 10)
-    {   //不够一个数据包大小
-               /* RFID 由 handlescan 在线监测统一触发，脚踏无数据时不能周期塞队列，避免刀具头拔掉后旧刀具信息无法清除。 */
-        if((footconnect_flag != 0U) || (WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR) != false))
+/*
+ * 函数功能：处理单踏板实时值、低值和高值三类 UART4 帧。
+ * 输入参数：frame 指向 FE EF 帧头；remaining 为从帧头开始的剩余字节数。
+ * 返回参数：true 表示发现无效定标值并要求本周期立即退出；false 表示继续扫描后续数据。
+ */
+static bool Foot_ParseSinglePedalFrame(const uint8_t *frame, uint16_t remaining)
+{
+    if ((remaining >= 8U) &&
+        (frame[2] == 0xB6U) && (frame[3] == 0xC1U) &&
+        (frame[4] == 0x01U) && (frame[5] == 0x01U))
+    {
+        jt_adcvalue = ((uint16_t)frame[6] << 8) | frame[7]; /* 保存单踏板当前 AD 值供 25ms 行为任务换算速度。 */
+        if ((s_foot_parser_state.connected == 0U) &&
+            (s_foot_parser_state.single_low_ready == 0U))
         {
-          footDisconnect_times++; /* 已上线脚踏或脚踏值错误报警都需要累计无数据周期，用于确认脚踏已经真正拔出。 */
-          if(footDisconnect_times > 100) // 160*10ms=1600ms，超过1.6秒没有数据，认为脚踏掉线,这个地方判断一下，难道1秒6都不清零的么
-          {
-            footDisconnect_times=0;
-            if(footconnect_flag != 0U)
-            {
-              footmessage.connect_flag=false;
-              Foot_SendMessage(footmessage);//队列通知掉线
-              //队列消息通知脚踏掉线
-              SendKeyBeepMessage(1U);
-            }
-            footconnect_flag=0; /* 断开确认后统一回到未连接状态，下一次插入必须重新读取并校验脚踏存储值。 */
-            first_connect_flag=0; /* 清掉单脚踏低值读取阶段，避免下次插入沿用上一次不完整的定标读取进度。 */
-            double_connect_flag=0; /* 清掉双脚踏读取阶段，保证重新插入后从高/中/低值流程重新开始。 */
-            Foot_ClearFootValueErrorAlarm(); /* 错误值脚踏拔出后没有新的有效帧，断开确认完成时清掉 83 号报警。 */
-          }
+            Uart4_SendPacket(get_jtLvalue, 8U); /* 首次识别单踏板时请求 EEPROM 低值。 */
         }
+        return false;
+    }
+
+    if ((remaining >= 8U) &&
+        (frame[2] == 0xD0U) && (frame[3] == 0xB4U) &&
+        (frame[4] == 0xB5U) && (frame[5] == 0xCDU))
+    {
+        s_foot_parser_state.single_low_ready = 1U; /* 标记低值已经读回。 */
+        footmessage.LValue_Left = ((uint16_t)frame[6] << 8) | frame[7]; /* 保存单踏板低位定标值。 */
+        if (s_foot_parser_state.single_high_requested == 0U)
+        {
+            Uart4_SendPacket(get_jtHvalue, 8U); /* 低值到达后只请求一次高值。 */
+        }
+        return false;
+    }
+
+    if ((remaining >= 8U) &&
+        (frame[2] == 0xD0U) && (frame[3] == 0xB4U) &&
+        (frame[4] == 0xB8U) && (frame[5] == 0xDFU))
+    {
+        s_foot_parser_state.single_high_requested = 1U; /* 标记高值已经读回。 */
+        footmessage.HValue_Left = ((uint16_t)frame[6] << 8) | frame[7]; /* 保存单踏板高位定标值。 */
+        if (Foot_IsPedalTwoPointStorageValid(footmessage.LValue_Left,
+                                             footmessage.HValue_Left) == false)
+        {
+            s_foot_parser_state.single_low_ready = 0U; /* 无效定标值要求下次重新读取完整低/高值。 */
+            s_foot_parser_state.single_high_requested = 0U;
+            Foot_ReportFootValueErrorAlarm(); /* 显示 83 号报警并阻止脚踏控制。 */
+            return true;
+        }
+
+        Foot_ClearFootValueErrorAlarm(); /* 新定标值有效时清除历史 83 号报警。 */
+        s_foot_parser_state.connected = 1U; /* 单踏板完成定标后进入在线状态。 */
+        footmessage.connect_flag = true;
+        footmessage.pedalType = 1U; /* 行为任务按单踏板比例运行流程处理。 */
+        Foot_SendMessage(footmessage); /* 保持原顺序，先发布上线消息再蜂鸣。 */
+        SendKeyBeepMessage(1U);
+    }
+
+    return false;
+}
+
+/*
+ * 函数功能：把双段/双脚踏按键码转换成现有业务按键消息。
+ * 输入参数：key_code 为 UART4 帧中的脚踏按键编号。
+ * 返回参数：无。
+ */
+static void Foot_DispatchPedalKey(uint8_t key_code)
+{
+    switch (key_code)
+    {
+        case 0x01U:
+            SendKeyBehMessage(1U, JTKey_left_long); /* 左键长按。 */
+            break;
+        case 0x02U:
+            SendKeyBehMessage(1U, JTKey_right_long); /* 右键长按。 */
+            break;
+        case 0x03U:
+            SendKeyBehMessage(1U, JTKey_middle_long); /* 中键长按。 */
+            break;
+        case 0x04U:
+            SendKeyBehMessage(1U, JTKey_right_short); /* 右键短按。 */
+            break;
+        case 0x05U:
+            SendKeyBehMessage(1U, JTkey_left_short); /* 左键短按。 */
+            break;
+        case 0x06U:
+            SendKeyBehMessage(1U, JTKey_middle_short); /* 中键短按。 */
+            break;
+        default:
+            return; /* 未定义按键码不投递消息，也不产生蜂鸣。 */
+    }
+
+    SendKeyBeepMessage(1U); /* 合法脚踏按键保持一次按键蜂鸣。 */
+}
+
+/*
+ * 函数功能：处理双段踏板和双脚踏的实时值、定标值及实体按键。
+ * 输入参数：frame 指向 FE EF BB AA 帧；remaining 为从帧头开始的剩余字节数。
+ * 返回参数：true 表示保持原提前退出语义；false 表示继续扫描后续数据。
+ */
+static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
+{
+    if ((remaining >= 10U) && (frame[4] == 0xDDU) && (frame[5] == 0x01U))
+    {
+        jtb_adcvalue = ((uint16_t)frame[6] << 8) | frame[7]; /* 保存双段踏板当前 AD 值。 */
+        if (s_foot_parser_state.connected != 0U)
+        {
+            return true; /* 保持旧逻辑：双段踏板已在线时收到实时帧后立即结束本周期。 */
+        }
+        if (remaining < 16U)
+        {
+            return false; /* 定标字段尚未收完整时等待下一包，不访问越界数据。 */
+        }
+
+        footmessage.HValue_Left = ((uint16_t)frame[10] << 8) | frame[11];
+        footmessage.MValue_Left = ((uint16_t)frame[12] << 8) | frame[13];
+        footmessage.LValue_Left = ((uint16_t)frame[14] << 8) | frame[15];
+        if (Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left,
+                                               footmessage.MValue_Left,
+                                               footmessage.HValue_Left) == false)
+        {
+            Foot_ReportFootValueErrorAlarm(); /* 双段踏板任一校准点无效时显示 83 号报警。 */
+            return true;
+        }
+
+        Foot_ClearFootValueErrorAlarm(); /* 三点定标恢复有效后释放报警。 */
+        footmessage.connect_flag = true;
+        footmessage.pedalType = 2U; /* 行为任务按轻踩泵、深踩电机流程处理。 */
+        Foot_SendMessage(footmessage);
+        SendKeyBeepMessage(1U);
+        s_foot_parser_state.connected = 1U;
+        return false;
+    }
+
+    if ((remaining >= 10U) && (frame[4] == 0xDDU) && (frame[5] == 0x02U))
+    {
+        jtd_adcvalue_l = ((uint16_t)frame[6] << 8) | frame[7]; /* 保存双脚踏左侧 AD 值。 */
+        jtd_adcvalue_r = ((uint16_t)frame[8] << 8) | frame[9]; /* 保存双脚踏右侧 AD 值。 */
+        if (s_foot_parser_state.connected != 0U)
+        {
+            return false; /* 双脚踏在线后继续扫描同一 DMA 包中的其它帧，保持原行为。 */
+        }
+        if (remaining < 22U)
+        {
+            return true; /* 双脚踏未上线且定标字段不完整时保持原立即退出语义。 */
+        }
+
+        footmessage.HValue_Left = ((uint16_t)frame[10] << 8) | frame[11];
+        footmessage.MValue_Left = ((uint16_t)frame[12] << 8) | frame[13];
+        footmessage.LValue_Left = ((uint16_t)frame[14] << 8) | frame[15];
+        footmessage.HValue_Right = ((uint16_t)frame[16] << 8) | frame[17];
+        footmessage.MValue_Right = ((uint16_t)frame[18] << 8) | frame[19];
+        footmessage.LValue_Right = ((uint16_t)frame[20] << 8) | frame[21];
+        if ((Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left,
+                                                footmessage.MValue_Left,
+                                                footmessage.HValue_Left) == false) ||
+            (Foot_IsPedalThreePointStorageValid(footmessage.LValue_Right,
+                                                footmessage.MValue_Right,
+                                                footmessage.HValue_Right) == false))
+        {
+            Foot_ReportFootValueErrorAlarm(); /* 左右任一路定标无效都禁止双脚踏上线。 */
+            return true;
+        }
+
+        Foot_ClearFootValueErrorAlarm(); /* 左右定标均有效后释放历史报警。 */
+        footmessage.connect_flag = true;
+        footmessage.pedalType = 3U; /* 行为任务按双脚踏左右独立流程处理。 */
+        Foot_SendMessage(footmessage);
+        s_foot_parser_state.connected = 1U;
+        SendKeyBeepMessage(1U);
+        return false;
+    }
+
+    if ((remaining >= 8U) && (frame[4] == 0xCCU))
+    {
+        Foot_DispatchPedalKey(frame[7]); /* 按键帧只读取既有第 7 字节业务码。 */
+    }
+
+    return false;
+}
+
+/*
+ * 函数功能：解析一个已经找到 FE EF 帧头的脚踏数据片段。
+ * 输入参数：frame 指向帧头；remaining 为当前 DMA 数据中从帧头开始的剩余长度。
+ * 返回参数：true 表示调用方应立即结束本周期；false 表示继续寻找后续帧。
+ */
+static bool Foot_ParseUartFrame(const uint8_t *frame, uint16_t remaining)
+{
+    s_foot_parser_state.silent_ticks = 0U; /* 任一合法 FE EF 帧头到达都重置掉线计数，保持原在线判定。 */
+
+    if ((remaining >= 8U) &&
+        (((frame[2] == 0xB6U) && (frame[3] == 0xC1U)) ||
+         ((frame[2] == 0xD0U) && (frame[3] == 0xB4U))))
+    {
+        return Foot_ParseSinglePedalFrame(frame, remaining);
+    }
+
+    if ((remaining >= 6U) && (frame[2] == 0xBBU) && (frame[3] == 0xAAU))
+    {
+        return Foot_ParseMultiPedalFrame(frame, remaining);
+    }
+
+    return false; /* 未识别帧保持静默，不改变脚踏业务状态。 */
+}
+
+/*
+ * 函数功能：每 10ms 读取 UART4 DMA 数据，解析脚踏上线、掉线、定标值、实时值和按键。
+ * 输入参数：event 为调度器传入的任务事件，本函数当前不使用。
+ * 返回参数：无。
+ */
+void Foot_ParseDataS(uint32_t event)
+{
+    uint16_t offset; /* 当前候选帧头在 DMA 数据中的偏移。 */
+    uint16_t received_len; /* 本周期从 UART4 DMA 取得的字节数。 */
+    uint8_t data[255] = {0U}; /* UART4 单周期接收缓存，容量保持原 255 字节。 */
+
+    (void)event;
+    received_len = Uart4_DMARecvDataPeek(data); /* 读取并消费本周期 UART4 DMA 数据。 */
+    if (received_len < 10U)
+    {
+        Foot_HandleMissingUartFrame(); /* 不足最短帧时只处理掉线计时。 */
         return;
     }
-    else
+
+    for (offset = 0U; (uint16_t)(offset + 10U) <= received_len; ++offset)
     {
-        // 修改循环条件，防止数组越界
-        for(i=0; i <= rlen - 10; i++)  // 使用加法形式的比较，避免下溢
+        if ((data[offset] != 0xFEU) || (data[offset + 1U] != 0xEFU))
         {
-            if(i+9 >= rlen) break; // 额外保护，确保不会数组越界
-
-            if(dat[i]==0xfE && dat[i+1]==0xEF)
-            {
-                footDisconnect_times=0;
-                if(i+7 < rlen && dat[i+2]==0xb6 && dat[i+3]==0xc1 && dat[i+4]==0x01 && dat[i+5]==0x01){
-                    jt_adcvalue=dat[i+6]<<8 | dat[i+7];
-                    if(!footconnect_flag)
-                    {
-                       //发送获取低值的命令
-                       if(!first_connect_flag){
-                       Uart4_SendPacket(get_jtLvalue, 8);
-                   }
-
-                    }
-                }
-                else if(i+7 < rlen && dat[i+2]==0xd0 && dat[i+3]==0xb4 && dat[i+4]==0xb5 && dat[i+5]==0xcd)//脚踏低值
-                {
-                        first_connect_flag=1;
-                    footmessage.LValue_Left=dat[i+6]<<8 | dat[i+7];
-
-                    if(!double_connect_flag){
-                    //判断脚踏高低值是否正确，若正确发送获取低值，不正确则通知队列报警
-                     Uart4_SendPacket(get_jtHvalue, 8);//获取高
-                    }
-
-                 // return;
-                }
-                else if(i+7 < rlen && dat[i+2]==0xd0 && dat[i+3]==0xb4 && dat[i+4]==0xb8 && dat[i+5]==0xdf)//脚踏高值
-                {
-                     double_connect_flag=1;
-
-                    footmessage.HValue_Left=dat[i+6]<<8 | dat[i+7];
-                    if(Foot_IsPedalTwoPointStorageValid(footmessage.LValue_Left, footmessage.HValue_Left) == false)
-                    {
-                      first_connect_flag=0; /* 本次读到的低/高值无效，清掉低值阶段，等待下次重新读取完整定标值。 */
-                      double_connect_flag=0; /* 高值阶段同样回到未完成状态，避免坏高值让脚踏误上线。 */
-                      Foot_ReportFootValueErrorAlarm(); /* 脚踏存储值错误时弹出 83 号报警图，并锁住泵和手柄控制。 */
-                      return; /* 坏定标值不能发送脚踏上线消息，避免后续任务使用错误行程计算速度。 */
-                    }
-                    Foot_ClearFootValueErrorAlarm(); /* 新读到的单踏板低/高值有效，允许清除历史脚踏值错误报警。 */
-                    //判断脚踏高低值正确后，队列通知脚踏上线
-                      footconnect_flag=1;
-                      footmessage.connect_flag=true;
-                      footmessage.pedalType=1;//JT
-                      Foot_SendMessage(footmessage);
-                        SendKeyBeepMessage(1U);
-                     //通知相关队列脚踏已连接，脚踏型号
-                }
-                else if(i+5 < rlen && dat[i+2]==0xbb && dat[i+3]==0xaa)
-                {
-                   if(i+9 < rlen && dat[i+4]==0xdd)//AD值
-                   {
-                      if(dat[i+5]==0x01)//jtb
-                      {
-                         jtb_adcvalue=dat[i+6]<<8 | dat[i+7];//ad值
-                        if(!footconnect_flag)
-                        {
-                            if(i+15 < rlen) // 确保读取 H/M/L 三组定标值时不会越界
-                            {
-                                footmessage.HValue_Left=dat[i+10]<<8  | dat[i+11];
-                                footmessage.MValue_Left=dat[i+12]<<8 | dat[i+13];
-                                footmessage.LValue_Left=dat[i+14]<<8 | dat[i+15];
-                                if(Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left, footmessage.MValue_Left, footmessage.HValue_Left) == false)
-                                {
-                                  Foot_ReportFootValueErrorAlarm(); /* JTB 低/中/高任一段无效时显示 83 号报警，并禁止控制泵和手柄。 */
-                                  return; /* 不发送脚踏上线消息，避免错误中点把轻排段或电机段误触发。 */
-                                }
-                                Foot_ClearFootValueErrorAlarm(); /* JTB 三点定标恢复有效后，释放脚踏值错误报警锁存。 */
-                                //判断脚踏值正确后，通知队列脚踏上线
-                                //footconnect_flag=2;
-                                footmessage.connect_flag=true;
-                                footmessage.pedalType=2;//JTB
-                                Foot_SendMessage(footmessage);
-                                  SendKeyBeepMessage(1U);
-                                  footconnect_flag=1;
-                                //通知相关队列脚踏已连接，脚踏型号jtb
-                            }
-                        }
-                        else return;
-                      }
-                      else if(i+9 < rlen && dat[i+5]==0x02)//jtd
-                      {
-                        jtd_adcvalue_l=dat[i+6]<<8 | dat[i+7];
-                        jtd_adcvalue_r=dat[i+8]<<8 | dat[i+9];
-
-                        if(!footconnect_flag)
-                        {
-                            if(i+21 < rlen) // 确保不会越界
-                            {
-                                footmessage.HValue_Left=dat[i+10]<<8 | dat[i+11];
-                                footmessage.MValue_Left=dat[i+12]<<8 | dat[i+13];
-                                footmessage.LValue_Left=dat[i+14]<<8 | dat[i+15];
-                                footmessage.HValue_Right=dat[i+16]<<8 | dat[i+17];
-                                footmessage.MValue_Right=dat[i+18]<<8 | dat[i+19];
-                                footmessage.LValue_Right=dat[i+20]<<8 | dat[i+21];
-                                if((Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left, footmessage.MValue_Left, footmessage.HValue_Left) == false) ||
-                                   (Foot_IsPedalThreePointStorageValid(footmessage.LValue_Right, footmessage.MValue_Right, footmessage.HValue_Right) == false))
-                                {
-                                  Foot_ReportFootValueErrorAlarm(); /* JTD 左/右任一路三点定标无效时显示 83 号报警，并禁止双脚踏控制。 */
-                                  return; /* 不发送脚踏上线消息，避免错误通道继续控制泵或手柄。 */
-                                }
-                                Foot_ClearFootValueErrorAlarm(); /* JTD 左右两路三点定标都有效后，释放历史脚踏值错误报警。 */
-                                //判断脚踏值正确后，队列通知脚踏上线
-                                footmessage.connect_flag=true;
-                                footmessage.pedalType=3;//JTd
-                                Foot_SendMessage(footmessage);
-                                  footconnect_flag=1;
-                                  SendKeyBeepMessage(1U);
-                                //通知相关队列脚踏已连接，脚踏型号jtd
-                            }
-                            else return;
-                        }
-
-                      }
-                   }
-                   else if(i+7 < rlen && dat[i+4]==0xcc)//按键
-                   {
-                      switch(dat[i+7])//队列通知行为
-                      {
-                         case 0x01://左键长按
-                         SendKeyBehMessage(1,JTKey_left_long);
-                           SendKeyBeepMessage(1U);
-                         break;
-                         case 0x02://右键长按
-                          SendKeyBehMessage(1,JTKey_right_long);
-                            SendKeyBeepMessage(1U);
-                         break;
-                         case 0x03://中键长按
-                           SendKeyBehMessage(1,JTKey_middle_long);
-                             SendKeyBeepMessage(1U);
-                         break;
-                         case 0x04://右键短按
-                          SendKeyBehMessage(1,JTKey_right_short);
-                            SendKeyBeepMessage(1U);
-                         break;
-                         case 0x05://左键短按
-                             SendKeyBehMessage(1,JTkey_left_short);
-                               SendKeyBeepMessage(1U);
-                         break;
-                         case 0x06://中键短按
-                           SendKeyBehMessage(1,JTKey_middle_short);
-                             SendKeyBeepMessage(1U);
-                         break;
-                         default:
-                         break;
-                      }
-                   }
-                }
-               // memset(dat,0,sizeof(dat));
-
-            }
-            else
-            {
-
-            }
+            continue; /* 跳过噪声字节，继续寻找下一个 FE EF 帧头。 */
         }
-       //  memset(dat,0,sizeof(dat));
 
+        if (Foot_ParseUartFrame(&data[offset], (uint16_t)(received_len - offset)) != false)
+        {
+            return; /* 无效定标或原有提前退出分支要求结束本周期。 */
+        }
     }
 }
+
 void SscFootControlTask_Init(void)
 {
     //初始化消息队列

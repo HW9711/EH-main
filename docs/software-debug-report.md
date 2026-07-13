@@ -135,7 +135,7 @@ flowchart TD
     B --> C["统一状态\nWorkMessage / MemoryMsg / pumpMessage / ControlSignalMessage"]
     C --> D["电机任务 50ms\nMOTORRUN()"]
     C --> E["A 泵任务 25ms\nPUMPAehaviors()"]
-    C --> F["B 泵任务 100ms\nPUMPBehaviors()"]
+    C --> F["B 泵任务 25ms\nPUMPBehaviors()"]
     C --> G["UI 任务 10ms\nUIDisplayTask()"]
     C --> H["外控心跳 100ms\nExternalCommTaskFunc()"]
     D --> I["UART1 电机驱动板"]
@@ -233,7 +233,7 @@ flowchart LR
 | `weight_x10` | 压力重量，单位 0.1g | 超阈值判断用 |
 | `pressure_threshold` | 压力阈值，单位 g | 0 表示不触发压力停泵 |
 | `pressure_hold_flag` | 压力触发后的保持停泵状态 | true 时输出强制 0 |
-| `pressure_recover_ms` | 压力恢复消抖累计时间 | 达到 3000ms 才解除保持 |
+| `pressure_recover_ms` | 兼容保留字段，当前压力锁止策略不再累计恢复时间 | 正常保持为 0 |
 | `seq` | 压力帧序号 | 判断压力数据是否卡死 |
 
 `ControlSignalMessage` 记录控制来源和一些泵请求。它不是最终输出值，而是用来说明“谁正在控制、谁请求了什么”。
@@ -399,9 +399,9 @@ typedef struct
 这段结构体要按两条链路读：
 
 1. 泵控制链路写 `run_flag`、`type`、`direction`、`speed_work`，表示用户、脚踏、手柄或外控希望泵怎么动。
-2. 压力安全链路写 `pressure_value`、`weight_x10`、`pressure_threshold`、`pressure_hold_flag`、`pressure_recover_ms`、`speed_output`，表示压力板和闭环保护允许泵实际输出多少。
+2. 压力安全链路写 `pressure_value`、`weight_x10`、`pressure_threshold`、`pressure_hold_flag`、`speed_output`，并将兼容字段 `pressure_recover_ms` 保持为 0，表示压力板和闭环保护允许泵实际输出多少。
 
-所以泵不转时不能只看 `run_flag`。`run_flag=true` 只能说明“有运行请求”，如果 `pressure_hold_flag=true` 或 `speed_output=0`，最终 UART 仍会发 0。反过来，压力恢复后如果 `run_flag` 仍为 true，泵可以继续输出；这就是压力停泵不清运行请求的原因。
+所以泵不转时不能只看 `run_flag`。`run_flag=true` 只能说明“有运行请求”，如果 `pressure_hold_flag=true` 或 `speed_output=0`，最终 UART 仍会发 0。压力自然下降不会自动解除锁止，必须先释放当前请求，再由新的启动沿清除锁止。
 
 ### 3.5 状态不变量
 
@@ -414,7 +414,7 @@ typedef struct
 | 当前工作只能来自当前通道 | `WorkMessage` 装载必须匹配 `channel_work` | A/B 速度、方向、手柄图标错乱 | `Pubinterface_LoadChannelMemory()` |
 | 真实报警统一写 `WorkMessage` | 影响停机的报警必须走 `WorkAlarm_Set()` | 蜂鸣响但电机不被禁止，或 UI 无报警 | `WorkAlarm_Set()` |
 | Page4 阈值只蜂鸣 | `WORK_ALARM_SPEED_THRESHOLD` 不应当阻塞调速 | 调速到阈值附近机器被误停 | `SpeedThreshold_CheckAndBeep()` 相关调用 |
-| 压力停泵不清运行请求 | `pressure_hold_flag=true` 时输出 0，但 `run_flag` 保持 | 压力恢复后无法自动恢复，或误以为用户已停止泵 | `PumpPressureControl_Apply()` |
+| 压力停泵按新启动沿解锁 | `pressure_hold_flag=true` 时输出 0；压力下降不自动复转，新启动沿才清锁止 | 连续踩住或持续触控时意外自动复转 | `PumpBehavior_ClearPressureHoldOnNewRequest()` |
 | 外控释放不是电机停稳自动释放 | 外控授权后由上位机退出或 10 秒静默释放 | 电机停了但本地屏幕/脚踏仍无法接管 | `ExternalComm_HandleLinkTimeout()` |
 
 ### 3.6 状态快照记录模板
@@ -473,8 +473,8 @@ flowchart TD
     A["main()"] --> B["HAL_Init() / SystemClock_Config()"]
     B --> C["CubeMX 外设初始化\nGPIO/DMA/UART/I2C/TIM"]
     C --> D["Tracealyzer_RecorderInit()"]
-    D --> E["Hardware_PostInit()\n板级 I2C/GPIO 后初始化"]
-    E --> F["App_Bootstrap_Init()"]
+    D --> E["MX_I2C_Init()\n业务 I2C2/I2C3 初始化"]
+    E --> F["Userparser_Init()"]
     F --> G["Userparser_Init()\n业务初始化核心"]
     G --> H["MX_FREERTOS_Init()"]
     H --> I["vTaskStartScheduler()"]
@@ -520,12 +520,12 @@ flowchart TD
 | UI 显示 `UIDisplayTask()` | 10ms | 消费 UI 队列 |
 | 脚踏解析 `Foot_ParseDataS()` | 10ms | UART4 脚踏实时帧 |
 | 脚踏控制 `FootControlTask()` | 25ms | 踏板行程控制电机和泵 |
-| A 泵 `PUMPAehaviors()` | 25ms | A 泵输出和压力恢复计时 |
+| A 泵 `PUMPAehaviors()` | 25ms | A 泵输出、压力锁止和排空计时 |
 | 屏幕键 `ScreenKeyTask()` | 30ms | DWIN 触摸帧和触控保活 |
 | 手柄按键 `HANDLEKEYTaskFunc()` | 30ms | 手柄按键扫描 |
 | 按键行为 `KeyBehaviorsTask()` | 30ms | 消费统一按键队列 |
 | 电机输出 `MOTORRUNTask()` | 50ms | 按 `WorkMessage` 下发 UART1 |
-| B 泵 `PUMPBehaviors()` | 100ms | B 泵输出和压力恢复计时 |
+| B 泵 `PUMPBehaviors()` | 25ms | B 泵输出、压力锁止和排空计时 |
 | RFID 自动模式 | 100ms | UART3 RFID 请求和回包 |
 | 压力软串口维护 `SimUartTaskFunc()` | 100ms | 软串口帧解析队列 |
 | 蜂鸣 | 100ms | 按键音和报警音 |
@@ -562,8 +562,8 @@ MX_TIM10_Init();
 MX_TIM14_Init();
 
 Tracealyzer_RecorderInit();
-Hardware_PostInit();
-App_Bootstrap_Init();
+MX_I2C_Init();
+Userparser_Init();
 MX_FREERTOS_Init();
 vTaskStartScheduler();
 ```
@@ -572,7 +572,7 @@ vTaskStartScheduler();
 
 1. UART1/2/3/4/5/6/7/8/10 都在进入业务前完成 HAL 初始化。
 2. 当前 `MX_IWDG_Init()` 被注释，是否真正启用看门狗不能只看 `IwdgTaskInit()`，还要看 IWDG 外设是否初始化。
-3. `Hardware_PostInit()` 和 `App_Bootstrap_Init()` 是业务初始化前的板级准备点。若某个 GPIO/I2C 资源在业务中表现异常，应先确认这里是否执行。
+3. `MX_I2C_Init()` 和 `Userparser_Init()` 是业务初始化的直接入口。若某个 GPIO/I2C 资源异常，应先确认二者的执行顺序。
 4. `vTaskStartScheduler()` 后不应再回到 while 循环；若回到 while，说明 FreeRTOS 调度器启动失败或堆/任务创建异常。
 
 `Userparser_Init()` 是业务初始化的主线。它不是普通工具函数，而是整机业务进入运行态的“总开关”：
@@ -581,7 +581,7 @@ vTaskStartScheduler();
 void Userparser_Init(void)
 {
   Iwdg_Reset();
-  Hardware_BoardGpioInit();
+  Board_GPIOConfiguration();
   EEPROM_AT24CXX_Init();
 
   Uart1_Init();
@@ -638,8 +638,8 @@ void Userparser_Init(void)
 | 阶段 | 断点 | 正常现象 | 异常说明 |
 | --- | --- | --- | --- |
 | HAL 外设初始化 | `MX_USARTx_UART_Init()` | 各 UART handle 初始化完成 | 串口 handle 错误、DMA 未就绪、时钟未开 |
-| 板级后初始化 | `Hardware_PostInit()` | 板级资源表可用 | I2C/GPIO 资源映射可能未准备 |
-| 应用启动 | `App_Bootstrap_Init()` | 调用到 `Userparser_Init()` | 应用层入口未接上 |
+| I2C 后初始化 | `MX_I2C_Init()` | I2C2/I2C3 业务总线可用 | EEPROM 和手柄总线可能未准备 |
+| 应用启动 | `Userparser_Init()` | 各业务模块完成初始化和任务注册 | 应用层入口未接上 |
 | 屏幕启动页 | `LCD_ForceShow_Which_Map()` | UART6 发 page0 切换帧 | 屏幕黑屏或停旧页 |
 | 电机急停 | `Motor_ErrorEmergencyStop_Ctrl()` | 上电先发停止/急停帧 | 驱动板可能保持上次状态 |
 | 公共状态初始化 | `Userparser_PubinterfaceInit()` | `WorkMessage/MemoryMsg/pumpMessage` 清零 | 后续读取到随机状态 |
@@ -2339,37 +2339,37 @@ static void Pump_SetSpeedS_B(uint16_t value, uint8_t pump_dir)
 | 项 | A 泵 | B 泵 |
 | --- | --- | --- |
 | 任务 | `PUMPAehaviors()` | `PUMPBehaviors()` |
-| 周期 | 25ms | 100ms |
-| 压力恢复累计 | 每次加 25ms | 每次加 100ms |
-| 排空计数 | `timingDrainage_times++ > 300` | `timingDrainage_times++ > 300` |
-| 实际排空时长 | 约 7.5s | 约 30s |
+| 周期 | 25ms | 25ms |
+| 压力锁止解除 | 新启动沿 | 新启动沿 |
+| 排空计数 | `timingDrainage_times >= 400` | `timingDrainage_times >= 400` |
+| 实际排空时长 | 约 10s | 约 10s |
 
-同样的计数在不同周期下代表不同真实时间。测试 A/B 一致性时必须考虑这个差异。
+A/B 周期和排空计数已经统一。测试一致性时重点检查保留的队列深度差异：A 为5项，B为2项。
 
 ### 9.2.1 A/B 泵任务差异源码依据
 
 A 泵任务周期和队列：
 
 ```c
-#define PUMPA_PRESSURE_TASK_PERIOD_MS 25U
+#define PUMP_BEHAVIOR_TASK_PERIOD_MS 25U
 PUMPAMsgQueue = Kernel_QueueCreate(5, sizeof(PUMPAMessage_t), "PUMPAMsgQueue");
-Kernel_TaskStart(&PUMPABehaviorHandle, KERNEL_TASK_ALWAYS, 25);
+Kernel_TaskStart(&PUMPABehaviorHandle, KERNEL_TASK_ALWAYS, PUMP_BEHAVIOR_TASK_PERIOD_MS);
 ```
 
 B 泵任务周期和队列：
 
 ```c
-#define PUMPB_PRESSURE_TASK_PERIOD_MS 100U
+#define PUMP_BEHAVIOR_TASK_PERIOD_MS 25U
 PUMPBMsgQueue = Kernel_QueueCreate(2, sizeof(PUMPBMessage_t), "PUMPBMsgQueue");
-Kernel_TaskStart(&PUMPBBehaviorHandle, KERNEL_TASK_ALWAYS, 100);
+Kernel_TaskStart(&PUMPBBehaviorHandle, KERNEL_TASK_ALWAYS, PUMP_BEHAVIOR_TASK_PERIOD_MS);
 ```
 
-差异影响：
+一致项和保留差异：
 
-1. A 泵压力恢复计时每次加 25ms，B 泵每次加 100ms。
-2. 同样 `pressure_recover_ms >= 3000` 时，A 泵约 120 次任务周期恢复，B 泵约 30 次任务周期恢复。
-3. 同样 `timingDrainage_times++ > 300`，A 泵约 7.5 秒，B 泵约 30 秒。
-4. A 队列深度 5，B 队列深度 2，高频重复命令下 B 更容易丢旧消息；但当前消息会去重，相同类型和速度不会反复入队。
+1. A/B 泵行为任务都按 25ms 运行，压力保护和显示刷新节奏一致。
+2. `timingDrainage_times` 每次加一，达到 `PUMP_TIMING_DRAINAGE_TICKS=400` 时约为 10 秒。
+3. 压力锁止不再按时间自动恢复，`pressure_recover_ms` 正常保持为 0；只有新的启动沿可以解除锁止。
+4. A 队列深度 5、B 队列深度 2，这项历史差异保留；当前消息会去重，相同类型和速度不会反复入队。
 
 测试 A/B 一致性时，应分别记录：
 
@@ -2401,8 +2401,8 @@ B 泵：
 
 | 通道 | RX | 固定写入 |
 | --- | --- | --- |
-| `SIM_UART_1` | PE4 | `pumpMessageB` |
-| `SIM_UART_2` | PE6 | `pumpMessageA` |
+| `SIM_UART_1` | PE4 | `pumpMessageA` |
+| `SIM_UART_2` | PE6 | `pumpMessageB` |
 
 当前主控设备码白名单以源码为准：
 
@@ -2429,7 +2429,7 @@ B 泵：
 | CRC | frame[17..18] | MODBUS 小端 |
 | 帧尾 | `55 AA` | 固定 |
 
-软串口只有一个 active receiver。A/B 两路如果完全同相发送，另一路可能增加 overlap drop。双压力板测试不能只测单路。
+两路软串口拥有独立接收状态：PE4 使用 TIM11，PE6 使用 TIM13。两块压力板完全同相发送时也能分别采样；双压力板测试仍要覆盖同相、错相和长期在线。
 
 ### 9.3.1 压力软串口源码依据
 
@@ -2437,7 +2437,8 @@ B 泵：
 
 ```c
 #define SOFT_UART_DEFAULT_BAUDRATE 9600U
-#define SOFT_UART_TIMER_INSTANCE   TIM11
+#define SOFT_UART_1_TIMER_INSTANCE TIM11
+#define SOFT_UART_2_TIMER_INSTANCE TIM13
 #define CS1237_FRAME_LENGTH        21U
 #define CS1237_PROTOCOL_VER        0x02U
 #define CS1237_MSG_TYPE_REPORT     0x01U
@@ -2454,9 +2455,11 @@ B 泵：
 static SoftUartChannelContext s_channels[SIM_UART_COUNT] = {
     { .tx_port = GPIOE, .tx_pin = GPIO_PIN_5,
       .rx_port = GPIOE, .rx_pin = GPIO_PIN_4,
+      .rx_timer = TIM11,
       .baudrate = 9600U },
     { .tx_port = GPIOE, .tx_pin = GPIO_PIN_11,
       .rx_port = GPIOE, .rx_pin = GPIO_PIN_6,
+      .rx_timer = TIM13,
       .baudrate = 9600U },
 };
 ```
@@ -2499,11 +2502,11 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
 ```c
 if (channel == SIM_UART_1)
 {
-    pump_message = &pumpMessageB;
+    pump_message = &pumpMessageA;
 }
 else if (channel == SIM_UART_2)
 {
-    pump_message = &pumpMessageA;
+    pump_message = &pumpMessageB;
 }
 
 pump_message->pressure_value = raw_cs1237;
@@ -2532,8 +2535,8 @@ pump_message->online_flag = (pump_type != 0U);
 | 断点或变量 | 正常值 | 异常说明 |
 | --- | --- | --- |
 | `SimUart_HandleExti()` | 起始位能触发 | PE4/PE6 没有电平变化 |
-| `s_receiver.active_channel` | 接收期间为 SIM_UART_1/2 | 一直 `SIM_UART_NONE` 表示没捕获起始位 |
-| `overlap_drop_count` | 单路测试应不增长 | 双路同相或另一路占用 active receiver |
+| `s_channels[SIM_UART_1/2].rx_stage` | 接收时按 START/DATA/STOP 推进 | 一直 IDLE 表示对应引脚没捕获起始位 |
+| `overlap_drop_count` | 兼容诊断字段，正常保持 0 | 非 0 表示仍有旧逻辑或异常统计写入 |
 | `framing_error_count` | 不持续增长 | 波特率、停止位、采样点异常 |
 | `Cs1237_FrameValid()` | true | 帧头、版本、长度、CRC 或帧尾错误 |
 | `Cs1237_UpdatePumpMessage()` | 写入对应 `pumpMessage` | 通道映射或设备码不对 |
@@ -2541,7 +2544,7 @@ pump_message->online_flag = (pump_type != 0U);
 
 ### 9.4 压力闭环为什么不清 run_flag
 
-压力闭环设计目标是：管路压力过高时临时压停泵，压力恢复后自动继续，而不是把用户的运行请求清掉。
+压力闭环设计目标是：管路压力过高时立即压停并建立锁止，压力自然下降不能自动复转；用户释放当前请求并再次启动后，新的启动沿才解除锁止。
 
 流程：
 
@@ -2554,26 +2557,24 @@ flowchart TD
     E -->|是| F["pressure_hold_flag = true\n本周期输出 0"]
     E -->|否| G{"是否处于保持"}
     G -->|否| H["按线性限速计算 speed_output"]
-    G -->|是| I{"weight_x10 < threshold_g * 10\n持续 3000ms"}
-    I -->|否| F
-    I -->|是| J["清 pressure_hold_flag\n恢复闭环输出"]
+    G -->|是| I["保持 0 输出\n等待当前请求释放"]
+    I --> J["新的启动沿\n清 pressure_hold_flag"]
 ```
 
 关键点：
 
 1. `pressure_hold_flag=true` 时实际输出为 0。
-2. `run_flag` 不会被清掉。
-3. `speed_work` 保留用户设定。
-4. 压力恢复必须连续达到 `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS = 3000ms`。
+2. 压力自然下降不会清除 `pressure_hold_flag`。
+3. `speed_work` 保留用户设定，便于下一次启动沿恢复原设定。
+4. 必须先让当前请求变为无效，再由下一次启动沿清锁止。
 5. 如果 `pressure_threshold=0`，压力停泵逻辑不触发。
 
 ### 9.4.1 压力闭环源码依据
 
-压力闭环总开关和恢复消抖：
+压力闭环总开关：
 
 ```c
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
-#define PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS 3000U
 ```
 
 停泵判断：
@@ -2663,7 +2664,7 @@ if (PumpPressureControl_IsPressureStopReached(pump_speed, weight_x10, threshold_
 }
 ```
 
-这里最容易误解的是：`run_flag` 不清，`speed_work` 不清，只有实际输出速度压到 0。这样做是为了让压力恢复后沿用原请求自动恢复。如果测试目标是“压力超限后必须保持停泵直到人工停止”，应修改需求和代码，而不是把当前行为当成 bug。
+这里最容易误解的是：`speed_work` 保留，但 `pressure_hold_flag` 会持续拦截实际输出。压力下降不会自动复转；当前控制源释放后，再次启动形成新的请求沿，才会清除锁止并重新使用原设定速度。
 
 ### 9.4.2 压力误停和不恢复的定位
 
@@ -2671,9 +2672,9 @@ if (PumpPressureControl_IsPressureStopReached(pump_speed, weight_x10, threshold_
 | --- | --- | --- | --- |
 | 泵一启动就停 | `pressure_threshold`、`weight_x10` | 重量已超过阈值 | 压力零点、阈值、设备码或单位错误 |
 | 压力阈值 0 时不停 | `threshold_g == 0` | 当前代码故意不触发停泵 | 压力板未给有效阈值 |
-| 高压后 `run_flag` 仍 true | `pressure_hold_flag` | 正常，保持用户运行请求 | 不应按 `run_flag` 判断实际输出 |
-| 压力降了仍不恢复 | `pressure_recover_ms` | 未连续达到 3000ms | 压力波动、阈值无效或任务周期没跑 |
-| A 恢复快 B 恢复慢 | A 25ms，B 100ms | 同为 3000ms，但周期次数不同 | 若实测时间差大，查任务卡顿 |
+| 高压后 `run_flag` 变 false | `pressure_hold_flag` | 正常，压力处理会撤销对应泵运行/排空请求 | 如果仍为 true，查停泵状态清理是否执行 |
+| 压力降了仍不恢复 | `pressure_hold_flag` | 当前设计要求保持锁止 | 释放控制源后重新启动，确认新启动沿清锁止 |
+| A/B 解锁行为不同 | 两路均为25ms | 两路都应按新启动沿解除 | 查对应通道请求沿和 `last_request_active` |
 | 屏幕显示运行但泵不转 | `speed_output` | 压力保持时输出为 0 | UI 显示设定值和实际输出值区分不清 |
 
 调试泵不转：
@@ -2682,7 +2683,7 @@ if (PumpPressureControl_IsPressureStopReached(pump_speed, weight_x10, threshold_
 | --- | --- |
 | `SendPumpAMessage()` / `SendPumpBMessage()` | 目标速度入队 |
 | `PUMPAehaviors()` / `PUMPBehaviors()` | `run_flag` 为 true |
-| `PUMPA_ApplyPressureClosedLoop()` / `PUMPB_ApplyPressureClosedLoop()` | 没被压力保持压停 |
+| `PumpBehavior_ApplyPressure()` | 没被压力锁止压停 |
 | `PumpPressureControl_Apply()` | 输出非 0 |
 | `Pump_SetSpeedS_A()` / `Pump_SetSpeedS_B()` | 正确方向和 UART 数据 |
 | `Uart5_SendPacket()` / `Uart7_SendPacket()` | 实际发出 |
@@ -3237,7 +3238,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 
 风险点在设备码：压力工程历史资料中合法设备码集合和主控白名单可能不完全一致。设备码不被主控认可时，主控可能能收到帧但不更新在线状态，表现为“压力板发包正常，主控泵类型或在线不对”。
 
-主控侧还存在单 active receiver 设计：一路压力软串口正在接收时，另一路同时起始会被抑制并增加 overlap 计数。因此双压力板同相上报时，要实测 `seq` 是否长期丢某一路。
+主控侧已改为双接收器：PE4/TIM11 与 PE6/TIM13 分别维护接收阶段、位序号和临时字节。双压力板同相上报时两路 `seq` 都应持续递增；若单路停滞，应定位该路 EXTI、定时器或线束。
 
 联合断点建议：
 
@@ -3245,7 +3246,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 | --- | --- | --- |
 | 压力板 `CS1237UartProtocol_BuildReportFrame()` | 21 字节帧字段正确 | 压力板上报格式或设备码错误 |
 | 主控 `HAL_GPIO_EXTI_Callback()` | PE4/PE6 起始位进入 | 压力线、GPIO、EXTI 配置异常 |
-| 主控 `SimUart_HandleExti()` | active receiver 选择正确 | 双路同相冲突或 A/B 线接反 |
+| 主控 `SimUart_HandleExti()` | 对应通道 `rx_stage` 进入 START | 对应 EXTI 未触发或 A/B 线接反 |
 | 主控 `Cs1237_FrameValid()` | 帧头、尾、CRC 通过 | 波特率、采样点、CRC 或帧格式不一致 |
 | 主控 `Cs1237_UpdatePumpMessage()` | `pumpMessageA/B.seq` 递增 | 设备码不被接受或通道映射错 |
 | 主控压力闭环 | `weight_x10`、`threshold_g` 合理 | 标定或阈值写入异常 |
@@ -3330,7 +3331,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 | A/B 泵物理互换 | `User\Application\include\pump.h` | `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=0` | A/B 物理口、屏幕、外控、压力源 |
 | 注水泵速度上限 | `pump.h` | `PUMP_INJECTWATER_SPEED_MAX=70` | 屏幕、脚踏、外控注水都测 |
 | 压力闭环总开关 | `pump_pressure_control.h` | `PUMP_PRESSURE_CONTROL_ENABLE=1` | 压力硬停和恢复 |
-| 压力恢复消抖 | `pump_pressure_control.h` | 3000ms | 高压释放后恢复时间 |
+| 压力锁止解除 | `pump_behavior_core.c` | 仅新启动沿解除 | 高压停泵后防止压力下降自动复转 |
 | 压力设备码 | `soft_uart.c` | `0x00/0x08/0x09` | 压力板 device code 实测 |
 | 外控心跳周期 | `external_comm_task.c` | 100ms | 上位机刷新 |
 | 外控停输出超时 | `external_comm_task.c` | 2000ms | 静默 2s 停输出 |
@@ -3416,7 +3417,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 | A/B 泵物理互换 | `User\Application\include\pump.h` | `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE` 当前为 `0U` | 改逻辑泵 A/B 到 UART5/UART7 的最终映射 | 屏幕启动 A 泵、外控启动 A 泵、压力 A 源三项一起测 |
 | 注水泵上限 | `User\Application\include\pump.h` | `PUMP_INJECTWATER_SPEED_MAX` 当前为 `70U` | 注水泵速度钳位，影响屏幕、脚踏、外控和手柄默认流量 | 设置超过上限，确认 `pump_speed` 被钳到目标上限 |
 | 压力闭环总开关 | `User\Application\include\pump_pressure_control.h` | `PUMP_PRESSURE_CONTROL_ENABLE` 当前为 `1U` | 所有泵输出是否经过压力降速和停泵保护 | 高压测试时确认 `speed_output` 是否被压低 |
-| 压力恢复时间 | `User\Application\include\pump_pressure_control.h` | `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS` 当前为 `3000U` | 高压停泵后连续安全多久才恢复输出 | 压力释放后计时，确认 3s 左右恢复 |
+| 压力锁止解除 | `User\Application\Pump\pump_behavior_core.c` | `PumpBehavior_ClearPressureHoldOnNewRequest()` | 高压停泵后必须释放并再次启动才恢复 | 保持控制源确认不复转，释放后再次启动确认解锁 |
 | 压力阈值曲线 | `pump_pressure_control.h` | `PUMP_PRESSURE_CONTROL_REDUCE_*` 和 `STOP_*` | 不同目标流量下的降速点和停泵点 | 50/110/140/200/260/300 档分别压测 |
 | 压力源映射 | `pump_pressure_control.h` | `PUMP_PRESSURE_CONTROL_A_SOURCE`、`B_SOURCE` | A/B 泵读取哪个 `pumpMessage` 的压力 | 单接 A、单接 B，确认只停对应泵 |
 | 压力设备码 | `User\Peripheral\uart\soft_uart.c` | `CS1237_DEVICE_CODE_*` 当前为 `0x00/0x08/0x09` | 泵类型识别和在线判断 | 构造设备码，看 `pumpMessage.type/online_flag` |
@@ -3445,7 +3446,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 | `Foot_ParseDataS()` | 10ms 解析脚踏实时帧 | 太慢会导致脚踏行程滞后 |
 | `FootControlTask()` | 25ms 执行脚踏控制 | 改动会影响松脚去抖和泵跟随节奏 |
 | `PUMPAehaviors()` | 25ms 输出 A 泵 | 改动会改变 A 泵排空计数的实际时长 |
-| `PUMPBehaviors()` | 100ms 输出 B 泵 | 与 A 泵周期不同，改动要重测 A/B 一致性 |
+| `PUMPBehaviors()` | 25ms 输出 B 泵 | 与 A 泵周期一致，改动仍要重测两路队列和物理输出 |
 | `ExternalCommTaskFunc()` | 10ms 外控链路和超时 | 改动会影响超时计时精度和心跳发送 |
 | `SimUartTaskFunc()` | 100ms 压力帧消费 | 太慢会让压力显示和闭环滞后 |
 
@@ -3480,7 +3481,7 @@ AA 55 02 01 0C Seq RawCs1237(4) WeightX10(4) ThresholdG(2) DeviceCode CRC16(2) 5
 这些命令只做静态检查，不会改工程：
 
 ```powershell
-rg -n "PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE|PUMP_INJECTWATER_SPEED_MAX|PUMP_PRESSURE_CONTROL_ENABLE|PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS" User\Application\include
+rg -n "PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE|PUMP_INJECTWATER_SPEED_MAX|PUMP_PRESSURE_CONTROL_ENABLE|PumpBehavior_ClearPressureHoldOnNewRequest" User\Application
 rg -n "CS1237_DEVICE_CODE|EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS|EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS" User
 rg -n "UIDP_LCD_VP_|UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE" User\Application\include
 rg -n "handledata\.c|param\.c|warn\.c|User[/\\]Data[/\\]data\.c|UI_Main\.c|UI_ModelConfiguration\.c|UI_Password\.c" EIDE\.eide\eide.yml EIDE\build\MainCtrlF413MXOs\builder.params build\MainCtrlF413MXOs\builder.params MDK-ARM\MainCtrlF413MXOs.uvprojx
@@ -3506,7 +3507,7 @@ git diff --check
 | 断点 | 看什么 |
 | --- | --- |
 | `main()` | 是否进入固件 |
-| `Hardware_PostInit()` | 板级 I2C/GPIO 是否完成 |
+| `MX_I2C_Init()` | 业务 I2C2/I2C3 是否完成 |
 | `Userparser_Init()` | 业务初始化是否卡住 |
 | `Uart6_Init()` | 屏幕串口是否初始化 |
 | `LCD_ForceShow_Which_Map()` | 是否发启动页 |
@@ -3595,13 +3596,13 @@ git diff --check
 
 ### 14.8 压力不更新
 
-原理链路：压力板 GPIO 起始位 -> EXTI -> TIM11 位采样 -> 21 字节帧 -> CRC -> `pumpMessageA/B`。
+原理链路：压力板 GPIO 起始位 -> EXTI -> A路TIM11/B路TIM13位采样 -> 21字节帧 -> CRC -> `pumpMessageA/B`。
 
 | 断点 | 看什么 |
 | --- | --- |
 | `HAL_GPIO_EXTI_Callback()` | PE4/PE6 是否进中断 |
-| `SimUart_HandleExti()` | active channel 是否正确 |
-| `SimUart_TimerIrqHandler()` | TIM11 是否采样 |
+| `SimUart_HandleExti()` | 对应通道 `rx_stage` 是否进入 START |
+| `SimUart_TimerIrqHandler()` | TIM11/TIM13 是否分别采样对应通道 |
 | `Cs1237_FrameValid()` | 帧头、尾、CRC 是否通过 |
 | `Cs1237_UpdatePumpMessage()` | A/B 对应 pumpMessage 是否更新 |
 | `pumpMessageA/B.seq` | 是否递增 |
@@ -3615,30 +3616,30 @@ git diff --check
 | `pressure_threshold` | 0 时不应触发压力停泵 |
 | `weight_x10` | 若大于等于 `threshold * 10`，停泵是设计动作 |
 | `pressure_hold_flag` | true 表示已进入保持 |
-| `pressure_recover_ms` | 未满 3000ms 不恢复 |
+| `pressure_recover_ms` | 兼容字段，当前应保持 0 |
 | `speed_output` | 保持期间为 0 |
 
-压力超过停泵点后，代码把本周期泵输出压到 0，并设置压力保持相关状态，但不直接清 `run_flag`。这样设计的原因是：`run_flag` 表示用户或外控仍然要求泵运行，压力保持表示安全层临时拦截输出。压力恢复到安全区并连续满足 `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS` 后，泵任务可以继续按原运行请求恢复输出；如果高压时直接清 `run_flag`，系统就无法区分“用户主动停泵”和“安全层临时停泵”。
+压力超过停泵点后，代码把本周期泵输出压到 0，并设置 `pressure_hold_flag`。即使压力随后下降，锁止也不会自动解除，防止持续踩住脚踏或持续触控时意外复转。控制源必须先释放，再次启动形成新请求沿后才允许恢复输出。
 
-恢复条件按下面判断：
+解除锁止条件按下面判断：
 
 ```text
 pressure_hold_flag = true
--> pressure 低于恢复判断区
--> pressure_recover_ms 连续累加
--> 达到 PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS
+-> 当前 run/排空请求全部释放
+-> last_request_active 变为 0
+-> 用户再次启动形成新请求沿
 -> 清保持状态
--> 下一轮泵任务重新按 run_flag 和 speed_work 计算输出
+-> 本轮泵任务重新按 speed_work 和压力计算输出
 ```
 
-如果压力已经下降但不恢复，优先看：
+如果重新启动后仍不恢复，优先看：
 
 | 变量 | 正常值 | 异常说明 |
 | --- | --- | --- |
-| `pumpMessageA/B.run_flag` | 仍为 true | 如果已被其它停止命令清掉，压力恢复也不会自动启动 |
-| `pressure_hold_flag` | 恢复后变 false | 一直 true 表示恢复条件未满足 |
-| `pressure_recover_ms` | 连续增加到 3000ms | 若反复清零，说明压力仍抖到危险区 |
-| `weight_x10` | 稳定低于恢复区 | 压力板标定漂移或线束噪声 |
+| 当前运行/排空请求 | 释放阶段全部为 false | 请求一直未释放就不会形成新启动沿 |
+| `pressure_hold_flag` | 新启动沿后变 false | 一直 true 表示请求沿没有从 0 变为 1 |
+| `pressure_recover_ms` | 保持 0 | 非 0 表示仍有过时逻辑写入 |
+| `weight_x10` | 低于当前速度 STOP 阈值 | 重新启动后仍高压会立即再次锁止 |
 | `speed_work` | 非 0 | 目标速度被别的入口改成 0 |
 
 如果 A 压力导致 B 停，优先查 PE4/PE6 接线和 `SIM_UART_1/2` 映射。
@@ -3844,7 +3845,7 @@ rg -n "handledata\.c|param\.c|warn\.c|User[/\\]Data[/\\]data\.c|UI_Main\.c|UI_Mo
 | 脚踏 | 单踏板启动停止、双踏板切通道、松脚去抖、注水泵跟随 | 脚踏能拿控制权，松脚释放，跟随泵随电机停止 |
 | 屏幕 | 调速、方向、泵、触控保活、触控超时停机 | VP 地址正确，UI 显示和公共状态一致 |
 | 电机 | 手柄、脚踏、触控、外控分别启动停止 | UART1 帧正确，驱动回包速度和错误码可解析 |
-| 泵 | A/B 三种泵类型、物理互换、压力保持、恢复 3000ms | 逻辑泵、物理口、压力源三者不混淆 |
+| 泵 | A/B 三种泵类型、物理互换、压力锁止、新启动沿解除 | 逻辑泵、物理口、压力源三者不混淆 |
 | 压力 | A 单路、B 单路、双路同时、设备码差异、阈值 0 | `seq` 更新，设备码映射正确，阈值 0 不误停 |
 | 外控 | 授权、设置值、启动电机、启动泵、2s 静默、10s 释放、急停 | 授权和控制权独立，超时安全动作符合源码 |
 | 构建 | EIDE builder.params、Keil uvprojx、旧模块 rg 检查 | 旧状态模块不回编译 |
@@ -3858,7 +3859,7 @@ rg -n "handledata\.c|param\.c|warn\.c|User[/\\]Data[/\\]data\.c|UI_Main\.c|UI_Mo
 | `WorkMessage`、`MemoryMsgA/B`、`ChannelrecognizeMessageA/B` 的区别 | 识别缓存、通道记忆、当前工作状态各自的生命周期和覆盖规则 |
 | 插入 A 手柄 | 短接 IO、去抖、EEPROM 认证、Page2/3/4/6、RFID、插拔事件、MemoryMsgA、WorkMessage、UI 刷新的完整路径 |
 | 脚踏启动电机和注水泵联动 | 脚踏帧、行程换算、控制权、`runflag_work`、泵跟随、松脚释放 |
-| 压力超过阈值 | 为什么泵输出为 0、为什么不清 `run_flag`、什么时候按恢复消抖重新输出 |
+| 压力超过阈值 | 为什么泵输出为 0、为什么清运行请求、什么时候由新启动沿解除锁止 |
 | 外控授权成功但不能启动 | 当前通道、手柄在线、报警、公共接头刀具、控制权、命令 AreaCode 的检查顺序 |
 | A/B 泵物理互换 | `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE` 只改物理 UART 映射，不改压力源和屏幕镜像 |
 | 注水泵上限 | `PUMP_INJECTWATER_SPEED_MAX` 影响注水泵速度钳位，不影响灌注/抽吸泵类型本身 |
@@ -3876,7 +3877,7 @@ rg -n "handledata\.c|param\.c|warn\.c|User[/\\]Data[/\\]data\.c|UI_Main\.c|UI_Mo
 | 运行中插拔 | A 运行时插 B、拔 B、拔 A | `WorkMessage.channel_work`、`runflag_work`、报警 |
 | 电机失停 | 发送停止后断开驱动回包或构造驱动错误 | 停止帧、`driver_speed_feedback`、owner 释放 |
 | 泵压力硬停 | 设置固定流量，逐步加压到停泵点 | `pressure_hold_flag`、`speed_output`、`run_flag` |
-| 压力双路同相 | A/B 压力板同周期上报 | `seq`、`overlap_drop_count`、A/B 映射 |
+| 压力双路同相 | A/B 压力板同周期上报 | 两路 `seq`、TIM11/TIM13 中断、A/B 映射 |
 | 脚踏异常定标 | 构造 H/L 或 H/M 接近的定标值 | 速度换算是否跳变、是否有保护 |
 | 外控半包粘包 | 上位机连续发送半包、粘包、错 CRC | FIFO 重同步、授权状态、心跳 |
 | EEPROM 外控写页 | 写 Page4 30 字节，读回，重插 | 页数据、认证、默认速度装载 |
@@ -4058,8 +4059,8 @@ rg -n "Userparser_Init|Pubinterface_LoadChannelMemory|PlugORunPLUGActive|Handles
 | 1 | 断在 `main()` 第一行 | 能进入 `main()` | 若进不来，查烧录、启动脚、复位、电源 |
 | 2 | 单步到 `HAL_Init()` 和 `SystemClock_Config()` 后 | 不进入 HardFault | 若 HardFault，查时钟、Flash、栈 |
 | 3 | 断在各 `MX_USARTx_UART_Init()` | UART handle 初始化完成 | 某路失败先查 CubeMX 外设和时钟 |
-| 4 | 断在 `Hardware_PostInit()` | 板级 GPIO/I2C 资源准备完成 | 查板级资源映射 |
-| 5 | 断在 `App_Bootstrap_Init()` 和 `Userparser_Init()` | 应用入口被调用 | 若没调用，查启动封装 |
+| 4 | 断在 `MX_I2C_Init()` | I2C2/I2C3 业务总线准备完成 | 查 I2C 初始化和板级映射 |
+| 5 | 断在 `Userparser_Init()` | 应用入口被调用 | 若没调用，查 main 直接调用链 |
 | 6 | 断在 `Uart6_Init()` | 屏幕串口初始化 | 若失败，查 UART6 配置和 DMA |
 | 7 | 断在 `LCD_ForceShow_Which_Map()` | UART6 发启动页帧 | 若没发帧，查屏幕函数入口 |
 | 8 | 断在 `Userparser_PubinterfaceInit()` | 公共状态清零 | 若未执行，后续状态可能随机 |
@@ -4191,14 +4192,14 @@ A/B 反的四种类型：
 | --- | --- | --- | --- |
 | 1 | PE4/PE6 波形 | 9600 8N1 周期帧 | 压力板或线束问题 |
 | 2 | `HAL_GPIO_EXTI_Callback()` | 起始位进中断 | EXTI 或 GPIO 配置问题 |
-| 3 | `SimUart_HandleExti()` | active receiver 选中一路 | 双路同相可能被抑制 |
-| 4 | `SimUart_TimerIrqHandler()` | 采样 21 字节 | TIM11 或采样点异常 |
+| 3 | `SimUart_HandleExti()` | A/B 对应 `rx_stage` 分别进入 START | 对应 EXTI 或引脚映射异常 |
+| 4 | `SimUart_TimerIrqHandler()` | TIM11/TIM13 分别采样对应通道 | 对应定时器或采样点异常 |
 | 5 | `Cs1237_FrameValid()` | true | 帧头、版本、长度、CRC、帧尾错误 |
 | 6 | `Cs1237_UpdatePumpMessage()` | 写入 A/B 对应 `pumpMessage` | 设备码或映射不对 |
 | 7 | `pumpMessageA/B.seq` | 周期递增 | 数据卡死或未消费 |
 | 8 | `weight_x10` 和 `threshold_g` | 单位分别 0.1g 和 g | 单位误判会导致误停 |
 | 9 | `PumpPressureControl_Apply()` | 返回合理 `speed_output` | 压力闭环限速或停泵 |
-| 10 | `pressure_recover_ms` | 安全区连续累加到 3000ms | 压力抖动或恢复条件不满足 |
+| 10 | 新启动沿 | 释放后再次启动会清 `pressure_hold_flag` | 请求未完全释放或仍处于高压 |
 
 ### 19.7 外控授权成功但不能启动
 
@@ -4543,7 +4544,7 @@ D7 CA F8 F1 TRAN LEN_H LEN_L FUN AREA INFO_CODE INFO... CRC_H CRC_L BF C6 BC C4
 | `pumpMessageA/B.weight_x10` | 压力帧 | 压力闭环 | 0.1g 单位 | 卡住说明压力不更新 |
 | `pumpMessageA/B.pressure_threshold` | 压力帧 | 压力闭环 | g 单位，0 表示不触发 | 单位错会误停 |
 | `pumpMessageA/B.pressure_hold_flag` | 压力闭环 | 泵任务 | true/false | true 时输出强制 0 |
-| `pumpMessageA/B.pressure_recover_ms` | 泵任务恢复计时 | 泵任务 | 0~3000+ | 不增长说明压力未进入安全区 |
+| `pumpMessageA/B.pressure_recover_ms` | 兼容保留字段 | 泵任务 | 当前应为 0 | 非 0 表示过时恢复计时逻辑仍在写入 |
 | `pumpMessageA/B.seq` | 压力帧 | 调试和心跳 | 周期递增 | 不变说明数据卡死 |
 
 ### 22.4 外控和任务门控
@@ -4585,16 +4586,15 @@ D7 CA F8 F1 TRAN LEN_H LEN_L FUN AREA INFO_CODE INFO... CRC_H CRC_L BF C6 BC C4
 | 禁止场景 | 真实人体、真实治疗、无人值守连续运行 |
 | 回退 | 改回 1U，重新烧录后做压力停泵和恢复测试 |
 
-### 23.3 想调整压力恢复时间
+### 23.3 想调整压力锁止解除策略
 
 | 项 | 内容 |
 | --- | --- |
-| 修改入口 | `pump_pressure_control.h` |
-| 当前宏 | `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS 3000U` |
-| 调小影响 | 压力释放后恢复更快，但更容易因压力抖动反复启停 |
-| 调大影响 | 恢复更稳，但停泵保持时间更长 |
-| 验证 | 人为加压停泵，再释放压力，记录 `pressure_recover_ms` 到恢复输出的时间 |
-| 回退 | 恢复 3000U |
+| 修改入口 | `pump_behavior_core.c` 的 `PumpBehavior_ClearPressureHoldOnNewRequest()` |
+| 当前策略 | 压力锁止不按时间自动解除，必须释放当前请求并再次启动 |
+| 不建议修改原因 | 自动恢复会导致持续踩住脚踏或持续触控时压力下降后自行复转 |
+| 验证 | 人为加压停泵，释放压力但保持控制源，确认不复转；完全释放后再次启动才恢复 |
+| 回退 | 保持“只允许新启动沿解除锁止”的当前策略 |
 
 ### 23.4 想互换 A/B 泵物理口
 
@@ -4709,7 +4709,7 @@ D7 CA F8 F1 TRAN LEN_H LEN_L FUN AREA INFO_CODE INFO... CRC_H CRC_L BF C6 BC C4
 | PUMP-01 | A 泵启动 | A 压力板在线 | 启动 A 泵 | `pumpMessageA.run_flag=true` | UART5 6 字节帧 | `PUMPAehaviors()` |
 | PUMP-02 | B 泵启动 | B 压力板在线 | 启动 B 泵 | `pumpMessageB.run_flag=true` | UART7 6 字节帧 | `PUMPBehaviors()` |
 | PUMP-03 | 压力停泵 | 阈值非 0 | 加压超过阈值 | `pressure_hold_flag=true`，`speed_output=0` | 泵输出速度 0 | `PumpPressureControl_Apply()` |
-| PUMP-04 | 压力恢复 | 已触发停泵 | 释放压力并等待 3s | `pressure_recover_ms>=3000`，保持解除 | 泵恢复输出 | `pressure_recover_ms` |
+| PUMP-04 | 压力锁止解除 | 已触发停泵 | 释放压力并保持控制源，再完全释放后重新启动 | 保持阶段不复转，新启动沿清 `pressure_hold_flag` | 泵只在再次启动后恢复 | `PumpBehavior_ClearPressureHoldOnNewRequest()` |
 | PUMP-05 | A/B 压力源 | 两路压力板 | 单独触发 A、B 压力 | 只影响对应 `pumpMessage` | 对应泵停 | `Cs1237_UpdatePumpMessage()` |
 
 ### 24.5 外控和 EEPROM

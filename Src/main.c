@@ -29,8 +29,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "hw_bootstrap.h"
-#include "app_bootstrap.h"
+#include "bsp_i2c_bus.h"
+#include "userparser.h"
 #include "at24cs32_crc_verify.h"
 #include "tracealyzer_recorder.h"
 #include "board_profile.h"
@@ -119,9 +119,9 @@ int main(void)
   /* 启动阶段默认关闭 Tracealyzer 记录器，后续需要抓调度日志时再临时打开。 */
   //Tracealyzer_RecorderInit();
 
-  Hardware_PostInit();
+  MX_I2C_Init(); /* CubeMX 外设初始化完成后再初始化业务使用的 I2C2/I2C3 总线。 */
 
-  App_Bootstrap_Init();
+  Userparser_Init(); /* 板级总线就绪后直接初始化各业务模块，删除无业务含义的启动转发层。 */
   /* USER CODE END 2 */
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();

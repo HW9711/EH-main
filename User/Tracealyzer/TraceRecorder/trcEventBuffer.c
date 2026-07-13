@@ -389,7 +389,6 @@ traceResult xTraceEventBufferPush(TraceEventBuffer_t *pxTraceEventBuffer, void *
 			break;
 		default:
 			return TRC_FAIL;
-			break;
 	}
 
 	return TRC_SUCCESS;

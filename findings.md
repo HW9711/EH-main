@@ -17,12 +17,12 @@
 
 - 主控真实 UART 参数以 `Src\usart.c` 为准：UART1/2/5/7/8/10 为 115200 8N1，其中 UART7 当前是 `UART_MODE_TX`；UART3/4/6 为 115200 8N2；压力软串口为 9600 8N1。
 - `User\board\board.h` 的 `BOARD_UART_LIST` 仍有预留波特率和历史注释，不能单独作为串口参数依据。
-- 软 UART 压力链路中，SIM_UART_1 RX=PE4 固定写 `pumpMessageB`，SIM_UART_2 RX=PE6 固定写 `pumpMessageA`。
+- 软 UART 压力链路中，SIM_UART_1 RX=PE4 固定写 `pumpMessageA`，SIM_UART_2 RX=PE6 固定写 `pumpMessageB`。
 - 压力主控白名单为 `0x00/0x0E/0x0C/0x08/0x09`，压力工程文档列 `0x0F/0x0E/0x0C/0x08/0x09`，需要实测霍尔高低电平定义。
 - 外控心跳是动态长度：手柄在线才追加原始类型，泵在线才追加泵类型、速度和 11 字节压力扩展。
 - 外控链路短超时 1000ms 停输出、长超时 5000ms 释放外控；源码注释仍写 30s，文档按代码值记录。
 - `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=1`，逻辑 A/B 泵最后输出到物理 UART 口时会互换。
-- A 泵任务周期 25ms，B 泵任务周期 100ms，双泵一致性需要做阶跃响应实测。
+- A/B 泵任务周期均为 25ms；A 队列深度 5、B 队列深度 2，双泵一致性仍需覆盖高频不同命令。
 
 ## 手柄 EEPROM 认证和识别细节
 
@@ -45,9 +45,9 @@
 - `sscFOOT.c` 运行解析任务 10ms，底层校准接收任务 3ms，行为任务 25ms。实际掉线阈值是 `footDisconnect_times > 100`，约 1s；头文件 `FOOT_OFFLINE_THRESHOLD=20` 和注释中的 1.6s 都不是当前运行分支的真实值。
 - 脚踏 JTB 运行帧分支检查 `i+13 < rlen` 后读取到 `i+15`，长度保护偏弱，噪声/短包注入时应重点验证。
 - 脚踏行程速度计算多处使用 `(H-L)` 或 `(H-M)` 作除数，当前未看到运行前统一保护 `H==L`、`H==M` 的防御分支，需做定标异常测试。
-- A 泵任务周期 25ms、队列深度 5；B 泵任务周期 100ms、队列深度 2。二者都以 `pumpMessageA/B` 为唯一输出数据源，队列只更新类型和目标速度。
+- A/B 泵任务周期均为 25ms；A 队列深度 5、B 队列深度 2。二者都以 `pumpMessageA/B` 为唯一输出数据源，队列只更新类型和目标速度。
 - 压力闭环阈值单位为 g，重量为 0.1g。默认硬停点是 `threshold_g * 10 * 3 / 2`；阈值以下不降速，阈值到硬停点线性降速，硬停点以上本周期输出 0 但不清 `run_flag`。
-- 软 UART 压力解析是 9600 8N1、TIM11 采样、全局单 active receiver；一路正在接收时另一路起始位会增加 `overlap_drop_count` 并被抑制，双路同相 200ms 上报需要实测丢帧率。
+- 软 UART 压力解析是 9600 8N1；SIM_UART_1/PE4 使用 TIM11，SIM_UART_2/PE6 使用 TIM13，两路拥有独立接收状态，可同时采样；`overlap_drop_count` 仅保留为兼容诊断字段，正常应保持 0。
 - CS1237 帧固定 21 字节，`AA 55 02 01 0C Seq Raw(4LE) WeightX10(4LE) ThresholdG(2LE) DeviceCode CRC16(2LE) 55 AA`，CRC16/MODBUS 覆盖 `frame[2]` 起 15 字节。
 - 主控压力白名单为 `0x00/0x0E/0x0C/0x08/0x09`，压力工程 `protocol.h` 定义为 `0x0F/0x0E/0x0C/0x08/0x09`，这是跨工程协议不一致。
 - 外控协议帧 Length 是整帧长度，CRC16 大端写入，覆盖 `TranCode, Length, FunCode, AreaCode, InforCode, InforArea`；接收 FIFO 会保留粘包/半包，错误候选帧只跳过帧头首字节继续重同步。
@@ -92,8 +92,8 @@
 - `User\Application\Handle\handlescan.c` 扫描周期 10ms，插入去抖 50ms，拔出去抖 500ms，认证前等待 200ms，普通认证最多 3 次快速重试，RFID 刀具头等待约 2 秒。
 - `User\Application\Beep\sscDrive.c` 电机输出任务 50ms 根据 `WorkMessage.runflag_work` 下发 UART1 启停帧，`User\Application\MotorUartData\motoruartdata.c` 3ms 解析驱动回包并更新 `driver_speed_feedback`、`driver_current_x100` 和报警。
 - `User\Application\include\pump.h` 当前 `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=0`，逻辑 A 泵走 UART5，逻辑 B 泵走 UART7。
-- `User\Application\include\pump_pressure_control.h` 当前压力闭环总开关默认开启，恢复消抖 3000ms；A 压力源固定 `pumpMessageA`/SIM_UART_2/PE6，B 压力源固定 `pumpMessageB`/SIM_UART_1/PE4。
-- A 泵任务周期 25ms，B 泵任务周期 100ms；同样的排空计数 `>300` 会导致 A/B 实际排空时长不同。
+- `User\Application\include\pump_pressure_control.h` 当前压力闭环总开关默认开启；压力停泵后锁止到下一次控制源启动沿，不再按 3000ms 自动恢复；A 压力源固定 `pumpMessageA`/SIM_UART_1/PE4，B 压力源固定 `pumpMessageB`/SIM_UART_2/PE6。
+- A/B 泵任务周期均为 25ms；排空计数使用 `PUMP_TIMING_DRAINAGE_TICKS=400`，两路实际排空时长均约 10 秒。
 - `docs/software-debug-report.md` 已生成，报告采用“配置速查、观察变量、模块断点、故障现象、构建清单”的顺序，适合后续测试时直接定位问题。
 - 本轮没有修改业务源码；报告生成后检查了异常字符、占位符、行尾空格、关键断点函数和 `git diff --check`。
 
@@ -105,7 +105,7 @@
 - 当前外控短超时为 2 秒停输出，长超时为 10 秒释放外控，应以 `EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS` 和 `EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS` 为准。
 - 当前主控压力设备码白名单为 `0x00/0x08/0x09`，旧文档和压力工程历史资料出现过其它设备码组合，属于跨工程协议一致性风险。
 - `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE` 改的是逻辑泵到物理 UART 的映射，`UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE` 改的是屏幕显示和触控映射，二者不能混用。
-- A 泵任务周期 25ms，B 泵任务周期 100ms，两者共用 `timingDrainage_times > 300` 会造成实际排空时长不同，新报告需要明确这是实机测试点。
+- A/B 泵任务周期均为 25ms，两路共用 `PUMP_TIMING_DRAINAGE_TICKS=400`，排空时长统一为约 10 秒。
 - `WORK_ALARM_SPEED_THRESHOLD` 和 `WORK_ALARM_MOTOR_DRIVER_BOARD` 当前都为 11，报警定位时必须结合来源函数和上游链路区分。
 
 ## 2026-06-27 产品手册级报告参考文档发现
@@ -134,7 +134,7 @@
 - 当前源码确认 `PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE=0U`，主报告将泵物理口互换和屏幕镜像、压力源映射分开说明。
 - 当前源码确认注水泵业务速度上限 `PUMP_INJECTWATER_SPEED_MAX=70U`，主报告将其限定为注水泵钳位入口，不扩展成所有泵类型上限。
 - 脚踏真实业务文件是 `User\Application\Beep\sscFOOT.c`，掉线判断在 `Foot_ParseDataS()` 中使用 `footDisconnect_times > 100`，头文件旧阈值不能单独作为运行判断依据。
-- 压力超过停泵点时不清 `run_flag` 是安全层保持停泵设计，恢复依赖压力回到安全区并满足 `PUMP_PRESSURE_CONTROL_RECOVER_DEBOUNCE_MS`。
+- 压力超过停泵点时建立 `pressure_hold_flag` 锁止；压力下降不自动恢复，必须释放当前请求并再次启动形成新启动沿。
 - 报告最终新增了实机记录模板和串口抓包字段，后续现场问题应同时记录公共状态快照和 UART 原始帧，避免只凭 UI 现象判断。
 
 ## 2026-06-27 代码段解释增强发现

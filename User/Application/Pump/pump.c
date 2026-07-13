@@ -6,7 +6,7 @@
 #include "Pubinterface.h"
 #include "pump_pressure_control.h"
 #include "data.h"
-#include "bsp_board.h"
+#include "board.h"
 #include "common.h"
 #include "uart5.h"
 #include "uart7.h"

@@ -336,7 +336,7 @@
               <MiscControls />
               <Define>USE_HAL_DRIVER,STM32F413xx</Define>
               <Undefine />
-              <IncludePath>../Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../User/Hardware/include;../User/Driver/include;../User/Kernel/include;../User/App/include;../User/Application/include;../User/Data;../User/Peripheral/include;../User/UI/include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../User/Tracealyzer/include;../User/Tracealyzer/TraceRecorder/include;../User/Tracealyzer/TraceRecorder/config;../User/Tracealyzer/TraceRecorder/streamports/include;../User/Tracealyzer/TraceRecorder/streamports/config;../User/board</IncludePath>
+              <IncludePath>../Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../User/Hardware/include;../User/Driver/include;../User/Kernel/include;../User/Application/include;../User/Data;../User/Peripheral/include;../User/UI/include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../User/Tracealyzer/include;../User/Tracealyzer/TraceRecorder/include;../User/Tracealyzer/TraceRecorder/config;../User/Tracealyzer/TraceRecorder/streamports/include;../User/Tracealyzer/TraceRecorder/streamports/config;../User/board</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -888,16 +888,6 @@
           </Files>
         </Group>
         <Group>
-          <GroupName>User/App</GroupName>
-          <Files>
-            <File>
-              <FileName>app_bootstrap.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\App\Bootstrap\app_bootstrap.c</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
           <GroupName>User/Hardware</GroupName>
           <Files>
             <File>
@@ -905,21 +895,11 @@
               <FileType>1</FileType>
               <FilePath>..\User\Hardware\Bsp\bsp_uart.c</FilePath>
             </File>
-            <File>
-              <FileName>hw_bootstrap.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Hardware\Bsp\hw_bootstrap.c</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>User/Kernel</GroupName>
           <Files>
-            <File>
-              <FileName>kernel_entry.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Kernel\Scheduler\kernel_entry.c</FilePath>
-            </File>
             <File>
               <FileName>kernel_scheduler.c</FileName>
               <FileType>1</FileType>
@@ -936,6 +916,16 @@
               <FilePath>..\User\Application\Common\common.c</FilePath>
             </File>
             <File>
+              <FileName>control_arbitration.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\Common\control_arbitration.c</FilePath>
+            </File>
+            <File>
+              <FileName>work_alarm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\Common\work_alarm.c</FilePath>
+            </File>
+            <File>
               <FileName>drivectrl_adapter.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\DriveCtrl\drivectrl_adapter.c</FilePath>
@@ -949,6 +939,11 @@
               <FileName>handlekey.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\Handle\handlekey.c</FilePath>
+            </File>
+            <File>
+              <FileName>handle_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\Handle\handle_control.c</FilePath>
             </File>
             <File>
               <FileName>handlescan.c</FileName>
@@ -986,12 +981,17 @@
                 <FilePath>..\User\Application\Pump\pump.c</FilePath>
               </File>
               <File>
-                <FileName>pump_behavior_core.c</FileName>
-                <FileType>1</FileType>
-                <FilePath>..\User\Application\Pump\pump_behavior_core.c</FilePath>
-              </File>
-              <File>
-                <FileName>pump_pressure_control.c</FileName>
+              <FileName>pump_behavior_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\Pump\pump_behavior_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>pump_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\Pump\pump_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>pump_pressure_control.c</FileName>
                 <FileType>1</FileType>
                 <FilePath>..\User\Application\Pump\pump_pressure_control.c</FilePath>
               </File>

@@ -52,7 +52,7 @@ traceResult xTraceTaskUnregister(TraceTaskHandle_t xTaskHandle, TraceUnsignedBas
 	/* This should never fail */
 	TRC_ASSERT_ALWAYS_EVALUATE(xTraceEntryGetAddress((TraceEntryHandle_t)xTaskHandle, &pvTask) == TRC_SUCCESS);
 	
-	xTraceStackMonitorRemove(pvTask);
+	(void)xTraceStackMonitorRemove(pvTask);
 	
 	return xTraceObjectUnregister((TraceObjectHandle_t)xTaskHandle, PSF_EVENT_TASK_DELETE, uxPriority);
 }

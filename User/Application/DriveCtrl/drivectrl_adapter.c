@@ -21,7 +21,7 @@ static void DriveCtrl_StopPump(pumpMessage_t *pump_msg, void (*set_speed)(uint32
     {
         pump_msg->run_flag = false;
         pump_msg->timingDrainage_flag = false;
-        pump_msg->pedalDrainage_flag = false; /* 驱动层强制停泵时清掉脚踏临时70档，避免后续普通启动继承旧排空状态。 */
+        pump_msg->pedalDrainage_flag = false; /* 驱动层强制停泵时清掉脚踏轻踩来源，避免后续普通启动继承旧状态。 */
         pump_msg->timingDrainage_times = 0U;
         pump_msg->speed_work = 0U;
     }

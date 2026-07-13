@@ -1,7 +1,7 @@
 ﻿// handlescan.c
 
 #include "handlescan.h"
-#include "bsp_board.h"
+#include "board.h"
 #include "bsp_gpio.h"
 #include "bsp_uart.h"
 #include "data.h"
@@ -245,7 +245,7 @@ typedef struct
     uint16_t short_pin;                                    /* 手柄短接检测引脚，只用于读取插拔状态。 */
     HandlescanChannelContext *context;                     /* 本通道跨 10ms 周期保存的扫描运行状态。 */
     ChannelrecognizeMessage_t *message;                    /* 本通道识别缓存，上线事件会把它装入通道记忆。 */
-    ChannelMemoryMessagr_t *memory;                        /* 本通道记忆，仅保留原有 auto_identify 更新顺序。 */
+    ChannelMemoryMessage_t *memory;                        /* 本通道记忆，仅保留原有 auto_identify 更新顺序。 */
     uint32_t *spec_values;                                 /* 本通道刀具规格显示缓存，A/B 不得交叉使用。 */
     uint8_t plug_key;                                      /* 手柄或 RFID 刀具上线时发送的屏幕事件键值。 */
     uint8_t unplug_key;                                    /* 手柄确认拔出时发送的屏幕事件键值。 */
@@ -2249,36 +2249,6 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(uint8_t channel, AT24CS32_CRC_S
 }
 
 /*
- * 处理运行中插拔报警。
- * 当电机已经处于启动状态时，如果此时检测到手柄掉线或插拔变化，按照旧逻辑需要：
- * 1. 立刻置运行中插拔报警；
- * 2. 打开蜂鸣报警标志；
- * 3. 如果板级仍保留 K1 兼容宏，则同步执行关闭动作；
- * 4. 返回 `1` 告诉调用方“本次已经触发报警”。
- */
-static uint8_t Handlescan_HandleRunningPlugAlarm(uint8_t channel)
-{
-    if (WorkMessage.runflag_work == true)
-    {
-        Handlescan_RaiseAlarm(channel, HANDLESCAN_ALARM_RUNNING_PLUG);
-        K1_OFF();
-        return 1U;
-    }
-
-    return 0U;
-}
-
-/*
- * 函数功能：执行 A 通道手柄插拔去抖、EEPROM 认证和识别缓存更新，认证通过后只发布插拔事件。
- * 输入参数：无。
- * 返回参数：无。
- * 设计目标：
- * 1. 仅在插入稳定后做一次认证和一次信息区读取；
- * 2. 认证成功后保持在线，不再重复访问 EEPROM；
- * 3. 认证失败后保持安静，但仍持续监视拔出边沿；
- * 4. 拔出稳定后只输出一次离线报文，并清理 A 通道扫描识别缓存。
- */
-/*
  * 函数功能：按通道选择 EEPROM CRC 认证总线。
  * 输入参数：binding 为固定通道绑定；result 保存底层认证明细。
  * 返回参数：返回原 AT24CS32 认证状态，不改变错误码含义。
@@ -2647,7 +2617,7 @@ static bool Handlescan_ProcessIntegratedHandle(
       binding->context; /* 保存本通道 EEPROM 页缓存和扫描阶段。 */
   ChannelrecognizeMessage_t *message =
       binding->message; /* 一体式手柄参数只写本通道识别缓存。 */
-  ChannelMemoryMessagr_t *memory =
+  ChannelMemoryMessage_t *memory =
       binding->memory; /* 清本通道旧 RFID 自动识别记忆。 */
   uint32_t *spec_values =
       binding->spec_values;     /* 一体式刀具规格只刷新本通道。 */
@@ -2761,7 +2731,7 @@ static bool Handlescan_ProcessOrdinaryEepromHandle(
       binding->context; /* 保存本通道 EEPROM 页缓存和扫描阶段。 */
   ChannelrecognizeMessage_t *message =
       binding->message; /* 普通手柄参数只写本通道识别缓存。 */
-  ChannelMemoryMessagr_t *memory =
+  ChannelMemoryMessage_t *memory =
       binding->memory; /* 保留本通道原有 auto_identify 更新顺序。 */
   uint32_t *spec_values = binding->spec_values; /* 普通刀具规格只刷新本通道。 */
   uint8_t read_status;          /* 保存 Page3 或 Page4 读取结果。 */

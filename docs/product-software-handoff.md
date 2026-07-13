@@ -75,7 +75,7 @@ flowchart LR
 | 外设层 | `User\Peripheral` | UART、软 UART、I2C、1-Wire、IWDG 等硬件访问 |
 | 内核适配层 | `User\Kernel` | 自研软任务调度、队列、任务入口封装 |
 | 应用层 | `User\Application` | 手柄、脚踏、屏幕、电机、泵、外部通信、报警、公共数据 |
-| 引导层 | `User\App` | `App_Bootstrap_Init()`，把主控业务初始化挂到 `main()` |
+| 业务初始化 | `User\Application\Src` | `Userparser_Init()`，由 `main()` 直接初始化业务模块 |
 
 ### 2.4 主控作为主线的关键数据流
 
@@ -97,11 +97,11 @@ flowchart LR
 sequenceDiagram
     participant Reset as 复位入口
     participant Main as main()
-    participant HW as Hardware_PostInit()
-    participant App as App_Bootstrap_Init()
+    participant HW as MX_I2C_Init()
+    participant App as Userparser_Init()
     participant Parser as Userparser_Init()
     participant RTOS as MX_FREERTOS_Init()
-    participant Kernel as Kernel_Scheduler_Start()
+    participant Kernel as AppTaskScheduler_Init()
     participant FreeRTOS as vTaskStartScheduler()
 
     Reset->>Main: HAL/CubeMX 基础初始化
@@ -111,7 +111,7 @@ sequenceDiagram
     App->>Parser: Userparser_Init()
     Parser->>Parser: UART/EEPROM/UI/公共数据/任务初始化
     Main->>RTOS: MX_FREERTOS_Init()
-    RTOS->>Kernel: Kernel_Scheduler_Start()
+    RTOS->>Kernel: AppTaskScheduler_Init()
     Kernel->>Kernel: 创建软任务调度相关任务
     Main->>FreeRTOS: 启动调度器
 ```
@@ -120,11 +120,11 @@ sequenceDiagram
 
 | 文件 | 关注点 |
 | --- | --- |
-| `Src\main.c` | `Hardware_PostInit()`、`App_Bootstrap_Init()`、`MX_FREERTOS_Init()`、`vTaskStartScheduler()` 的顺序 |
-| `User\Hardware\Bsp\hw_bootstrap.c` | 板级硬件后初始化 |
+| `Src\main.c` | `MX_I2C_Init()`、`Userparser_Init()`、`MX_FREERTOS_Init()`、`vTaskStartScheduler()` 的顺序 |
+| `User\Peripheral\bus\i2c.c` | I2C2/I2C3 业务总线初始化 |
 | `User\App\Bootstrap\app_bootstrap.c` | 调用 `Userparser_Init()` |
 | `User\Application\Src\userparser.c` | 主控业务初始化总入口 |
-| `Src\freertos.c` | 调用 `Kernel_Scheduler_Start()` |
+| `Src\freertos.c` | 直接调用 `AppTaskScheduler_Init()` |
 | `User\Kernel\Scheduler\kernel_entry.c` | 调度器入口 |
 
 ### 3.2 `Userparser_Init()` 初始化顺序
@@ -132,7 +132,7 @@ sequenceDiagram
 `Userparser_Init()` 是接手主控必须先读的函数，它把业务模块按依赖顺序拉起来。静态审查看到的主要顺序如下：
 
 1. 屏幕显示开机页。
-2. `Hardware_BoardGpioInit()` 初始化板级 GPIO。
+2. `Board_GPIOConfiguration()` 初始化板级 GPIO。
 3. `EEPROM_AT24CXX_Init()` 初始化外部 EEPROM。
 4. 初始化硬件 UART：
    - `Uart1_Init()`：无刷/有刷驱动板。
@@ -160,8 +160,8 @@ sequenceDiagram
 | UART5 | 步进/泵 A | `sscPUMPA.c`、`pump.c` | 115200 8N1 | A 泵固定识别开关、压力闭环和输出方向 |
 | UART6 | 屏幕 | `screenkey.c`、`sscUIDP.c` | 115200 8N2 | 屏幕事件会触发插拔、模式和参数变更 |
 | UART7 | 步进/泵 B | `sscPUMPB.c`、`pump.c` | 115200 8N1，当前 `UART_MODE_TX` | B 泵固定识别开关、压力闭环和输出方向 |
-| 软串口 1 | B 泵压力传感器 | `soft_uart.c` | 9600 | RX=PE4，现场固定映射到 B 泵 |
-| 软串口 2 | A 泵压力传感器 | `soft_uart.c` | 9600 | RX=PE6，现场固定映射到 A 泵 |
+| 软串口 1 | A 泵压力传感器 | `soft_uart.c` | 9600 | RX=PE4，使用 TIM11 独立采样，固定写入 A 泵状态 |
+| 软串口 2 | B 泵压力传感器 | `soft_uart.c` | 9600 | RX=PE6，使用 TIM13 独立采样，固定写入 B 泵状态 |
 
 主控硬件引脚和 DMA 速查：
 
@@ -176,8 +176,8 @@ sequenceDiagram
 | UART7 TX/RX | PE7/PE8 | DMA1_Stream3 Ch5 RX | 泵/步进物理 B 口 | CubeMX 当前只开 TX，若需要回包必须重新确认 RX 初始化 |
 | UART8 TX/RX | PE1/PE0 | DMA1_Stream6 Ch5 RX | 预留 | 当前不是主线链路，改动前先查调用点 |
 | UART10 TX/RX | PE3/PE2 | DMA2_Stream0 Ch5 RX | 调试/预留 | 压力透传和外控心跳曾做过开关，交付默认不要输出调试文本 |
-| 软串口 1 TX/RX | PE5/PE4 | EXTI4 + TIM11 | B 泵压力 | 同时两路上报时会争用 active receiver |
-| 软串口 2 TX/RX | PE11/PE6 | EXTI9_5 + TIM11 | A 泵压力 | RX 线反接会导致压力闭环错源 |
+| 软串口 1 TX/RX | PE5/PE4 | EXTI4 + TIM11 | A 泵压力 | 与 B 路接收状态独立，固定写 `pumpMessageA` |
+| 软串口 2 TX/RX | PE11/PE6 | EXTI9_5 + TIM13 | B 泵压力 | 与 A 路接收状态独立，固定写 `pumpMessageB` |
 | 手柄短接数据 | PD2/PD3/PD4 | GPIO | 手柄识别/短接 | 配合 `handlescan.c` 判断 A/B 插拔 |
 | 手柄按键数据 | PD0/PD1/PC12 | GPIO/EXTI | 手柄按键 | PD1 同时在 board.h 里作为 EXTI1，改硬件前要核冲突 |
 | ADC1 | PA1/PA2/PA3/PA4 | ADC1 | 手柄按键、电压、温度 | PA1/PA2 是 H_KEY1/H_KEY2，不是普通 GPIO |
@@ -187,7 +187,7 @@ sequenceDiagram
 | 状态灯 | PE10 | GPIO | 系统运行灯 | 200ms 任务翻转，可用示波器看调度是否活着 |
 | 指示 LED H1-H4 | PC8/PC9/PA8/PA9 | GPIO | 通道/状态显示 | 宏中 ON/OFF 有低有效写法，不能按字面推断 |
 
-系统时钟来自 8MHz HSE，当前 `board.h` 记录 SYSCLK 100MHz、APB1 50MHz、APB2 100MHz。软 UART 用 TIM11 做 RX 采样，DWT/TIM7 做 TX 微秒延时；如果后续改系统时钟，必须重新验证 9600 软串口采样点。
+系统时钟来自 8MHz HSE，当前 `board.h` 记录 SYSCLK 100MHz、APB1 50MHz、APB2 100MHz。软 UART 的 A 路用 TIM11、B 路用 TIM13 做 RX 采样，DWT/TIM7 做 TX 微秒延时；如果后续改系统时钟，必须分别重新验证两路 9600 软串口采样点。
 
 ### 3.4 软任务调度周期
 
@@ -208,7 +208,7 @@ sequenceDiagram
 | `KeyBehaviorsTask` | `User\Application\Beep\sscKEYBH.c` | 30ms | 屏幕/按键行为分发 |
 | `MOTORRUNTask` | `User\Application\Beep\sscDrive.c` | 50ms | 电机运行命令下发 |
 | `BeepControlTask` | `User\Application\Beep\sscBEEP.c` | 100ms | 蜂鸣控制 |
-| `PUMPBBehaviorHandle` | `User\Application\Beep\sscPUMPB.c` | 100ms | B 泵行为处理 |
+| `PUMPBBehaviorHandle` | `User\Application\Beep\sscPUMPB.c` | 25ms | B 泵行为处理 |
 | `AUTOMODEGETDATATask` | `User\Application\Beep\sscRFID.c` | 100ms | RFID/自动模式数据 |
 | `SimUartTask` | `User\Peripheral\uart\soft_uart.c` | 100ms | 压力软串口状态维护 |
 | `LEDTask` | `User\Application\Led\sysrunled.c` | 200ms | 系统状态灯 |
@@ -295,7 +295,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | `online_flag` | 泵/压力模块在线 | CS1237 设备码或外控固定识别 | 外控启动前置检查、心跳 |
 | `run_flag` | 泵输出门控 | 脚踏、外控、排空、急停 | `sscPUMPA/B.c` |
-| `timingDrainage_flag/times` | 定时排空状态和计数 | 泵行为入口 | 泵任务 25ms/100ms 周期 |
+| `timingDrainage_flag/times` | 定时排空状态和计数 | 泵行为入口 | A/B 泵任务统一 25ms 周期 |
 | `step_value` | 调节步进 | 屏幕/配置 | 调泵 UI |
 | `associated_channel` | 泵关联通道 | 配置/预留 | 后续双通道扩展 |
 | `type` | 业务泵类型 | 屏幕、脚踏、外控固定识别 | 泵方向和速度公式 |
@@ -995,7 +995,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UserParserFun() 系统任务初始化"] --> B["SscDriveMotorTask_Init()"]
+A["Userparser_Init() 系统任务初始化"] --> B["SscDriveMotorTask_Init()"]
     B --> C["Kernel_TaskStart(MOTORRUNTask, 50ms)"]
     C --> D["MOTORRUNTask()"]
     D --> E["MOTORRUN()"]
@@ -1071,7 +1071,7 @@ flowchart LR
 | 文件 | 功能 |
 | --- | --- |
 | `User\Application\Beep\sscPUMPA.c` | A 泵行为任务，周期 25ms |
-| `User\Application\Beep\sscPUMPB.c` | B 泵行为任务，周期 100ms |
+| `User\Application\Beep\sscPUMPB.c` | B 泵行为任务，周期 25ms |
 | `User\Application\Pump\pump.c` | 泵输出和压力数据读取 |
 | `User\Application\include\pump_pressure_control.h` | 泵压力闭环数据源说明 |
 | `User\Peripheral\uart\soft_uart.c` | 解析 CS1237 压力传感器帧 |
@@ -1081,8 +1081,8 @@ flowchart LR
 
 | 主控软串口 | RX | 现场泵 | 写入对象 |
 | --- | --- | --- | --- |
-| `SIM_UART_1` | PE4 | B 泵压力传感器 | `pumpMessageB` |
-| `SIM_UART_2` | PE6 | A 泵压力传感器 | `pumpMessageA` |
+| `SIM_UART_1` | PE4 | A 泵压力传感器 | `pumpMessageA` |
+| `SIM_UART_2` | PE6 | B 泵压力传感器 | `pumpMessageB` |
 
 主控对 CS1237 的合法设备码白名单：
 
@@ -1116,11 +1116,11 @@ AA DIR SPEED_H SPEED_L BB AA
 | 项 | 当前值/行为 |
 | --- | --- |
 | 总开关 | `PUMP_PRESSURE_CONTROL_ENABLE=1` |
-| A 泵压力源 | 固定 `pumpMessageA`，即 SIM_UART_2/PE6 |
-| B 泵压力源 | 固定 `pumpMessageB`，即 SIM_UART_1/PE4 |
+| A 泵压力源 | 固定 `pumpMessageA`，即 SIM_UART_1/PE4 |
+| B 泵压力源 | 固定 `pumpMessageB`，即 SIM_UART_2/PE6 |
 | 普通限速 | 阈值以下不降速，阈值到硬停倍率之间线性降速 |
 | 硬停倍率 | `PUMP_PRESSURE_CONTROL_STOP_RATIO_NUM/DEN = 3/2 = 1.5` |
-| 硬停动作 | 本周期输出压到 0，不清 `run_flag`，压力恢复后可自动继续 |
+| 硬停动作 | 输出压到 0 并锁止；压力下降不自动继续，只允许新启动沿解除 |
 | 排空计时 | 压力硬停期间不累计排空时间 |
 | 调试输出 | `PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE=0`，交付版不应打开 |
 
@@ -1139,7 +1139,7 @@ AA DIR SPEED_H SPEED_L BB AA
 | 断点/观察点 | 目的 |
 | --- | --- |
 | `Cs1237_UpdatePumpMessage()` | 看压力帧是否进了正确的 A/B `pumpMessage` |
-| `PUMPA_ApplyPressureClosedLoop()`、`PUMPB_ApplyPressureClosedLoop()` | 看阈值、重量和限速结果 |
+| `PumpBehavior_ApplyPressure()` | 看阈值、重量、锁止状态和限速结果 |
 | `Pump_SetSpeedS_A()`、`Pump_SetSpeedS_B()` | 看最终 UART5/UART7 输出口和线上 6 字节 |
 | `ExternalComm_ApplyFixedPumpIdentity()` | 看外控固定识别是否覆盖在线状态和类型 |
 | `ExternalComm_RefreshUart5PumpRunState()` | 看 A 注水泵“外控独立运行”和“手柄跟随运行”的并集 |
@@ -1151,7 +1151,7 @@ AA DIR SPEED_H SPEED_L BB AA
 ```mermaid
 flowchart TD
     A["脚踏/外控/排空/手柄跟随"] --> B["写 pumpMessageA/B\nrun_flag, type, speed_work"]
-    B --> C["PUMPA 25ms / PUMPB 100ms"]
+    B --> C["PUMPA 25ms / PUMPB 25ms"]
     C --> D{"run_flag 或 timingDrainage_flag?"}
     D -->|否| E["pump_type=0, uart_data=0"]
     D -->|是| F["按 type 选择方向和限幅"]
@@ -1170,12 +1170,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UserParserFun() 系统任务初始化"] --> B["SscPumpATask_Init()"]
+    A["Userparser_Init() 系统任务初始化"] --> B["SscPumpATask_Init()"]
     A --> C["SscPumpBTask_Init()"]
     B --> D["PUMPAQueue_Init()"]
     C --> E["PUMPBQueue_Init()"]
     D --> F["Kernel_TaskStart(PUMPABehaviorTask, 25ms)"]
-    E --> G["Kernel_TaskStart(PUMPBBehaviorTask, 100ms)"]
+    E --> G["Kernel_TaskStart(PUMPBBehaviorTask, 25ms)"]
     F --> H["PUMPABehaviorTask()"]
     G --> I["PUMPBBehaviorTask()"]
     H --> J["PUMPAehaviors()"]
@@ -1186,7 +1186,7 @@ flowchart TD
     M --> O["读取 pumpMessageB\nrun_flag/type/speed_work"]
     N --> P["按 DRAWWATER/INJECTWATER/POURWATER\n选择方向、限幅、速度公式"]
     O --> P
-    P --> Q["PUMPA_ApplyPressureClosedLoop()\n或 PUMPB_ApplyPressureClosedLoop()"]
+    P --> Q["PumpBehavior_ApplyPressure()\nA/B 共用压力保护内核"]
     Q --> R["PumpPressureControl_ShouldForceStop()"]
     Q --> S["PumpPressureControl_Apply()"]
     R --> T{"达到硬停倍率?"}
@@ -1253,9 +1253,9 @@ return target_speed * remaining / available
 | `5000` | `500.0g` | 约 50% |
 | `>=6000` | `>=600.0g` | 0，本周期硬停 |
 
-硬停不是锁存故障。`PUMPA_PauseByPressureLimit()`、`PUMPB_PauseByPressureLimit()` 只让本周期输出 0，不清 `run_flag`、不清手动启动请求，也不清手柄跟随请求。压力掉回硬停点以下后，下一周期会按原 `speed_work` 继续闭环输出。这个行为适合“压力释放后自动恢复注水”，但测试时必须确认不会在管路弹性释放后产生频繁启停。
+达到硬停点后会建立 `pressure_hold_flag` 锁止并持续输出 0。压力自然下降不会自动复转；控制源必须先释放当前请求，再次启动形成新的请求沿后，`PumpBehavior_ClearPressureHoldOnNewRequest()` 才解除锁止。`speed_work` 保留用户设定，但锁止期间不会形成非零输出。
 
-排空 `timingDrainage_flag` 的计时也受压力硬停影响：压力硬停期间不增加 `timingDrainage_times`，避免高压等待消耗排空时长。A/B 都是 `>100` 次后结束，但 A 周期 25ms 约 2.5s，B 周期 100ms 约 10s，二者实际排空时间不同。
+排空 `timingDrainage_flag` 的计时也受压力硬停影响：压力硬停期间不增加 `timingDrainage_times`，避免高压等待消耗排空时长。A/B 均按 25ms 周期累计，达到 `PUMP_TIMING_DRAINAGE_TICKS=400` 时结束，对应约 10 秒。
 
 #### 4.6.2 软 UART 压力帧解析算法
 
@@ -1263,24 +1263,24 @@ return target_speed * remaining / available
 
 | 通道 | RX | 业务映射 | 采样 |
 | --- | --- | --- | --- |
-| `SIM_UART_1` | PE4 | B 泵压力传感器 -> `pumpMessageB` | 9600 8N1，TIM11 |
-| `SIM_UART_2` | PE6 | A 泵压力传感器 -> `pumpMessageA` | 9600 8N1，TIM11 |
+| `SIM_UART_1` | PE4 | A 泵压力传感器 -> `pumpMessageA` | 9600 8N1，TIM11 |
+| `SIM_UART_2` | PE6 | B 泵压力传感器 -> `pumpMessageB` | 9600 8N1，TIM13 |
 
 软 UART 位级状态机：
 
-1. EXTI 捕获 RX 下降沿，只有全局 `active_channel=SIM_UART_NONE` 时才锁定该通道。
+1. EXTI 捕获 RX 下降沿，只检查本通道 `rx_stage` 是否空闲；A/B 可以同时进入接收。
 2. 定时器先等半个 bit 时间确认起始位。
 3. 再按 1 bit 时间采 8 个数据位，低位先收。
 4. 最后采停止位；停止位异常增加 framing error。
 5. 完成的字节先进入 ISR 环形缓冲，再由 100ms `SimUartTaskFunc` 搬到协议解析器。
 
-全局只有一个 active receiver。若 A/B 两个压力模块同时起始：
+两路拥有独立接收状态和采样定时器。若 A/B 两个压力模块同时起始：
 
 | 场景 | 当前动作 | 结果 |
 | --- | --- | --- |
-| A 正在收，B 起始位到来 | B 的 `overlap_drop_count++`，B EXTI 暂时抑制 | B 当前字节或整帧可能丢失 |
-| B 正在收，A 起始位到来 | A 同理被抑制 | A 当前字节或整帧可能丢失 |
-| 两路错相超过一帧时间 | 可交替完整接收 | 心跳中 A/B `seq` 都应递增 |
+| A 正在收，B 起始位到来 | B 进入自己的 START 状态并启动 TIM13 | A/B 分别完成当前字节采样 |
+| B 正在收，A 起始位到来 | A 进入自己的 START 状态并启动 TIM11 | A/B 分别完成当前字节采样 |
+| 两路同相或错相上报 | 两路环形缓冲独立保存字节 | 心跳中 A/B `seq` 都应持续递增 |
 
 CS1237 协议帧固定 21 字节：
 
@@ -1300,18 +1300,18 @@ AA 55 02 01 0C Seq RawCs1237(4LE) WeightX10(4LE) ThresholdG(2LE) DeviceCode CRC_
 
 ```mermaid
 flowchart TD
-    A["UserParserFun()"] --> B["SimUartTask_Init()"]
+    A["Userparser_Init()"] --> B["SimUartTask_Init()"]
     B --> C["SimUart_InitAll()"]
-    C --> D["SoftUart_InitTimingBase()\nSoftUart_InitRxTimer()"]
+    C --> D["SoftUart_InitTimingBase()\nSoftUart_InitRxTimers()"]
     C --> E["SoftUart_InitChannelGpio()\nPE4/PE6"]
     C --> F["SoftUart_RearmExtiLines()"]
     B --> G["Kernel_TaskStart(SimUartTaskFunc, 100ms)"]
 
     H["HAL_GPIO_EXTI_Callback()"] --> I["SimUart_HandleExti(GPIO_Pin)"]
-    I --> J{"active_channel 空闲?"}
-    J -->|是| K["锁定通道\nSoftUart_StartSampleTimer(half_bit)"]
-    J -->|否| L["overlap_drop_count++\n抑制重叠通道 EXTI"]
-    K --> M["SimUart_TimerIrqHandler()"]
+    I --> J{"本通道 rx_stage 空闲?"}
+    J -->|是| K["启动本通道\nSoftUart_StartSampleTimer(half_bit)"]
+    J -->|否| L["忽略本通道数据位重复下降沿"]
+    K --> M["TIM11/TIM13\nSimUart_TimerIrqHandler(channel)"]
     M --> N["SoftUart_ProcessSample()"]
     N --> O{"完成 8N1 字节?"}
     O -->|否| M
@@ -1332,10 +1332,11 @@ flowchart TD
 ```mermaid
 flowchart LR
     A["压力 MCU\nCS1237 原始值/重量/阈值/设备码"] --> B["AA55 21B 帧\n9600 8N1"]
-    B --> C["PE4 SIM_UART_1\n对应 pumpMessageB"]
-    B --> D["PE6 SIM_UART_2\n对应 pumpMessageA"]
-    C --> E["EXTI + TIM11 位采样"]
-    D --> E
+    B --> C["PE4 SIM_UART_1\n对应 pumpMessageA"]
+    B --> D["PE6 SIM_UART_2\n对应 pumpMessageB"]
+    C --> E["EXTI4 + TIM11 位采样"]
+    D --> E2["EXTI9_5 + TIM13 位采样"]
+    E2 --> F
     E --> F["ISR 环形缓冲\n按通道保存字节"]
     F --> G["SimUartTaskFunc 100ms"]
     G --> H["CS1237 帧解析器\n头尾/长度/CRC/设备码"]
@@ -1347,7 +1348,7 @@ flowchart LR
     K --> M
     L --> N["外控心跳在线状态"]
     I --> O["外控心跳压力扩展"]
-    H --> P["invalid_crc/framing_error\noverlap_drop_count 调试统计"]
+    H --> P["invalid_crc/framing_error\nbuffer_overflow 调试统计"]
 ```
 
 `DeviceCode` 只用于 `online_flag` 和 `losses_times`，不能写 `pumpMessage.type`。主控当前合法码是 `0x00/0x0E/0x0C/0x08/0x09`；压力工程协议头文件合法码是 `0x0F/0x0E/0x0C/0x08/0x09`。这会直接影响“压力板在线但泵不允许启动/上位机显示离线”的判断。
@@ -1443,7 +1444,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["UserParserFun()"] --> B["ExternalComm_Init()"]
+    A["Userparser_Init()"] --> B["ExternalComm_Init()"]
     B --> C["ExternalComm_RxFifoInit()"]
     B --> D["Kernel_TaskStart(ExternalCommTaskFunc, 10ms)"]
     D --> E["ExternalCommTaskFunc()"]
@@ -1984,21 +1985,21 @@ AA 55 02 01 0C Seq RawCs1237[4] WeightX10[4] ThresholdG[2] DeviceCode CRC16[2] 5
 
 | 项 | 当前实现 |
 | --- | --- |
-| 字节接收 | 下降沿 EXTI 捕获起始位，TIM11 半位/整位采样，8N1 |
+| 字节接收 | 下降沿 EXTI 捕获起始位，A 路 TIM11、B 路 TIM13 分别按半位/整位采样，8N1 |
 | 中断缓冲 | 每路 64 字节 ISR 环形缓冲 |
 | 任务队列 | 每路 128 字节静态队列 |
 | 解析周期 | `SimUartTaskFunc()` 100ms 搬运并解析 |
 | 帧同步 | 按字节寻找 `AA 55`，候选帧无效时从帧内重新找下一处 `AA 55` |
 | CRC | CRC16/MODBUS，主控覆盖 frame[2] 开始 15 字节，和压力文档一致 |
 | 在线判断 | `DeviceCode` 必须在主控白名单内 |
-| A/B 映射 | SIM_UART_1 写 `pumpMessageB`，SIM_UART_2 写 `pumpMessageA` |
-| 互斥限制 | 全局 `active_channel` 任意时刻只允许一路接收一个字节，双路同相上报有丢帧风险 |
+| A/B 映射 | SIM_UART_1 写 `pumpMessageA`，SIM_UART_2 写 `pumpMessageB` |
+| 双路接收 | A/B 各自维护 `rx_stage`、位序号和采样定时器，可同时接收同相上报 |
 
 压力调试抓包建议：
 
 1. 先单独接 A 压力板，确认 `pumpMessageA.seq` 递增、`pumpMessageB.seq` 不动。
 2. 再单独接 B 压力板，确认 `pumpMessageB.seq` 递增、`pumpMessageA.seq` 不动。
-3. 双路同时接入后，分别测试上电同相和错相上报；若 `seq` 长时间停滞，优先查软串口 active receiver 竞争。
+3. 双路同时接入后，分别测试上电同相和错相上报；若某路 `seq` 长时间停滞，优先查该路 EXTI、TIM11/TIM13 中断和接线。
 4. 压力超阈值测试要同时看 `weight_x10`、`pressure_threshold`、最终泵 UART 帧速度是否降到 0。
 
 ### 6.5 压力传感器标定协议
@@ -2113,15 +2114,15 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 | A 压力解析 | 接 A 压力板 | `pumpMessageA` 更新，Seq 递增 |
 | B 压力解析 | 接 B 压力板 | `pumpMessageB` 更新，Seq 递增 |
 | 双压力同时上报 | A/B 压力板都 200ms 上报 | 主控不应长期丢某一路 |
-| 软 UART 同相碰撞 | 两个压力板同步复位同相上报 | 记录 `seq` 丢失和 `overlap_drop_count`，评估是否需要错相 |
+| 软 UART 同相接收 | 两个压力板同步复位同相上报 | TIM11/TIM13 分别进入中断，两路 `seq` 持续递增 |
 | 压力阈值以下 | 设置阈值 400g，施加 300g | 泵速不降 |
 | 压力线性降速 | 阈值 400g，施加 500g | 输出约为目标速度 50% |
-| 压力硬停 | 阈值 400g，施加 600g | 本周期输出 0，但 `run_flag` 不清 |
-| 压力恢复 | 硬停后释放到 450g/350g | 450g 降速恢复，350g 恢复目标速度 |
+| 压力硬停 | 阈值 400g，施加 600g | 输出 0，清对应运行/排空请求并建立 `pressure_hold_flag` |
+| 压力锁止解除 | 硬停后释放压力但保持控制源，再完全释放并重新启动 | 保持控制源时不复转；新的启动沿解除锁止后恢复 |
 | 设备码异常 | 改变霍尔组合或断霍尔 | 泵在线状态变化符合白名单 |
 | `0x00/0x0F` 差异 | 构造两种设备码 | 主控和压力工程显示差异明确记录 |
 | 排空硬停 | 排空期间施加硬停压力 | 压力硬停期间排空计时不增加 |
-| A/B 排空时间 | A/B 分别排空 | A 约 2.5s，B 约 10s，确认是否符合产品需求 |
+| A/B 排空时间 | A/B 分别排空 | 两路均固定70档并在约10秒结束 |
 | 固定泵识别 | 不接压力板，仅外控设置泵速/启动 | 固定识别打开时仍显示在线并可控，文档记录这是交付配置 |
 | 标定写入 | 通过压力上位机写表 | 写入后重启，标定表仍生效 |
 
@@ -2169,8 +2170,8 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 
 | 文件 | 静态审查结论 | 预期风险/bug | 建议测试 |
 | --- | --- | --- | --- |
-| `Src\main.c` | 启动顺序清晰，`Hardware_PostInit()` 在 `App_Bootstrap_Init()` 前 | 如果硬件后初始化失败，应用初始化仍可能继续 | 加启动日志或断点，确认 I2C/UART/GPIO 初始化成功 |
-| `Src\freertos.c` | 通过 `Kernel_Scheduler_Start()` 间接创建软任务 | 若软任务未注册成功，业务看似启动但无周期动作 | 断点 `Kernel_TaskStart()`，统计任务数 |
+| `Src\main.c` | 启动顺序清晰，`MX_I2C_Init()` 在 `Userparser_Init()` 前 | 如果硬件初始化失败，应用初始化仍可能继续 | 加启动日志或断点，确认 I2C/UART/GPIO 初始化成功 |
+| `Src\freertos.c` | 直接调用 `AppTaskScheduler_Init()` 创建现有应用任务 | 若软任务未注册成功，业务看似启动但无周期动作 | 断点 `Kernel_TaskStart()`，统计任务数 |
 | `User\Application\Src\userparser.c` | 初始化总入口，模块依赖强 | 新增模块容易因顺序错导致串口/公共数据未就绪 | 每次改初始化顺序后做最小 bring-up |
 | `User\Kernel\Scheduler\kernel_scheduler.c` | 软任务周期统一管理 | 高频 3ms 任务、10ms 外控和 100ms 压力任务相互影响需要测 CPU 占用 | Tracealyzer 或 GPIO 翻转测周期抖动 |
 | `User\Application\include\Pubinterface.h` | 公共状态定义集中 | `WorkMessage` 被多任务读写，字段一致性依赖调用纪律 | 外控、脚踏、手柄并发切换压力测试 |
@@ -2184,14 +2185,14 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 | `User\Application\Handle\handlekey.c` | 手柄按键控制入口 | 手控与脚踏/外控抢控制权时可能产生边界问题 | 手控运行中踩脚踏、外控授权、屏幕停止 |
 | `User\Application\Beep\sscBEEP.c` | 报警蜂鸣和临时提示 | 3 秒临时报警不能覆盖长期报警 | 长期报警中触发临时坏手柄提示 |
 | `User\Application\Beep\sscDrive.c` | 电机控制帧下发 | 当前主控下发 11B `BB AA` 测试尾，不带 CRC；若现场按正式 CRC 协议理解会误判 | 抓 UART1 TX，确认驱动固件仍接受 `RxCRC=0xAABB` |
-| `User\Application\MotorUartData\motoruartdata.c` | 3ms 解析驱动回包 | 循环条件 `i < (rlen - 11)` 但读取到 `i+11`，刚好 12B 单帧可能不解析 | 用模拟器只回一帧 12B，确认 `driver_speed_feedback` 是否更新 |
+| `User\Application\MotorUartData\motoruartdata.c` | 3ms 解析驱动回包 | 12B 单帧在 `rlen=12` 时会执行一次循环并从第0字节解析；风险主要是噪声前缀和连续帧重同步 | 用模拟器回单帧、噪声前缀和连续帧，确认 `driver_speed_feedback` 更新 |
 | `User\Application\MotorUartData\motoruartdata.c` | 驱动 Err 映射 | 任意非零 Err 都会停电机和泵，若驱动误报瞬态 Err 会造成整机停机 | 注入 Err=2/5/11/12/14/15 和恢复 0，观察报警归属和清除 |
-| `User\Application\Beep\sscPUMPA.c` | A 泵行为，25ms | A 泵压力数据来自 `SIM_UART_2/PE6`，接线错会闭环错源 | 断 A/B 压力线分别验证 |
-| `User\Application\Beep\sscPUMPB.c` | B 泵行为，100ms | B 泵任务周期比 A 慢，排空 `>100` 次导致 B 排空约 10s 而 A 约 2.5s | A/B 同目标压力阶跃和排空时间对比 |
+| `User\Application\Beep\sscPUMPA.c` | A 泵行为，25ms | A 泵压力数据来自 `SIM_UART_1/PE4`，接线错会闭环错源 | 断 A/B 压力线分别验证 |
+| `User\Application\Beep\sscPUMPB.c` | B 泵行为，25ms | A/B 周期已统一，仍需验证各自队列和物理 UART 输出没有串路 | A/B 同目标压力阶跃和排空时间对比 |
 | `User\Application\Pump\pump.c` | 泵输出和压力读取 | 业务泵类型不能被 CS1237 设备码覆盖 | 外控心跳中泵类型和业务类型分别核对 |
-| `User\Peripheral\uart\soft_uart.c` | 双路 9600 软 UART + CS1237 解析 | 双路同时上报时只允许一个 active receiver，存在帧碰撞/丢帧风险 | 两个压力板固定 200ms 同周期，上电相位错开和同相都测 |
+| `User\Peripheral\uart\soft_uart.c` | 双路 9600 软 UART + CS1237 解析 | A 路 TIM11、B 路 TIM13 独立接收，单路中断或接线异常仍会导致对应通道掉线 | 两个压力板固定 200ms 同周期，上电相位错开和同相都测 |
 | `User\Application\ExternalComm\external_comm_protocol.c` | 外控协议解析/组帧 | CRC 覆盖范围正确但需与上位机一致 | 用上位机构造合法/错误 CRC 帧 |
-| `User\Application\ExternalComm\external_comm_task.c` | 外控授权、心跳、泵压力上传 | `EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS=5000` 但注释写 30s | 实测静默 1s 和 5s 行为，统一注释 |
+| `User\Application\ExternalComm\external_comm_task.c` | 外控授权、心跳、泵压力上传 | 当前链路释放超时为 10s，上位机仍应按 200ms 周期保活 | 实测静默未满10s和达到10s后的授权释放行为 |
 | `User\Application\ExternalComm\external_comm_task.c` | EEPROM 读写跟随当前通道 | 上位机不能指定 A/B 总线，切通道后批量写页可能写到另一只手柄 | A/B 插双手柄，切换后分别读写 Page4 并读回确认 |
 | `User\Application\Beep\sscFOOT.c` | 脚踏解析和行为 | 运行掉线阈值实际约 1s，和头文件 20 次/旧注释 1.6s 不一致 | 脚踏在线后断线，实测 UI/蜂鸣时间 |
 | `User\Application\Beep\sscFOOT.c` | 脚踏速度映射 | `(H-L)`、`(H-M)` 未统一防 0，定标异常可能导致除 0 或异常速度 | 构造 H=L、H=M 回包，观察是否保护 |
@@ -2205,7 +2206,7 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 
 | 文件 | 接手时先看什么 | 推荐断点/观察点 | 修改风险 |
 | --- | --- | --- | --- |
-| `Src\main.c` | `main()` 中 HAL、时钟、GPIO、DMA、UART、任务启动顺序 | `Hardware_PostInit()`、`App_Bootstrap_Init()` | 改初始化顺序会影响外设未就绪时的应用初始化 |
+| `Src\main.c` | `main()` 中 HAL、时钟、GPIO、DMA、UART、任务启动顺序 | `MX_I2C_Init()`、`Userparser_Init()` | 改初始化顺序会影响外设未就绪时的应用初始化 |
 | `Src\usart.c` | UART1-10 真实波特率、停止位、TX/RX 模式、DMA | 各 `MX_USARTx_UART_Init()` | `board.h` 注释和 `Src\usart.c` 不完全一致 |
 | `User\Application\Src\userparser.c` | `Userparser_Init()` 业务初始化顺序 | `Userparser_PubinterfaceInit()`、各 `Ssc*Task_Init()` | 公共数据没初始化就启动任务会出现随机状态 |
 | `User\Kernel\Scheduler\kernel_scheduler.c` | 软任务创建、周期、事件分发 | `Kernel_TaskStart()`、任务回调入口 | 高频任务过多会影响 3ms 串口接收和软 UART |
@@ -2218,10 +2219,10 @@ A5 5A | Ver | Cmd | PayloadLen | Seq | Payload | CRC16(2) | 5A A5
 | `User\Application\MotorUartData\motoruartdata.c` | UART1 回包 CRC、速度/电流反馈、Err 映射 | `BrushlessMotorUartData_ReceiveData()`、`MotorUart_SetDriverAlarm()` | 误清其他模块报警会掩盖故障 |
 | `User\Application\Motor\motor.c` | 旧电机接口和上电急停 | `Motor_ErrorEmergencyStop_Ctrl()` | 旧接口保留测试帧，不能误当当前主运行链路 |
 | `User\Application\Beep\sscPUMPA.c` | A 泵任务、压力闭环、逻辑到物理口 | `PUMPAehaviors()`、`Pump_SetSpeedS_A()` | A/B 物理互换开关会改变实际串口 |
-| `User\Application\Beep\sscPUMPB.c` | B 泵任务、压力闭环、100ms 周期 | `PUMPBehaviors()`、`Pump_SetSpeedS_B()` | B 周期比 A 慢，双泵一致性要实测 |
+| `User\Application\Beep\sscPUMPB.c` | B 泵任务、压力闭环、25ms 周期 | `PUMPBehaviors()`、`Pump_SetSpeedS_B()` | A/B 周期一致，但队列深度和物理输出口仍独立 |
 | `User\Application\Pump\pump.c` | 泵底层兼容接口 | `Pump_SetSpeed_A/B()` | 旧接口和新 `pumpMessage` 链路混用会造成输出来源不清 |
 | `User\Application\include\pump_pressure_control.h` | 压力闭环宏和硬停倍率 | `PumpPressureControl_Apply()` | 改倍率必须用压力台架验证 |
-| `User\Peripheral\uart\soft_uart.c` | 双路软 UART、CS1237 解析、A/B 压力映射 | `Cs1237_UpdatePumpMessage()`、`Cs1237_FrameValid()` | 双路同相上报可能丢帧，不能用单路测试代替双路测试 |
+| `User\Peripheral\uart\soft_uart.c` | 双路软 UART、CS1237 解析、A/B 压力映射 | `Cs1237_UpdatePumpMessage()`、`Cs1237_FrameValid()` | 两路独立采样，但仍必须双路同相测试中断、映射和长期在线状态 |
 | `User\Application\ExternalComm\external_comm_protocol.c` | 外控帧头、长度、CRC、组帧 | `ExternalCommProtocol_Parse()`、`BuildFrame()` | CRC 覆盖范围要和上位机完全一致 |
 | `User\Application\ExternalComm\external_comm_task.c` | 外控授权、命令分发、心跳、超时停输出 | `ExternalComm_DispatchFrame()`、`ExternalComm_SendHeartbeat()`、`ExternalComm_CheckLinkWatchdog()` | 外控安全动作改错会影响急停和断线停机 |
 | `User\Application\Beep\sscFOOT.c` | 脚踏帧、行程比例、脚踏接管、轻排泵 | `FootControlTask()`、`Foot_EnsureFootControlMode()` | 脚踏消息滞留会在其他控制释放后误触发 |
@@ -2354,10 +2355,9 @@ rg -n "BB AA|PWM_FRE|CRC_Calc" D:\EH_main\reference\shima_waixie\small_2026_3_31
 | P2 | 手柄 Page4 默认方向字段当前不生效 | 代码固定返回 `ZZDIR`，如果产品要求 EEPROM 控制默认方向，需要补编码表和回归测试 |
 | P2 | 脚踏 JTB 短包长度保护偏弱 | JTB 分支检查到 `i+13` 却读取到 `i+15`，噪声帧需专项注入验证 |
 | P2 | 脚踏 JTD 右踏切通道在线判断可疑 | 当前 A 通道踩右踏尝试切 B 时仍检查 `Channel_Aonline` |
-| P2 | 电机回包解析 12B 边界可能漏单帧 | 循环条件和读取长度不完全一致，刚好一帧时需模拟器验证 |
-| P2 | 主控外控释放超时注释 30s 与代码 5s 不一致 | 现场测试和客户预期可能不一致 |
-| P2 | 双路压力软串口同时上报竞争 | 软 UART 同时接收能力需要实测，压力数据可能掉帧 |
-| P2 | B 泵任务周期 100ms、A 泵 25ms | A/B 响应和排空时间都不同，可能影响双泵一致性 |
+| P2 | 电机回包噪声前缀和连续帧重同步 | 12B 单帧可正常解析，但噪声字节和粘连帧仍需模拟器覆盖 |
+| P2 | 双路压力软串口独立中断依赖 | PE4/TIM11 或 PE6/TIM13 任一路配置异常都会只影响对应泵，需分别验证两路长期在线 |
+| P2 | A/B 泵队列深度不同 | 任务周期均为25ms，但 A 队列5项、B队列2项，高频不同命令仍需检查两路响应一致性 |
 
 ## 13. 接手提示
 

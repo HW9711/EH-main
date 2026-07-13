@@ -6,9 +6,8 @@
 #include "delay.h"
 #include "eeprom.h"
 #include "mainboard_software_version.h"
-#include "bsp_board.h"
+#include "board.h"
 #include "board_profile.h"
-#include "hw_bootstrap.h"
 #include "uart1.h"
 #include "uart2.h"
 #include "uart3.h"
@@ -71,7 +70,7 @@ void Userparser_Init(void)
   Iwdg_Reset();
 
   //1.GPIO
-  Hardware_BoardGpioInit();
+  Board_GPIOConfiguration(); /* 直接初始化业务 GPIO 和中断映射，删除只转发一次的硬件启动函数。 */
 
   //2.IIC、1-@Wire
   EEPROM_AT24CXX_Init();

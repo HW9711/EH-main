@@ -168,14 +168,12 @@ static traceResult prvTraceErrorPrint(uint32_t uiErrorCode)
 		}
 		(void)xTracePrintF(pxErrorInfo->xWarningChannel, szDesc, xFileName, (uint32_t)uxLineNumber);
 		return TRC_SUCCESS;
-		break;
 		
 	default:
 		/* No error, or an unknown error occurred */
 		(void)xTracePrintF(pxErrorInfo->xWarningChannel, "Unknown error code: 0x%08X", uiErrorCode);
 		
 		return TRC_FAIL;
-		break;
 	}
 
 	return TRC_SUCCESS;
@@ -191,7 +189,6 @@ static traceResult prvTraceErrorGetDescription(uint32_t uiErrorCode, const char*
 	{
 	case TRC_ERROR_NONE:
 		return TRC_FAIL;
-		break;
 
 	case TRC_WARNING_ENTRY_TABLE_SLOTS:
 		/* There was not enough symbol table slots for storing symbol names.

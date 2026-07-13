@@ -1,6 +1,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "control_arbitration.h"
+#include "work_alarm.h"
+#include "pump_control.h"
+#include "handle_control.h"
+
 #define TMBB_ONLINES 1
 #define TMBA_ONLINES 2
 #define EMBA_ONLINES 3
@@ -47,34 +52,6 @@
 #define JTWORK      1U//脚踏工作
 #define HANDLEWORK  2U//手控工作
 #define TOUCHWORK     3U//外部工作
-
-#define CONTROL_OWNER_NONE      0U//当前没有任何控制方式占用运行控制权
-#define CONTROL_OWNER_EXTERNAL  1U//上位机外部通信正在占用控制权
-#define CONTROL_OWNER_FOOT      2U//脚踏正在占用控制权
-#define CONTROL_OWNER_SCREEN    3U//屏幕按钮/触控正在占用控制权
-#define CONTROL_OWNER_HANDLE    4U//手柄按键正在占用控制权
-
-/*
- * WorkMessage.alarm_value 统一报警码。
- * 数值必须和 sscUIDP.c::UIAIARMDP() 的图片映射保持一致，蜂鸣、屏幕和上位机都读取同一份报警状态。
- */
-#define WORK_ALARM_NONE                 0U//无报警
-#define WORK_ALARM_HANDLE_NOT_CONNECTED 1U//手柄未连接，请连接手柄
-#define WORK_ALARM_MANUAL_SELECTED      2U//手控已选中，请用手控
-#define WORK_ALARM_FOOT_SELECTED        3U//脚控已选中，请用脚控
-#define WORK_ALARM_MOTOR_OVERLOAD       4U//电机过载，请松开脚踏
-#define WORK_ALARM_FOOT_VALUE_ERROR     6U//脚踏值错误，请联系售后
-#define WORK_ALARM_MOTOR_OVERLOAD_ALT   5U//电机过载，请松开脚踏，兼容旧 UI 图片位
-#define WORK_ALARM_UID_ERROR            7U//UID 错误
-#define WORK_ALARM_MOTOR_COMM_ERROR     8U//电机通讯异常
-#define WORK_ALARM_HALL_ERROR           9U//HALL 值错误
-#define WORK_ALARM_HANDLE_MODEL_ERROR_A 10U//A通道EEprom校验失败，手柄型号错误
-#define WORK_ALARM_HANDLE_MODEL_ERROR   WORK_ALARM_HANDLE_MODEL_ERROR_A//兼容旧代码：未区分通道时默认沿用A通道手柄校验报警
-#define WORK_ALARM_SPEED_THRESHOLD      11U//Page4速度/频率阈值蜂鸣报警，只驱动蜂鸣，不强制停机
-#define WORK_ALARM_MOTOR_DRIVER_BOARD   11U//电机驱动板故障报警码，UI 绑定 0x0B；真实报警写 WorkMessage，阈值报警只蜂鸣
-#define WORK_ALARM_HANDLE_MODEL_ERROR_B 12U//B通道EEprom校验失败，手柄型号错误
-#define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U//A/B通道EEprom均校验失败，上位机需要显示双通道来源
-#define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U//泵压力达到模块阈值，屏幕显示 89 号压力报警图，当前只做限时提示不锁全局报警
 
 /*
  * 报警提示固定时间配置统一放在 Pubinterface，便于现场统一调整弹窗、蜂鸣和上位机临时报警保持时间。
@@ -228,31 +205,36 @@
 
 typedef struct 
 {
-  volatile bool      runflag_work;//电机运行标志位，这里考虑
-  volatile uint8_t   switchhandle_counts;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机。
-  volatile uint8_t   switchhandle_countss;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机。
-  volatile uint8_t   switchhandleA_flag;//脚踏切到 A 通道后的确认标志，未确认前不允许误启动 A 通道。
-  volatile uint8_t   switchhandleB_flag;//脚踏切到 B 通道后的确认标志，未确认前不允许误启动 B 通道。
-  volatile bool      alarm_flag;
-  volatile uint8_t   alarm_value;//报警码，供蜂鸣、UI 和上位机统一读取
-  volatile bool      Channel_Aonline;
-  volatile bool      Channel_Bonline;
-  volatile uint8_t   hand_model;
-  volatile uint8_t   channel_work;//工作通道//1为a通道，2为b通道,3为双通道（基于配合使用前提下）
-  volatile uint8_t   drivetype_work;//驱动方式(脚控，手控，触控)
-  volatile uint8_t   hmiactive_work;//外部控制激活标志位
-  volatile uint8_t   touchactive_work;//外部控制激活标志位
-  volatile uint8_t   tool_type;
-  volatile uint8_t   raw_tool_type;//原始刀具型号，保留 PXM/PXP/RFID 标签代号，驱动和上位机扩展可按原始来源判断
-  volatile uint32_t  speed_work;//工作速度
-  volatile uint32_t  speed_set_work;//设置速度
-  volatile uint16_t  freq_work;//工作频率
-  volatile uint16_t  dir_work;///工作方向
+  /* 32 位字段集中放在结构体前部，避免在 8/16 位字段之间产生对齐空洞。 */
+  volatile uint32_t  speed_work;//当前实际工作速度，运行时由控制源和驱动任务共同维护
+  volatile uint32_t  speed_set_work;//用户设置速度，停止后继续保留供下次启动使用
+  volatile uint32_t  tool_reduction_ratio;//减速比：高16位表示增速比，低16位表示减速比
+
+  /* 16 位运行量保持原类型和业务单位，只调整存放顺序。 */
+  volatile uint16_t  freq_work;//当前工作频率
+  volatile uint16_t  dir_work;//当前工作方向
   volatile uint16_t  current_work;//驱动保护电流阈值，来自手柄 EEPROM Page4[21..22] 或 RFID，单位 0.01A；0 表示驱动板默认
   volatile uint16_t  driver_speed_feedback;//驱动板反馈实际转速，来自 0xAA 回包 byte4~5，保持驱动协议中的“实际转速/10”单位，不覆盖控制目标速度
   volatile uint16_t  driver_current_x100;//驱动板反馈实时电流，来自 0xAA 回包 byte8~9，单位 0.01A，只用于监测上传，不能覆盖 current_work 保护电流
-  volatile uint32_t  tool_reduction_ratio;//减速比 高16位表示增速16位表示减速
+
+  /* 8 位字段和布尔状态集中放在尾部，字段名称与业务含义保持不变。 */
+  volatile uint8_t   switchhandle_counts;//双踏板长按切换通道的连续计数，供 V2.1 脚踏逻辑判断切换时机
+  volatile uint8_t   switchhandle_countss;//双踏板另一侧长按切换通道的连续计数
+  volatile uint8_t   switchhandleA_flag;//脚踏切到 A 通道后的确认标志，未确认前不允许误启动 A 通道
+  volatile uint8_t   switchhandleB_flag;//脚踏切到 B 通道后的确认标志，未确认前不允许误启动 B 通道
+  volatile uint8_t   alarm_value;//报警码，供蜂鸣、UI 和上位机统一读取
+  volatile uint8_t   hand_model;//当前选中通道的手柄型号
+  volatile uint8_t   channel_work;//工作通道：1 为 A，2 为 B，3 为双通道
+  volatile uint8_t   drivetype_work;//驱动方式：脚控、手控、触控或外控
+  volatile uint8_t   hmiactive_work;//外部控制激活标志
+  volatile uint8_t   touchactive_work;//屏幕触控激活标志
+  volatile uint8_t   tool_type;//归一化后的业务刀具类型
+  volatile uint8_t   raw_tool_type;//原始刀具型号，保留 PXM/PXP/RFID 标签代号，驱动和上位机扩展可按原始来源判断
   volatile uint8_t   auto_identify;//当前通道是否由屏幕自动识别/RFID 流程触发，切通道时同步记忆
+  volatile bool      runflag_work;//电机运行请求标志
+  volatile bool      alarm_flag;//全局持续报警是否有效
+  volatile bool      Channel_Aonline;//A 通道手柄是否在线
+  volatile bool      Channel_Bonline;//B 通道手柄是否在线
 }
 WorkMessage_t;
 extern WorkMessage_t WorkMessage;//工作信息
@@ -282,30 +264,33 @@ extern ControlSignalMessage_t ControlSignalMessage;//控制信号量
 
 
 typedef struct {
-
-  volatile uint8_t   hand_model;//手柄类型
-  volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，来自Page2第0字节，外部通信心跳在线时直接上传
-  volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
-  volatile uint8_t  tool_type;//刨还是磨
-  volatile uint8_t  raw_tool_type;//原始刀具型号，tool_type 归一为 PLANER/GRINDH 后仍保留旧型号码
-  volatile uint8_t   drive_type;//驱动方式(脚控，手控，外控，触控)
+  /* 32 位参数集中保存，消除原来 freq_alarm_osc 与倍率字段之间的对齐空洞。 */
   volatile uint32_t  zz_speed;//正传速度
   volatile uint32_t  fz_speed;//反传速度
   volatile uint32_t  osc_speed;//往复速度
-  volatile uint16_t  freq;//工作频率
-  volatile uint16_t  dir;///工作方向
-  
-  volatile uint16_t  current_work;//当前通道记忆的驱动保护电流阈值，单位 0.01A；切到该通道时装载到 WorkMessage.current_work
-  volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
   volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
   volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
+  volatile uint32_t  tool_reduction_ratio;//刀具减速比：高16位表示增速比，低16位表示减速比
+
+  /* 16 位参数保持原协议单位和装载规则。 */
+  volatile uint16_t  freq;//工作频率
+  volatile uint16_t  dir;//工作方向
+  volatile uint16_t  current_work;//当前通道记忆的驱动保护电流阈值，单位 0.01A；切到该通道时装载到 WorkMessage.current_work
+  volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
+
+  /* 8 位识别和控制状态集中放在尾部，所有字段继续按名称访问。 */
+  volatile uint8_t   hand_model;//手柄类型
+  volatile uint8_t   hand_type_raw_major;//手柄EEPROM原始类型高字节，来自Page2第0字节，外部通信心跳在线时直接上传
+  volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
+  volatile uint8_t   tool_type;//归一化后的刨/磨刀具类型
+  volatile uint8_t   raw_tool_type;//原始刀具型号，tool_type 归一为 PLANER/GRINDH 后仍保留旧型号码
+  volatile uint8_t   drive_type;//驱动方式：脚控、手控、外控或触控
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
-  volatile uint32_t  tool_reduction_ratio;//刀具减数比
   volatile uint8_t   auto_identify;//通道自动识别状态记忆，避免切换通道后丢失 RFID 识别模式
 }
-ChannelMemoryMessagr_t;
-extern ChannelMemoryMessagr_t MemoryMsgA;//通道记忆（增对可调节参数），用于切换手柄
-extern ChannelMemoryMessagr_t MemoryMsgB;//
+ChannelMemoryMessage_t;
+extern ChannelMemoryMessage_t MemoryMsgA;//A 通道记忆，用于切换通道后恢复识别参数和用户设置
+extern ChannelMemoryMessage_t MemoryMsgB;//B 通道记忆，字段含义与 A 通道完全一致
 typedef struct 
 {
   volatile bool      digital_enable;
@@ -363,28 +348,32 @@ extern ChannelrecognizeMessage_t ChannelrecognizeMessageB;
 
 typedef struct 
 {
-  volatile bool     online_flag;//泵在线
-  volatile bool     run_flag;//泵开始
-   volatile uint16_t timingDrainage_times;//定时排空时间，100ms任务中累计时需要大于1位
-  volatile bool     timingDrainage_flag;//定时排空，优先级在run_flag运行后，遇到run_flag=true则切为false
-  volatile bool     pedalDrainage_flag;//双脚踏轻踩排空临时状态：输出固定70但不改speed_work，也不进入10秒计时
-  volatile uint8_t  step_value;//步进值
-  volatile uint8_t  associated_channel;//关联通道，如果
-  volatile uint16_t  type;//业务泵类型：DRAWWATER/INJECTWATER/POURWATER，不能保存 CS1237 霍尔设备码
-  volatile uint8_t  direction;//方向
-  volatile uint16_t speed_work;//泵速度，灌注最大到300ml，必须使用16位避免截断
-  volatile uint16_t speed_output;//压力闭环修正后的实际输出速度，屏幕和上位机运行态显示读这里，speed_work 保持设定值
-  volatile uint16_t speed_Max;
-  volatile uint16_t speed_Min;
-  volatile uint16_t speed_step_value;//调节步进值一次多少ml，快速档位先不管，后续在判断最大值最小值之间分为6档进行分配
-  volatile uint8_t  losses_times;//识别丢失次数
+  /* 32 位压力数据集中放置，避免布尔字段与计数之间产生多段填充。 */
   volatile int32_t  pressure_value;//压力传感器原始值，对应下位机 RawCs1237
-  volatile uint16_t pressure_threshold;//压力阀值，由压力模块提供
   volatile uint32_t weight_x10;//重量值，单位 0.1g，对应下位机 WeightX10
-  volatile bool     pressure_hold_flag;//压力触发停泵后的锁止标志，保持期间实际输出为0，只能由下一次控制源启动沿清除。
   volatile uint32_t pressure_recover_ms;//压力锁止辅助计数保留字段，当前策略不再按压力恢复时间自动恢复泵输出。
-  volatile uint8_t  seq;//压力模块上报帧序号
 
+  /* 16 位业务量保持原范围，灌注速度仍可保存到 300。 */
+  volatile uint16_t timingDrainage_times;//定时排空累计周期，必须使用16位避免10秒计时溢出
+  volatile uint16_t type;//业务泵类型：DRAWWATER/INJECTWATER/POURWATER，不能保存 CS1237 霍尔设备码
+  volatile uint16_t speed_work;//用户设定泵速度，普通运行和手柄联动读取该值
+  volatile uint16_t speed_output;//压力闭环修正后的实际输出速度，屏幕和上位机运行态显示读这里
+  volatile uint16_t speed_Max;//当前泵类型允许的最大速度
+  volatile uint16_t speed_Min;//当前泵类型允许的最小速度
+  volatile uint16_t speed_step_value;//每次调速使用的步进值
+  volatile uint16_t pressure_threshold;//压力阈值，由压力模块提供
+
+  /* 单字节运行状态集中放在尾部，名称和控制语义保持不变。 */
+  volatile uint8_t  step_value;//当前泵档位
+  volatile uint8_t  associated_channel;//泵与手柄通道的关联标志
+  volatile uint8_t  direction;//泵业务方向
+  volatile uint8_t  losses_times;//压力模块连续识别丢失次数
+  volatile uint8_t  seq;//压力模块上报帧序号
+  volatile bool     online_flag;//压力模块已识别，泵在线
+  volatile bool     run_flag;//普通运行或联动运行请求
+  volatile bool     timingDrainage_flag;//屏幕10秒定时排空请求
+  volatile bool     pedalDrainage_flag;//双脚踏轻踩来源标志：使用speed_work设定速度，不进入屏幕10秒排空计时
+  volatile bool     pressure_hold_flag;//压力触发停泵后的锁止标志，只能由下一次控制源启动沿清除
 }
 pumpMessage_t;
 extern pumpMessage_t pumpMessageA;//泵A结构体
@@ -414,36 +403,35 @@ extern ControlSigleMessage_t ControlSigleMssage;
 void ChannelMessageInit(void);
 void WorkMessageInit(void);
 void ChannelMemoryMessageInit(void);
-void PUMPActive(uint8_t key_value);
-void ToolPosActive(uint8_t key_value);//刀具开孔位置行为
 void HandleSwitchActive(uint8_t key_value);
 void SpeedActive(uint8_t key_value);
 void DirActive(uint8_t key_value);
 void FreqActive(uint8_t key_value);
-void AutoIdentifyActive(uint8_t key_value);//新屏自动识别刀具入口，按当前通道触发 RFID 识别
 void HmiExitActive(uint8_t key_value);
-bool ControlArbitration_IsExternalActive(void);
-bool ControlArbitration_IsOwner(uint8_t owner);
-bool ControlArbitration_IsBusyByOther(uint8_t owner);
-bool ControlArbitration_TryEnter(uint8_t owner);
-void ControlArbitration_Exit(uint8_t owner);
-void ControlArbitration_ExitLocalControlIfIdle(uint8_t owner);
-/* 周期刷新本地电机 owner 释放，电机命令停止且驱动反馈归零后允许其它本地模式接管。 */
-void ControlArbitration_RefreshMotorOwner(void);
-void ControlArbitration_ForceRelease(void);
-bool ControlArbitration_EnterExternalControl(void);
-void ControlArbitration_ReleaseExternalControl(void);
-bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type,uint8_t control_key);
 void Pubinterface_RefreshControlModeDisplay(void); /* 统一刷新脚控、手控、触控三个控制方式图标，避免脚踏任务分散直写残留高亮。 */
 void Pubinterface_RefreshRuntimeDisplaySnapshot(void); /* 开机后按当前 WorkMessage/MemoryMsg 快照补刷 A/B 手柄和当前通道参数区。 */
 bool Pubinterface_ApplyFootControlPriorityOnConnect(void); /* 脚踏上线且手柄未运行时，按脚踏优先规则尝试切到脚控。 */
 void Pubinterface_ClearFootControlManualLock(void); /* 脚踏离线或用户重新选择脚控时清除本在线周期的屏幕手动锁存。 */
 void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag); /* 刷新外部通信小电脑图标：在线白色、外控黄色、离线熄灭。 */
-void WorkAlarm_Set(uint8_t alarm_value);
-void WorkAlarm_Clear(void);
-void WorkAlarm_ClearIf(uint8_t alarm_value);
-bool WorkAlarm_Is(uint8_t alarm_value);
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
+bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model); /* 判断当前手柄型号是否允许作为手柄实体键控制入口。 */
+void Pubinterface_ServiceTransientAlarms(void); /* 周期维护公共接头、压力堵塞和运行中拔手柄三类限时弹窗。 */
+void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag); /* 刷新单个手柄图标。 */
+void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按 A/B 在线和当前通道刷新手柄图标。 */
+bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
+bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断刀具是否具备刨刀能力。 */
+bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
+void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
+void Pubinterface_ClearSelectedChannelDisplay(void); /* 无当前手柄时关闭运行参数区。 */
+void Pubinterface_ClearCommonSocketToolMissingAlarm(void); /* 刀具重新识别后清除公共接头缺刀报警。 */
+void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel); /* 按指定通道记忆刷新主运行页。 */
+bool Pubinterface_ClearHandleNotConnectedAlarm(void); /* 清除当前手柄未连接报警。 */
+void Pubinterface_RefreshHandleUnplugAlarmDisplay(void); /* 清屏后补发仍有效的拔手柄报警。 */
+void Pubinterface_StopRunningHandleOnUnplug(void); /* 运行中拔当前手柄时停止电机和联动泵。 */
+void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow); /* 把有效或兜底流量写入在线注水泵。 */
+void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 装载指定通道 Page4 默认注水流量。 */
+bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新插入通道是否允许自动选中。 */
+void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
 bool Pubinterface_IsCommonSocketToolReady(void);
 bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 手柄电机启动前检查公共接头 EPC 刀具头，缺失时负责报警并拒绝运行。 */
 void Pubinterface_StopTouchKeepAliveRun(void);
@@ -467,9 +455,7 @@ bool Pubinterface_IsPressureBlockStopLatched(void); /* 查询注水冷却压力�
 void Pubinterface_CheckSpeedThresholdAlarm(void);
 bool Pubinterface_IsRfidAutoIdentifyEnabled(uint8_t channel); /* 查询 PXBA/PXBB 指定通道是否仍允许 RFID 自动识别，供 handlescan 在线监测门禁使用。 */
 void ControlTypeActive(uint8_t key_value);
-void PlanerGridH(uint8_t key_value);
  void ChannelrecognizeMessageInit(void);
 void ChannelFlagMessageInit(void);
 void pumpMessageInit(void);
 void Pubinterface_ClearRfidToolMemory(uint8_t channel);
-void PlugORunPLUGActive(uint8_t key_value);

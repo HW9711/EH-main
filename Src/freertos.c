@@ -24,7 +24,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "kernel_entry.h"
+#include "app_task.h"
 
 /* USER CODE END Includes */
 
@@ -81,7 +81,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_QUEUES */
 
   /* USER CODE BEGIN RTOS_THREADS */
-  Kernel_Scheduler_Start();
+  AppTaskScheduler_Init(); /* 直接创建现有应用调度任务，任务模型、周期和全局互斥锁均保持不变。 */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */

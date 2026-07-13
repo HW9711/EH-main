@@ -322,7 +322,6 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     uint16_t uart_data;                   /* 本周期最终下发给泵驱动的速度字段。 */
     uint8_t force_stop = 0U;              /* 压力保护是否要求本周期硬停。 */
     uint8_t drainage_active;              /* 锁存周期开始时的10秒定时排空状态，保持原分支判断时序。 */
-    uint8_t pedal_drainage_active;        /* 锁存双脚踏轻踩排空状态，只控制固定70输出，不参与10秒计时。 */
     uint8_t request_active;               /* 运行或排空任一有效都视为有输出请求。 */
 
     if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT)
@@ -338,12 +337,10 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 锁存本周期请求状态。 */
     PumpBehavior_ClearPressureHoldOnNewRequest(binding, runtime, request_active); /* 只在新启动沿清除压力锁止。 */
     drainage_active = binding->message->timingDrainage_flag ? 1U : 0U; /* 压力处理前锁存排空状态。 */
-    pedal_drainage_active = binding->message->pedalDrainage_flag ? 1U : 0U; /* 单独锁存脚踏轻排，避免复用定时排空计数。 */
-
     if (binding->message->run_flag || binding->message->timingDrainage_flag)
     {
         pump_type = (uint8_t)binding->message->type; /* 运行时使用设备识别流程写入的真实泵类型。 */
-        pump_speed = ((drainage_active != 0U) || (pedal_drainage_active != 0U)) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 两种排空都临时输出70；普通手柄联动读取屏幕设定速度。 */
+        pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
     }
 
     uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, &force_stop); /* 合并类型换算和压力闭环。 */

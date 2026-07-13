@@ -1207,156 +1207,188 @@ void ExternalComm_ClearPumpPressureRunRequest(uint8_t pump_channel)
 }
 
 /*
- * 函数功能：处理上位机控制命令，包括 A/B 泵启停、当前手柄启停、开口定位、急停和退出外控。
+ * 函数功能：执行上位机对 A 泵的独立启动或停止命令。
+ * 输入参数：area_code 为 0x01 时启动 A 泵，为 0x02 时停止 A 泵。
+ * 返回参数：true 表示命令执行成功；false 表示 A 泵离线，失败应答已发送。
+ */
+static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
+{
+    if (area_code == 0x01U)
+    {
+        if (pumpMessageA.online_flag == false)
+        {
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL); /* A 泵未在线时拒绝启动，避免只改变界面状态而无实际输出。 */
+            return false;
+        }
+
+        ExternalComm_SetUart5PumpManualRun(1U); /* 只置位 A 泵独立运行请求，手柄冷却跟随请求保持原状态。 */
+    }
+    else
+    {
+        ExternalComm_SetUart5PumpManualRun(0U); /* 只清除 A 泵独立运行请求，仍有冷却跟随时泵继续运行。 */
+    }
+
+    ExternalComm_RefreshExternalControlRunDisplay(); /* 按当前外控输出请求刷新小电脑图标的白色或黄色状态。 */
+    return true;
+}
+
+/*
+ * 函数功能：执行上位机对 B 泵的独立启动或停止命令。
+ * 输入参数：area_code 为 0x03 时启动 B 泵，为 0x04 时停止 B 泵。
+ * 返回参数：true 表示命令执行成功；false 表示 B 泵离线，失败应答已发送。
+ */
+static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
+{
+    if (area_code == 0x03U)
+    {
+        if (pumpMessageB.online_flag == false)
+        {
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL); /* B 泵未在线时拒绝启动，保持协议失败原因不变。 */
+            return false;
+        }
+
+        if (pumpMessageB.speed_work == 0U)
+        {
+            pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* 0 速启动时按泵类型补原有默认速度。 */
+        }
+        s_external_pump_b_manual_run_request = 1U; /* 记录 B 泵外控输出请求，供外控运行图标判断。 */
+        pumpMessageB.run_flag = true; /* 泵任务下一周期按当前设定速度发送 B 泵运行帧。 */
+        pumpMessageB.timingDrainage_flag = false; /* 外控普通启动不属于 10 秒定时排空。 */
+    }
+    else
+    {
+        s_external_pump_b_manual_run_request = 0U; /* 停止后清除 B 泵外控输出锁存。 */
+        pumpMessageB.run_flag = false; /* 泵任务下一周期发送 B 泵停止帧。 */
+        pumpMessageB.timingDrainage_flag = false; /* 同时退出可能残留的定时排空状态。 */
+    }
+
+    Pubinterface_RefreshPumpBDisplay(); /* B 泵状态改变后立即同步屏幕数值和按钮。 */
+    ExternalComm_RefreshExternalControlRunDisplay(); /* 按剩余外控输出请求刷新小电脑图标。 */
+    return true;
+}
+
+/*
+ * 函数功能：执行上位机对当前手柄电机的启动或停止命令。
+ * 输入参数：area_code 为 0x05 时启动当前手柄，为 0x06 时停止当前手柄。
+ * 返回参数：true 表示命令执行成功；false 表示缺少手柄或公共接头刀具，失败应答已发送。
+ */
+static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
+{
+    if (area_code == 0x05U)
+    {
+        if (ExternalComm_SelectedHandleOnline() == 0U)
+        {
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_NO_CHANNEL); /* 没有选中且在线的手柄时禁止启动电机。 */
+            return false;
+        }
+        if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+        {
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_NOT_SUPPORT); /* 公共接头缺少 EPC 刀具时保留原失败原因。 */
+            return false;
+        }
+
+        Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 新启动命令允许重新尝试压力闭环运行。 */
+        WorkMessage.speed_work = WorkMessage.speed_set_work; /* 实际输出速度恢复为当前设定速度。 */
+        WorkMessage.runflag_work = true; /* 驱动任务下一周期发送电机启动帧。 */
+        ControlSignalMessage.HMI_control_flag = true; /* 标记本次运行来自外部控制。 */
+        ExternalComm_SetUart5InjectPumpFollow(1U); /* 按公共 A/B 选择规则启动手柄冷却注水泵。 */
+    }
+    else
+    {
+        WorkMessage.runflag_work = false; /* 停止当前手柄电机。 */
+        WorkMessage.speed_work = 0U; /* 清零实际输出速度，保留设定速度供下次启动。 */
+        ControlSignalMessage.HMI_control_flag = false; /* 结束外控手柄运行来源。 */
+        ExternalComm_SetUart5InjectPumpFollow(0U); /* 停止由手柄联动启动的注水泵。 */
+        ExternalComm_ClearHandleNotConnectedAlarmForRecovery(); /* 上位机停止等价于确认并退出掉线故障。 */
+    }
+
+    ExternalComm_RefreshExternalControlRunDisplay(); /* 按手柄和泵的剩余输出请求刷新外控图标。 */
+    return true;
+}
+
+/*
+ * 函数功能：执行上位机开口定位左/右动作。
+ * 输入参数：area_code 为 0x07 时向左定位，为 0x08 时向右定位。
+ * 返回参数：true 表示已向当前通道下发定位；false 表示没有当前通道，失败应答已发送。
+ */
+static bool ExternalComm_ApplyToolPositionControl(uint8_t area_code)
+{
+    if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                 area_code,
+                                 EXTERNAL_COMM_REASON_NO_CHANNEL); /* 未选中通道时禁止把定位动作误发给其它通道。 */
+        return false;
+    }
+
+    ToolPosMay(WorkMessage.channel_work, (area_code == 0x07U), 1U); /* 保持左=true、右=false和固定 1 度参数。 */
+    return true;
+}
+
+/*
+ * 函数功能：按 AreaCode 分派泵、手柄、开口定位和急停动作。
+ * 输入参数：area_code 为外部协议控制动作编号。
+ * 返回参数：true 表示动作成功；false 表示动作失败且对应失败应答已发送。
+ */
+static bool ExternalComm_ExecuteControlCommand(uint8_t area_code)
+{
+    switch (area_code)
+    {
+        case 0x01U:
+        case 0x02U:
+            return ExternalComm_ApplyPumpAControl(area_code);
+        case 0x03U:
+        case 0x04U:
+            return ExternalComm_ApplyPumpBControl(area_code);
+        case 0x05U:
+        case 0x06U:
+            return ExternalComm_ApplyHandleRunControl(area_code);
+        case 0x07U:
+        case 0x08U:
+            return ExternalComm_ApplyToolPositionControl(area_code);
+        case 0xFFU:
+            ExternalComm_StopAllWork(); /* 急停保留跨来源强制停止全部输出的原行为。 */
+            return true;
+        default:
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_BAD_AREA); /* 未定义控制码返回原有 BAD_AREA 原因。 */
+            return false;
+    }
+}
+
+/*
+ * 函数功能：校验外部控制权，执行控制命令，并在成功后统一回显控制编号。
  * 输入参数：frame 指向已解析的外部通信控制帧，area_code 表示具体控制动作。
  * 返回参数：无。
  */
 static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
 {
-    /* 控制成功应答只回显 1 字节控制代号。 */
-    uint8_t info[1];
+    uint8_t info[1]; /* 成功应答只回显 1 字节 AreaCode，保持现有协议帧不变。 */
 
-    /* 只有急停允许跨来源强制全停，其它启停命令都必须先取得外部控制权。 */
     if (ExternalComm_EnsureActiveForRun(frame->area_code) == 0U)
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                  frame->area_code,
-                                 EXTERNAL_COMM_REASON_BUSY);
+                                 EXTERNAL_COMM_REASON_BUSY); /* 非急停命令未取得外控权时返回忙。 */
         return;
     }
 
-    /* AreaCode 决定具体控制动作，V1 直接改业务状态，不模拟 HMI 切换按键。 */
-    switch (frame->area_code)
+    if (ExternalComm_ExecuteControlCommand(frame->area_code) == false)
     {
-        case 0x01U:
-            /* A 泵启动前要求模拟串口已经上报可识别设备码，泵类型由该设备码决定。 */
-            if (pumpMessageA.online_flag == false)
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_DEVICE_FAIL);
-                return;
-            }
-            /* 上位机单独启动 A 泵时，只置位“独立运行请求”，不改变手柄冷却跟随请求。 */
-            ExternalComm_SetUart5PumpManualRun(1U);
-            ExternalComm_RefreshExternalControlRunDisplay(); /* A 泵已经进入外控输出请求，小电脑切到 40 黄色。 */
-            break;
-        case 0x02U:
-            /* 上位机单独停止 A 泵时，只清除“独立运行请求”；如果公共 A/B 跟随规则仍选中 A 泵，冷却跟随会继续保持。 */
-            ExternalComm_SetUart5PumpManualRun(0U);
-            ExternalComm_RefreshExternalControlRunDisplay(); /* A 泵外控请求清除后，按其它输出请求决定回 39 或保持 40。 */
-            break;
-        case 0x03U:
-            /* B 泵启动前要求模拟串口已经上报可识别设备码，泵类型由该设备码决定。 */
-            if (pumpMessageB.online_flag == false)
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_DEVICE_FAIL);
-                return;
-            }
-            if (pumpMessageB.speed_work == 0U)
-            {
-                pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 泵 0 速启动时按灌注/注水/抽吸类型补默认速度。 */
-            }
-            s_external_pump_b_manual_run_request = 1U; /* B 泵没有复用 UART5 A 泵锁存，这里单独记录外控 B 泵正在请求输出。 */
-            /* 置位 B 泵运行标志。 */
-            pumpMessageB.run_flag = true;
-            /* 外部普通启动不进入排空计时模式。 */
-            pumpMessageB.timingDrainage_flag = false;
-            /* 上位机启动 B 泵后同步屏幕数值和按钮黄/黑状态。 */
-            Pubinterface_RefreshPumpBDisplay();
-            ExternalComm_RefreshExternalControlRunDisplay(); /* B 泵启动属于外控输出中，小电脑切到 40 黄色。 */
-            break;
-        case 0x04U:
-            s_external_pump_b_manual_run_request = 0U; /* B 泵停止时清除图标用的外控输出锁存，避免图标继续高亮。 */
-            /* 清除 B 泵运行标志。 */
-            pumpMessageB.run_flag = false;
-            /* 同时清除 B 泵排空计时。 */
-            pumpMessageB.timingDrainage_flag = false;
-            /* 上位机停止 B 泵后立即刷新屏幕按钮状态，避免仍显示运行。 */
-            Pubinterface_RefreshPumpBDisplay();
-            ExternalComm_RefreshExternalControlRunDisplay(); /* B 泵外控请求清除后，按手柄或 A 泵是否仍在输出决定 39/40。 */
-            break;
-        case 0x05U:
-            /* 当前手柄启动必须有选中通道且该通道已经识别在线，避免无手柄时误启动电机和联动注水泵。 */
-            if (ExternalComm_SelectedHandleOnline() == 0U)
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_NO_CHANNEL);
-                return;
-            }
-            if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_NOT_SUPPORT);
-                return; /* 公共接头基座在线但 EPC 刀具头未识别时，外控真正启动电机才报警并拒绝运行。 */
-            }
-            Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 上位机再次下发手柄启动命令属于新的控制源触发，允许重新尝试压力闭环启动。 */
-            /* 恢复实际速度为已设置速度。 */
-            WorkMessage.speed_work = WorkMessage.speed_set_work;
-            /* 置位运行标志，驱动任务会发送启动帧。 */
-            WorkMessage.runflag_work = true;
-            /* 置位外部控制启动标志，UI/状态层可区分外部启动来源。 */
-            ControlSignalMessage.HMI_control_flag = true;
-            /* 当前手柄启动成功后，按调试开关同步启动公共 A/B 规则选中的注水冷却泵。 */
-            ExternalComm_SetUart5InjectPumpFollow(1U);
-            ExternalComm_RefreshExternalControlRunDisplay(); /* 手柄已由外控启动，小电脑切到 40 黄色。 */
-            break;
-        case 0x06U:
-            /* 停止当前手柄运行。 */
-            WorkMessage.runflag_work = false;
-            /* 停止时清零实际输出速度。 */
-            WorkMessage.speed_work = 0U;
-            /* 清除外部控制启动标志。 */
-            ControlSignalMessage.HMI_control_flag = false;
-            /* 当前手柄停止时，同步停止由手柄带动的 A/B 注水冷却泵。 */
-            ExternalComm_SetUart5InjectPumpFollow(0U);
-            ExternalComm_ClearHandleNotConnectedAlarmForRecovery(); /* 上位机停止当前手柄时确认掉线故障，允许报警弹窗关闭。 */
-            ExternalComm_RefreshExternalControlRunDisplay(); /* 手柄外控停止后，按泵输出请求决定回 39 或保持 40。 */
-            break;
-        case 0x07U:
-            /* 开口定位左动作必须有当前通道。 */
-            if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_NO_CHANNEL);
-                return;
-            }
-            /* 开口定位必须依赖当前选中通道，避免未选通道时误按 B 通道下发。 */
-            ToolPosMay(WorkMessage.channel_work, true, 1U);
-            break;
-        case 0x08U:
-            /* 开口定位右动作必须有当前通道。 */
-            if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
-            {
-                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                         frame->area_code,
-                                         EXTERNAL_COMM_REASON_NO_CHANNEL);
-                return;
-            }
-            /* 开口定位必须依赖当前选中通道，避免未选通道时误按 B 通道下发。 */
-            ToolPosMay(WorkMessage.channel_work, false, 1U);
-            break;
-        case 0xFFU:
-            /* 急停统一清除手柄和泵运行状态。 */
-            ExternalComm_StopAllWork();
-            break;
-        default:
-            /* 未定义控制码返回控制失败。 */
-            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                     frame->area_code,
-                                     EXTERNAL_COMM_REASON_BAD_AREA);
-            return;
+        return; /* 具体动作已发送对应失败应答，统一入口不重复回包。 */
     }
 
-    /* 应答载荷回显控制 AreaCode。 */
-    info[0] = frame->area_code;
-    /* 返回控制成功。 */
-    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info));
+    info[0] = frame->area_code; /* 成功载荷回显原控制编号。 */
+    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info)); /* 保持原控制成功应答格式。 */
 }
 
 static void ExternalComm_ReadBusinessPage(const ExternalCommFrame_t *frame)
@@ -1993,7 +2025,7 @@ static uint8_t ExternalComm_HeartbeatResolveOnline(uint8_t work_online, const Ch
  * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
  * 返回参数：手柄型号枚举，0 表示未知。
  */
-static uint8_t ExternalComm_HeartbeatResolveHandleModel(const ChannelMemoryMessagr_t *memory,
+static uint8_t ExternalComm_HeartbeatResolveHandleModel(const ChannelMemoryMessage_t *memory,
                                                         const ChannelrecognizeMessage_t *recognize)
 {
     /* 通道记忆已经装载时优先使用 MemoryMsg，保持运行逻辑和上报一致。 */
@@ -2017,7 +2049,7 @@ static uint8_t ExternalComm_HeartbeatResolveHandleModel(const ChannelMemoryMessa
  * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
  * 返回参数：原始主类型字节，0 表示未知。
  */
-static uint8_t ExternalComm_HeartbeatResolveRawMajor(const ChannelMemoryMessagr_t *memory,
+static uint8_t ExternalComm_HeartbeatResolveRawMajor(const ChannelMemoryMessage_t *memory,
                                                      const ChannelrecognizeMessage_t *recognize)
 {
     /* MemoryMsg 已经保存原始类型时优先使用它。 */
@@ -2041,7 +2073,7 @@ static uint8_t ExternalComm_HeartbeatResolveRawMajor(const ChannelMemoryMessagr_
  * 输入参数：memory 为通道记忆，recognize 为扫描识别缓存。
  * 返回参数：原始子类型字节，0 表示未知。
  */
-static uint8_t ExternalComm_HeartbeatResolveRawMinor(const ChannelMemoryMessagr_t *memory,
+static uint8_t ExternalComm_HeartbeatResolveRawMinor(const ChannelMemoryMessage_t *memory,
                                                      const ChannelrecognizeMessage_t *recognize)
 {
     /* MemoryMsg 已经保存原始类型时优先使用它。 */
@@ -2094,7 +2126,7 @@ static uint8_t ExternalComm_HeartbeatToolDirection(uint16_t dir)
  * 输入参数：memory 指向 A/B 通道记忆。
  * 返回参数：当前方向对应的速度值，无法判断时返回 0。
  */
-static uint16_t ExternalComm_HeartbeatToolDefaultSpeed(const ChannelMemoryMessagr_t *memory)
+static uint16_t ExternalComm_HeartbeatToolDefaultSpeed(const ChannelMemoryMessage_t *memory)
 {
     /* 通道记忆为空时不能读取速度，返回 0 表示无有效默认速度。 */
     if (memory == NULL)
@@ -2165,7 +2197,7 @@ static uint16_t ExternalComm_HeartbeatRecognizeDefaultSpeed(const Channelrecogni
  * 返回参数：true 表示可以上报刀具块，false 表示跳过。
  */
 static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
-                                                const ChannelMemoryMessagr_t *memory,
+                                                const ChannelMemoryMessage_t *memory,
                                                 const ChannelrecognizeMessage_t *recognize)
 {
     bool is_rfid_source; /* true 表示该通道刀具信息来自 RFID，不能按普通 EEPROM 完整规格强过滤。 */
@@ -2206,7 +2238,7 @@ static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
  */
 static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
                                                   uint8_t channel,
-                                                  const ChannelMemoryMessagr_t *memory,
+                                                  const ChannelMemoryMessage_t *memory,
                                                   const ChannelrecognizeMessage_t *recognize,
                                                   RfidToolResult_t *rfid_result)
 {
@@ -2314,7 +2346,7 @@ static void ExternalComm_HeartbeatAppendRfidResultBlock(uint8_t *info_area,
 static void ExternalComm_HeartbeatAppendOneToolBlock(uint8_t *info_area,
                                                      uint16_t *info_len,
                                                      uint8_t channel,
-                                                     const ChannelMemoryMessagr_t *memory,
+                                                     const ChannelMemoryMessage_t *memory,
                                                      const ChannelrecognizeMessage_t *recognize)
 {
     uint8_t handle_model; /* 保存本块使用的基座型号，用于生成刀具来源字段。 */

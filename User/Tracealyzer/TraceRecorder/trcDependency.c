@@ -37,7 +37,6 @@ traceResult xTraceDependencyRegister(const char* szName, TraceUnsignedBaseType_t
 		break;
 	default:
 		return TRC_FAIL;
-		break;
 	}
 	
 	return xTraceObjectRegisterInternal(PSF_EVENT_DEPENDENCY_REGISTER, (void*)0, szName, 1u, auxStates, TRC_ENTRY_OPTION_DEPENDENCY, &xObjectHandle);
