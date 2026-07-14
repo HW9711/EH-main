@@ -31,9 +31,9 @@
 #define CS1237_CRC_OFFSET              17U
 #define CS1237_CRC_LENGTH              15U
 /* CS1237 下位机设备码映射业务泵类型；未列出的编码先作为备用码处理，不参与泵类型识别。 */
-#define CS1237_DEVICE_CODE_INJECT_WATER 0x00U  /* 0x00 表示注水泵，PUMPA/PUMPB 按注水方向和流量公式输出。 */
-#define CS1237_DEVICE_CODE_POUR_WATER   0x08U  /* 0x08 表示灌注泵，PUMPA/PUMPB 按灌注方向和流量公式输出。 */
-#define CS1237_DEVICE_CODE_DRAW_WATER   0x09U  /* 0x09 表示抽水泵，PUMPA/PUMPB 按抽水方向和流量公式输出。 */
+#define CS1237_DEVICE_CODE_INJECT_WATER 0x0BU  /* 单磁铁触发 PA2 后上报 1011，主控识别为注水泵。 */
+#define CS1237_DEVICE_CODE_POUR_WATER   0x0DU  /* 单磁铁触发 PA3 后上报 1101，主控识别为灌注泵。 */
+#define CS1237_DEVICE_CODE_DRAW_WATER   0x0EU  /* 单磁铁触发 PA4 后上报 1110，主控识别为抽水泵。 */
 #define CS1237_PUMP_LOSS_SUSPECT_MS     1500U  /* 超过 1.5 秒无有效帧先进入疑似丢失，避免单次软串口错帧立刻清在线状态。 */
 #define CS1237_PUMP_LOSS_CONFIRM_MS     3000U  /* 疑似丢失持续到 3 秒仍无有效帧才确认离线，兼顾拔泵响应和偶发错帧容错。 */
 
@@ -787,11 +787,11 @@ static uint16_t Cs1237_MapDeviceCodeToPumpType(uint8_t device_code)
     switch (device_code)
     {
         case CS1237_DEVICE_CODE_INJECT_WATER:
-            return INJECTWATER; /* 0x00 明确识别为注水泵，允许手柄冷却联动。 */
+            return INJECTWATER; /* 0x0B 明确识别为注水泵，允许手柄冷却联动。 */
         case CS1237_DEVICE_CODE_POUR_WATER:
-            return POURWATER; /* 0x08 明确识别为灌注泵，不参与手柄冷却联动。 */
+            return POURWATER; /* 0x0D 明确识别为灌注泵，不参与手柄冷却联动。 */
         case CS1237_DEVICE_CODE_DRAW_WATER:
-            return DRAWWATER; /* 0x09 明确识别为抽水泵，不参与手柄冷却联动。 */
+            return DRAWWATER; /* 0x0E 明确识别为抽水泵，不参与手柄冷却联动。 */
         default:
             return 0U; /* 其它设备码为备用码，当前不强行映射为任何已知泵类型。 */
     }

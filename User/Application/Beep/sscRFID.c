@@ -14,6 +14,24 @@
 #include <string.h>
 
 #define RFID_FRAME_HEAD                 0xBBU /* RFID 模块帧头，所有回包都从该字节开始。 */
+#define RFID_REGION_CHINA_920           0x01U /* 中国 920.125~924.875MHz 频段。 */
+#define RFID_REGION_US                  0x02U /* 美国 902.25~927.75MHz 频段。 */
+#define RFID_REGION_EUROPE              0x03U /* 欧洲 865.1~867.9MHz 频段。 */
+#define RFID_REGION_CHINA_840           0x04U /* 中国 840.125~844.875MHz 频段。 */
+#define RFID_REGION_KOREA               0x06U /* 韩国 917.1~923.3MHz 频段。 */
+
+/* 修改下面这一项即可切换 RFID 地区频段；当前产品配置由该宏唯一决定。 */
+#define RFID_REGION_SELECT              RFID_REGION_US
+
+#if ((RFID_REGION_SELECT != RFID_REGION_CHINA_920) && \
+     (RFID_REGION_SELECT != RFID_REGION_US) && \
+     (RFID_REGION_SELECT != RFID_REGION_EUROPE) && \
+     (RFID_REGION_SELECT != RFID_REGION_CHINA_840) && \
+     (RFID_REGION_SELECT != RFID_REGION_KOREA))
+#error "RFID_REGION_SELECT is invalid"
+#endif
+
+#define RFID_REGION_COMMAND_CHECKSUM    (0x08U + RFID_REGION_SELECT) /* 区域命令校验和随地区编号变化，避免切换地区后继续发送旧校验值。 */
 #define RFID_FRAME_TAIL                 0x7EU /* RFID 模块帧尾，帧尾前一字节是累加和校验。 */
 #define RFID_RESP_SECOND_EPC            0x02U /* EPC 读取回包第二字节，协议指定为 BB 02 22。 */
 #define RFID_RESP_CMD_EPC               0x22U /* EPC 读取回包命令码。 */
@@ -52,7 +70,7 @@ typedef struct
 static uint8_t NO_MASK3_WRITE_EPC[7] = {0XBB, 0X00, 0X22, 0X00, 0X00, 0X22, 0X7E}; /* 无掩码读取 EPC 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
 static unsigned char  pa_gain10[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X03, 0Xe8, 0Xa3, 0X7E};//发射功率
-static unsigned char region_set_CHAIN[]={0XBB ,0x00 ,0x07 ,0x00 ,0x01 ,0x01 ,0x09 ,0x7E};//中国1-920.125-924.875M
+static uint8_t region_set_command[] = {0xBBU, 0x00U, 0x07U, 0x00U, 0x01U, RFID_REGION_SELECT, RFID_REGION_COMMAND_CHECKSUM, 0x7EU}; /* 根据上方地区配置生成唯一一条有效区域命令，避免未选地区数组产生告警。 */
 
 static kernel_task_t AUTOMODEGETDATATaskHandle;     /* RFID 轮询任务句柄，任务实际按请求工作。 */
 static kernel_task_t CUTTERSCANTaskHandle;          /* 预留旧句柄，不启动，避免破坏工程外部引用假设。 */
@@ -566,7 +584,7 @@ static void Rfid_InitModuleOnChannel(uint8_t channel)
     Rfid_SendPacketForChannel(channel, pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 按通道发送发射功率配置，保证 A/B 模块功率一致。 */
     Delay_ms(50); /* 等待 RFID 模块处理功率命令，避免连续命令粘连。 */
 
-    Rfid_SendPacketForChannel(channel, region_set_CHAIN, (uint16_t)sizeof(region_set_CHAIN)); /* 按通道发送区域配置，保持原工程默认频段。 */
+    Rfid_SendPacketForChannel(channel, region_set_command, (uint16_t)sizeof(region_set_command)); /* 按通道发送当前选定地区的频段配置，A/B 两个 RFID 模块保持一致。 */
     Delay_ms(50); /* 等待 RFID 模块处理区域命令，避免下一条跳频命令被吞掉。 */
 
     Rfid_SendPacketForChannel(channel, hop_ch, (uint16_t)sizeof(hop_ch)); /* 按通道发送跳频配置，保持原射频初始化行为。 */

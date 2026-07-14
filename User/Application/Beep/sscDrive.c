@@ -23,6 +23,7 @@
 #define MOTOR_DRIVE_SPEED_UP_SHIFT 16U /* WorkMessage.tool_reduction_ratio 高 16 位表示增速比。 */
 #define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
 #define MOTOR_DRIVE_DISPLAY_SPEED_INVALID 0xFFFFFFFFUL /* 速度显示缓存的无效值，用于强制下一次运行刷新屏幕速度。 */
+#define MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM 100U /* 脚踏实时速度只按 100rpm 整数档刷新屏幕，实际电机速度仍保留完整精度。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -165,6 +166,16 @@ static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed)
     return motor_speed;                                       /* 返回本次启动帧希望电机达到的实际 rpm，组帧前还要按协议 /10。 */
 }
 
+/*
+ * 函数功能：把脚踏实时速度向下量化为 100rpm 整数倍，仅用于屏幕显示和刷新判重。
+ * 输入参数：actual_speed 为脚踏任务计算出的完整精度实际目标速度，单位为 rpm。
+ * 返回参数：不大于实际目标速度的 100rpm 整数倍；输入小于 100rpm 时返回 0。
+ */
+static uint32_t MotorDrive_QuantizeFootDisplaySpeed(uint32_t actual_speed)
+{
+    return (actual_speed / MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM) * MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM; /* 只截掉百位以下数值，不回写 WorkMessage，也不影响电机驱动帧。 */
+}
+
 /// 开口定位
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)//通道，方向，角度
 {
@@ -207,7 +218,7 @@ void MOTORRUN(void)
     if(WorkMessage.drivetype_work==JTWORK)
     {
         motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
-        display_speed_value=WorkMessage.speed_work; /* 脚踏运行时屏幕速度显示实际比例速度，而不是手柄允许的最大速度。 */
+        display_speed_value=MotorDrive_QuantizeFootDisplaySpeed(WorkMessage.speed_work); /* 屏幕只显示 100rpm 整数倍；电机仍使用上方未量化的完整速度。 */
     }
     ssc_speed_value=MotorDrive_ApplyToolReductionRatio(motor_source_speed); /* 本次控制源速度统一按 EEPROM/RFID 倍率换算成电机实际 rpm。 */
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
