@@ -1022,8 +1022,8 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
 
             if(pumpMessageA.type==INJECTWATER)//事实上不准备给外部控制提供改轻排按钮
             {
-                 /* A 泵是注水泵时按当前手柄 Page4 默认流量启动；旧代码误写 B 泵会导致脚踏踩下后目标泵不转。 */
-                 Foot_StartPumpAInjection(Pubinterface_GetCurrentDefaultInjectionFlow(), false, false);
+                 /* A 泵轻踩阶段沿用屏幕当前设定流量，快速踩入电机段时不再短暂写入 Page4 默认流量。 */
+                 Foot_StartPumpAInjection(pumpMessageA.speed_work, false, false);
             }
             else if(pumpMessageB.type==INJECTWATER)
             {

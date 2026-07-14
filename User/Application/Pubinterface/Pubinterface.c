@@ -1041,6 +1041,27 @@ uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message)
 }
 
 /*
+ * 函数功能：只刷新指定泵的启停/排空按钮，不重画流量数值和进度条。
+ * 输入参数：button_area_id 为泵按钮区域，pump_message 为当前泵状态。
+ * 返回参数：无。
+ */
+static void SendPumpButton(uint8_t button_area_id, const pumpMessage_t *pump_message)
+{
+	uint8_t display_value[10] = {0U}; /* UIDP 队列固定复制 10 字节，未使用的按钮参数必须保持为 0。 */
+	bool pump_available = (pump_message->type != 0U); /* 设备码尚未识别时按钮保持禁用，不能显示成可操作状态。 */
+	bool button_active = pump_message->run_flag; /* 抽吸泵和灌注泵仍使用普通运行标志控制按钮高亮。 */
+
+	if (pump_message->type == INJECTWATER)
+	{
+		button_active = (pump_message->timingDrainage_flag || pump_message->pedalDrainage_flag); /* 注水泵按钮只表示排空，手柄冷却联动必须显示白色。 */
+	}
+
+	display_value[0] = (uint8_t)pump_message->type; /* Value[0] 携带泵类型，屏幕据此选择启动按钮或排空按钮资源。 */
+	display_value[1] = button_active ? 1U : 0U; /* Value[1] 只表示按钮是否高亮，不携带泵流量。 */
+	SendUIDSMessage(button_area_id, pump_available, display_value); /* 单独投递按钮消息，切换运行来源时不会误刷旧流量进度。 */
+}
+
+/*
  * 函数功能：把泵运行状态同步到屏幕泵区域和泵启停按钮。
  * 输入参数：pump_area_id 为泵数值区域，button_area_id 为启停按钮区域，pump_message 为当前泵状态。
  * 返回参数：无。
@@ -1049,24 +1070,13 @@ static void SendPumpDisplay(uint8_t pump_area_id, uint8_t button_area_id, const 
 {
 	uint8_t display_value[10] = {0U}; /* UIDP 队列固定拷贝 10 字节，泵刷新也使用同一缓冲格式。 */
 	bool pump_available = (pump_message->type != 0U); /* 未识别到泵类型时暗掉区域，防止屏幕显示可控但泵任务没有有效设备。 */
-	bool button_active = pump_message->run_flag; /* 抽吸和灌注泵继续按普通运行状态显示启停按钮。 */
 	uint16_t display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 运行态显示闭环后的实际输出速度，停止态继续显示设定速度。 */
-
-	if (pump_message->type == INJECTWATER)
-	{
-		button_active = (pump_message->timingDrainage_flag || pump_message->pedalDrainage_flag); /* 注水泵按钮只表示排空；手柄冷却联动运行时必须保持白色。 */
-	}
 
 	display_value[0] = (uint8_t)pump_message->type; /* Value[0] 传业务泵类型，UIPUMPADP/UIPUMPBDP 用它选择注水、灌注或抽吸图标。 */
 	display_value[1] = (uint8_t)(display_speed >> 8); /* Value[1] 传显示速度高字节，闭环限速时会跟随实际输出变化。 */
 	display_value[2] = (uint8_t)(display_speed & 0xFFU); /* Value[2] 传显示速度低字节，和 UIDP 现有解析顺序一致。 */
 	SendUIDSMessage(pump_area_id, pump_available, display_value); /* 屏幕泵加减或启停后立刻刷新数值和档位。 */
-
-	display_value[0] = (uint8_t)pump_message->type; /* 按钮刷新同样携带泵类型，按钮图标按泵类型显示不同资源。 */
-	display_value[1] = button_active ? 1U : 0U; /* Value[1] 表示按钮业务是否激活，不能再把注水泵普通联动误画成排空。 */
-	display_value[2] = 0U; /* 按钮消息不使用速度低字节，清零避免复用上一次数值消息残留。 */
-	/* 注水泵排空固定使用 70 档，不能再按“速度小于 100”提前返回，否则泵已启动但排空按钮收不到黄色运行图消息。 */
-	SendUIDSMessage(button_area_id, pump_available, display_value); /* 同步按钮黄/黑状态，补齐副工程屏幕交互反馈。 */
+	SendPumpButton(button_area_id, pump_message); /* 完整刷新时继续同步按钮；切换来源时可单独调用按钮刷新。 */
 }
 
 /*
@@ -1565,7 +1575,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		s_handle_injection_pump_follow_mask |= HANDLE_INJECTION_FOLLOW_PUMP_A; /* 记录 A 泵由手柄冷却跟随启动，停止时才允许本函数释放。 */
 		if (drainage_was_active)
 		{
-			Pubinterface_RefreshPumpADisplay(); /* 即使切换前后速度都是70，也要立即把 A 排空按钮从黄色恢复为白色。 */
+			SendPumpButton(UI_PUMPABUTTON_ID, &pumpMessageA); /* 只把 A 排空按钮恢复为白色，不能用切换前的实际速度重画进度条。 */
 		}
 	}
 	else if ((s_handle_injection_pump_follow_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U)
@@ -1588,7 +1598,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		s_handle_injection_pump_follow_mask |= HANDLE_INJECTION_FOLLOW_PUMP_B; /* 记录 B 泵由手柄冷却跟随启动，停止时才允许本函数释放。 */
 		if (drainage_was_active)
 		{
-			Pubinterface_RefreshPumpBDisplay(); /* B 泵速度未变化时也要主动取消黄色排空按钮。 */
+			SendPumpButton(UI_PUMPBBUTTON_ID, &pumpMessageB); /* B 通道同样只刷新按钮，避免旧 speed_output 瞬间显示为满格。 */
 		}
 	}
 	else if ((s_handle_injection_pump_follow_mask & HANDLE_INJECTION_FOLLOW_PUMP_B) != 0U)
