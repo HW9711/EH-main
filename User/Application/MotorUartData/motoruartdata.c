@@ -87,7 +87,11 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
  */
 static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 {
-	if(WorkMessage.alarm_value ==WORK_ALARM_HANDLE_NOT_CONNECTED)return;
+	/* 运行手柄掉线属于当前首要故障，驱动报警不能覆盖该报警，否则用户将失去掉线确认入口。 */
+	if (WorkMessage.alarm_value == WORK_ALARM_HANDLE_NOT_CONNECTED) /* 运行手柄掉线报警必须保留用户确认入口，驱动故障不能覆盖。 */
+	{
+		return;
+	}
 	uint8_t alarm_value = MotorUart_MapDriverErrorToAlarm(driver_error); /* 把参考驱动 Err 编码转换为主控统一报警码。 */
 
 	if (alarm_value == 0U)
@@ -95,7 +99,7 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 		return; /* 防御：无故障不应调用设置报警，直接返回避免误清其他模块状态。 */
 	}
 
-	if ((s_motor_uart_last_driver_error == driver_error) &&
+	if ((s_motor_uart_last_driver_error == driver_error) && /* 同一故障已由本模块持有且屏幕仍显示时，不重复上报。 */
 	    (s_motor_uart_alarm_owned == alarm_value) &&
 	    (WorkMessage.alarm_flag == true) &&
 	    (WorkMessage.alarm_value == alarm_value))
@@ -116,7 +120,7 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
  */
 static void MotorUart_ClearDriverAlarmIfOwned(void)
 {
-	if ((s_motor_uart_alarm_owned != 0U) &&
+	if ((s_motor_uart_alarm_owned != 0U) && /* 只清除本模块持有且当前仍显示的驱动报警，不能误清其它报警。 */
 	    (WorkMessage.alarm_flag == true) &&
 	    (WorkMessage.alarm_value == s_motor_uart_alarm_owned))
 	{
@@ -135,14 +139,19 @@ static void MotorUart_ClearDriverAlarmIfOwned(void)
 	s_motor_uart_alarm_start_tick = 0U;   /* 本次保持周期结束或报警归属已转移，清掉旧 tick 防止下次沿用。 */
 }
 
+/*
+ * 函数功能：驱动故障恢复边沿撤销所有电机控制源的运行请求，防止旧请求自动恢复。
+ * 输入参数：无，函数直接清理 WorkMessage 和 ControlSignalMessage。
+ * 返回参数：无。
+ */
 static void MotorUart_StopAllWork(void)
 {
-	WorkMessage.runflag_work = false;
+	WorkMessage.runflag_work = false; /* 撤销电机运行命令，驱动任务下一周期继续保持停机。 */
 
-	ControlSignalMessage.handle_control_flag = false;
-	ControlSignalMessage.HMI_control_flag = false;
-	ControlSignalMessage.jtL_control_flag = false;
-	ControlSignalMessage.jtR_control_flag = false;
+	ControlSignalMessage.handle_control_flag = false; /* 清除手柄按键运行来源，避免故障恢复后再次置位。 */
+	ControlSignalMessage.HMI_control_flag = false; /* 清除外控运行来源，要求上位机重新下发启动。 */
+	ControlSignalMessage.jtL_control_flag = false; /* 清除左脚踏运行来源，要求用户松开后重新踩下。 */
+	ControlSignalMessage.jtR_control_flag = false; /* 清除右脚踏运行来源，保持双脚踏停机状态一致。 */
 	
 }
 
@@ -150,15 +159,21 @@ static void MotorUart_StopAllWork(void)
 //接收串口数据任务，收到的数据放入缓冲区
 // 无刷
 //============================================================================
+/*
+ * 函数功能：解析 UART1 驱动板回包，更新实际转速、电流和驱动故障状态。
+ * 输入参数：无，函数直接读取 UART1 DMA 接收缓冲区。
+ * 返回参数：无；合法回包会更新 WorkMessage，并在故障时撤销电机和泵运行请求。
+ */
 void BrushlessMotorUartData_ReceiveData(void)
 {
-	static uint8_t clean_huic=0;
+	static uint8_t clean_huic=0; /* 记录上一周期是否出现驱动故障，用于故障恢复边沿再执行一次安全全停。 */
   uint8_t rlen = 0, i = 0;
   uint8_t dat[UART1_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
   uint16_t CRC_Check_Vaule=0;
 	
   //读取串口数据
   rlen = Uart1_DMARecvDataPeek(dat);
+	/* 少于一帧所需字节时保留 DMA 数据等待后续接收，不能进入 CRC 和字段解析。 */
   if (rlen < 11)   //不够一个数据包大小
 	  return;
 
@@ -168,34 +183,40 @@ void BrushlessMotorUartData_ReceiveData(void)
 	  if (dat[i] == 0xAA)  
 	  {
 		  CRC_Check_Vaule = Common_Crc16(&dat[i],10);//ssc
+			/* CRC 通过后才允许修改运行状态，避免串口噪声被误当成驱动故障或速度反馈。 */
 			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
 			{
 				Common_CopyData(&dat[i], dat1, 12);    //截取10个数据
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是 App.FB.Prot.AllCur * 100，单位 0.01A，只上传给上位机显示。 */
+					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */
 					if (dat1[7] == MOTOR_UART_DRIVER_ERR_NONE)
 					{
+						/* 只在“上一帧故障、本帧恢复”的边沿再次全停，防止旧运行请求随故障解除自动恢复输出。 */
 						if(clean_huic==1){
 							clean_huic=0;
-						MotorUart_StopAllWork();
+							MotorUart_StopAllWork();
 						}
+						/* 仅清理由驱动故障创建的报警，不能覆盖手柄掉线等更高层报警。 */
 						MotorUart_ClearDriverAlarmIfOwned();
 						
 					}
 					else
 					{
-						
+						/* 记录故障存在，供故障恢复帧执行一次安全全停。 */
 						clean_huic=1;
+						/* 把驱动私有故障码转换为主工程报警，保持蜂鸣、屏幕和上位机一致。 */
 						MotorUart_SetDriverAlarm(dat1[7]);
-						Pump_SetSpeed_A(0);//泵停止运行
+						Pump_SetSpeed_A(0);//立即下发 A 泵零速，先切断当前泵硬件输出
 						//Pump_SetSpeed_B(0);//泵停止运行
-						pumpMessageA.run_flag = false;
+						pumpMessageA.run_flag = false; /* 撤销 A 泵运行请求，防止泵任务下一周期重新拉起。 */
 						//pumpMessageA.speed_work = 0U;
-						pumpMessageB.run_flag = false;
+						pumpMessageB.run_flag = false; /* 同步撤销 B 泵请求，使驱动故障进入全泵停机状态。 */
 						//pumpMessageB.speed_work = 0U;
 						// MotorUart_StopAllWork();
 					}	
-				switch (dat1[1])
+					/* byte1 是驱动当前方向回显；现阶段仅保留协议分支，不据此改写主控方向状态。 */
+					switch (dat1[1])
 				{
 					case 0x01 :  //正向
 					{

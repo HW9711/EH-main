@@ -65,7 +65,7 @@ static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号�
  * 输入参数：无，报警码固定使用 WORK_ALARM_FOOT_SELECTED。
  * 返回参数：无。
  */
-static void HandleRunKey_RaiseFootSelectedTimedAlarm(void)
+static void HandleRunKey_ShowFootAlarm(void)
 {
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只读取 Value[0]，其余补零避免沿用上一条报警参数。 */
 
@@ -88,7 +88,7 @@ static void HandleRunKey_RaiseFootSelectedTimedAlarm(void)
  * 输入参数：无，直接读取弹窗归属和 HAL 毫秒 tick。
  * 返回参数：无。
  */
-static void HandleRunKey_ServiceFootSelectedTimedAlarm(void)
+static void HandleRunKey_ServiceFootAlarm(void)
 {
 	if (s_handle_foot_selected_timed_alarm_active == 0U)
 	{
@@ -245,6 +245,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
  */
 static bool HandleRunKey_SetMotorRun(bool enable)
 {
+	/* enable 为 true 时执行完整启动门禁；停止请求无需再次检查刀具和控制权。 */
 	if (enable)
 	{
 		if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
@@ -310,6 +311,7 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 	uint8_t hand_model = HandleRunKey_GetChannelModel(channel); /* 每次处理都读取通道型号，A/B 切换或重新识别后策略立即跟随当前手柄。 */
 	bool momentary_model = HandleRunKey_IsMomentaryModel(hand_model); /* LGZI 使用按住运行模式，其它型号保持原翻转启停模式。 */
 
+	/* 当前通道已经由实体键启动时，本周期只处理强制停机、松开或再次按下，不重复走启动流程。 */
 	if (s_handle_run_key_owner_channel == channel)
 	{
 		if ((WorkMessage.alarm_flag == true) ||
@@ -346,7 +348,7 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 	{
 		if ((press_event == true) && (WorkMessage.drivetype_work == JTWORK))
 		{
-			HandleRunKey_RaiseFootSelectedTimedAlarm(); /* 当前选中脚控时误按手柄键，只提示 82 号报警，不启动手柄。 */
+			HandleRunKey_ShowFootAlarm(); /* 当前选中脚控时误按手柄键，只提示 82 号报警，不启动手柄。 */
 		}
 		return; /* 手控未被选中时实体手柄键不允许启动，避免脚控或触控选中时被手柄按键绕过。 */
 	}
@@ -396,7 +398,7 @@ static void HandleKey_ScanRunKeys(void)
 void HANDLEKEYTaskFunc(uint32_t event)
 {
 	(void)event; /* 当前任务只按固定 30ms 周期运行，不使用调度事件值。 */
-	HandleRunKey_ServiceFootSelectedTimedAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
+	HandleRunKey_ServiceFootAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
 	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 	{
 		return; /* 其它来源正在控制时不扫描启动键，但仍先完成本模块提示生命周期维护。 */

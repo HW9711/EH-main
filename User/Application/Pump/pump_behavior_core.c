@@ -111,7 +111,7 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
  * 输入参数：binding 为本通道固定配置；runtime 为本通道独立跨周期状态；request_active 表示本周期是否请求运行或排空。
  * 返回参数：无。
  */
-static void PumpBehavior_ClearPressureHoldOnNewRequest(const PumpBehaviorBinding_t *binding,
+static void PumpBehavior_ClearHoldOnStart(const PumpBehaviorBinding_t *binding,
                                                        PumpBehaviorRuntime_t *runtime,
                                                        uint8_t request_active)
 {
@@ -335,7 +335,7 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     PumpBehavior_ReceiveSpeed(binding, message_queue); /* 每周期最多取一条速度消息，等待时间保持 0。 */
 
     request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 锁存本周期请求状态。 */
-    PumpBehavior_ClearPressureHoldOnNewRequest(binding, runtime, request_active); /* 只在新启动沿清除压力锁止。 */
+    PumpBehavior_ClearHoldOnStart(binding, runtime, request_active); /* 只在新启动沿清除压力锁止。 */
     drainage_active = binding->message->timingDrainage_flag ? 1U : 0U; /* 压力处理前锁存排空状态。 */
     if (binding->message->run_flag || binding->message->timingDrainage_flag)
     {

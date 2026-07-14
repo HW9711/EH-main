@@ -22,19 +22,19 @@
  */
 void UI_Start_Fun(void)
 {
-  uint8_t TimeCnt = 0;
-  uint16_t DelayTime = 2000;
+  uint8_t TimeCnt = 0; /* 每 20 次 2ms 循环喂狗一次，启动等待期间保持看门狗在线。 */
+  uint16_t DelayTime = 2000; /* 2000 次乘 2ms 形成约 4 秒启动页停留时间。 */
 
   while (DelayTime--)
   {
     Delay_ms(2);
 
 	  if(++TimeCnt < 20)
-	    continue ;
+	    continue ; /* 未到约 40ms 喂狗间隔时继续等待，避免每 2ms 都访问看门狗。 */
 
 	  TimeCnt = 0;
 
-	  Iwdg_Reset();
+	  Iwdg_Reset(); /* 启动页尚未退出也持续喂狗，防止 4 秒等待被误判为主程序卡死。 */
 	  /* EX8 启动页不再保留旧 LOGO 连击入口；这里只保留启动页等待和喂狗节奏，标定页由新屏专用入口维护。 */
   }
 }

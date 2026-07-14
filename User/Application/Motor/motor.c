@@ -31,10 +31,16 @@
 // 输    出: 无
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：校验有刷电机停止参数并保留旧接口组帧，不再占用已改作外控的 UART2。
+ * 输入参数：MotorNum 为电机号，Mode 为方向模式，Freq 为往复频率。
+ * 返回参数：无；参数非法时不生成后续控制字段。
+ */
 void BrushedMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq)
 {
 	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xBB, 0xAA, 0};
 
+	/* 参数超过驱动协议范围时直接退出，避免无效电机号、模式或频率进入旧组帧数据。 */
 	if ((MotorNum > 5) || (Mode > 6) || (Freq > 100))
 		return ;
 
@@ -60,10 +66,16 @@ void BrushedMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq)
 // 输    出: 无
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：校验有刷电机运行参数并保留旧接口组帧，不再占用已改作外控的 UART2。
+ * 输入参数：MotorNum 为电机号，Mode 为方向模式，Freq 为往复频率，Speed/Current 为目标转速和电流。
+ * 返回参数：无；参数非法时不生成后续控制字段。
+ */
 void BrushedMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint16_t Speed, uint16_t Current)
 {
 	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xBB, 0xAA, 0};
 
+	/* 参数超过驱动协议范围时直接退出，避免错误控制字段进入保留的有刷电机帧。 */
 	if ((MotorNum > 5) || (Mode > 6) || (Freq > 100))
 		return ;
 
@@ -114,6 +126,11 @@ void BrushedMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint16_t Spe
 
 //AA 01 00 01 00 00 02 00 00  BB AA
 
+/*
+ * 函数功能：向 UART1 驱动板连续发送无霍尔/有霍尔、正转/反转四组停止帧，确保未知当前模式也能停机。
+ * 输入参数：MotorNum、Mode、Freq、Mode1 为历史接口参数；当前停止序列使用固定广播帧覆盖全部模式。
+ * 返回参数：无。
+ */
 void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t Mode1)  
 {
 	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0xbb, 0xaa};
@@ -132,15 +149,20 @@ void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t M
 //	dat[9] =  (MotorCRC & 0x00FF);
 //	dat[10] = ((MotorCRC & 0xFF00) >> 8);
 	
+	/* 先发送正转、无霍尔停止帧，覆盖当前驱动若处于无霍尔正转的情况。 */
 	Uart1_SendPacket(dat, 11);
 	dat[6]=0x02;
+	/* 两帧之间保留 5ms，给驱动板完整接收和处理上一帧的时间。 */
 	Delay_ms(5);
+	/* 再发送正转、有霍尔停止帧，不能依赖主控保存的闭环类型。 */
 	Uart1_SendPacket(dat, 11);
 	Delay_ms(5);
 	dat[1] = 0x02;
+		/* 切到反转模式并发送有霍尔停止帧，覆盖驱动当前处于反转的情况。 */
 		Uart1_SendPacket(dat, 11);
 		Delay_ms(5);
 			dat[6]=0x01;
+				/* 最后发送反转、无霍尔停止帧，使四种运行组合都收到明确停止命令。 */
 				Uart1_SendPacket(dat, 11);
 	
 }
@@ -156,11 +178,17 @@ void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t M
 // 输    出: 无
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：按私有协议生成无刷电机运行帧并通过 UART1 下发。
+ * 输入参数：MotorNum 为电机号，Mode 为方向，Freq 为往复频率，Mode1 为闭环类型，Speed/Current 为目标值。
+ * 返回参数：无；参数超出协议范围时不发送控制帧。
+ */
 void BrushlessMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t Mode1, uint16_t Speed, uint16_t Current)
 {
 
 	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0};
 	uint16_t MotorCRC;
+	/* 驱动协议不接受超范围电机号、模式和频率，拒绝发送可避免驱动进入未定义状态。 */
 	if ((MotorNum > 5) || (Mode > 6) || (Freq > 100))
 		return ;
 

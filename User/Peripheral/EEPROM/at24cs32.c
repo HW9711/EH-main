@@ -25,7 +25,7 @@ static AT24CS32_DebugInfo s_at24cs32_last_debug = {0U};
  * 调用前先写入“发起前状态”，调用后再补齐“返回状态与错误码”。
  * 这样更容易判断问题出在访问发起前，还是出在访问过程中。
  */
-static void AT24CS32_UpdateDebugInfo(I2C_HandleTypeDef *hi2c,
+static void At24_UpdateDebug(I2C_HandleTypeDef *hi2c,
                                      uint8_t op_type,
                                      uint16_t dev_addr,
                                      uint16_t mem_addr,
@@ -42,7 +42,7 @@ static void AT24CS32_UpdateDebugInfo(I2C_HandleTypeDef *hi2c,
 }
 
 /* 检查 I2C 句柄是否有效 */
-static uint8_t AT24CS32_IsI2cReady(I2C_HandleTypeDef *hi2c)
+static uint8_t At24_IsReady(I2C_HandleTypeDef *hi2c)
 {
     return (hi2c != NULL) ? 1U : 0U;
 }
@@ -51,7 +51,7 @@ static uint8_t AT24CS32_IsI2cReady(I2C_HandleTypeDef *hi2c)
  * 判断当前 I2C 句柄是否就是手柄认证所使用的 I2C2。
  * 当前现场问题主要集中在 I2C2，因此恢复逻辑会优先对 I2C2 做定向处理。
  */
-static uint8_t AT24CS32_IsI2C2Handle(I2C_HandleTypeDef *hi2c)
+static uint8_t At24_IsI2c2(I2C_HandleTypeDef *hi2c)
 {
     return (hi2c == &hi2c2) ? 1U : 0U;
 }
@@ -61,9 +61,10 @@ static uint8_t AT24CS32_IsI2C2Handle(I2C_HandleTypeDef *hi2c)
  * 这样可以把“器件未应答 / 总线未空闲”和“正式读写失败”区分开。
  * 现场分析时可以借助 HSDBG 报文更快判断问题发生在访问前还是访问中。
  */
-static HAL_StatusTypeDef AT24CS32_WaitDeviceReady(I2C_HandleTypeDef *hi2c, uint16_t dev_addr)
+static HAL_StatusTypeDef At24_WaitReady(I2C_HandleTypeDef *hi2c, uint16_t dev_addr)
 {
-    if (AT24CS32_IsI2cReady(hi2c) == 0U) {
+    /* I2C 句柄为空时不能访问 HAL 状态机，直接返回错误给上层恢复链。 */
+    if (At24_IsReady(hi2c) == 0U) {
         return HAL_ERROR;
     }
 
@@ -78,20 +79,23 @@ static HAL_StatusTypeDef AT24CS32_WaitDeviceReady(I2C_HandleTypeDef *hi2c, uint1
  * 这里重点关注 HAL_BUSY、HAL_TIMEOUT 以及 HAL_I2C_ERROR_TIMEOUT。
  * 因为这些情况都与现场看到的 BUSY Flag 超时高度一致。
  */
-static uint8_t AT24CS32_ShouldRecoverI2c(I2C_HandleTypeDef *hi2c, HAL_StatusTypeDef hal_status)
+static uint8_t At24_NeedsRecovery(I2C_HandleTypeDef *hi2c, HAL_StatusTypeDef hal_status)
 {
     uint32_t hal_error;
 
-    if (AT24CS32_IsI2cReady(hi2c) == 0U) {
+    /* 无有效 I2C 句柄时不存在可恢复的硬件状态，禁止读取 HAL 错误码。 */
+    if (At24_IsReady(hi2c) == 0U) {
         return 0U;
     }
 
     hal_error = HAL_I2C_GetError(hi2c);
 
+    /* HAL 明确报告总线忙或超时时允许软恢复，给本次 EEPROM 访问一次重试机会。 */
     if ((hal_status == HAL_BUSY) || (hal_status == HAL_TIMEOUT)) {
         return 1U;
     }
 
+    /* HAL 状态未直接返回超时但错误位已置位时也需要恢复外设状态机。 */
     if ((hal_error & HAL_I2C_ERROR_TIMEOUT) != 0U) {
         return 1U;
     }
@@ -104,15 +108,18 @@ static uint8_t AT24CS32_ShouldRecoverI2c(I2C_HandleTypeDef *hi2c, HAL_StatusType
  * 当前优先采用 HAL DeInit + Init 的方式，把外设状态机从 BUSY/TIMEOUT 状态中拉回来。
  * 这样改动面较小，也更适合先验证是不是“外设状态卡死”导致的首包读取失败。
  */
-static void AT24CS32_RecoverI2cBus(I2C_HandleTypeDef *hi2c)
+static void At24_RecoverBus(I2C_HandleTypeDef *hi2c)
 {
-    if (AT24CS32_IsI2cReady(hi2c) == 0U) {
+    /* 句柄为空时没有可恢复的总线，静默返回以保持其它 I2C 通道不变。 */
+    if (At24_IsReady(hi2c) == 0U) {
         return;
     }
 
-    if (AT24CS32_IsI2C2Handle(hi2c) != 0U) {
+    /* I2C2 使用项目固定初始化入口恢复 A 通道引脚、时钟和速度配置。 */
+    if (At24_IsI2c2(hi2c) != 0U) {
         HAL_I2C_DeInit(&hi2c2);
         MX_I2C2_Init();
+    /* I2C3 使用独立初始化入口恢复 B 通道，避免误套 I2C2 引脚配置。 */
     } else if (hi2c == &hi2c3) {
         HAL_I2C_DeInit(&hi2c3);
         MX_I2C3_Init();
@@ -125,13 +132,13 @@ static void AT24CS32_RecoverI2cBus(I2C_HandleTypeDef *hi2c)
 }
 
 /* 计算页起始字节地址 */
-static uint16_t AT24CS32_PageToAddr(uint16_t page_index)
+static uint16_t At24_PageAddr(uint16_t page_index)
 {
     return (uint16_t)(page_index * AT24CS32_PAGE_SIZE);
 }
 
 /* 封装 16 位字地址读接口 */
-static uint8_t AT24CS32_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
+static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
 {
     HAL_StatusTypeDef hal_status;
 
@@ -154,14 +161,17 @@ static uint8_t AT24CS32_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint
      * 这样如果器件尚未 ready，或者总线在这里就已经 Busy，
      * 可以先尝试做一次恢复，避免把真正的读操作浪费掉。
      */
-    hal_status = AT24CS32_WaitDeviceReady(hi2c, dev_addr);
+    hal_status = At24_WaitReady(hi2c, dev_addr);
+    /* 设备未就绪时先判断是否属于可恢复故障，不能直接进入正式读取。 */
     if (hal_status != HAL_OK) {
-        if (AT24CS32_ShouldRecoverI2c(hi2c, hal_status) != 0U) {
-            AT24CS32_RecoverI2cBus(hi2c);
-            hal_status = AT24CS32_WaitDeviceReady(hi2c, dev_addr);
+        /* BUSY/TIMEOUT 类故障才复位总线，普通器件未应答保持原失败状态。 */
+        if (At24_NeedsRecovery(hi2c, hal_status) != 0U) {
+            At24_RecoverBus(hi2c);
+            hal_status = At24_WaitReady(hi2c, dev_addr);
         }
 
-        AT24CS32_UpdateDebugInfo(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
+        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
+        /* 恢复后仍未就绪时结束本次读，避免把无效缓存当成 EEPROM 数据。 */
         if (hal_status != HAL_OK) {
             return 0U;
         }
@@ -180,10 +190,12 @@ static uint8_t AT24CS32_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint
                                   len,
                                   AT24CS32_I2C_TIMEOUT_MS);
 
-    if ((hal_status != HAL_OK) && (AT24CS32_ShouldRecoverI2c(hi2c, hal_status) != 0U)) {
-        AT24CS32_RecoverI2cBus(hi2c);
+    /* 正式读取发生可恢复故障时只做一次软恢复和重试，避免任务被无限阻塞。 */
+    if ((hal_status != HAL_OK) && (At24_NeedsRecovery(hi2c, hal_status) != 0U)) {
+        At24_RecoverBus(hi2c);
 
-        if (AT24CS32_WaitDeviceReady(hi2c, dev_addr) == HAL_OK) {
+        /* 恢复后器件重新应答才执行第二次读取，否则保留 BUSY 失败状态。 */
+        if (At24_WaitReady(hi2c, dev_addr) == HAL_OK) {
             hal_status = HAL_I2C_Mem_Read(hi2c,
                                           dev_addr,
                                           mem_addr,
@@ -197,8 +209,9 @@ static uint8_t AT24CS32_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint
     }
 
     /* 无论最终成功还是失败，都把本次访问的真实结果完整回填到调试结构体里 */
-    AT24CS32_UpdateDebugInfo(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
+    At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
 
+    /* HAL 最终返回成功时向上层报告有效数据，其它状态统一报告失败。 */
     if (hal_status == HAL_OK) {
         return 1U;
     }
@@ -206,7 +219,7 @@ static uint8_t AT24CS32_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint
 }
 
 /* 封装 16 位字地址写接口 */
-static uint8_t AT24CS32_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
+static uint8_t At24_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
 {
     HAL_StatusTypeDef hal_status;
 
@@ -227,14 +240,17 @@ static uint8_t AT24CS32_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uin
      * 先确认器件可应答，再做真正的写入。
      * 对 EEPROM 来说，这一步也能避免“上一轮写周期尚未结束时又立即写入”带来的误判。
      */
-    hal_status = AT24CS32_WaitDeviceReady(hi2c, dev_addr);
+    hal_status = At24_WaitReady(hi2c, dev_addr);
+    /* 器件未结束上一轮写周期时不能直接写入，先进入一次受限恢复流程。 */
     if (hal_status != HAL_OK) {
-        if (AT24CS32_ShouldRecoverI2c(hi2c, hal_status) != 0U) {
-            AT24CS32_RecoverI2cBus(hi2c);
-            hal_status = AT24CS32_WaitDeviceReady(hi2c, dev_addr);
+        /* 只有 BUSY/TIMEOUT 类状态才重建 I2C，普通未应答不反复复位总线。 */
+        if (At24_NeedsRecovery(hi2c, hal_status) != 0U) {
+            At24_RecoverBus(hi2c);
+            hal_status = At24_WaitReady(hi2c, dev_addr);
         }
 
-        AT24CS32_UpdateDebugInfo(hi2c, AT24CS32_DEBUG_OP_WRITE, dev_addr, mem_addr, len, hal_status);
+        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_WRITE, dev_addr, mem_addr, len, hal_status);
+        /* 恢复后仍未就绪时停止写入，避免把页数据写成不完整记录。 */
         if (hal_status != HAL_OK) {
             return 0U;
         }
@@ -248,10 +264,12 @@ static uint8_t AT24CS32_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uin
                                    len,
                                    AT24CS32_I2C_TIMEOUT_MS);
 
-    if ((hal_status != HAL_OK) && (AT24CS32_ShouldRecoverI2c(hi2c, hal_status) != 0U)) {
-        AT24CS32_RecoverI2cBus(hi2c);
+    /* 正式写入遇到可恢复故障时只重试一次，避免 EEPROM 任务长时间占用 I2C。 */
+    if ((hal_status != HAL_OK) && (At24_NeedsRecovery(hi2c, hal_status) != 0U)) {
+        At24_RecoverBus(hi2c);
 
-        if (AT24CS32_WaitDeviceReady(hi2c, dev_addr) == HAL_OK) {
+        /* 总线恢复且器件应答后才允许再次写页，防止在 BUSY 状态重复下发。 */
+        if (At24_WaitReady(hi2c, dev_addr) == HAL_OK) {
             hal_status = HAL_I2C_Mem_Write(hi2c,
                                            dev_addr,
                                            mem_addr,
@@ -265,8 +283,9 @@ static uint8_t AT24CS32_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uin
     }
 
     /* 统一回填本次写操作的底层状态，便于现场直接对照 HSDBG 分析 */
-    AT24CS32_UpdateDebugInfo(hi2c, AT24CS32_DEBUG_OP_WRITE, dev_addr, mem_addr, len, hal_status);
+    At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_WRITE, dev_addr, mem_addr, len, hal_status);
 
+    /* HAL 最终成功才向上层确认写入已发出，其它状态统一报告失败。 */
     if (hal_status == HAL_OK) {
         return 1U;
     }
@@ -274,14 +293,16 @@ static uint8_t AT24CS32_MemWrite(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uin
 }
 
 /* 通用序列号读取实现，按指定 I2C 句柄执行 */
-static uint8_t AT24CS32_ReadSerialNumber_ByI2C(I2C_HandleTypeDef *hi2c, uint8_t *sn_buf)
+static uint8_t At24_ReadSn(I2C_HandleTypeDef *hi2c, uint8_t *sn_buf)
 {
-    if ((sn_buf == NULL) || (AT24CS32_IsI2cReady(hi2c) == 0U)) {
+    /* 序列号缓存或 I2C 句柄无效时拒绝读取，避免认证输入写入空地址。 */
+    if ((sn_buf == NULL) || (At24_IsReady(hi2c) == 0U)) {
         return 1U;
     }
 
     /* 序列号区固定地址为 0x0800，长度为 16 字节 */
-    if (AT24CS32_MemRead(hi2c,
+    /* 固定序列号区读取失败时返回独立错误码，便于认证层区分参数错误。 */
+    if (At24_MemRead(hi2c,
                          AT24CS32_SN_WRITE_ADDR,
                          0x0800U,
                          sn_buf,
@@ -293,13 +314,15 @@ static uint8_t AT24CS32_ReadSerialNumber_ByI2C(I2C_HandleTypeDef *hi2c, uint8_t 
 }
 
 /* 通用写实现，按指定 I2C 句柄执行 */
-static uint8_t AT24CS32_WriteBytes_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t addr, uint8_t *data, uint16_t len)
+static uint8_t At24_WriteBytes(I2C_HandleTypeDef *hi2c, uint16_t addr, uint8_t *data, uint16_t len)
 {
-    if ((AT24CS32_IsI2cReady(hi2c) == 0U) || (data == NULL) ||
+    /* 句柄、缓存、地址或长度非法时拒绝写入，防止 EEPROM 越界和空指针访问。 */
+    if ((At24_IsReady(hi2c) == 0U) || (data == NULL) ||
         (addr >= AT24CS32_TOTAL_SIZE) || (len == 0U)) {
         return 0U;
     }
 
+    /* 起始地址有效但末地址越界时同样拒绝，防止跨过 AT24CS32 末尾。 */
     if ((uint32_t)addr + len > AT24CS32_TOTAL_SIZE) {
         return 0U;
     }
@@ -311,7 +334,8 @@ static uint8_t AT24CS32_WriteBytes_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t addr,
         uint16_t write_len = (len > page_left) ? page_left : len;
 
         /* 执行一次分页写 */
-        if (AT24CS32_MemWrite(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, data, write_len) == 0U) {
+        /* 任一分页写失败都立即停止，避免后续页继续写入形成半份记录。 */
+        if (At24_MemWrite(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, data, write_len) == 0U) {
             return 0U;
         }
 
@@ -327,13 +351,15 @@ static uint8_t AT24CS32_WriteBytes_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t addr,
 }
 
 /* 通用读实现，按指定 I2C 句柄执行 */
-static uint8_t AT24CS32_ReadBytes_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t addr, uint8_t *data, uint16_t len)
+static uint8_t At24_ReadBytes(I2C_HandleTypeDef *hi2c, uint16_t addr, uint8_t *data, uint16_t len)
 {
-    if ((AT24CS32_IsI2cReady(hi2c) == 0U) || (data == NULL) ||
+    /* 句柄、缓存、地址或长度非法时拒绝读取，避免越界访问和无效输出。 */
+    if ((At24_IsReady(hi2c) == 0U) || (data == NULL) ||
         (addr >= AT24CS32_TOTAL_SIZE) || (len == 0U)) {
         return 0U;
     }
 
+    /* 读取末地址超过器件容量时拒绝操作，避免地址回卷读到错误数据。 */
     if ((uint32_t)addr + len > AT24CS32_TOTAL_SIZE) {
         return 0U;
     }
@@ -343,7 +369,8 @@ static uint8_t AT24CS32_ReadBytes_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t addr, 
         uint16_t read_len = (len > AT24CS32_READ_CHUNK_SIZE) ? AT24CS32_READ_CHUNK_SIZE : len;
 
         /* 执行一次分块读 */
-        if (AT24CS32_MemRead(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, data, read_len) == 0U) {
+        /* 任一分块读取失败都立即停止，避免上层使用前半段有效、后半段旧值的缓存。 */
+        if (At24_MemRead(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, data, read_len) == 0U) {
             return 0U;
         }
 
@@ -362,6 +389,7 @@ uint16_t AT24CS32_PageChecksum(const uint8_t *page_buf)
     uint16_t sum = 0U;
     uint8_t i;
 
+    /* 页缓存为空时无法计算校验和，返回 0 并保持内存不访问。 */
     if (page_buf == NULL) {
         return 0U;
     }
@@ -379,6 +407,7 @@ uint8_t AT24CS32_VerifyPageChecksum(const uint8_t *page_buf)
     uint16_t calc_sum;
     uint16_t stored_sum;
 
+    /* 页缓存为空时不能读取页尾校验值，直接判定校验失败。 */
     if (page_buf == NULL) {
         return 0U;
     }
@@ -391,20 +420,23 @@ uint8_t AT24CS32_VerifyPageChecksum(const uint8_t *page_buf)
 }
 
 /* 通用按页读取：读取整页后立即做页和校验 */
-static uint8_t AT24CS32_ReadPage_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t page_index, uint8_t *page_buf)
+static uint8_t At24_ReadPage(I2C_HandleTypeDef *hi2c, uint16_t page_index, uint8_t *page_buf)
 {
     uint16_t addr;
 
-    if ((AT24CS32_IsI2cReady(hi2c) == 0U) || (page_buf == NULL) ||
+    /* 句柄、页缓存或页号非法时拒绝整页读取，避免地址越界。 */
+    if ((At24_IsReady(hi2c) == 0U) || (page_buf == NULL) ||
         (page_index >= AT24CS32_PAGE_COUNT)) {
         return 0U;
     }
 
-    addr = AT24CS32_PageToAddr(page_index);
-    if (AT24CS32_MemRead(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, page_buf, AT24CS32_PAGE_SIZE) == 0U) {
+    addr = At24_PageAddr(page_index);
+    /* 整页读取失败时不再做校验，防止旧缓存被误认为本次有效数据。 */
+    if (At24_MemRead(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, page_buf, AT24CS32_PAGE_SIZE) == 0U) {
         return 0U;
     }
 
+    /* 页尾校验和不匹配说明 EEPROM 数据损坏，整页结果必须判失败。 */
     if (AT24CS32_VerifyPageChecksum(page_buf) == 0U) {
         return 0U;
     }
@@ -413,13 +445,14 @@ static uint8_t AT24CS32_ReadPage_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t page_in
 }
 
 /* 通用按页写入：写入前自动刷新页和校验 */
-static uint8_t AT24CS32_WritePage_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t page_index, const uint8_t *page_buf)
+static uint8_t At24_WritePage(I2C_HandleTypeDef *hi2c, uint16_t page_index, const uint8_t *page_buf)
 {
     uint16_t addr;
     uint16_t sum;
     uint8_t temp_page[AT24CS32_PAGE_SIZE];
 
-    if ((AT24CS32_IsI2cReady(hi2c) == 0U) || (page_buf == NULL) ||
+    /* 句柄、页缓存或页号非法时拒绝整页写入，避免覆盖错误 EEPROM 区域。 */
+    if ((At24_IsReady(hi2c) == 0U) || (page_buf == NULL) ||
         (page_index >= AT24CS32_PAGE_COUNT)) {
         return 0U;
     }
@@ -429,8 +462,9 @@ static uint8_t AT24CS32_WritePage_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t page_i
     temp_page[AT24CS32_PAGE_SIZE - 2U] = (uint8_t)(sum >> 8);
     temp_page[AT24CS32_PAGE_SIZE - 1U] = (uint8_t)(sum & 0xFFU);
 
-    addr = AT24CS32_PageToAddr(page_index);
-    if (AT24CS32_MemWrite(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, temp_page, AT24CS32_PAGE_SIZE) == 0U) {
+    addr = At24_PageAddr(page_index);
+    /* 带新页和的整页写入失败时向上层报告失败，不能假定 EEPROM 已落盘。 */
+    if (At24_MemWrite(hi2c, AT24CS32_EEPROM_WRITE_ADDR, addr, temp_page, AT24CS32_PAGE_SIZE) == 0U) {
         return 0U;
     }
 
@@ -441,61 +475,61 @@ static uint8_t AT24CS32_WritePage_ByI2C(I2C_HandleTypeDef *hi2c, uint16_t page_i
 /* I2C2 显式接口：读取序列号 */
 uint8_t AT24CS32_ReadSerialNumber_I2C2(uint8_t *sn_buf)
 {
-    return AT24CS32_ReadSerialNumber_ByI2C(&hi2c2, sn_buf);
+    return At24_ReadSn(&hi2c2, sn_buf);
 }
 
 /* I2C3 显式接口：读取序列号 */
 uint8_t AT24CS32_ReadSerialNumber_I2C3(uint8_t *sn_buf)
 {
-    return AT24CS32_ReadSerialNumber_ByI2C(&hi2c3, sn_buf);
+    return At24_ReadSn(&hi2c3, sn_buf);
 }
 
 /* I2C2 显式接口：写数据 */
 uint8_t AT24CS32_WriteBytes_I2C2(uint16_t addr, uint8_t *data, uint16_t len)
 {
-    return AT24CS32_WriteBytes_ByI2C(&hi2c2, addr, data, len);
+    return At24_WriteBytes(&hi2c2, addr, data, len);
 }
 
 /* I2C3 显式接口：写数据 */
 uint8_t AT24CS32_WriteBytes_I2C3(uint16_t addr, uint8_t *data, uint16_t len)
 {
-    return AT24CS32_WriteBytes_ByI2C(&hi2c3, addr, data, len);
+    return At24_WriteBytes(&hi2c3, addr, data, len);
 }
 
 /* I2C2 显式接口：读数据 */
 uint8_t AT24CS32_ReadBytes_I2C2(uint16_t addr, uint8_t *data, uint16_t len)
 {
-    return AT24CS32_ReadBytes_ByI2C(&hi2c2, addr, data, len);
+    return At24_ReadBytes(&hi2c2, addr, data, len);
 }
 
 /* I2C3 显式接口：读数据 */
 uint8_t AT24CS32_ReadBytes_I2C3(uint16_t addr, uint8_t *data, uint16_t len)
 {
-    return AT24CS32_ReadBytes_ByI2C(&hi2c3, addr, data, len);
+    return At24_ReadBytes(&hi2c3, addr, data, len);
 }
 
 /* I2C2 显式接口：按页读取 */
 uint8_t AT24CS32_ReadPage_I2C2(uint16_t page_index, uint8_t *page_buf)
 {
-    return AT24CS32_ReadPage_ByI2C(&hi2c2, page_index, page_buf);
+    return At24_ReadPage(&hi2c2, page_index, page_buf);
 }
 
 /* I2C3 显式接口：按页读取 */
 uint8_t AT24CS32_ReadPage_I2C3(uint16_t page_index, uint8_t *page_buf)
 {
-    return AT24CS32_ReadPage_ByI2C(&hi2c3, page_index, page_buf);
+    return At24_ReadPage(&hi2c3, page_index, page_buf);
 }
 
 /* I2C2 显式接口：按页写入 */
 uint8_t AT24CS32_WritePage_I2C2(uint16_t page_index, const uint8_t *page_buf)
 {
-    return AT24CS32_WritePage_ByI2C(&hi2c2, page_index, page_buf);
+    return At24_WritePage(&hi2c2, page_index, page_buf);
 }
 
 /* I2C3 显式接口：按页写入 */
 uint8_t AT24CS32_WritePage_I2C3(uint16_t page_index, const uint8_t *page_buf)
 {
-    return AT24CS32_WritePage_ByI2C(&hi2c3, page_index, page_buf);
+    return At24_WritePage(&hi2c3, page_index, page_buf);
 }
 
 /*
@@ -514,6 +548,7 @@ void AT24CS32_ClearLastDebugInfo(void)
  */
 void AT24CS32_GetLastDebugInfo(AT24CS32_DebugInfo *info)
 {
+    /* 调用方未提供输出结构时不复制调试状态，避免空指针写入。 */
     if (info == NULL) {
         return;
     }

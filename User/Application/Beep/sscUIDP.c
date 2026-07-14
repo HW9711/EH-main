@@ -89,38 +89,38 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 
 	if(pump_type==INJECTWATER)//注水
 	{
-		if(value==0U)gear_value=0U;
-		else if(value<=5U)gear_value=1U;
-		else if(value<=10U)gear_value=2U;
-		else if(value<=15U)gear_value=3U;
-		else if(value<=20U)gear_value=4U;
-		else if(value<=25U)gear_value=5U;
-		else if(value<=30U)gear_value=6U;
-		else if(value<=40U)gear_value=7U;
-		else if(value<=50U)gear_value=8U;
-		else if(value<=60U)gear_value=9U;
+		if(value==0U)gear_value=0U; /* 注水流量为 0 时显示停止档，不点亮进度。 */
+		else if(value<=5U)gear_value=1U; /* 1~5 档流量归入第 1 格，保持低流量可见。 */
+		else if(value<=10U)gear_value=2U; /* 6~10 档流量映射到第 2 格。 */
+		else if(value<=15U)gear_value=3U; /* 11~15 档流量映射到第 3 格。 */
+		else if(value<=20U)gear_value=4U; /* 16~20 档流量映射到第 4 格。 */
+		else if(value<=25U)gear_value=5U; /* 21~25 档流量映射到第 5 格。 */
+		else if(value<=30U)gear_value=6U; /* 26~30 档流量映射到第 6 格。 */
+		else if(value<=40U)gear_value=7U; /* 31~40 档流量映射到第 7 格。 */
+		else if(value<=50U)gear_value=8U; /* 41~50 档流量映射到第 8 格。 */
+		else if(value<=60U)gear_value=9U; /* 51~60 档流量映射到第 9 格。 */
 		else gear_value=10U;
 	}
 	else if(pump_type==DRAWWATER)//抽吸
 	{
-		if(value==8U)gear_value=7U;
-		else if(value==10U)gear_value=8U;
-		else if(value==12U)gear_value=9U;
-		else if(value>=15U)gear_value=10U;
+		if(value==8U)gear_value=7U; /* 抽吸泵 8 档对应屏幕第 7 格。 */
+		else if(value==10U)gear_value=8U; /* 抽吸泵 10 档对应屏幕第 8 格。 */
+		else if(value==12U)gear_value=9U; /* 抽吸泵 12 档对应屏幕第 9 格。 */
+		else if(value>=15U)gear_value=10U; /* 抽吸泵 15 档及以上统一显示满格，避免图片索引越界。 */
 		else gear_value=(uint8_t)value;
 	}
 	else if(pump_type==POURWATER)//灌注
 	{
-		if(value==0U)gear_value=0U;
-		else if(value<=30U)gear_value=1U;
-		else if(value<=60U)gear_value=2U;
-		else if(value<=90U)gear_value=3U;
-		else if(value<=120U)gear_value=4U;
-		else if(value<=150U)gear_value=5U;
-		else if(value<=180U)gear_value=6U;
-		else if(value<=210U)gear_value=7U;
-		else if(value<=240U)gear_value=8U;
-		else if(value<=270U)gear_value=9U;
+		if(value==0U)gear_value=0U; /* 灌注流量为 0 时显示停止档。 */
+		else if(value<=30U)gear_value=1U; /* 1~30ml 映射到第 1 格。 */
+		else if(value<=60U)gear_value=2U; /* 31~60ml 映射到第 2 格。 */
+		else if(value<=90U)gear_value=3U; /* 61~90ml 映射到第 3 格。 */
+		else if(value<=120U)gear_value=4U; /* 91~120ml 映射到第 4 格。 */
+		else if(value<=150U)gear_value=5U; /* 121~150ml 映射到第 5 格。 */
+		else if(value<=180U)gear_value=6U; /* 151~180ml 映射到第 6 格。 */
+		else if(value<=210U)gear_value=7U; /* 181~210ml 映射到第 7 格。 */
+		else if(value<=240U)gear_value=8U; /* 211~240ml 映射到第 8 格。 */
+		else if(value<=270U)gear_value=9U; /* 241~270ml 映射到第 9 格。 */
 		else gear_value=10U;
 	}
 
@@ -222,7 +222,7 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
  */
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 {
-	if(UIDPMsgQueue == NULL) return;
+	if(UIDPMsgQueue == NULL) return; /* 显示队列尚未创建时不能投递刷新消息，直接返回避免访问空句柄。 */
     UIDPMessage_t msg;
     msg.areaId = areaId;
 	msg.enable_flag = enable_flag;
@@ -234,7 +234,7 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 	{
 		memset(msg.Value, 0, sizeof(msg.Value));//开机初始化和清屏类消息不需要参数，统一补零避免空指针访问
 	}
-	if((s_uidp_last_valid != 0U) &&
+	if((s_uidp_last_valid != 0U) && /* 已有相同区域、状态和参数的成功消息时，无需重复占用屏幕队列。 */
 	   (s_uidp_last_msg.areaId == msg.areaId) &&
 	   (s_uidp_last_msg.enable_flag == msg.enable_flag) &&
 	   (memcmp(s_uidp_last_msg.Value, msg.Value, sizeof(msg.Value)) == 0))
@@ -389,14 +389,14 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 		//传入控制模式，是否需要重写代码
 		if(control_type==1)//脚踏
 		{
-           if(light_flag)
+		   if(light_flag) /* 脚控被选中时显示黄色高亮，否则保持白色可选状态。 */
 		   LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT,32U);
 		   else
 		   LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT,31U);
 		}
 		else if(control_type==2)//手控
 		{
-			if(light_flag)
+			if(light_flag) /* 手控被选中时显示黄色高亮，否则保持白色可选状态。 */
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,35U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,34U);
@@ -407,7 +407,7 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 		}
 		else if(control_type==4)///外部控制
 		{
-			if(light_flag)
+			if(light_flag) /* 外控已接管时显示在线高亮，否则显示普通在线图标。 */
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL,40U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL,39U);
@@ -424,19 +424,19 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);//触控按钮默认白色可选态，按下进入触控后才显示黄色
 			LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL);//外部通信未接入时隐藏小电脑图标，避免误显示为在线
 		}
-		else if(control_type == 1U)
+		else if(control_type == 1U) /* 只禁用脚控入口时，不改写其它控制方式图标。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT, 30U);
 		}
-		else if(control_type == 2U)
+		else if(control_type == 2U) /* 只禁用手控入口时，把手控按钮恢复为未选状态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE, 33U);
 		}
-		else if(control_type == 3U)
+		else if(control_type == 3U) /* 只禁用触控入口时，把触控按钮恢复为暗态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);
 		}
-		else if(control_type == 4U)
+		else if(control_type == 4U) /* 外控离线时隐藏图标，避免误显示上位机仍连接。 */
 		{
 			LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL);
 		}
@@ -455,25 +455,25 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 		switch(dir_type)
 		{
 			case 1://顺时针
-			if(light_flag == 1U)
+			if(light_flag == 1U) /* 1 表示正转已选中，显示黄色高亮资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,22U);
-			else if(light_flag == 2U)
+			else if(light_flag == 2U) /* 2 表示正转不可用，显示黑色禁用资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,20U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,21U);
 			break;
 			case 2://逆时针
-			if(light_flag == 1U)
+			if(light_flag == 1U) /* 1 表示反转已选中，显示黄色高亮资源。 */
 				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,25U);
-			else if(light_flag == 2U)
+			else if(light_flag == 2U) /* 2 表示反转不可用，显示黑色禁用资源。 */
 				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,24U);
 			break;
 			case 3://往复
-			if(light_flag == 1U)
+			if(light_flag == 1U) /* 1 表示往复已选中，显示黄色高亮资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,28U);
-			else if(light_flag == 2U)
+			else if(light_flag == 2U) /* 2 表示往复不可用，显示黑色禁用资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,27U);
@@ -482,7 +482,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 	}
 	else
 	{
-		if(dir_type == 0U)
+		if(dir_type == 0U) /* 方向类型为 0 表示整组不可用，三个方向同时回到黑色禁用态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD, 20U);
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 26U);
@@ -650,8 +650,10 @@ void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,ui
  */
 void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,uint8_t tool_result_pic)
 {
+	/* 只有识别区域启用时才显示自动或手动选择内容；禁用状态下对应触控位置也应保持不可操作。 */
 	if(enable_flag)
 	{
+		/* 自动识别模式隐藏手动磨头、刨刀按钮，避免画面无按钮时仍产生手动选择歧义。 */
 		if(auto_identify_flag)
 		{
 			//LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
@@ -662,6 +664,7 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 		}
 		else
 		{
+			/* 手动识别模式显示磨头、刨刀按钮，输入层此时才允许对应触控事件进入业务处理。 */
 			LCD_Show_Picture(UIDP_LCD_VP_TOOL_RESULT,63U);
 			LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,52U);//手动模式下 0x1407 显示“手动识别”
 			if(PAO_flag)
@@ -678,6 +681,7 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 	}
 	else
 	{
+		/* 整个识别区域禁用时清除所有图片，输入层必须同步把这些位置视为不可点击。 */
 		LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);//禁用识别区时必须隐藏 0x1407，避免拔掉一体式手柄后旧自动识别标志把按钮重新画出来。
 	
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
@@ -725,6 +729,7 @@ void UIDP_ForceNoHandleDisplay(void)
 void UIFREQDP(bool enable_flag,uint8_t freq_value,bool update_value)
 {
 	
+	/* 仅支持频率调节的方向才启用此区域，输入层应只在该状态下接受频率加减事件。 */
 	if(enable_flag)
 	{
        //显示频率值
@@ -738,6 +743,7 @@ void UIFREQDP(bool enable_flag,uint8_t freq_value,bool update_value)
 	}
 	else
 	{
+	   /* 黑色暗态表示当前方向不支持频率调节，对应触控位置必须静默且不得分发业务事件。 */
 	   //消失或者暗黑
 	   LCD_Show_Picture(UIDP_LCD_VP_FREQ_AREA,11U);//频率区暗态
 	   LCD_Disappear_Number(UIDP_LCD_SP_FREQ_VALUE);///隐藏数字

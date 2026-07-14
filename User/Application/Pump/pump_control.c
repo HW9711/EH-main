@@ -43,7 +43,7 @@ uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message)
  * 输入参数：pump_message 指向 A/B 泵运行状态，优先读取已配置 speed_Max，未配置时按泵类型回退。
  * 返回参数：当前泵类型允许的最大速度；未知类型返回 0。
  */
-static uint16_t Pubinterface_GetPumpSpeedMax(const pumpMessage_t *pump_message)
+static uint16_t Pump_GetSpeedMax(const pumpMessage_t *pump_message)
 {
 	if (pump_message == NULL)
 	{
@@ -73,7 +73,7 @@ static uint16_t Pubinterface_GetPumpSpeedMax(const pumpMessage_t *pump_message)
  * 输入参数：pump_message 指向 A/B 泵运行状态，读取 speed_Min 作为配置下限。
  * 返回参数：当前泵速度下限；空指针返回 0。
  */
-static uint16_t Pubinterface_GetPumpSpeedMin(const pumpMessage_t *pump_message)
+static uint16_t Pump_GetSpeedMin(const pumpMessage_t *pump_message)
 {
 	if (pump_message == NULL)
 	{
@@ -89,7 +89,7 @@ static uint16_t Pubinterface_GetPumpSpeedMin(const pumpMessage_t *pump_message)
  * 输入参数：key_value 为屏幕解析后的 A/B 泵加、减、启停逻辑键值。
  * 返回参数：true 表示本次屏幕泵键不允许继续修改泵状态；false 表示可继续进入 PUMPActive 原有业务分支。
  */
-static bool Pubinterface_ShouldRejectScreenPumpKey(uint8_t key_value)
+static bool Pump_ShouldRejectScreenKey(uint8_t key_value)
 {
 	switch (key_value)
 	{
@@ -173,7 +173,7 @@ static bool Pubinterface_ShouldRejectScreenPumpKey(uint8_t key_value)
  * 输入参数：key_value 为左侧或右侧实体脚踏短按键值。
  * 返回参数：无。
  */
-static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
+static void Pump_HandleGearKey(uint8_t key_value)
 {
 	static uint8_t PumpA_Gear = 0; /* 保存 A 泵实体脚踏档位，保持与原 PUMPActive 内静态变量相同的跨周期状态。 */
 	static uint8_t PumpB_Gear = 0; /* 保存 B 泵实体脚踏档位，左右泵继续各自独立循环。 */
@@ -182,19 +182,24 @@ static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
 	{
 	case JTkey_left_short:
 		PumpA_Gear++;
+		/* A 泵档位超过第五档后回到零档，使实体键保持 0~5 循环。 */
 		if (PumpA_Gear > 5)
 			PumpA_Gear = 0;
+		/* 未识别 A 泵时清除旧档位并退出，避免把残留类型对应的速度写入未知设备。 */
 		if (pumpMessageA.type == 0)
 		{
-			PumpA_Gear = 0; // 队列通知界面暗黑
+			PumpA_Gear = 0; // 清除旧档位，后续刷新仍由现有界面链处理。
 			return;
 		}
-		else if (pumpMessageA.type == DRAWWATER) // 抽水
+		/* A 路识别为抽吸泵时按每档 3 单位换算工作速度。 */
+		else if (pumpMessageA.type == DRAWWATER)
 		{
 			pumpMessageA.speed_work = 3 * PumpA_Gear; // 每一档位增加30ml水
 		}
-		else if (pumpMessageA.type == INJECTWATER) // 注水
+		/* A 路识别为注水泵时使用注水档位表，不能沿用抽吸泵倍率。 */
+		else if (pumpMessageA.type == INJECTWATER)
 		{
+			/* 屏幕定时排空期间禁止实体键改速，避免固定排空输出被档位覆盖。 */
 			if (pumpMessageA.timingDrainage_flag == true)
 				return;
 			switch (PumpA_Gear)
@@ -213,7 +218,8 @@ static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
 				break;
 			}
 		}
-		else if (pumpMessageA.type == POURWATER) // 灌注
+		/* A 路识别为灌注泵时使用 50 单位档位表，并保留第五档 300 的上限。 */
+		else if (pumpMessageA.type == POURWATER)
 		{
 
 			switch (PumpA_Gear)
@@ -235,18 +241,22 @@ static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
 		break;
 	case JTKey_right_short:
 		PumpB_Gear++;
+		/* B 泵档位超过第五档后回到零档，使右实体键同样保持 0~5 循环。 */
 		if (PumpB_Gear > 5)
 			PumpB_Gear = 0;
+		/* 未识别 B 泵时只清除旧档位，防止未知设备继承上一台泵的速度。 */
 		if (pumpMessageB.type == 0)
 		{
 			PumpB_Gear = 0;
 			// 队列通知界面暗黑
 		}
-		else if (pumpMessageB.type == DRAWWATER) // 抽水
+		/* B 路识别为抽吸泵时按每档 3 单位换算工作速度。 */
+		else if (pumpMessageB.type == DRAWWATER)
 		{
 			pumpMessageB.speed_work = 3 * PumpB_Gear; // 每一档位增加30ml水
 		}
-		else if (pumpMessageB.type == INJECTWATER) // 注水
+		/* B 路识别为注水泵时使用原注水档位表，保持右泵历史行为。 */
+		else if (pumpMessageB.type == INJECTWATER)
 		{
 			switch (PumpB_Gear)
 			{
@@ -264,7 +274,8 @@ static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
 				break;
 			}
 		}
-		else if (pumpMessageB.type == POURWATER) // 灌注
+		/* B 路识别为灌注泵时使用 50 单位档位表，并保留第五档 300 的上限。 */
+		else if (pumpMessageB.type == POURWATER)
 		{
 			switch (PumpB_Gear)
 			{
@@ -292,7 +303,7 @@ static void Pubinterface_HandlePumpGearKey(uint8_t key_value)
  * 输入参数：key_value 为泵启停键值，pump_owner 为该键对应的控制权来源。
  * 返回参数：无。
  */
-static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
+static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 {
 	bool is_timed_drainage = false; /* 仅屏幕排空按钮置位；实体长按和 HMI 普通启泵继续使用 speed_work。 */
 
@@ -301,6 +312,7 @@ static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
 	case JTKey_left_long:
 	case HMIkey_APUMP_control:
 	case SCREENKey_APUMP_control:
+		/* A 泵类型未识别时强制保持停止，并退出可能残留的本地控制权。 */
 		if (pumpMessageA.type == 0)
 		{
 			pumpMessageA.run_flag = false;
@@ -311,17 +323,20 @@ static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
 		}
 		else
 		{
+			/* A 泵当前停止时进入启动路径；已经运行时由对应 else 分支执行停止。 */
 			if (!pumpMessageA.run_flag)
 			{
 				/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
 				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 					return;
+				/* A 泵零速判断保留原控制结构；当前分支只有历史说明，不改写设定速度。 */
 				if (pumpMessageA.speed_work == 0U)
 				{
 					//pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 按泵类型补启动速度，避免灌注/抽吸泵只置 run_flag 但 UART 输出 0 速。 */
 				}
 				is_timed_drainage = (key_value == SCREENKey_APUMP_control); /* A 注水泵只有屏幕排空按钮使用固定速度和10秒计时。 */
 				pumpMessageA.run_flag = true;
+				/* 只有注水泵需要区分屏幕定时排空和脚踏轻排来源。 */
 				if (pumpMessageA.type == INJECTWATER)
 				{
 					pumpMessageA.pedalDrainage_flag = false; /* 新控制请求开始前关闭脚踏轻踩来源，避免按钮状态和控制来源叠加。 */
@@ -348,6 +363,7 @@ static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
 	case JTKey_right_long:
 	case SCREENKey_BPUMP_control:
 	case HMIkey_BPUMP_control:
+		/* B 泵类型未识别时强制保持停止，并退出可能残留的本地控制权。 */
 		if (pumpMessageB.type == 0)
 		{
 			pumpMessageB.run_flag = false;
@@ -358,17 +374,20 @@ static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
 		}
 		else
 		{
+			/* B 泵当前停止时进入启动路径；已经运行时由对应 else 分支执行停止。 */
 			if (!pumpMessageB.run_flag)
 			{
 				/* 只有 HMI 外控泵键会占用外控 owner；本地脚踏/屏幕泵键不占用手柄电机 owner。 */
 				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 					return;
+				/* B 泵设定为零时补入该类型启动速度，确保运行标志对应真实非零输出。 */
 				if (pumpMessageB.speed_work == 0U)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 泵按类型补启动速度，保证屏幕直接启动灌注泵时能实际输出。 */
 				}
 				is_timed_drainage = (key_value == SCREENKey_BPUMP_control); /* B 注水泵只有屏幕排空按钮使用固定速度和10秒计时。 */
 				pumpMessageB.run_flag = true;
+				/* 只有注水泵需要区分屏幕定时排空和脚踏轻排来源。 */
 				if (pumpMessageB.type == INJECTWATER)
 				{
 					pumpMessageB.pedalDrainage_flag = false; /* 新控制请求开始前关闭脚踏轻踩来源，避免来源叠加。 */
@@ -402,7 +421,7 @@ static void Pubinterface_HandlePumpRunKey(uint8_t key_value, uint8_t pump_owner)
  * 输入参数：key_value 为 A/B 泵加速或减速键值。
  * 返回参数：无。
  */
-static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
+static void Pump_HandleSpeedKey(uint8_t key_value)
 {
 	uint16_t pump_speed_max = 0U; /* 当前泵类型允许的速度上限，防止加速越界。 */
 	uint16_t pump_speed_min = 0U; /* 当前泵类型允许的速度下限，防止无符号减法下溢。 */
@@ -419,6 +438,7 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 			pumpMessageA.speed_step_value = 1;
 			break;
 		case INJECTWATER: // 注
+			/* A 泵处于屏幕定时排空时拒绝调速，确保固定排空速度不被覆盖。 */
 			if (pumpMessageA.timingDrainage_flag == true)
 				return;
 			pumpMessageA.speed_step_value = 5;
@@ -430,8 +450,9 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
 			return;
 		}
-		pump_speed_max = Pubinterface_GetPumpSpeedMax(&pumpMessageA); /* A 泵调速上限按类型兜底，解决 speed_Max 未初始化导致加速回 0 的问题。 */
-		pump_speed_min = Pubinterface_GetPumpSpeedMin(&pumpMessageA); /* A 泵调速下限来自配置，当前未配置时保持 0。 */
+		pump_speed_max = Pump_GetSpeedMax(&pumpMessageA); /* A 泵调速上限按类型兜底，解决 speed_Max 未初始化导致加速回 0 的问题。 */
+		pump_speed_min = Pump_GetSpeedMin(&pumpMessageA); /* A 泵调速下限来自配置，当前未配置时保持 0。 */
+		/* A 泵加速键进入上限保护路径，其余同组键按减速路径处理。 */
 		if (key_value == HMIkey_APUMP_Add || key_value == SCREENKey_APUMP_Add)
 		{
 			if (pumpMessageA.speed_work >= pump_speed_max)
@@ -462,6 +483,7 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 				pumpMessageA.speed_work -= pumpMessageA.speed_step_value; /* 正常范围内按当前泵类型步进降低速度。 */
 			}
 		}
+		/* A 泵运行时进入历史队列通知占位；当前空分支不改变任何泵状态。 */
 		if (pumpMessageA.run_flag == true)
 		{
 			// 队列通知A泵运行设置数据
@@ -479,6 +501,7 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 			pumpMessageB.speed_step_value = 1;
 			break;
 		case INJECTWATER: // 注
+			/* B 泵处于屏幕定时排空时拒绝调速，确保固定排空速度不被覆盖。 */
 			if (pumpMessageB.timingDrainage_flag == true)
 
 				return;
@@ -491,8 +514,9 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
 			return;
 		}
-		pump_speed_max = Pubinterface_GetPumpSpeedMax(&pumpMessageB); /* B 泵调速上限按类型兜底，解决 speed_Max 未初始化导致屏幕加速仍显示 0 的问题。 */
-		pump_speed_min = Pubinterface_GetPumpSpeedMin(&pumpMessageB); /* B 泵调速下限来自配置，当前未配置时保持 0。 */
+		pump_speed_max = Pump_GetSpeedMax(&pumpMessageB); /* B 泵调速上限按类型兜底，解决 speed_Max 未初始化导致屏幕加速仍显示 0 的问题。 */
+		pump_speed_min = Pump_GetSpeedMin(&pumpMessageB); /* B 泵调速下限来自配置，当前未配置时保持 0。 */
+		/* B 泵加速键进入上限保护路径，其余同组键按减速路径处理。 */
 		if (key_value == HMIkey_BPUMP_Add || key_value == SCREENKey_BPUMP_Add)
 		{
 			if (pumpMessageB.speed_work >= pump_speed_max)
@@ -524,6 +548,7 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
 			}
 		}
 
+		/* B 泵运行时进入历史队列通知占位；当前空分支不改变任何泵状态。 */
 		if (pumpMessageB.run_flag == true)
 		{
 			// 队列通知B泵运行设置数据
@@ -540,7 +565,7 @@ static void Pubinterface_HandlePumpSpeedKey(uint8_t key_value)
  * 输入参数：key_value 为轻排启停键值，pump_owner 为该键对应的控制权来源。
  * 返回参数：无。
  */
-static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_owner)
+static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 {
 	switch (key_value)
 	{
@@ -548,12 +573,15 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		/* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
 		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 			return;
-		if (pumpMessageA.type == INJECTWATER) // 注水
+		/* 左轻排优先选择 A 注水泵，保持左右脚踏与逻辑泵通道的首选对应关系。 */
+		if (pumpMessageA.type == INJECTWATER)
 		{
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
+			/* 当前没有工作通道时才允许本地轻排，避免与手柄联动用泵重叠。 */
+			if (!WorkMessage.channel_work)
 			{
 				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
+				/* 脚踏轻排接管 A 泵前结束屏幕定时排空，避免两种停止条件同时生效。 */
+				if (pumpMessageA.timingDrainage_flag == true)
 				{
 					pumpMessageA.timingDrainage_flag = false;
 				}
@@ -564,12 +592,15 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 				pumpMessageA.run_flag = true;
 			}
 		}
+		/* A 不是注水泵时回退选择 B 注水泵，保留左轻排的原选择顺序。 */
 		else if (pumpMessageB.type == INJECTWATER)
 		{
 
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
+			/* 当前没有工作通道时才允许回退启动 B 泵，避免覆盖手柄联动状态。 */
+			if (!WorkMessage.channel_work)
 			{
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
+				/* 脚踏轻排接管 B 泵前结束屏幕定时排空，避免计时器随后误停泵。 */
+				if (pumpMessageB.timingDrainage_flag == true)
 				{
 					pumpMessageB.timingDrainage_flag = false;
 				}
@@ -585,12 +616,14 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		Pubinterface_RefreshPumpBDisplay(); /* 轻排可能启动 A 或 B 注水泵，两个泵区都刷新以避免状态残留。 */
 		break;
 	case JTKey_Gently_left_stop:
-		if (pumpMessageA.type == INJECTWATER) // 注水
+		/* 左轻排停止时优先停止 A 注水泵，与左侧启动选择顺序保持一致。 */
+		if (pumpMessageA.type == INJECTWATER)
 		{
 			// 队列通知A泵停
 			pumpMessageA.run_flag = false;
 			;
 		}
+		/* A 不是注水泵时停止回退使用的 B 注水泵。 */
 		else if (pumpMessageB.type == INJECTWATER)
 		{
 			// 队列通知B泵停
@@ -605,12 +638,15 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		/* 本地脚踏轻排只控制泵，不占用手柄电机 owner；外控轻排仍需要外控授权。 */
 		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 			return;
-		if (pumpMessageB.type == INJECTWATER) // 注水
+		/* 右轻排优先选择 B 注水泵，保持右脚踏与逻辑 B 通道的首选对应关系。 */
+		if (pumpMessageB.type == INJECTWATER)
 		{
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
+			/* 当前没有工作通道时才允许本地轻排，避免与手柄联动用泵重叠。 */
+			if (!WorkMessage.channel_work)
 			{
 				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
+				/* 脚踏轻排接管 B 泵前结束屏幕定时排空，避免两种来源互相覆盖。 */
+				if (pumpMessageB.timingDrainage_flag == true)
 				{
 					pumpMessageB.timingDrainage_flag = false;
 				}
@@ -621,13 +657,16 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 				pumpMessageB.run_flag = true;
 			}
 		}
+		/* B 不是注水泵时回退选择 A 注水泵，保留右轻排的原选择顺序。 */
 		else if (pumpMessageA.type == INJECTWATER)
 		{
 			// 队列发送
-			if (!WorkMessage.channel_work) // 手柄在线，就可以运行A泵
+			/* 当前没有工作通道时才允许回退启动 A 泵，避免覆盖手柄联动状态。 */
+			if (!WorkMessage.channel_work)
 			{
 				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
+				/* 脚踏轻排接管 A 泵前结束屏幕定时排空，避免计时器随后误停泵。 */
+				if (pumpMessageA.timingDrainage_flag == true)
 				{
 					pumpMessageA.timingDrainage_flag = false;
 				}
@@ -643,12 +682,14 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		Pubinterface_RefreshPumpBDisplay(); /* 右轻排可能影响 A 或 B 注水泵，两个泵区一起刷新。 */
 		break;
 	case JTKey_Gently_rigth_stop:
-		if (pumpMessageB.type == INJECTWATER) // 注水
+		/* 右轻排停止时优先停止 B 注水泵，与右侧启动选择顺序保持一致。 */
+		if (pumpMessageB.type == INJECTWATER)
 		{
 			// 队列通知A泵停
 			pumpMessageB.run_flag = false;
 			;
 		}
+		/* B 不是注水泵时停止回退使用的 A 注水泵。 */
 		else if (pumpMessageA.type == INJECTWATER)
 		{
 			// 队列通知B泵停
@@ -664,12 +705,15 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 			return;
 
+		/* 当前工作通道为 A 时，HMI 轻排优先选择 A 注水泵。 */
 		if (WorkMessage.channel_work == 1)
 		{
+			/* A 本身是注水泵时直接使用 A，保持 HMI 当前通道优先。 */
 			if (pumpMessageA.type == INJECTWATER)
 			{
 				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
+				/* HMI 轻排接管 A 泵前结束屏幕定时排空，避免 10 秒计时误停。 */
+				if (pumpMessageA.timingDrainage_flag == true)
 				{
 					pumpMessageA.timingDrainage_flag = false;
 				}
@@ -679,10 +723,12 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 				}
 				pumpMessageA.run_flag = true;
 			}
+			/* A 不是注水泵时回退选择 B 注水泵，保证轻排仍有可用水泵。 */
 			else if (pumpMessageB.type == INJECTWATER)
 			{
 				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
+				/* HMI 轻排接管 B 泵前结束屏幕定时排空，避免 10 秒计时误停。 */
+				if (pumpMessageB.timingDrainage_flag == true)
 				{
 					pumpMessageB.timingDrainage_flag = false;
 				}
@@ -693,12 +739,15 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 				pumpMessageB.run_flag = true;
 			}
 		}
+		/* 当前工作通道为 B 时，HMI 轻排优先选择 B 注水泵。 */
 		else if (WorkMessage.channel_work == 2)
 		{
+			/* B 本身是注水泵时直接使用 B，保持 HMI 当前通道优先。 */
 			if (pumpMessageB.type == INJECTWATER)
 			{
 				// 队列发送启动B
-				if (pumpMessageB.timingDrainage_flag == true) // 如果正在排空
+				/* HMI 轻排接管 B 泵前结束屏幕定时排空，避免 10 秒计时误停。 */
+				if (pumpMessageB.timingDrainage_flag == true)
 				{
 					pumpMessageB.timingDrainage_flag = false;
 				}
@@ -708,10 +757,12 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 				}
 				pumpMessageB.run_flag = true;
 			}
+			/* B 不是注水泵时回退选择 A 注水泵，保证轻排仍有可用水泵。 */
 			else if (pumpMessageA.type == INJECTWATER)
 			{
 				// 队列发送启动A
-				if (pumpMessageA.timingDrainage_flag == true) // 如果正在排空
+				/* HMI 轻排接管 A 泵前结束屏幕定时排空，避免 10 秒计时误停。 */
+				if (pumpMessageA.timingDrainage_flag == true)
 				{
 					pumpMessageA.timingDrainage_flag = false;
 				}
@@ -727,26 +778,32 @@ static void Pubinterface_HandlePumpGentlyKey(uint8_t key_value, uint8_t pump_own
 		Pubinterface_RefreshPumpBDisplay(); /* HMI 轻排启动后刷新 B 泵显示，保持上位机和屏幕状态一致。 */
 		break;
 	case HMIkey_Gently_stop:
+		/* 当前工作通道为 A 时按启动时的 A 优先顺序停止注水泵。 */
 		if (WorkMessage.channel_work == 1)
 		{
+			/* A 为注水泵时停止 A，避免错误关闭另一通道。 */
 			if (pumpMessageA.type == INJECTWATER)
 			{
 				// 队列发送停止A
 				pumpMessageA.run_flag = false;
 			}
+			/* A 不是注水泵时停止启动阶段回退使用的 B 注水泵。 */
 			else if (pumpMessageB.type == INJECTWATER)
 			{
 				// 队列发送停止B
 				pumpMessageB.run_flag = false;
 			}
 		}
+		/* 当前工作通道为 B 时按启动时的 B 优先顺序停止注水泵。 */
 		else if (WorkMessage.channel_work == 2)
 		{
+			/* B 为注水泵时停止 B，避免错误关闭另一通道。 */
 			if (pumpMessageB.type == INJECTWATER)
 			{
 				// 队列发送停止B
 				pumpMessageB.run_flag = false;
 			}
+			/* B 不是注水泵时停止启动阶段回退使用的 A 注水泵。 */
 			else if (pumpMessageA.type == INJECTWATER)
 			{
 				// 队列停止B
@@ -772,7 +829,7 @@ void PUMPActive(uint8_t key_value)
 {
 	uint8_t pump_owner = ControlArbitration_GetOwnerByPumpKey(key_value); /* 在业务分派前解析控制来源，保持原入口调用时机。 */
 
-	if (Pubinterface_ShouldRejectScreenPumpKey(key_value))
+	if (Pump_ShouldRejectScreenKey(key_value))
 	{
 		return; /* 屏幕键未通过在线、报警或手柄占用门禁时，不进入任何泵动作处理。 */
 	}
@@ -781,7 +838,7 @@ void PUMPActive(uint8_t key_value)
 	{
 	case JTkey_left_short:
 	case JTKey_right_short:
-		Pubinterface_HandlePumpGearKey(key_value); /* 实体脚踏短按只循环对应通道档位。 */
+		Pump_HandleGearKey(key_value); /* 实体脚踏短按只循环对应通道档位。 */
 		break;
 
 	case JTKey_left_long:
@@ -790,7 +847,7 @@ void PUMPActive(uint8_t key_value)
 	case JTKey_right_long:
 	case SCREENKey_BPUMP_control:
 	case HMIkey_BPUMP_control:
-		Pubinterface_HandlePumpRunKey(key_value, pump_owner); /* 启停和排空集中处理，保留 A/B 历史差异。 */
+		Pump_HandleRunKey(key_value, pump_owner); /* 启停和排空集中处理，保留 A/B 历史差异。 */
 		break;
 
 	case HMIkey_APUMP_Add:
@@ -801,7 +858,7 @@ void PUMPActive(uint8_t key_value)
 	case SCREENKey_BPUMP_Add:
 	case HMIkey_BPUMP_Sub:
 	case SCREENKey_BPUMP_Sub:
-		Pubinterface_HandlePumpSpeedKey(key_value); /* 上位机和屏幕调速按对应通道统一进入限幅处理。 */
+		Pump_HandleSpeedKey(key_value); /* 上位机和屏幕调速按对应通道统一进入限幅处理。 */
 		break;
 
 	case JTKey_Gently_left_start:
@@ -810,7 +867,7 @@ void PUMPActive(uint8_t key_value)
 	case JTKey_Gently_rigth_stop:
 	case HMIkey_Gently_start:
 	case HMIkey_Gently_stop:
-		Pubinterface_HandlePumpGentlyKey(key_value, pump_owner); /* 轻排保持左右优先泵和 HMI 当前通道选择顺序。 */
+		Pump_HandleGentlyKey(key_value, pump_owner); /* 轻排保持左右优先泵和 HMI 当前通道选择顺序。 */
 		break;
 
 	default:

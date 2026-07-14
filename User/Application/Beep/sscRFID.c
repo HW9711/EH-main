@@ -207,7 +207,7 @@ static uint16_t Rfid_PeekChannelUartData(uint8_t channel, uint8_t *data)
  * 输入参数：channel 为请求读取的业务通道。
  * 返回参数：true 表示允许读取，false 表示当前状态禁止读取。
  */
-static bool Rfid_IsRequestAllowedForCurrentSelection(uint8_t channel)
+static bool Rfid_IsRequestAllowed(uint8_t channel)
 {
     bool requested_channel_online = false; /* 记录请求通道是否已经完成插入事件，用于区分后插入手柄上线前的 RFID 预读。 */
 
@@ -468,7 +468,7 @@ static void Rfid_ReceiveRequestMessage(void)
         return; /* 清刀具前排队的旧代次请求直接丢弃，避免旧读命令重新复活刀具信息。 */
     }
 
-    if (Rfid_IsRequestAllowedForCurrentSelection(msg.channel) == false)
+    if (Rfid_IsRequestAllowed(msg.channel) == false)
     {
         s_request_active = false; /* 当前运行状态或选中通道不允许读取时，取消本次出队请求。 */
         s_request_channel = CHANNEL_NONE; /* 清掉请求通道，避免后续 RFID 回包被误认为属于旧通道。 */
@@ -523,7 +523,7 @@ static void SplitType_AutoModeGetData_Task(void)
         return; /* 运行态禁止继续访问 RFID 模块。 */
     }
 
-    if (Rfid_IsRequestAllowedForCurrentSelection(s_request_channel) == false)
+    if (Rfid_IsRequestAllowed(s_request_channel) == false)
     {
         s_request_active = false; /* 通道选择变化后当前请求失效，停止识别以免非选中通道刷新刀具信息。 */
         Rfid_ClearChannelUartData(s_request_channel); /* 活动请求失效时先清原通道串口，避免晚到回包污染下一次请求。 */
@@ -631,10 +631,12 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
 
     if (RFIDMsgQueue == NULL)
     {
+        /* A 通道请求无法入队时立即发布 A 刀具离线，避免界面继续保留旧标签。 */
         if(channel == CHANNEL_A)
         {
             SendKeyRFIDMessageAdown();
         }
+        /* B 通道请求无法入队时只清 B 刀具状态，不能误影响 A 通道。 */
         else if(channel == CHANNEL_B)
         {
             SendKeyRFIDMessageBdown();
@@ -650,10 +652,12 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
      */
     if ((Rfid_ChannelToIndex(channel, &index) == false) || (Rfid_IsSourceValid(source) == false))
     {
+       /* 无效请求属于 A 通道时发布 A 离线事件，使扫描状态与失败结果一致。 */
        if(channel == CHANNEL_A)
         {
             SendKeyRFIDMessageAdown();
         }
+        /* 无效请求属于 B 通道时发布 B 离线事件，保持两路缓存独立。 */
         else if(channel == CHANNEL_B)
         {
             SendKeyRFIDMessageBdown();
@@ -666,7 +670,7 @@ bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mo
         return false; /* 电机运行中禁止新 RFID 请求入队，避免运行参数被新刀具信息覆盖。 */
     }
 
-    if (Rfid_IsRequestAllowedForCurrentSelection(channel) == false)
+    if (Rfid_IsRequestAllowed(channel) == false)
     {
         return false; /* 当前运行状态或双手柄选中状态不允许读取，避免非目标通道刷新 RFID 刀具参数。 */
     }
@@ -911,7 +915,7 @@ void RfidHandle(uint8_t *uartx_rf_buff, uint8_t interface, bool enable_rfid, uin
         return; /* 旧调用显式关闭 RFID 时不解析。 */
     }
 
-    if (Rfid_ParseReceivedFrame(uartx_rf_buff,
+    if (Rfid_ParseReceivedFrame(uartx_rf_buff, /* 旧入口只有解析出完整合法标签帧后才允许更新兼容结果。 */
                                 UART3_MAX_PACKET_SIZE,
                                 Rfid_LegacyTypeToSource(rfid_type),
                                 &result) == false)

@@ -139,6 +139,11 @@ uint32_t Common_FolatToHex(float fdata)
 // 输    出:
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：把泵流量设定值换算为泵驱动使用的转速控制值，并保留现有现场标定曲线。
+ * 输入参数：NumFluid 为屏幕或控制源设置的流量；is_Irrigate_FLAG 非 0 表示灌注泵，0 表示注水泵。
+ * 返回参数：换算后的驱动控制值，后续泵任务会据此生成串口输出。
+ */
 uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 {
 	float temp = 0;
@@ -147,35 +152,35 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 	//  temp1 = NumFluid / 0.37;
 	//  temp = temp1 + temp1 * 0.23;
 	temp=NumFluid;
-	if (temp == 0)
+	if (temp == 0) /* 流量为 0 时必须直接输出 0，避免停泵状态仍由标定公式产生非零转速。 */
 	temp1 = 0;
 	#ifdef WATER_UPTAKE
-	else
+	else /* 吸水泵配置使用固定比例换算，保持该硬件版本原有的流量标定关系。 */
 	{
 		temp1=temp*42;
 	}
 	#else
-	else
+	else /* 非吸水泵配置继续按泵类型选择灌注或注水标定曲线。 */
   {
-		if(is_Irrigate_FLAG)
+		if(is_Irrigate_FLAG) /* 灌注泵沿用线性标定系数 0.58，不能套用注水泵的分段补偿。 */
 		{
 				temp1=(uint32_t )(temp*0.58f);//灌注
 		}
-		else
+		else /* 注水泵按现场标定区间补偿，保证不同流量段的实际出水量连续可控。 */
 		{
-			if(temp>65&&temp<=70)
+			if(temp>65&&temp<=70) /* 65~70 档使用高流量标定式，限制在现有注水泵最大设定范围内。 */
 				temp1=(uint32_t )temp*(temp*0.02f+2.1f);//注水
 			
-				else if(temp>=45&&temp<=65)    
+				else if(temp>=45&&temp<=65) /* 45~65 档扣除 10 档机械起转补偿后再按原标定斜率换算。 */
 				temp1=(uint32_t )(temp-10)*(temp*0.02f+2.1f);
 				
-				else if(temp>=40&&temp<45)
+				else if(temp>=40&&temp<45) /* 40~45 档扣除 5 档补偿，保持该区间实测流量与屏幕设定一致。 */
 				temp1=(uint32_t )(temp-5)*(temp*0.02f+2.1f);
 				
-				else if(temp>=30&&temp<40)
+				else if(temp>=30&&temp<40) /* 30~40 档使用低流量补偿系数，避免泵处于起转附近时输出不足。 */
 				temp1=(uint32_t )(temp-3)*(temp*0.02f+2.3f);
 				
-				else 
+				else /* 低于 30 档或异常超范围值沿用基础比例，避免分段公式出现无匹配输出。 */
 					temp1 = (uint32_t )(temp*2.5f);	
 		}
 		
@@ -208,6 +213,11 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 
 //============================================================================
 //============================================================================
+/*
+ * 函数功能：逐字节比较两段数据是否完全一致。
+ * 输入参数：dat1、dat2 为待比较缓冲区；num 为需要比较的字节数。
+ * 返回参数：1 表示全部字节相同，0 表示至少一个字节不同。
+ */
 uint8_t Common_CompareData (uint8_t *dat1, uint8_t *dat2, uint16_t num)
 {
   uint8_t ret = 0;
@@ -215,10 +225,10 @@ uint8_t Common_CompareData (uint8_t *dat1, uint8_t *dat2, uint16_t num)
 
   for (i = 0; i < num; i++)
   {
-    if (dat1[i] == dat2[i])
+    if (dat1[i] == dat2[i]) /* 只累计相同字节，循环结束后由累计数判断整段数据是否完全一致。 */
       j++;
   }
-	if (j == num)
+	if (j == num) /* 相同字节数达到请求长度时才返回成功，任一字节不同都保持失败。 */
     ret = 1;
 		return ret;
 }

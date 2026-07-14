@@ -202,7 +202,7 @@ static void Foot_SendMessage(FootMessage_t msg)
 {
     //初始化一个静态FootMessage_t bj_msg结构体，并且判断bj_msg和msg的值是否相等，如果相等返回，如果不相等msg赋值给bj_msg
     static FootMessage_t bj_msg;
-    if(FootMsgQueue == NULL) return;
+    if(FootMsgQueue == NULL) return; /* 脚踏队列尚未创建时不能投递解析结果，直接返回避免访问空句柄。 */
     if(memcmp(&bj_msg, &msg, sizeof(FootMessage_t)) == 0) return;
        memcpy(&bj_msg, &msg, sizeof(FootMessage_t));
     (void)Kernel_QueueSend(FootMsgQueue, &msg, 0);
@@ -334,7 +334,7 @@ static void Foot_ClearRunRequestAfterGateFail(void)
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Foot_LatchCommonSocketMissingUntilRelease(void)
+static void Foot_LatchSocketMissing(void)
 {
     s_common_socket_missing_wait_release=true;       /* 当前脚踏动作已经触发过缺刀具报警，同一次长踩不再反复请求启动和刷 80。 */
 }
@@ -344,7 +344,7 @@ static void Foot_LatchCommonSocketMissingUntilRelease(void)
  * 输入参数：无。
  * 返回参数：true 表示本周期已被等待松脚锁存拦截；false 表示允许继续判断脚踏启动。
  */
-static bool Foot_BlockRunIfCommonSocketMissingLatched(void)
+static bool Foot_BlockIfSocketMissing(void)
 {
     if(s_common_socket_missing_wait_release==false)
     {
@@ -360,7 +360,7 @@ static bool Foot_BlockRunIfCommonSocketMissingLatched(void)
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Foot_ClearCommonSocketMissingLatchAfterRelease(void)
+static void Foot_ClearSocketLatchOnRelease(void)
 {
     if(s_common_socket_missing_wait_release==false)
     {
@@ -470,7 +470,7 @@ static void Foot_ReportManualSelectedAlarm(void)
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Foot_ClearManualSelectedAlarmOnRelease(void)
+static void Foot_ClearManualAlarmOnRelease(void)
 {
     if(WorkAlarm_Is(WORK_ALARM_MANUAL_SELECTED) == false)
     {
@@ -587,7 +587,7 @@ static bool Foot_EnsureFootControlMode(void)
  * 输入参数：release_ticks 连续低于阈值的计数指针，由 FootControlTask 保存单踏板释放确认次数。
  * 返回参数：true 表示本周期仍按抖动处理并保持泵/电机运行；false 表示已经确认松脚，可以进入停泵分支。
  */
-static bool Foot_ShouldIgnoreSinglePedalReleaseGlitch(uint8_t *release_ticks)
+static bool Foot_IgnoreSingleReleaseGlitch(uint8_t *release_ticks)
 {
     /* 防御空指针：如果调用方没有传入计数器，就不能做去抖，直接允许停泵保持旧安全行为。 */
     if(release_ticks == NULL)
@@ -612,7 +612,7 @@ static bool Foot_ShouldIgnoreSinglePedalReleaseGlitch(uint8_t *release_ticks)
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Foot_ClearPressureStopLatchAfterRelease(void)
+static void Foot_ClearPressureLatchOnRelease(void)
 {
     Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 脚踏松开只解除压力停机锁存，不走停泵接口，避免误清手柄联动注水泵状态。 */
 }
@@ -650,7 +650,7 @@ static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
     return ((uint32_t)ad_value <= ((uint32_t)low_value + (uint32_t)JT_threshold)); /* 用和运行入口一致的低阈值判断释放，避免双脚踏一边未松就清压力锁存。 */
 }
 
-static void Foot_DoublePedalRequireReleaseBeforeRun(uint8_t channel)
+static void Foot_RequireDoublePedalRelease(uint8_t channel)
 {
     s_double_pedal_release_before_run_channel = channel;
 }
@@ -662,6 +662,7 @@ static bool Foot_DoublePedalIsWaitingRelease(uint8_t channel)
 
 static void Foot_DoublePedalMarkReleased(uint8_t channel)
 {
+    /* 只有当前等待释放的通道真正松脚时才解除门禁，另一侧松脚不能提前放行。 */
     if(s_double_pedal_release_before_run_channel == channel)
     {
         s_double_pedal_release_before_run_channel = CHANNEL_NONE;
@@ -727,7 +728,7 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
                  {
                     MemoryMsgA.drive_type=HANDLEWORK;//添加记忆功能
                  }
-                 else if(WorkMessage.channel_work==CHANNEL_B)
+                 else if(WorkMessage.channel_work==CHANNEL_B) /* 掉线前工作通道为 B 时，只把 B 通道记忆恢复为手控。 */
                  {
                     MemoryMsgB.drive_type=HANDLEWORK;
                  }
@@ -745,8 +746,8 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
          //通知界面，如果因为脚踏行为报警，则恢复
          ControlSignalMessage.jt_enable_flag=false;//脚踏掉线，禁止脚踏控制界面选择少了一个。后续界面按钮需要判断脚踏是否使能进行判断
          Pubinterface_ClearFootControlManualLock(); /* 脚踏离线代表本在线周期结束，用户手动切手控/触控的锁存到此失效。 */
-         Foot_ClearManualSelectedAlarmOnRelease(); /* 脚踏掉线等价于释放脚踏，清除手控已选中的错模式报警。 */
-         Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 脚踏掉线等价于释放脚踏，公共接头缺刀具等待松脚状态也必须结束。 */
+         Foot_ClearManualAlarmOnRelease(); /* 脚踏掉线等价于释放脚踏，清除手控已选中的错模式报警。 */
+         Foot_ClearSocketLatchOnRelease(); /* 脚踏掉线等价于释放脚踏，公共接头缺刀具等待松脚状态也必须结束。 */
 
          if(ControlSignalMessage.jtL_control_flag||ControlSignalMessage.jtR_control_flag)//如果当前正是脚踏控制电机过程中
          {
@@ -869,15 +870,18 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
         return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 无有效脚踏参数时保持停机，并允许周期末释放 owner。 */
     }
 
-    adValue=jt_adcvalue;
-    if(adValue<msg->LValue_Left)adValue=msg->LValue_Left;
-    if(adValue-msg->LValue_Left>JT_threshold)
+    adValue = jt_adcvalue; /* 读取单踏板当前 AD，后续按本次定标低点计算有效行程。 */
+    if (adValue < msg->LValue_Left) /* 低于定标低点的采样按低点处理，避免无符号减法回绕。 */
+    {
+        adValue = msg->LValue_Left;
+    }
+    if ((adValue - msg->LValue_Left) > JT_threshold) /* 超过踩下去抖阈值后才进入运行门禁和速度计算。 */
         {
             if(Foot_BlockRunIfPressureStopLatched())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 压力保护后脚踏仍踩住时，本周期不允许重新写运行标志，必须等待真实松脚。 */
             }
-            if(Foot_BlockRunIfCommonSocketMissingLatched())
+            if(Foot_BlockIfSocketMissing())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 公共接头缺刀具后脚踏仍踩住时，只保持停机，等待松脚后才允许重新报警。 */
             }
@@ -902,7 +906,7 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
             /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
             if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
             {
-                Foot_LatchCommonSocketMissingUntilRelease(); /* 本次脚踏已经触发公共接头缺刀具报警，后续长踩必须等松脚再触发。 */
+                Foot_LatchSocketMissing(); /* 本次脚踏已经触发公共接头缺刀具报警，后续长踩必须等松脚再触发。 */
                 Foot_ClearRunRequestAfterGateFail(); /* 公共接头缺刀具头时只报警 80，并保证脚踏不会留下运行状态。 */
                 return FOOT_CONTROL_FLOW_RETURN_TASK;
             } /* 脚踏启动手柄电机前检查公共接头 EPC 刀具头，缺失时只报警不运行。 */
@@ -921,7 +925,7 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
             if(ControlSignalMessage.jtL_control_flag)
             {
                 /* 单踏板踩住时 AD 可能短暂跌回阈值以下，先去抖，避免 A 泵被一个采样毛刺立刻停掉。 */
-                if(Foot_ShouldIgnoreSinglePedalReleaseGlitch(&s_single_release_debounce_ticks))
+                if(Foot_IgnoreSingleReleaseGlitch(&s_single_release_debounce_ticks))
                 {
                     return FOOT_CONTROL_FLOW_FINISH_CYCLE;
                 }
@@ -932,11 +936,11 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
                 if(ControlSignalMessage.jtL_gentlypump_flag)
                 {
                  ControlSignalMessage.jtL_gentlypump_flag=false;
-                 if(pumpMessageA.type==INJECTWATER)
+                 if(pumpMessageA.type==INJECTWATER) /* 单踏板轻排实际使用 A 注水泵时，松脚只停止 A 泵。 */
                  {
                    Foot_StopPumpAInjection();
                  }
-                 else if(pumpMessageB.type==INJECTWATER)
+                 else if(pumpMessageB.type==INJECTWATER) /* A 不是注水泵时，按原选择顺序停止实际使用的 B 注水泵。 */
                  {
                    Foot_StopPumpBInjection();
                  }
@@ -948,18 +952,18 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
                {
                 Foot_ClearHandleOrOverloadAlarm();
                }
-                Foot_ClearManualSelectedAlarmOnRelease(); /* 单踏板确认松开后清除 81 号错模式报警。 */
-                Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 单踏板确认松开后允许下一次缺刀具启动重新弹 80。 */
+                Foot_ClearManualAlarmOnRelease(); /* 单踏板确认松开后清除 81 号错模式报警。 */
+                Foot_ClearSocketLatchOnRelease(); /* 单踏板确认松开后允许下一次缺刀具启动重新弹 80。 */
             }
             else
             {
-                if(Foot_ShouldIgnoreSinglePedalReleaseGlitch(&s_single_release_debounce_ticks))
+                if(Foot_IgnoreSingleReleaseGlitch(&s_single_release_debounce_ticks))
                 {
                     return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 压力停机后 jtL_control_flag 已被清零，仍要按松脚去抖确认，防止踩住脚踏时 AD 抖动误清锁存。 */
                 }
-                Foot_ClearPressureStopLatchAfterRelease(); /* 单踏板确认松开后结束压力停机锁存，下一次重新踩下才允许启动。 */
-                Foot_ClearManualSelectedAlarmOnRelease(); /* 单踏板无运行标志但已释放时，也要关闭手控已选中报警。 */
-                Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 单踏板无运行标志但已释放时，同步解除缺刀具等待松脚锁存。 */
+                Foot_ClearPressureLatchOnRelease(); /* 单踏板确认松开后结束压力停机锁存，下一次重新踩下才允许启动。 */
+                Foot_ClearManualAlarmOnRelease(); /* 单踏板无运行标志但已释放时，也要关闭手控已选中报警。 */
+                Foot_ClearSocketLatchOnRelease(); /* 单踏板无运行标志但已释放时，同步解除缺刀具等待松脚锁存。 */
                 //本来就是停止，如果不是脚踏控制的那么不需要任何处理和操作
             }
             Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警，让下一次踩下可以重新报警。 */
@@ -990,7 +994,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双段脚踏保持踩下时如果仍在压力锁存内，不允许轻踩段重新启动注水泵。 */
         }
-        if(Foot_BlockRunIfCommonSocketMissingLatched())
+        if(Foot_BlockIfSocketMissing())
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双段脚踏缺刀具后保持踩下时，不再重新启动轻排泵或重复弹 80。 */
         }
@@ -1049,19 +1053,19 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
             if(ControlSignalMessage.jtL_gentlypump_flag)
                  {
                    ControlSignalMessage.jtL_gentlypump_flag=false;
-                  if(pumpMessageA.type==INJECTWATER)
+                  if(pumpMessageA.type==INJECTWATER) /* 双段轻排实际使用 A 注水泵时，完全松脚后停止 A 泵。 */
                   {
                     Foot_StopPumpAInjection();
                   }
-                  else if(pumpMessageB.type==INJECTWATER)
+                  else if(pumpMessageB.type==INJECTWATER) /* A 不是注水泵时，完全松脚后停止实际使用的 B 泵。 */
                   {
                      Foot_StopPumpBInjection();
                    }
                  }
              Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警，让下一次踩下可以重新报警。 */
-             Foot_ClearPressureStopLatchAfterRelease(); /* 双段脚踏完全松到低阈值以下后，释放压力停机锁存，避免再踩脚踏被旧锁存拒绝。 */
-             Foot_ClearManualSelectedAlarmOnRelease(); /* 双段脚踏完全松开后清除 81 号错模式报警。 */
-             Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 双段脚踏完全释放后，下一次踩下才允许公共接头缺刀具重新报警。 */
+             Foot_ClearPressureLatchOnRelease(); /* 双段脚踏完全松到低阈值以下后，释放压力停机锁存，避免再踩脚踏被旧锁存拒绝。 */
+             Foot_ClearManualAlarmOnRelease(); /* 双段脚踏完全松开后清除 81 号错模式报警。 */
+             Foot_ClearSocketLatchOnRelease(); /* 双段脚踏完全释放后，下一次踩下才允许公共接头缺刀具重新报警。 */
      }
     if(adValue<msg->MValue_Left)adValue=msg->MValue_Left;
     if(adValue-msg->MValue_Left>JT_threshold)
@@ -1071,7 +1075,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
         /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
         if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
         {
-            Foot_LatchCommonSocketMissingUntilRelease(); /* 双段脚踏电机段已触发公共接头缺刀具报警，保持踩下时不再重复弹 80。 */
+            Foot_LatchSocketMissing(); /* 双段脚踏电机段已触发公共接头缺刀具报警，保持踩下时不再重复弹 80。 */
             Foot_ClearRunRequestAfterGateFail(); /* 双段脚踏进入电机段前发现公共接头无刀具，停泵并清运行请求。 */
             return FOOT_CONTROL_FLOW_RETURN_TASK;
         } /* 脚踏比例启动前先确认刀具头参数有效，避免公共接头空刀具运行。 */
@@ -1127,15 +1131,18 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
         return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 无左侧定标参数时结束本周期，不继续处理右侧。 */
     }
 
-    adValue=jtd_adcvalue_l;
-    if(adValue<msg->LValue_Left)adValue=msg->LValue_Left;
-        if(adValue-msg->LValue_Left>JT_threshold)
+    adValue = jtd_adcvalue_l; /* 读取双脚踏左侧 AD，按左侧独立定标区间处理。 */
+    if (adValue < msg->LValue_Left) /* 低于左踏板低点时钳位，防止后续差值回绕。 */
+    {
+        adValue = msg->LValue_Left;
+    }
+        if ((adValue - msg->LValue_Left) > JT_threshold) /* 左侧超过踩下阈值后才进入轻踩泵和深踩电机流程。 */
         {
             if(Foot_BlockRunIfPressureStopLatched())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏左侧保持踩下时如果压力锁存未释放，禁止继续进入轻踩泵和电机启动路径。 */
             }
-            if(Foot_BlockRunIfCommonSocketMissingLatched())
+            if(Foot_BlockIfSocketMissing())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏左侧缺刀具后保持踩下时，本周期只维持停机并等待松脚。 */
             }
@@ -1160,15 +1167,18 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
 
             Foot_StartDoublePedalGentlyPump(false); /* 左脚按 A 优先规则启动并记录实际泵，使用屏幕设定速度且不进入10秒定时排空。 */
 
-            if(adValue<msg->MValue_Left)adValue=msg->MValue_Left;
-          if(adValue-msg->MValue_Left>JT_threshold)
+            if (adValue < msg->MValue_Left) /* 进入深踩段前按中点钳位，避免中点差值发生无符号回绕。 */
+            {
+                adValue = msg->MValue_Left;
+            }
+          if ((adValue - msg->MValue_Left) > JT_threshold) /* 超过中点阈值才允许申请电机 owner，轻踩只控制注水泵。 */
             {
                 if(WorkMessage.channel_work==CHANNEL_A)
                 {
                     /* 双踏板左侧触发当前通道启动前先占用脚踏控制权。 */
                     if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
                     {
-                        Foot_LatchCommonSocketMissingUntilRelease(); /* 左脚踏当前通道已触发缺刀具报警，长踩期间不再重复弹窗。 */
+                        Foot_LatchSocketMissing(); /* 左脚踏当前通道已触发缺刀具报警，长踩期间不再重复弹窗。 */
                         Foot_ClearRunRequestAfterGateFail(); /* 左脚踏当前通道启动前发现缺刀具，停泵并保持电机停机。 */
                         return FOOT_CONTROL_FLOW_RETURN_TASK;
                     } /* 双踏板当前通道启动前执行公共接头刀具头 gate。 */
@@ -1187,9 +1197,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                     WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                     Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧启动 A 通道后进入冷却联动和压力锁存门禁，堵管后保持踩踏不能重启手柄。 */
                 }
-                else if(WorkMessage.channel_work==CHANNEL_B)
+                else if(WorkMessage.channel_work==CHANNEL_B) /* 左脚对应 A 通道；当前在 B 时需判断能否切回 A。 */
                 {
-                        if(WorkMessage.Channel_Aonline==true)
+                        if(WorkMessage.Channel_Aonline==true) /* A 手柄在线时先按去抖次数切到 A，避免一次采样抖动切通道。 */
                         {
                             WorkMessage.switchhandle_counts++;
                             if(WorkMessage.switchhandle_counts<FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS)
@@ -1204,7 +1214,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                             {
                                 SendKeyBeepMessage(1U); /* 双脚踏左踏板跨通道切换 A 手柄成功，蜂鸣一次给操作者确认。 */
                             }
-                            Foot_DoublePedalRequireReleaseBeforeRun(CHANNEL_A);
+                            Foot_RequireDoublePedalRelease(CHANNEL_A);
                             ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                             return FOOT_CONTROL_FLOW_RETURN_TASK;
 
@@ -1213,7 +1223,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                         {
                             if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
                             {
-                                Foot_LatchCommonSocketMissingUntilRelease(); /* 左脚踏跨通道已触发缺刀具报警，必须松脚后才允许再次触发。 */
+                                Foot_LatchSocketMissing(); /* 左脚踏跨通道已触发缺刀具报警，必须松脚后才允许再次触发。 */
                                 Foot_ClearRunRequestAfterGateFail(); /* 左脚踏跨通道直接运行前发现公共接头无刀具，立即撤销脚踏请求。 */
                                 return FOOT_CONTROL_FLOW_RETURN_TASK;
                             } /* 双踏板左侧跨通道直接运行前也要检查公共接头刀具头，避免绕过当前通道 gate。 */
@@ -1270,9 +1280,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
              if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
              {
                  Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警；双踏板必须确认右侧也已释放。 */
-                 Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都回到释放区，才算退出本次压力停机控制源。 */
-                 Foot_ClearManualSelectedAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
-                 Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 双脚踏左右都释放后，下一次左/右脚踏启动才允许重新弹 80。 */
+                 Foot_ClearPressureLatchOnRelease(); /* 双脚踏必须左右两侧都回到释放区，才算退出本次压力停机控制源。 */
+                 Foot_ClearManualAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
+                 Foot_ClearSocketLatchOnRelease(); /* 双脚踏左右都释放后，下一次左/右脚踏启动才允许重新弹 80。 */
              }
             //左脚停止
          }
@@ -1303,7 +1313,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏右侧保持踩下时如果压力锁存未释放，禁止蜂鸣结束后自动拉起手柄和泵。 */
         }
-        if(Foot_BlockRunIfCommonSocketMissingLatched())
+        if(Foot_BlockIfSocketMissing())
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏右侧缺刀具后保持踩下时，只保持停机，不再重复触发 80 弹窗。 */
         }
@@ -1334,7 +1344,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                /* 双踏板右侧触发当前通道启动前先占用脚踏控制权。 */
                if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
                {
-                   Foot_LatchCommonSocketMissingUntilRelease(); /* 右脚踏当前通道已触发缺刀具报警，等待松脚后才能再报警。 */
+                   Foot_LatchSocketMissing(); /* 右脚踏当前通道已触发缺刀具报警，等待松脚后才能再报警。 */
                    Foot_ClearRunRequestAfterGateFail(); /* 右脚踏当前通道启动前发现缺刀具，报警后不保留运行边沿。 */
                    return FOOT_CONTROL_FLOW_RETURN_TASK;
                } /* 右踏板启动当前通道前检查公共接头刀具头是否已识别。 */
@@ -1353,11 +1363,11 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                  WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                 Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧启动 B 通道后统一刷新冷却泵跟随，并让压力堵塞锁存能够清回 runflag。 */
             }
-            else if(WorkMessage.channel_work==CHANNEL_A)
+            else if(WorkMessage.channel_work==CHANNEL_A) /* 右脚对应 B 通道；当前在 A 时需判断能否切到 B。 */
             {
-                    if(WorkMessage.Channel_Aonline==true)
+                    if(WorkMessage.Channel_Aonline==true) /* 当前 A 仍在线时，继续判断 B 是否可作为右脚目标通道。 */
                     {
-                      if(WorkMessage.Channel_Bonline==true)
+                      if(WorkMessage.Channel_Bonline==true) /* A/B 都在线时按去抖次数切到 B，防止误触造成通道跳变。 */
                       {
                             WorkMessage.switchhandle_countss++;
                             if(WorkMessage.switchhandle_countss<FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS)
@@ -1372,7 +1382,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                             {
                                 SendKeyBeepMessage(1U); /* 双脚踏右踏板跨通道切换 B 手柄成功，蜂鸣一次给操作者确认。 */
                             }
-                            Foot_DoublePedalRequireReleaseBeforeRun(CHANNEL_B);
+                            Foot_RequireDoublePedalRelease(CHANNEL_B);
                             ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                             return FOOT_CONTROL_FLOW_RETURN_TASK;
                         }
@@ -1380,7 +1390,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                         {
                             if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
                             {
-                                Foot_LatchCommonSocketMissingUntilRelease(); /* 右脚踏跨通道已触发缺刀具报警，长踩期间不再重复请求启动。 */
+                                Foot_LatchSocketMissing(); /* 右脚踏跨通道已触发缺刀具报警，长踩期间不再重复请求启动。 */
                                 Foot_ClearRunRequestAfterGateFail(); /* 右脚踏跨通道直接运行前发现公共接头无刀具，立即撤销脚踏请求。 */
                                 return FOOT_CONTROL_FLOW_RETURN_TASK;
                             } /* 双踏板右侧跨通道直接运行前也要检查公共接头刀具头，避免空刀具下发运行。 */
@@ -1438,9 +1448,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
         if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left))
         {
             Foot_ClearHandleOrOverloadAlarm(); /* 门禁失败已清运行标志时，真实松脚仍要关闭手柄未连接报警；双踏板必须确认左侧也已释放。 */
-            Foot_ClearPressureStopLatchAfterRelease(); /* 双脚踏必须左右两侧都松开后才清压力锁存，防止另一侧仍踩住时自动恢复。 */
-            Foot_ClearManualSelectedAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
-            Foot_ClearCommonSocketMissingLatchAfterRelease(); /* 双脚踏左右都释放后，解除公共接头缺刀具等待松脚锁存。 */
+            Foot_ClearPressureLatchOnRelease(); /* 双脚踏必须左右两侧都松开后才清压力锁存，防止另一侧仍踩住时自动恢复。 */
+            Foot_ClearManualAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
+            Foot_ClearSocketLatchOnRelease(); /* 双脚踏左右都释放后，解除公共接头缺刀具等待松脚锁存。 */
         }
      }
 
@@ -1496,7 +1506,7 @@ void FootControlTask(uint32_t event)
         Foot_HandleConnectionUpdate(&msg); /* 只有收到新消息时才处理上线或掉线边沿。 */
     }
 
-    if (msg.connect_flag == true)
+    if (msg.connect_flag == true) /* 脚踏在线时才按踏板类型处理动作；离线消息只更新连接状态。 */
     {
         switch (msg.pedalType)
         {
@@ -1579,6 +1589,7 @@ static void Foot_HandleMissingUartFrame(void)
  */
 static bool Foot_ParseSinglePedalFrame(const uint8_t *frame, uint16_t remaining)
 {
+    /* 长度足够且命令头为 B6 C1 或 D0 B4 时按单踏板协议解析，避免误读其它帧。 */
     if ((remaining >= 8U) &&
         (frame[2] == 0xB6U) && (frame[3] == 0xC1U) &&
         (frame[4] == 0x01U) && (frame[5] == 0x01U))
@@ -1723,6 +1734,7 @@ static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
         footmessage.HValue_Right = ((uint16_t)frame[16] << 8) | frame[17];
         footmessage.MValue_Right = ((uint16_t)frame[18] << 8) | frame[19];
         footmessage.LValue_Right = ((uint16_t)frame[20] << 8) | frame[21];
+        /* 双脚踏左右任一路三点标定无效都禁止上线，避免异常区间参与电机速度换算。 */
         if ((Foot_IsPedalThreePointStorageValid(footmessage.LValue_Left,
                                                 footmessage.MValue_Left,
                                                 footmessage.HValue_Left) == false) ||
@@ -1743,6 +1755,7 @@ static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
         return false;
     }
 
+    /* 剩余长度足够且功能码为 0xCC 时才读取第 7 字节按键码，避免短帧越界。 */
     if ((remaining >= 8U) && (frame[4] == 0xCCU))
     {
         Foot_DispatchPedalKey(frame[7]); /* 按键帧只读取既有第 7 字节业务码。 */
@@ -1760,6 +1773,7 @@ static bool Foot_ParseUartFrame(const uint8_t *frame, uint16_t remaining)
 {
     s_foot_parser_state.silent_ticks = 0U; /* 任一合法 FE EF 帧头到达都重置掉线计数，保持原在线判定。 */
 
+    /* 至少收到 8 字节且命令头匹配 B6 C1 或 D0 B4 时，才按单踏板协议读取后续字段。 */
     if ((remaining >= 8U) &&
         (((frame[2] == 0xB6U) && (frame[3] == 0xC1U)) ||
          ((frame[2] == 0xD0U) && (frame[3] == 0xB4U))))
@@ -1767,6 +1781,7 @@ static bool Foot_ParseUartFrame(const uint8_t *frame, uint16_t remaining)
         return Foot_ParseSinglePedalFrame(frame, remaining);
     }
 
+    /* 命令头为 BB AA 时进入双段/双脚踏协议解析，6 字节是读取类型字段的最小长度。 */
     if ((remaining >= 6U) && (frame[2] == 0xBBU) && (frame[3] == 0xAAU))
     {
         return Foot_ParseMultiPedalFrame(frame, remaining);

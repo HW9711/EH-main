@@ -15,7 +15,7 @@ static uint8_t Uart2_Flag_Last = 0;
 static uint16_t Uart2_RecvWaitTimeCnt = 0;
 static uint8_t Uart2_DMABuf[UART2_MAX_PACKET_SIZE] = { 0 };
 
-static void Uart2_DMAConfiguration(void)
+static void Uart2_DmaInit(void)
 {
 //	Delay_ms(300);
 
@@ -24,6 +24,7 @@ static void Uart2_DMAConfiguration(void)
 
 void Uart2_Configuration(uint16_t baud)
 {
+  /* UART2 初始化失败时进入统一故障处理，避免外控通信口处于不可预期状态。 */
   if (Bsp_UartInit(BSP_UART_PORT_2, baud) != HAL_OK)
   {
     Error_Handler();
@@ -41,7 +42,7 @@ static void Uart2_DMAReset(void)
 
 void Uart2_Init(void)
 {
-  Uart2_DMAConfiguration();
+  Uart2_DmaInit();
 }
 
 void Uart2_SendPacket(uint8_t *pData, uint16_t Length)
@@ -58,6 +59,7 @@ uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
   Uart2_RecvWaitTimeCnt++;
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_2);
 
+  /* DMA 剩余数发生变化说明本帧仍在接收，重新开始帧间静默计时。 */
   if (RemainLen != Uart2_Flag_Last)
   {
     Uart2_RecvWaitTimeCnt = 0;
@@ -65,8 +67,10 @@ uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
   }
   else
   {
+    /* 接收长度连续不变达到门限后，才把缓存交给外控协议层。 */
     if (Uart2_RecvWaitTimeCnt >= UART2_TimeoutComp)
     {
+      /* DMA 至少接收一个字节时才复制，空帧不触发上层解析。 */
       if (RemainLen < UART2_MAX_PACKET_SIZE)
       {
         rlen = (UART2_MAX_PACKET_SIZE - RemainLen);

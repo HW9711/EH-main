@@ -44,6 +44,7 @@ void MX_I2C2_Init(void)
     hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c2.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
 
+    /* I2C2 初始化失败会使 A 通道手柄总线不可用，必须进入统一错误处理。 */
     if (HAL_I2C_Init(&hi2c2) != HAL_OK)
     {
         Error_Handler();
@@ -65,6 +66,7 @@ void MX_I2C3_Init(void)
     hi2c3.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c3.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
 
+    /* I2C3 初始化失败会使 B 通道手柄总线不可用，必须进入统一错误处理。 */
     if (HAL_I2C_Init(&hi2c3) != HAL_OK)
     {
         Error_Handler();
@@ -88,6 +90,7 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+    /* HAL 正在初始化 I2C2 时配置其 PB10/PB3 时钟和复用引脚。 */
     if (hi2c->Instance == I2C2)
     {
         /* 使能I2C2与GPIOB时钟 */
@@ -107,6 +110,7 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
         GPIO_InitStruct.Alternate = I2C2_SDA_AF;
         HAL_GPIO_Init(I2C2_SDA_PORT, &GPIO_InitStruct);
     }
+    /* HAL 正在初始化 I2C3 时改配 PA8/PC9，不能沿用 I2C2 的 GPIO。 */
     else if (hi2c->Instance == I2C3)
     {
         /* 使能I2C3与对应GPIO时钟 */
@@ -134,12 +138,14 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
  *============================================================================*/
 void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
 {
+    /* 只在释放 I2C2 时关闭 I2C2 时钟和 PB10/PB3，避免影响 B 通道。 */
     if (hi2c->Instance == I2C2)
     {
         __HAL_RCC_I2C2_CLK_DISABLE();
         HAL_GPIO_DeInit(I2C2_SCL_PORT, I2C2_SCL_PIN);
         HAL_GPIO_DeInit(I2C2_SDA_PORT, I2C2_SDA_PIN);
     }
+    /* 只在释放 I2C3 时关闭 I2C3 时钟和 PA8/PC9，避免影响 A 通道。 */
     else if (hi2c->Instance == I2C3)
     {
         __HAL_RCC_I2C3_CLK_DISABLE();

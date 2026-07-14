@@ -15,7 +15,7 @@ static uint8_t Uart6_Flag_Last = 0;
 static uint16_t Uart6_RecvWaitTimeCnt = 0;
 static uint8_t Uart6_DMABuf[UART6_MAX_PACKET_SIZE] = { 0 };
 
-static void Uart6_DMAConfiguration(void)
+static void Uart6_DmaInit(void)
 {
 //	Delay_ms(300);
 
@@ -24,6 +24,7 @@ static void Uart6_DMAConfiguration(void)
 
 void Uart6_Configuration(uint16_t baud)
 {
+  /* UART6 初始化失败时进入统一故障处理，避免触控屏通信口继续使用无效配置。 */
   if (Bsp_UartInit(BSP_UART_PORT_6, baud) != HAL_OK)
   {
     Error_Handler();
@@ -43,7 +44,7 @@ static void Uart6_DMAReset(void)
 
 void Uart6_Init(void)
 {
-  Uart6_DMAConfiguration();
+  Uart6_DmaInit();
 	
 }
 
@@ -62,6 +63,7 @@ uint16_t Uart6_DMARecvDataPeek(uint8_t *data)
   Uart6_RecvWaitTimeCnt++;
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_6);
 
+  /* DMA 剩余数变化说明屏幕数据仍在到达，清零静默计时防止截断同一帧。 */
   if (RemainLen != Uart6_Flag_Last)
   {
     Uart6_RecvWaitTimeCnt = 0;
@@ -69,8 +71,10 @@ uint16_t Uart6_DMARecvDataPeek(uint8_t *data)
   }
   else
   {
+    /* 接收长度连续不变达到门限后，才把缓存交给屏幕协议解析。 */
     if (Uart6_RecvWaitTimeCnt >= UART6_TimeoutComp)
     {
+      /* DMA 至少收到一个字节时才复制，空帧不触发屏幕按键处理。 */
       if (RemainLen < UART6_MAX_PACKET_SIZE)
       {
         rlen = (UART6_MAX_PACKET_SIZE - RemainLen);

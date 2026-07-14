@@ -6,7 +6,7 @@
  * 输入参数：pressure_g 为 g 单位压力阈值。
  * 返回参数：返回放大 10 倍后的 0.1g 单位压力阈值。
  */
-static uint32_t PumpPressureControl_BuildPressureX10(uint16_t pressure_g)
+static uint32_t PumpPressure_ToX10(uint16_t pressure_g)
 {
     /* 将 g 单位阈值转换成 0.1g 单位，保证后续和压力模块 WeightX10 使用同一量纲比较。 */
     return (uint32_t)pressure_g * 10U;
@@ -17,11 +17,11 @@ static uint32_t PumpPressureControl_BuildPressureX10(uint16_t pressure_g)
  * 输入参数：target_speed 为当前目标泵速；speed_low/speed_high 为相邻泵速点；value_low/value_high 为对应压力阈值。
  * 返回参数：返回 target_speed 对应的 g 单位压力阈值。
  */
-static uint16_t PumpPressureControl_InterpolateG(uint16_t target_speed,
-                                                 uint16_t speed_low,
-                                                 uint16_t speed_high,
-                                                 uint16_t value_low,
-                                                 uint16_t value_high)
+static uint16_t PumpPressure_Interpolate(uint16_t target_speed,
+                                         uint16_t speed_low,
+                                         uint16_t speed_high,
+                                         uint16_t value_low,
+                                         uint16_t value_high)
 {
     /* speed_span 保存两个标定泵速点之间的跨度，用于按当前目标泵速线性插值。 */
     uint32_t speed_span = (uint32_t)speed_high - (uint32_t)speed_low;
@@ -50,7 +50,7 @@ static uint16_t PumpPressureControl_InterpolateG(uint16_t target_speed,
  * 输入参数：target_speed 为当前准备输出的泵速，单位 ml/min。
  * 返回参数：返回 g 单位开始限速压力阈值。
  */
-static uint16_t PumpPressureControl_BuildReduceThresholdG(uint16_t target_speed)
+static uint16_t PumpPressure_ReduceThreshold(uint16_t target_speed)
 {
     /* 低于最小实测泵速时沿用 50 ml/min 阈值，避免低速堵管还按高阈值放行。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN)
@@ -62,51 +62,51 @@ static uint16_t PumpPressureControl_BuildReduceThresholdG(uint16_t target_speed)
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN)
     {
         /* 返回 50~110 ml/min 对应的开始限速阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_50_G,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_110_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_50_G,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_110_G);
     }
     /* 110~140 ml/min 之间按实测点线性插值。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN)
     {
         /* 返回 110~140 ml/min 对应的开始限速阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_110_G,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_140_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_110_G,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_140_G);
     }
     /* 140~200 ml/min 之间按实测点线性插值。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN)
     {
         /* 返回 140~200 ml/min 对应的开始限速阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_140_G,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_200_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_140_G,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_200_G);
     }
     /* 200~260 ml/min 之间按实测点线性插值。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN)
     {
         /* 返回 200~260 ml/min 对应的开始限速阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_200_G,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_260_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_200_G,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_260_G);
     }
     /* 260~300 ml/min 之间按实测点线性插值。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN)
     {
         /* 返回 260~300 ml/min 对应的开始限速阈值。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_260_G,
-                                                PUMP_PRESSURE_CONTROL_REDUCE_300_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_260_G,
+                                        PUMP_PRESSURE_CONTROL_REDUCE_300_G);
     }
     /* 高于 300 ml/min 时沿用当前最高实测档位阈值，避免外推导致保护阈值继续抬高。 */
     return PUMP_PRESSURE_CONTROL_REDUCE_300_G;
@@ -117,7 +117,7 @@ static uint16_t PumpPressureControl_BuildReduceThresholdG(uint16_t target_speed)
  * 输入参数：target_speed 为当前准备输出的泵速，单位 ml/min。
  * 返回参数：返回 g 单位停泵压力阈值，来源为 PUMP_PRESSURE_CONTROL_STOP_xx_G 表并按相邻档位插值。
  */
-static uint16_t PumpPressureControl_BuildStopThresholdG(uint16_t target_speed)
+static uint16_t PumpPressure_StopThreshold(uint16_t target_speed)
 {
     /* 低于最小实测泵速时沿用 50 ml/min 停泵阈值，避免低速请求被外推到未标定区间。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN)
@@ -129,51 +129,51 @@ static uint16_t PumpPressureControl_BuildStopThresholdG(uint16_t target_speed)
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN)
     {
         /* 返回 50~110 ml/min 对应的停泵阈值，不再读取压力模块上报的报警阈值作为停止点。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_50_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_110_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_STOP_50_G,
+                                        PUMP_PRESSURE_CONTROL_STOP_110_G);
     }
     /* 110~140 ml/min 之间按停泵表插值，保持停止点随业务设定泵速变化。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN)
     {
         /* 返回 110~140 ml/min 对应的停泵阈值，用于主控压力锁止和闭环压 0。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_110_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_140_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_STOP_110_G,
+                                        PUMP_PRESSURE_CONTROL_STOP_140_G);
     }
     /* 140~200 ml/min 之间按停泵表插值，避免只在固定档位才生效。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN)
     {
         /* 返回 140~200 ml/min 对应的停泵阈值，供本周期硬停判断使用。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_140_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_200_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_STOP_140_G,
+                                        PUMP_PRESSURE_CONTROL_STOP_200_G);
     }
     /* 200~260 ml/min 之间按停泵表插值，保持中高速区间停止点连续。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN)
     {
         /* 返回 200~260 ml/min 对应的停泵阈值，避免阈值在档位边界突变。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_200_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_260_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_STOP_200_G,
+                                        PUMP_PRESSURE_CONTROL_STOP_260_G);
     }
     /* 260~300 ml/min 之间按停泵表插值，覆盖当前最高标定段。 */
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN)
     {
         /* 返回 260~300 ml/min 对应的停泵阈值，用于高流量区间压 0 判断。 */
-        return PumpPressureControl_InterpolateG(target_speed,
-                                                PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN,
-                                                PUMP_PRESSURE_CONTROL_STOP_260_G,
-                                                PUMP_PRESSURE_CONTROL_STOP_300_G);
+        return PumpPressure_Interpolate(target_speed,
+                                        PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN,
+                                        PUMP_PRESSURE_CONTROL_STOP_260_G,
+                                        PUMP_PRESSURE_CONTROL_STOP_300_G);
     }
     /* 高于 300 ml/min 时沿用最高档停泵阈值，避免外推把停泵点抬到未验证压力。 */
     return PUMP_PRESSURE_CONTROL_STOP_300_G;
@@ -216,7 +216,7 @@ uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_
     }
 
     /* 停泵点按当前泵速查询 STOP 表，threshold_g 只保留为压力帧有效性门禁。 */
-    stop_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildStopThresholdG(target_speed));
+    stop_x10 = PumpPressure_ToX10(PumpPressure_StopThreshold(target_speed));
 
     /* 当前压力达到停泵阈值时进入锁止停泵，后续只能由下一次控制源启动沿重新放行。 */
     return (weight_x10 >= stop_x10) ? 1U : 0U;
@@ -258,7 +258,7 @@ uint8_t PumpPressureControl_ShouldForceStop(uint16_t target_speed, uint32_t weig
     }
 
     /* 按目标泵速查询 STOP 表作为硬停锁存点，压力模块 ThresholdG 不再决定主控停止压力。 */
-    stop_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildStopThresholdG(target_speed));
+    stop_x10 = PumpPressure_ToX10(PumpPressure_StopThreshold(target_speed));
 
     /* 当前重量达到或超过 STOP 宏表停泵阈值时返回 1，调用方据此暂停输出并下发 0 速帧。 */
     if (weight_x10 >= stop_x10)
@@ -313,9 +313,9 @@ uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, u
     }
 
     /* 根据当前目标泵速查表并插值得到开始限速阈值，只用于 STOP 停泵点以下的平滑降速。 */
-    reduce_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildReduceThresholdG(target_speed));
+    reduce_x10 = PumpPressure_ToX10(PumpPressure_ReduceThreshold(target_speed));
     /* 停泵阈值使用 STOP 宏表按当前泵速换算，压力达到后本周期输出压到 0。 */
-    stop_x10 = PumpPressureControl_BuildPressureX10(PumpPressureControl_BuildStopThresholdG(target_speed));
+    stop_x10 = PumpPressure_ToX10(PumpPressure_StopThreshold(target_speed));
 
     /* 先按 STOP 表判断硬停，避免线性限速计算在达到停止压力后仍保留非 0 输出。 */
     if (weight_x10 >= stop_x10)

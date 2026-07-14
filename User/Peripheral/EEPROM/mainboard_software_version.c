@@ -20,7 +20,7 @@ static const char s_mainboard_sw_version_hex_marker[] = MAINBOARD_SW_VERSION_HEX
  * 输入参数：data 为写入位置，value 为待写入 32 位值。
  * 返回参数：无。
  */
-static void MainboardSoftwareVersion_WriteBE32(uint8_t *data, uint32_t value)
+static void SwVersion_WriteBe32(uint8_t *data, uint32_t value)
 {
   data[0] = (uint8_t)(value >> 24); /* 写入最高字节，方便上位机按地址原值显示。 */
   data[1] = (uint8_t)(value >> 16); /* 写入次高字节，保持多字节字段顺序一致。 */
@@ -33,7 +33,7 @@ static void MainboardSoftwareVersion_WriteBE32(uint8_t *data, uint32_t value)
  * 输入参数：data 为待读取字段起始地址。
  * 返回参数：读取出的 32 位值。
  */
-static uint32_t MainboardSoftwareVersion_ReadBE32(const uint8_t *data)
+static uint32_t SwVersion_ReadBe32(const uint8_t *data)
 {
   return (((uint32_t)data[0] << 24) |
           ((uint32_t)data[1] << 16) |
@@ -46,7 +46,7 @@ static uint32_t MainboardSoftwareVersion_ReadBE32(const uint8_t *data)
  * 输入参数：record 为 32 字节 Page1 缓存。
  * 返回参数：前 30 字节累加得到的页校验和。
  */
-static uint16_t MainboardSoftwareVersion_PageSum(const uint8_t *record)
+static uint16_t SwVersion_PageSum(const uint8_t *record)
 {
   uint16_t sum = 0U; /* 16 位累加自然截断，保持和手查 EEPROM 页和规则一致。 */
   uint8_t index; /* 遍历 Page1 前 30 字节。 */
@@ -64,9 +64,9 @@ static uint16_t MainboardSoftwareVersion_PageSum(const uint8_t *record)
  * 输入参数：record 为 32 字节 Page1 缓存。
  * 返回参数：无。
  */
-static void MainboardSoftwareVersion_FillPageSum(uint8_t *record)
+static void SwVersion_FillPageSum(uint8_t *record)
 {
-  uint16_t sum = MainboardSoftwareVersion_PageSum(record); /* 先按前 30 字节重新计算页和。 */
+  uint16_t sum = SwVersion_PageSum(record); /* 先按前 30 字节重新计算页和。 */
 
   record[30] = (uint8_t)(sum >> 8); /* 页和高字节放 byte30。 */
   record[31] = (uint8_t)(sum & 0xFFU); /* 页和低字节放 byte31。 */
@@ -77,7 +77,7 @@ static void MainboardSoftwareVersion_FillPageSum(uint8_t *record)
  * 输入参数：无。
  * 返回参数：标准 CRC32 结果，初值和异或值均为 0xFFFFFFFF。
  */
-static uint32_t MainboardSoftwareVersion_CalcCodeCrc32(void)
+static uint32_t SwVersion_CodeCrc32(void)
 {
   const uint8_t *code = (const uint8_t *)(uintptr_t)MAINBOARD_SW_VERSION_CODE_START; /* 固定从 Flash 0x08000000 读取代码区。 */
   uint32_t crc = 0xFFFFFFFFUL; /* 标准 CRC32 初始值，上位机必须使用同一规则。 */
@@ -101,7 +101,7 @@ static uint32_t MainboardSoftwareVersion_CalcCodeCrc32(void)
  * 输入参数：record 为 32 字节输出缓存。
  * 返回参数：无。
  */
-static void MainboardSoftwareVersion_BuildRecord(uint8_t *record)
+static void SwVersion_BuildRecord(uint8_t *record)
 {
   uint8_t index; /* 拷贝固定大版本字符串时使用的字节下标。 */
   const char *version_text = &s_mainboard_sw_version_hex_marker[sizeof(MAINBOARD_SW_VERSION_HEX_MARKER_TEXT) - 1U]; /* Page1 大版本直接来自 HEX 标记后的字符串，避免上位机和固件使用两套来源。 */
@@ -125,11 +125,11 @@ static void MainboardSoftwareVersion_BuildRecord(uint8_t *record)
   }
 
   record[13] = MAINBOARD_SW_VERSION_CRC32_ALGO; /* byte13 写入 CRC32 算法编号，防止上位机按错误算法比较。 */
-  MainboardSoftwareVersion_WriteBE32(&record[14], MAINBOARD_SW_VERSION_CODE_START); /* byte14~17 写入固定校验起始地址 0x08000000。 */
-  MainboardSoftwareVersion_WriteBE32(&record[18], MAINBOARD_SW_VERSION_CODE_SIZE); /* byte18~21 写入固定校验长度 256KB。 */
-  crc32 = MainboardSoftwareVersion_CalcCodeCrc32(); /* 计算当前代码区 CRC32，烧录文件变化会体现在这里。 */
-  MainboardSoftwareVersion_WriteBE32(&record[22], crc32); /* byte22~25 写入代码区 CRC32，用于和 HEX 解析结果比对。 */
-  MainboardSoftwareVersion_FillPageSum(record); /* byte30~31 写入 Page1 自身校验和，读取时先验证记录未损坏。 */
+  SwVersion_WriteBe32(&record[14], MAINBOARD_SW_VERSION_CODE_START); /* byte14~17 写入固定校验起始地址 0x08000000。 */
+  SwVersion_WriteBe32(&record[18], MAINBOARD_SW_VERSION_CODE_SIZE); /* byte18~21 写入固定校验长度 256KB。 */
+  crc32 = SwVersion_CodeCrc32(); /* 计算当前代码区 CRC32，烧录文件变化会体现在这里。 */
+  SwVersion_WriteBe32(&record[22], crc32); /* byte22~25 写入代码区 CRC32，用于和 HEX 解析结果比对。 */
+  SwVersion_FillPageSum(record); /* byte30~31 写入 Page1 自身校验和，读取时先验证记录未损坏。 */
 }
 
 /*
@@ -137,7 +137,7 @@ static void MainboardSoftwareVersion_BuildRecord(uint8_t *record)
  * 输入参数：record 为 32 字节 Page1 缓存。
  * 返回参数：MainboardSoftwareVersionStatus_t 状态码。
  */
-static MainboardSoftwareVersionStatus_t MainboardSoftwareVersion_ValidateRecord(const uint8_t *record)
+static MainboardSoftwareVersionStatus_t SwVersion_ValidateRecord(const uint8_t *record)
 {
   uint16_t stored_sum; /* Page1 byte30~31 存储的页和。 */
   uint16_t calc_sum; /* 根据 Page1 前 30 字节重新计算出的页和。 */
@@ -148,12 +148,13 @@ static MainboardSoftwareVersionStatus_t MainboardSoftwareVersion_ValidateRecord(
   }
 
   stored_sum = (uint16_t)(((uint16_t)record[30] << 8) | record[31]); /* 页和按大端保存在记录末尾。 */
-  calc_sum = MainboardSoftwareVersion_PageSum(record); /* 重新计算页和，用于发现 EEPROM 记录损坏。 */
+  calc_sum = SwVersion_PageSum(record); /* 重新计算页和，用于发现 EEPROM 记录损坏。 */
   if (stored_sum != calc_sum)
   {
     return MAINBOARD_SW_VERSION_STATUS_PAGE_SUM_FAIL; /* 页和失败时不再信任后续字段。 */
   }
 
+  /* 任一魔术字节不一致都说明 Page1 不是本软件版本记录，禁止继续按当前格式解析。 */
   if ((record[0] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC0) ||
       (record[1] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC1) ||
       (record[2] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC2) ||
@@ -162,10 +163,11 @@ static MainboardSoftwareVersionStatus_t MainboardSoftwareVersion_ValidateRecord(
     return MAINBOARD_SW_VERSION_STATUS_MAGIC_FAIL; /* 魔术字不匹配说明 Page1 不是主控软件版本记录。 */
   }
 
+  /* 格式号、CRC 算法或代码区范围任一不匹配时，上位机不能用该记录比较当前固件。 */
   if ((record[4] != MAINBOARD_SW_VERSION_FORMAT) ||
       (record[13] != MAINBOARD_SW_VERSION_CRC32_ALGO) ||
-      (MainboardSoftwareVersion_ReadBE32(&record[14]) != MAINBOARD_SW_VERSION_CODE_START) ||
-      (MainboardSoftwareVersion_ReadBE32(&record[18]) != MAINBOARD_SW_VERSION_CODE_SIZE))
+      (SwVersion_ReadBe32(&record[14]) != MAINBOARD_SW_VERSION_CODE_START) ||
+      (SwVersion_ReadBe32(&record[18]) != MAINBOARD_SW_VERSION_CODE_SIZE))
   {
     return MAINBOARD_SW_VERSION_STATUS_FORMAT_FAIL; /* 格式、算法或 256KB 范围不匹配时，上位机不能拿来直接比较。 */
   }
@@ -183,12 +185,12 @@ uint8_t MainboardSoftwareVersion_Sync(void)
   uint8_t current_record[MAINBOARD_SW_VERSION_RECORD_SIZE]; /* 当前固件计算出的目标 Page1 记录。 */
   uint8_t stored_record[MAINBOARD_SW_VERSION_RECORD_SIZE]; /* 从主控板 AT24C32 读出的旧 Page1 记录。 */
 
-  MainboardSoftwareVersion_BuildRecord(current_record); /* 每次启动都按当前 Flash 256KB 内容重新生成目标记录。 */
+  SwVersion_BuildRecord(current_record); /* 每次启动都按当前 Flash 256KB 内容重新生成目标记录。 */
   memcpy(s_mainboard_sw_version_record, current_record, MAINBOARD_SW_VERSION_RECORD_SIZE); /* 缓存当前目标记录，便于调试读取最近计算值。 */
 
-  if (IIC_AT24C32_ReadBytes(MAINBOARD_SW_VERSION_PAGE1_ADDR, stored_record, MAINBOARD_SW_VERSION_RECORD_SIZE) != 0U)
+  if (IIC_AT24C32_ReadBytes(MAINBOARD_SW_VERSION_PAGE1_ADDR, stored_record, MAINBOARD_SW_VERSION_RECORD_SIZE) != 0U) /* 只有 Page1 读取成功，才能比较旧记录并决定是否免写。 */
   {
-    if ((MainboardSoftwareVersion_ValidateRecord(stored_record) == MAINBOARD_SW_VERSION_STATUS_OK) &&
+    if ((SwVersion_ValidateRecord(stored_record) == MAINBOARD_SW_VERSION_STATUS_OK) &&
         (memcmp(stored_record, current_record, MAINBOARD_SW_VERSION_RECORD_SIZE) == 0))
     {
       return MAINBOARD_SW_VERSION_STATUS_OK; /* EEPROM 已经存着当前固件记录，不重复写，减少 AT24C32 磨损。 */
@@ -210,7 +212,7 @@ uint8_t MainboardSoftwareVersion_Sync(void)
     return MAINBOARD_SW_VERSION_STATUS_EEPROM_WRITE_FAIL; /* 读回和目标记录不同，说明写入过程不可靠。 */
   }
 
-  return (uint8_t)MainboardSoftwareVersion_ValidateRecord(stored_record); /* 最后再跑格式和页和校验，保证写入记录可被上位机解析。 */
+  return (uint8_t)SwVersion_ValidateRecord(stored_record); /* 最后再跑格式和页和校验，保证写入记录可被上位机解析。 */
 }
 
 /*
@@ -239,7 +241,7 @@ uint8_t MainboardSoftwareVersion_ReadPayload(uint8_t *payload, uint16_t payload_
     return 1U;
   }
 
-  status = MainboardSoftwareVersion_ValidateRecord(s_mainboard_sw_version_record); /* 读取成功后校验 Page1 自身结构。 */
+  status = SwVersion_ValidateRecord(s_mainboard_sw_version_record); /* 读取成功后校验 Page1 自身结构。 */
   if ((sync_status == MAINBOARD_SW_VERSION_STATUS_EEPROM_READ_FAIL) ||
       (sync_status == MAINBOARD_SW_VERSION_STATUS_EEPROM_WRITE_FAIL))
   {

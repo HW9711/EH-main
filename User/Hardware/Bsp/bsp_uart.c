@@ -41,6 +41,7 @@ HAL_StatusTypeDef Bsp_UartInit(bsp_uart_port_t port, uint32_t baud_rate)
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 端口号没有对应 HAL 句柄时拒绝初始化，避免访问空句柄并误改其它串口。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -55,6 +56,7 @@ HAL_StatusTypeDef Bsp_UartDeInit(bsp_uart_port_t port)
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 端口号无效时直接返回错误，不能把空句柄交给 HAL 反初始化。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -67,6 +69,7 @@ HAL_StatusTypeDef Bsp_UartTransmit(bsp_uart_port_t port, uint8_t *p_data, uint16
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 未找到指定串口时禁止发送，避免错误端口造成空指针访问或数据发错通道。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -79,6 +82,7 @@ HAL_StatusTypeDef Bsp_UartAbort(bsp_uart_port_t port)
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 无效端口没有可中止的硬件事务，返回错误并保持所有真实串口不变。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -91,6 +95,7 @@ HAL_StatusTypeDef Bsp_UartReceiveDma(bsp_uart_port_t port, uint8_t *p_data, uint
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 无效端口不能启动 DMA 接收，防止 HAL 使用空串口句柄配置 DMA。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -103,6 +108,7 @@ HAL_StatusTypeDef Bsp_UartDmaStop(bsp_uart_port_t port)
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 无效端口没有可停止的 DMA，返回错误且不影响其它串口接收。 */
     if (uart == 0)
     {
         return HAL_ERROR;
@@ -115,6 +121,7 @@ uint32_t Bsp_UartRxDmaRemain(bsp_uart_port_t port)
 {
     UART_HandleTypeDef *uart = Bsp_UartHandle(port);
 
+    /* 串口或其 RX DMA 句柄未建立时按剩余 0 返回，避免读取无效 DMA 寄存器。 */
     if ((uart == 0) || (uart->hdmarx == 0))
     {
         return 0;

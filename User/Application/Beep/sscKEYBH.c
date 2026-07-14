@@ -31,7 +31,7 @@ void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	// 	control_types=control_type;
 	// 	control_keys=control_key;
 	// }
-	if(KeyBehivQueue == NULL) return;
+	if(KeyBehivQueue == NULL) return; /* 按键队列尚未创建时不能投递事件，直接返回避免访问空句柄。 */
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
@@ -254,6 +254,7 @@ void PlugunPLUGActive(uint8_t key_value)
  */
 void KeyBehaviors()
 {
+	/* 任务可能先于队列有效消息运行，句柄为空时本周期不做任何按键分发。 */
 	if(KeyBehivQueue == NULL)
 	return;
 	KeyBehMessage_t msg={0};

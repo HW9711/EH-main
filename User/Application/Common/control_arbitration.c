@@ -87,7 +87,7 @@ uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
  * 输入参数：无，直接读取 WorkMessage.driver_speed_feedback。
  * 返回参数：true 表示驱动反馈转速仍大于停止阈值；false 表示反馈已经低于停止阈值。
  */
-static bool ControlArbitration_IsMotorFeedbackActive(void)
+static bool ControlArbitration_IsMotorMoving(void)
 {
 	/* 反馈转速来自 UART1 驱动板回包，用于避免刚下发停止命令但电机还未真实停稳时提前释放控制权。 */
 	return (WorkMessage.driver_speed_feedback > CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD);
@@ -107,7 +107,7 @@ static bool ControlArbitration_IsMotorBusy(void)
 	}
 
 	/* runflag_work 清零后继续看驱动反馈，保证仲裁释放跟真实停转绑定。 */
-	return ControlArbitration_IsMotorFeedbackActive();
+	return ControlArbitration_IsMotorMoving();
 }
 
 /*
@@ -115,7 +115,7 @@ static bool ControlArbitration_IsMotorBusy(void)
  * 输入参数：无，读取当前 owner 和电机忙状态。
  * 返回参数：无；满足释放条件时把 s_control_owner 置为 CONTROL_OWNER_NONE。
  */
-static void ControlArbitration_ReleaseLocalOwnerIfMotorIdle(void)
+static void ControlArbitration_ReleaseLocalIfIdle(void)
 {
 	/* 外部通信必须由主动退出、超时释放或急停释放，不能因为本地电机停稳自动退出。 */
 	if (s_control_owner == CONTROL_OWNER_EXTERNAL)
@@ -155,7 +155,7 @@ static bool ControlArbitration_IsValidOwner(uint8_t owner)
  * 输入参数：control_type 按键消息来源，取 JTKey/HANDLEKey/SCREENKey/HMIkey/PLUGunPLUG 等。
  * 返回参数：CONTROL_OWNER_*；插拔和未知来源返回 CONTROL_OWNER_NONE。
  */
-static uint8_t ControlArbitration_GetOwnerByKeySource(uint8_t control_type)
+static uint8_t ControlArbitration_OwnerFromKey(uint8_t control_type)
 {
 	/* 脚踏队列消息统一归属脚踏控制来源。 */
 	if (control_type == JTKey)
@@ -240,7 +240,7 @@ uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value)
  * 输入参数：control_type 为按键来源；control_key 为来源内的业务按键值。
  * 返回参数：true 表示该键只调整速度、频率或泵流量；false 表示仍按普通运行控制键仲裁。
  */
-static bool ControlArbitration_IsRuntimeAdjustmentKey(uint8_t control_type, uint8_t control_key)
+static bool ControlArbitration_IsRuntimeKey(uint8_t control_type, uint8_t control_key)
 {
 	/* 手柄实体速度加减只修改当前目标速度，不改变脚控、手控、触控或外控的运行归属。 */
 	if (control_type == HANDLEKey)
@@ -295,7 +295,7 @@ static bool ControlArbitration_IsRuntimeAdjustmentKey(uint8_t control_type, uint
  * 输入参数：control_type 为按键来源；control_key 为来源内的泵业务按键值。
  * 返回参数：true 表示应进入 PUMPActive 继续按泵类型、在线状态和排空状态判断；false 表示不是泵业务键。
  */
-static bool ControlArbitration_IsPumpBusinessKey(uint8_t control_type, uint8_t control_key)
+static bool ControlArbitration_IsPumpKey(uint8_t control_type, uint8_t control_key)
 {
 	/* 脚踏短按调档、长按启停/排空、轻排开始/停止都通过同一个泵业务函数处理。 */
 	if (control_type == JTKey)
@@ -357,7 +357,7 @@ bool ControlArbitration_IsOwner(uint8_t owner)
 bool ControlArbitration_IsBusyByOther(uint8_t owner)
 {
 	/* 查询前先释放已经停稳的本地 owner，避免停止后残留锁挡住下一种本地控制方式。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
+	ControlArbitration_ReleaseLocalIfIdle();
 
 	/* 没有 owner 时表示电机仲裁空闲，任意本地来源都可以尝试控制。 */
 	if (s_control_owner == CONTROL_OWNER_NONE)
@@ -395,7 +395,7 @@ bool ControlArbitration_TryEnter(uint8_t owner)
 	}
 
 	/* 申请前先清掉已经停稳的本地 owner，保证电机停止后其它本地模式能接管。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
+	ControlArbitration_ReleaseLocalIfIdle();
 
 	/* 已经持有控制权时重复申请按成功处理。 */
 	if (s_control_owner == owner)
@@ -466,7 +466,7 @@ void ControlArbitration_RefreshMotorOwner(void)
 {
 	Pubinterface_ServiceTransientAlarms(); /* 电机任务周期统一维护三类限时弹窗，不把报警生命周期散落在仲裁模块。 */
 	/* 统一复用本地 owner 释放逻辑，保证手柄、脚踏、屏幕停止后不因反馈延迟永久占用。 */
-	ControlArbitration_ReleaseLocalOwnerIfMotorIdle();
+	ControlArbitration_ReleaseLocalIfIdle();
 }
 
 /*
@@ -577,7 +577,7 @@ void ControlArbitration_ReleaseExternalControl(void)
  */
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t control_key)
 {
-	uint8_t key_owner = ControlArbitration_GetOwnerByKeySource(control_type);
+	uint8_t key_owner = ControlArbitration_OwnerFromKey(control_type);
 
 	/* 手柄插拔事件只维护在线状态和通道记忆，不属于运行控制，互斥期间仍要接收。 */
 	if (control_type == PLUGunPLUG)
@@ -594,7 +594,7 @@ bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t contro
 	}
 
 	/* 运行参数调节允许跨本地 owner 生效；但外控已独占时，本地脚踏/屏幕/手柄不能绕过外控锁。 */
-	if (ControlArbitration_IsRuntimeAdjustmentKey(control_type, control_key))
+	if (ControlArbitration_IsRuntimeKey(control_type, control_key))
 	{
 		if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && key_owner != CONTROL_OWNER_EXTERNAL)
 		{
@@ -608,7 +608,7 @@ bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t contro
 	}
 
 	/* 泵业务和手柄电机 owner 分离，先放行到 PUMPActive，再由泵类型、在线状态和排空状态判断。 */
-	if (ControlArbitration_IsPumpBusinessKey(control_type, control_key))
+	if (ControlArbitration_IsPumpKey(control_type, control_key))
 	{
 		if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && key_owner != CONTROL_OWNER_EXTERNAL)
 		{

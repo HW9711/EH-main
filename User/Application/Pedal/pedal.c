@@ -202,6 +202,11 @@ void Pedal_ReadStorageHLValue(void)
 //接收串口数据任务，收到的数据放入缓冲区
 // 帧头byte | 数据长度byte | 数据类型byte | *data[byte] | crc8
 //============================================================================
+/*
+ * 函数功能：解析 UART4 脚踏板回包，更新脚踏类型、实时 AD 值、定标值和定标页面按键。
+ * 输入参数：无，函数直接读取 UART4 DMA 接收缓冲区。
+ * 返回参数：无；CRC 合法的回包会写入 PedalCalibrationData 并刷新脚踏在线状态。
+ */
 void PedalRecv_Scan(void)
 {
   uint16_t crc = 0;
@@ -227,20 +232,25 @@ void PedalRecv_Scan(void)
 
 	    //JT_Connect_Flag = Connect;
 	    //实时采样的脚踏数据 FE EF    B6 C1       01        01     DATA_H DATA_L CRCH CRCL
+	    /* CRC 正确才允许更新定标数据，避免串口噪声把错误 AD 值保存为脚踏标定点。 */
 	    if (crc == ((dat1[8] << 8) + dat1[9]))
 	    {	
+	      /* B6 C1 是脚踏主动上报的实时采样帧，用于识别踏板类型并刷新左右 AD 值。 */
 	      if ((dat1[2] == 0xB6) && (dat1[3] == 0xC1))
 		    {
 					
-					if ((dat1[4] == 0x01) && (dat1[5] == 0x01)) 
+					/* 01 01 表示单踏板，后续只解析一组实时 AD 数据。 */
+					if ((dat1[4] == 0x01) && (dat1[5] == 0x01))
 					{
 						PedalCalibrationData.FootPedalType = 0;   // 单踏板：定标页统一从 PedalCalibrationData 读取类型，不再依赖旧全局数据仓库。
 					}
+					/* 01 0A/0B 分别表示双踏板左、右通道，两种回包都确认当前设备为双踏板。 */
           else if(((dat1[4] == 0x01) && (dat1[5] == 0x0A)) || ((dat1[4] == 0x01) && (dat1[5] == 0x0B))) 
           {
 						PedalCalibrationData.FootPedalType = 1;		// 双踏板：保留原有左右 AD 值解析规则，仅替换脚踏类型数据源。
 					}
 					
+					/* 双踏板必须按通道码分别保存左右 AD，避免一侧采样覆盖另一侧。 */
 					if (PedalCalibrationData.FootPedalType == 1)
 					{
 						
@@ -255,7 +265,7 @@ void PedalRecv_Scan(void)
 								 
 							 }								 
 						}
-						else
+						else /* 单踏板只使用统一 AD 字段，保持定标页原有单路显示逻辑。 */
 						{
 							if ((dat1[4] == 0x01) && (dat1[5] == 0x01))
 							{
@@ -265,8 +275,9 @@ void PedalRecv_Scan(void)
 						}				
 		    }
 		    //主控板发送命令给脚踏板，脚踏板回复的读取已存储
-		    else if ((dat1[2] == 0xD0) && (dat1[3] == 0xB4))  
+		    else if ((dat1[2] == 0xD0) && (dat1[3] == 0xB4))
 		    {
+					/* 双踏板保存左右各自的低、中、高点，运行任务会分别使用两套阈值。 */
 					if (PedalCalibrationData.FootPedalType == 1)
 					{
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
@@ -298,7 +309,7 @@ void PedalRecv_Scan(void)
 						}	
 						
 					}						
-          else if(PedalCalibrationData.FootPedalType == 0)
+          else if(PedalCalibrationData.FootPedalType == 0) /* 单踏板只保存一套定标值，并同步兼容定标页使用的右侧显示字段。 */
           {
 						if((dat1[4] == 0xB5) && (dat1[5] == 0xCD))//B5 CD 表示低的低值右
 						{
@@ -321,6 +332,7 @@ void PedalRecv_Scan(void)
 					}
 		    }
 		    //电机处于停止状态，响应按键
+		    /* 电机停止时才处理 0xDD 定标按键帧，避免运行中按键误改定标页面参数。 */
 		    else if ((WorkMessage.runflag_work == false) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0xDD))
 		    {
 		      switch (dat1[7])
@@ -333,6 +345,7 @@ void PedalRecv_Scan(void)
 			      default : break;
 		      }
 		    }
+		    /* 0x02 是另一版脚踏固件的兼容按键帧，保持与 0xDD 帧相同的定标页面事件映射。 */
 		    else if ((WorkMessage.runflag_work == false) && (dat1[2] == 0xBB) && (dat1[3] == 0xAA) && (dat1[4] == 0xCC) && (dat1[5] == 0x02))
 		    {
 		      switch (dat1[7])
@@ -362,10 +375,16 @@ void PedalRecv_Scan(void)
 * @retval None
 */
 /* USER CODE END Header_PEDALRECVTaskFunc */
+/*
+ * 函数功能：周期检查脚踏 UART4 定标回包，并在外控占用时暂停本地脚踏数据处理。
+ * 输入参数：event 为调度器事件参数，当前任务不使用该值。
+ * 返回参数：无。
+ */
 void PEDALRECVTaskFunc(uint32_t event)
 {
   /* USER CODE BEGIN PEDALRECVTaskFunc */
   /* Infinite loop */
+	/* 外控占用期间暂停本地脚踏定标解析，避免脚踏页面状态与外控运行状态同时变化。 */
 	if(WorkMessage.hmiactive_work)
 		return;
 		PedalRecv_Scan();

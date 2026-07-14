@@ -21,16 +21,20 @@ void IIC_Init(void)
   SCL_H();
 }
 
-//============================================================================
-//============================================================================
+/*
+ * 函数功能：尝试释放被从设备拉低的软件 IIC 总线，使后续 EEPROM 访问可以重新产生起始信号。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void IIC_Reset(void)
 {
   uint8_t i;
-  SDA_H();
-  Delay_us(10);
+  SDA_H(); /* 主机先释放 SDA，随后读取的低电平才表示从设备仍占用总线。 */
+  Delay_us(10); /* 给 GPIO 开漏线留出稳定时间，避免刚切换方向就误判总线状态。 */
 
   if(SDA_STAT == 0)
   {
+	  /* SDA 被从设备卡低时补发 9 个 SCL，推动从设备移出残留字节并释放总线。 */
 	  for(i = 0; i < 9; i ++)
 	  {
 	    SCL_H();
@@ -71,8 +75,11 @@ static void Signal_Stop(void)
   Delay_us(10);
 }
 
-//============================================================================
-//============================================================================
+/*
+ * 函数功能：等待从设备在第 9 个时钟拉低 SDA 应答，超时后主动停止本次事务。
+ * 输入参数：无。
+ * 返回参数：0 表示收到 ACK；1 表示等待超时并已发送停止信号。
+ */
 uint8_t IIC_WaitAck(void)
 {
   uint8_t errCount = 0;
@@ -87,8 +94,8 @@ uint8_t IIC_WaitAck(void)
     errCount++;
     if(errCount > 200)
 	  {
-	    Signal_Stop();
-      ack = 1;
+	    Signal_Stop(); /* 从设备长时间不应答时立即释放总线，避免后续事务一直处于占用状态。 */
+      ack = 1; /* 把本次事务标记为失败，由上层决定重试或上报 EEPROM 异常。 */
       break;
     }
   }
@@ -129,8 +136,11 @@ void IIC_NAck(void)
   Delay_us(10);
 }
 
-//============================================================================
-//============================================================================
+/*
+ * 函数功能：按高位在前的 IIC 时序发送一个字节，ACK 由调用方随后单独检查。
+ * 输入参数：wdata 为待发送字节。
+ * 返回参数：固定返回 1，保持旧调用接口不变。
+ */
 static uint8_t Write_Byte(uint8_t wdata)
 {
   uint8_t i,mdata;
@@ -143,11 +153,11 @@ static uint8_t Write_Byte(uint8_t wdata)
 		Delay_us(10);
 	  if(mdata & 0x80)
 	  {
-	    SDA_H();
+	    SDA_H(); /* 当前最高位为 1 时释放 SDA，由上拉电阻形成高电平。 */
 	  }
 	  else
 	  {
-	    SDA_L();
+	    SDA_L(); /* 当前最高位为 0 时由主机主动拉低 SDA。 */
 	  }
 
 	  Delay_us(10);
@@ -162,8 +172,11 @@ static uint8_t Write_Byte(uint8_t wdata)
 	return 1;
 }
 
-//============================================================================
-//============================================================================
+/*
+ * 函数功能：按高位在前的 IIC 时序读取一个字节，并在字节末尾发送 ACK 或 NACK。
+ * 输入参数：ack 为 1 时继续连续读取并发送 ACK，为 0 时结束读取并发送 NACK。
+ * 返回参数：本次从 SDA 采样得到的 8 位数据。
+ */
 static uint8_t Read_Byte(uint8_t ack)
 {
   uint8_t i,rdata = 0;
@@ -179,13 +192,14 @@ static uint8_t Read_Byte(uint8_t ack)
 	  SCL_H();
 	  Delay_us(5);
 
+	  /* SCL 拉高后的 SDA 为高表示当前接收位为 1，需要写入结果最低位。 */
 	  if(SDA_STAT > 0)
 	    rdata++;
 
 	  Delay_us(5);
   }
 
-  (ack == 1) ? IIC_Ack() : IIC_NAck();
+  (ack == 1) ? IIC_Ack() : IIC_NAck(); /* 非最后字节用 ACK 请求继续发送，最后字节用 NACK 结束连续读。 */
 
   return rdata;
 }
@@ -206,6 +220,7 @@ uint8_t IIC_WriteRead_Test(void)
 
 	for (i = 0; i < 3; i++)
 	{
+		/* 读回任一字节不同都判定 EEPROM 自检失败，避免接受部分写入的数据。 */
 		if (temp[i] != temp1[i])
 			return 0;
 	}
@@ -224,6 +239,7 @@ uint8_t IIC_AT24CXX_ReadOneByte(uint16_t ReadAddr)
 
   Signal_Start();
 
+  /* 容量大于 AT24C16 的器件使用 16 位内部地址，需要先发送地址高字节。 */
   if (EE_TYPE > AT24C16)
   {
 	  Write_Byte(0xA0);	   //发送写命令
@@ -259,6 +275,7 @@ void IIC_AT24CXX_WriteOneByte(uint16_t WriteAddr, uint8_t DataToWrite)
 {
   Signal_Start();
 
+  /* 容量大于 AT24C16 时读取同样使用 16 位内部地址，先装载地址高字节。 */
   if (EE_TYPE > AT24C16)
   {
 	  Write_Byte(0xA0);	    //发送写命令
@@ -348,7 +365,7 @@ uint8_t IIC_AT24C32_ReadBytes(uint16_t ReadAddr, uint8_t *pBuffer, uint16_t NumT
  * 输入参数：WriteAddr 为 AT24C32 内部起始地址，pBuffer 为待写数据，NumToWrite 为本次写入字节数。
  * 返回参数：1 表示写入事务已被 EEPROM 应答，0 表示参数非法或 EEPROM 未应答。
  */
-static uint8_t IIC_AT24C32_WriteChunk(uint16_t WriteAddr, const uint8_t *pBuffer, uint16_t NumToWrite)
+static uint8_t Iic_WriteAt24Chunk(uint16_t WriteAddr, const uint8_t *pBuffer, uint16_t NumToWrite)
 {
   uint16_t index; /* 当前写入字节下标，用于逐字节等待 EEPROM ACK。 */
 
@@ -415,7 +432,7 @@ uint8_t IIC_AT24C32_WriteBytes(uint16_t WriteAddr, const uint8_t *pBuffer, uint1
     page_left = (uint16_t)(AT24C32_IIC_PAGE_SIZE - (WriteAddr % AT24C32_IIC_PAGE_SIZE)); /* 计算当前页剩余容量。 */
     write_len = (NumToWrite > page_left) ? page_left : NumToWrite; /* 单次写入不能跨页，否则 AT24C32 会回卷覆盖本页前部。 */
 
-    if (IIC_AT24C32_WriteChunk(WriteAddr, pBuffer, write_len) == 0U)
+    if (Iic_WriteAt24Chunk(WriteAddr, pBuffer, write_len) == 0U)
     {
       return 0U; /* 任一分页写失败时立即返回，让上层保留旧版本状态。 */
     }

@@ -1,4 +1,4 @@
-﻿#include "soft_uart.h"
+#include "soft_uart.h"
 
 #include "FreeRTOS.h"
 #include "kernel_scheduler.h"
@@ -143,17 +143,17 @@ static uint32_t SoftUart_GetTimerClockHz(const SoftUartChannelContext *ctx);
 static bool SoftUart_AnyReceiverBusy(void);
 static void SoftUart_WriteTx(const SoftUartChannelContext *channel, GPIO_PinState level);
 static GPIO_PinState SoftUart_ReadRx(const SoftUartChannelContext *channel);
-static bool SoftUart_TestForwardChannelSelected(sim_uart_channel_t channel);
+static bool SoftUart_IsForwardSource(sim_uart_channel_t channel);
 static void SoftUart_TestForwardFrame(sim_uart_channel_t channel, const uint8_t *data, uint16_t length);
 static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length);
 static uint16_t Cs1237_ReadU16Le(const uint8_t *data);
 static uint32_t Cs1237_ReadU32Le(const uint8_t *data);
 static bool Cs1237_FrameValid(const uint8_t *frame);
-static pumpMessage_t *Cs1237_GetPumpMessageForChannel(sim_uart_channel_t channel);
+static pumpMessage_t *Cs1237_GetPump(sim_uart_channel_t channel);
 static void Cs1237_BeepOnceIfNoAlarm(void);
-static void Cs1237_RefreshPumpDisplayByChannel(sim_uart_channel_t channel);
+static void Cs1237_RefreshPumpUi(sim_uart_channel_t channel);
 static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame);
-static void Cs1237_ServicePumpLossTimeout(void);
+static void Cs1237_CheckPumpTimeout(void);
 static void Cs1237_ParserResync(Cs1237FrameParser *parser);
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data);
 static void delay_us(uint32_t us);
@@ -167,6 +167,7 @@ static bool SoftUart_ChannelValid(sim_uart_channel_t channel)
  * 所有对外接口都会先经过该函数做统一的通道合法性检查。 */
 static SoftUartChannelContext *SoftUart_GetChannel(sim_uart_channel_t channel)
 {
+    /* 通道号越界时拒绝取数组元素，避免后续访问错误 GPIO、定时器和队列。 */
     if (!SoftUart_ChannelValid(channel))
     {
         return NULL;
@@ -198,7 +199,7 @@ static bool SoftUart_AnyReceiverBusy(void)
  * 输入参数：channel 为压力模块模拟串口通道，当前线束要求 SIM_UART_1/PE4 接 A 泵压力传感器，SIM_UART_2/PE6 接 B 泵压力传感器。
  * 返回参数：有效通道返回对应 pumpMessage_t 指针，非法通道返回 NULL。
  */
-static pumpMessage_t *Cs1237_GetPumpMessageForChannel(sim_uart_channel_t channel)
+static pumpMessage_t *Cs1237_GetPump(sim_uart_channel_t channel)
 {
     if (channel == SIM_UART_1)
     {
@@ -231,7 +232,7 @@ static void Cs1237_BeepOnceIfNoAlarm(void)
  * 输入参数：channel 为压力模块模拟串口通道。
  * 返回参数：无。
  */
-static void Cs1237_RefreshPumpDisplayByChannel(sim_uart_channel_t channel)
+static void Cs1237_RefreshPumpUi(sim_uart_channel_t channel)
 {
     if (channel == SIM_UART_1)
     {
@@ -255,7 +256,7 @@ static GPIO_PinState SoftUart_ReadRx(const SoftUartChannelContext *channel)
 
 /* 判断当前字节是否需要做 UART10 测试透传。
  * 该配置默认关闭，只有显式选择某一路时才会额外输出。 */
-static bool SoftUart_TestForwardChannelSelected(sim_uart_channel_t channel)
+static bool SoftUart_IsForwardSource(sim_uart_channel_t channel)
 {
     switch (SOFT_UART_TEST_FORWARD_SOURCE)
     {
@@ -275,12 +276,14 @@ static bool SoftUart_TestForwardChannelSelected(sim_uart_channel_t channel)
  * 这里不添加任何前缀、换行或格式化文本，便于串口助手直接观察真实帧内容。 */
 static void SoftUart_TestForwardFrame(sim_uart_channel_t channel, const uint8_t *data, uint16_t length)
 {
+    /* 缓冲为空或长度为 0 时没有可透传内容，保持测试串口静默。 */
     if ((data == NULL) || (length == 0U))
     {
         return;
     }
 
-    if (!SoftUart_TestForwardChannelSelected(channel))
+    /* 仅透传配置选中的压力通道，避免 A/B 原始字节混在同一测试输出中。 */
+    if (!SoftUart_IsForwardSource(channel))
     {
         return;
     }
@@ -298,6 +301,7 @@ static void SoftUart_InitTimingBase(void)
 {
     uint32_t start;
 
+    /* 任一微秒计时源已经就绪时不重复初始化，避免重置正在使用的计数器。 */
     if (s_dwt_ready || s_tim7_ready)
     {
         return;
@@ -313,6 +317,7 @@ static void SoftUart_InitTimingBase(void)
     }
     s_dwt_ready = (DWT->CYCCNT != start) ? 1U : 0U;
 
+    /* 芯片未开放 DWT 时再启用 TIM7 作为微秒延时后备，保证位时序仍可用。 */
     if (!s_dwt_ready)
     {
         start = __HAL_TIM_GET_COUNTER(&htim7);
@@ -330,6 +335,7 @@ static void SoftUart_InitTimingBase(void)
  */
 static void delay_us(uint32_t us)
 {
+    /* DWT 可用时优先按 CPU 周期延时，提供软件 UART 最稳定的位宽。 */
     if (s_dwt_ready)
     {
         uint32_t start = DWT->CYCCNT;
@@ -341,6 +347,7 @@ static void delay_us(uint32_t us)
         return;
     }
 
+    /* DWT 不可用但 TIM7 已就绪时，用 1MHz 定时器完成同等微秒等待。 */
     if (s_tim7_ready)
     {
         uint32_t remaining = us;
@@ -350,6 +357,7 @@ static void delay_us(uint32_t us)
         {
             uint32_t now = __HAL_TIM_GET_COUNTER(&htim7);
             uint32_t elapsed = (now >= start) ? (now - start) : (0x10000U + now - start);
+            /* 已累计到本段所需微秒数时结束轮询，继续发送或采样下一位。 */
             if (elapsed >= remaining)
             {
                 break;
@@ -360,6 +368,7 @@ static void delay_us(uint32_t us)
         return;
     }
 
+    /* 两个微秒计时源都不可用时，整毫秒部分退化为 HAL 延时。 */
     if (us >= 1000U)
     {
         HAL_Delay(us / 1000U);
@@ -538,6 +547,7 @@ static void SoftUart_InitChannelGpio(sim_uart_channel_t channel)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
 
+    /* 非法通道没有固定 GPIO 映射，不能配置未知引脚或改变其它外设。 */
     if (ctx == NULL)
     {
         return;
@@ -564,11 +574,13 @@ static void SoftUart_RingPushFromIsr(sim_uart_channel_t channel, uint8_t data)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
 
+    /* 非法通道没有环形缓冲，不能在中断中写入未知内存。 */
     if (ctx == NULL)
     {
         return;
     }
 
+    /* 环形缓冲已满时只记录溢出并丢弃新字节，禁止覆盖尚未搬走的压力数据。 */
     if (ctx->ring_count >= SOFT_UART_ISR_BUFFER_SIZE)
     {
         ctx->buffer_overflow_count++;
@@ -592,6 +604,7 @@ static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
     bool has_data = false;
     uint32_t primask; /* 保存进入临界区前的全局中断状态，退出时按原状态恢复，避免破坏外层关中断状态。 */
 
+    /* 通道或输出指针无效时不能安全取字节，直接报告缓冲无数据。 */
     if ((ctx == NULL) || (data == NULL))
     {
         return false;
@@ -599,6 +612,7 @@ static bool SoftUart_RingPopTask(sim_uart_channel_t channel, uint8_t *data)
 
     primask = __get_PRIMASK(); /* 软串口 ISR 优先级高于 FreeRTOS 屏蔽阈值，BASEPRI 不能保护下面的环形缓冲共享索引。 */
     __disable_irq(); /* 暂停所有中断，防止 TIM11/TIM13 ISR 写索引时任务同时修改同一通道计数。 */
+    /* 缓冲中确有数据时才推进尾索引，空缓冲保持索引和计数不变。 */
     if (ctx->ring_count > 0U)
     {
         *data = ctx->ring_buffer[ctx->ring_tail];
@@ -650,6 +664,7 @@ static void SoftUart_ProcessSample(sim_uart_channel_t channel)
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel); /* 由独立定时器中断明确选择通道。 */
     GPIO_PinState pin_state;
 
+    /* 非法通道没有接收上下文，定时中断不能推进任何状态机。 */
     if (ctx == NULL)
     {
         return;
@@ -707,6 +722,11 @@ static void SoftUart_ProcessSample(sim_uart_channel_t channel)
     }
 }
 
+/*
+ * 函数功能：按 CRC16/MODBUS 规则计算压力上报帧校验值，防止错误字节进入泵状态。
+ * 输入参数：data 为待校验数据起始地址；length 为参与校验的字节数。
+ * 返回参数：计算得到的 16 位 CRC，低字节在压力帧中先发送。
+ */
 static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length)
 {
     uint16_t crc = 0xFFFFU;
@@ -716,6 +736,7 @@ static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length)
         crc ^= data[i];
         for (uint8_t bit = 0U; bit < 8U; bit++)
         {
+            /* CRC 最低位为 1 时右移后异或 MODBUS 多项式，否则只右移。 */
             if ((crc & 0x0001U) != 0U)
             {
                 crc = (uint16_t)((crc >> 1U) ^ 0xA001U);
@@ -730,11 +751,21 @@ static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length)
     return crc;
 }
 
+/*
+ * 函数功能：从压力帧中读取一个低字节在前的 16 位无符号数。
+ * 输入参数：data 指向字段的低字节。
+ * 返回参数：按小端顺序组合后的 16 位数值。
+ */
 static uint16_t Cs1237_ReadU16Le(const uint8_t *data)
 {
     return (uint16_t)data[0] | (uint16_t)((uint16_t)data[1] << 8U);
 }
 
+/*
+ * 函数功能：从压力帧中读取一个低字节在前的 32 位无符号数。
+ * 输入参数：data 指向字段的最低字节。
+ * 返回参数：按小端顺序组合后的 32 位数值。
+ */
 static uint32_t Cs1237_ReadU32Le(const uint8_t *data)
 {
     return (uint32_t)data[0] |
@@ -758,6 +789,7 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
         return false; /* 帧头不匹配时不能作为压力帧处理，避免错位数据刷新泵在线状态。 */
     }
 
+    /* 协议版本、消息类型或载荷长度任一不符时，候选数据不能作为压力上报帧。 */
     if ((frame[2] != CS1237_PROTOCOL_VER) ||
         (frame[3] != CS1237_MSG_TYPE_REPORT) ||
         (frame[4] != CS1237_PAYLOAD_LENGTH))
@@ -781,7 +813,7 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
  * 输入参数：device_code 为下位机上报帧第 16 字节设备码。
  * 返回参数：DRAWWATER/INJECTWATER/POURWATER 表示已识别泵类型，0 表示备用码或未知码。
  */
-static uint16_t Cs1237_MapDeviceCodeToPumpType(uint8_t device_code)
+static uint16_t Cs1237_DecodePumpType(uint8_t device_code)
 {
     /* 设备码只在这里转换为业务类型，避免外部通信或手柄联动路径再固定覆盖泵类型。 */
     switch (device_code)
@@ -809,7 +841,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     uint32_t weight_x10 = Cs1237_ReadU32Le(&frame[10]);
     uint16_t threshold_g = Cs1237_ReadU16Le(&frame[14]);
     uint8_t device_code = frame[16];
-    uint16_t pump_type = Cs1237_MapDeviceCodeToPumpType(device_code);
+    uint16_t pump_type = Cs1237_DecodePumpType(device_code);
     bool new_online_flag = (pump_type != 0U);
     uint16_t old_pump_type;
     bool old_online_flag;
@@ -817,7 +849,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     bool pump_display_changed;
     uint32_t now_tick = HAL_GetTick();
 
-    pump_message = Cs1237_GetPumpMessageForChannel(channel);
+    pump_message = Cs1237_GetPump(channel);
     if (pump_message == NULL)
     {
         return; /* 非法通道不能写泵状态，也不能刷新屏幕，保持原有运行状态不变。 */
@@ -857,6 +889,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
                             pump_online_changed); /* 类型或在线状态变化才触发 A/B 对应区域重绘，保持 A 左 B 右不换位。 */
     taskEXIT_CRITICAL();
 
+    /* 泵类型或在线状态发生变化时才重装默认速度并刷新对应泵区，避免每帧覆盖用户设定。 */
     if (pump_display_changed)
     {
         if(pump_message->type==INJECTWATER)
@@ -865,13 +898,13 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
         }
         else if(pump_message->type==POURWATER)
         {
-        pump_message->speed_work=200;
+        pump_message->speed_work=200; /* 灌注泵刚识别时装载 200 档默认设定，后续屏幕调速从该值继续。 */
         }
         else if(pump_message->type==DRAWWATER)
         {
-        pump_message->speed_work=10;
+        pump_message->speed_work=10; /* 抽水泵刚识别时装载 10 档默认设定，避免上线后保持零速。 */
         }
-        Cs1237_RefreshPumpDisplayByChannel(channel); /* 泵类型或在线状态变化后立即刷新对应泵区，保证屏幕可用态同步。 */
+        Cs1237_RefreshPumpUi(channel); /* 泵类型或在线状态变化后立即刷新对应泵区，保证屏幕可用态同步。 */
     }
 
     if (pump_online_changed)
@@ -885,14 +918,14 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Cs1237_ServicePumpLossTimeout(void)
+static void Cs1237_CheckPumpTimeout(void)
 {
     uint32_t now_tick = HAL_GetTick();
 
     for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
     {
         sim_uart_channel_t channel = (sim_uart_channel_t)i;
-        pumpMessage_t *pump_message = Cs1237_GetPumpMessageForChannel(channel);
+        pumpMessage_t *pump_message = Cs1237_GetPump(channel);
         bool loss_confirmed = false;
         uint32_t loss_age_ms; /* 当前距离最近一次有效压力帧的时间，用于区分正常间隔、疑似丢失和确认离线。 */
         uint32_t suspect_age_ms; /* 当前疑似丢失已经持续的时间，用于避免一次错帧就清在线状态。 */
@@ -949,12 +982,17 @@ static void Cs1237_ServicePumpLossTimeout(void)
 
         if (loss_confirmed != false)
         {
-            Cs1237_RefreshPumpDisplayByChannel(channel); /* 离线状态已经写入公共结构，立即把对应泵区刷为不可用。 */
+            Cs1237_RefreshPumpUi(channel); /* 离线状态已经写入公共结构，立即把对应泵区刷为不可用。 */
             Cs1237_BeepOnceIfNoAlarm(); /* 泵丢失边沿蜂鸣一次，报警期间不抢占报警蜂鸣。 */
         }
     }
 }
 
+/*
+ * 函数功能：压力候选帧校验失败后，在现有缓存内寻找下一处 AA55 帧头并恢复解析位置。
+ * 输入参数：parser 为当前通道的压力帧解析上下文。
+ * 返回参数：无；函数直接更新缓存内容和有效长度。
+ */
 static void Cs1237_ParserResync(Cs1237FrameParser *parser)
 {
     uint8_t new_length = 0U;
@@ -964,64 +1002,70 @@ static void Cs1237_ParserResync(Cs1237FrameParser *parser)
         if ((parser->frame[start] == CS1237_HEADER_0) &&
             (parser->frame[start + 1U] == CS1237_HEADER_1))
         {
-            new_length = (uint8_t)(parser->length - start);
+            new_length = (uint8_t)(parser->length - start); /* 缓存内部已有下一帧头时，只保留该帧头之后的数据，避免粘包错位后整段丢弃。 */
             for (uint8_t i = 0U; i < new_length; i++)
             {
-                parser->frame[i] = parser->frame[start + i];
+                parser->frame[i] = parser->frame[start + i]; /* 把下一候选帧移到缓冲起点，后续字节可直接续接。 */
             }
-            parser->length = new_length;
+            parser->length = new_length; /* 新长度只覆盖已经保留下来的候选帧内容。 */
             return;
         }
     }
 
     if (parser->frame[parser->length - 1U] == CS1237_HEADER_0)
     {
-        parser->frame[0] = CS1237_HEADER_0;
-        parser->length = 1U;
+        parser->frame[0] = CS1237_HEADER_0; /* 末字节可能是下一帧的第一个 AA，保留它等待后续 55。 */
+        parser->length = 1U; /* 解析器回到“已收到第一个帧头字节”状态。 */
         return;
     }
 
-    parser->length = 0U;
+    parser->length = 0U; /* 缓存中没有可复用帧头时彻底清空，从下一字节重新找 AA。 */
 }
 
+/*
+ * 函数功能：逐字节组装指定通道的 21 字节压力帧，并在满帧后校验、发布或重同步。
+ * 输入参数：channel 为字节所属模拟串口通道；data 为本次收到的原始字节。
+ * 返回参数：无。
+ */
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
 {
     Cs1237FrameParser *parser;
 
     if (!SoftUart_ChannelValid(channel))
     {
-        return;
+        return; /* 非法通道没有独立解析缓存，直接拒绝以防数组越界。 */
     }
 
     parser = &s_cs1237_parsers[(uint32_t)channel];
 
+    /* 当前没有候选帧时只查找第一个 AA 帧头，普通噪声不能进入解析缓存。 */
     if (parser->length == 0U)
     {
         if (data == CS1237_HEADER_0)
         {
-            parser->frame[0] = data;
-            parser->length = 1U;
+            parser->frame[0] = data; /* 空闲状态只接受 AA 作为候选帧起点，普通噪声字节直接忽略。 */
+            parser->length = 1U; /* 记录已收到第一帧头字节，下一字节必须为 55。 */
         }
         return;
     }
 
     if ((parser->length == 1U) && (data != CS1237_HEADER_1))
     {
-        parser->length = (data == CS1237_HEADER_0) ? 1U : 0U;
-        parser->frame[0] = CS1237_HEADER_0;
+        parser->length = (data == CS1237_HEADER_0) ? 1U : 0U; /* 第二字节不是 55 时，重复 AA 可继续作为新帧头，其它值则回到空闲。 */
+        parser->frame[0] = CS1237_HEADER_0; /* 统一保留候选 AA，避免连续 AA55 的有效帧被漏掉。 */
         return;
     }
 
-    parser->frame[parser->length++] = data;
+    parser->frame[parser->length++] = data; /* 帧头已确认后按接收顺序保存协议字节。 */
     if (parser->length < CS1237_FRAME_LENGTH)
     {
-        return;
+        return; /* 21 字节尚未收齐时继续等待，不能提前刷新泵在线和压力状态。 */
     }
 
     if (Cs1237_FrameValid(parser->frame))
     {
-        Cs1237_UpdatePumpMessage(channel, parser->frame);
-        parser->length = 0U;
+        Cs1237_UpdatePumpMessage(channel, parser->frame); /* 完整帧通过固定字段和 CRC 后才写入对应泵状态。 */
+        parser->length = 0U; /* 本帧已经消费，清长度等待下一帧。 */
     }
     else
     {
@@ -1044,7 +1088,7 @@ static void SimUartTaskFunc(uint32_t event)
 
     if (!s_initialized)
     {
-        return;
+        return; /* 队列和通道上下文尚未初始化时不能搬运字节，避免访问空队列句柄。 */
     }
 
     for (uint32_t i = 0U; i < SIM_UART_COUNT; i++)
@@ -1059,24 +1103,25 @@ static void SimUartTaskFunc(uint32_t event)
 
             if (xQueueSend(ctx->queue_handle, &byte, 0U) != pdPASS)
             {
-                ctx->queue_overflow_count++;
+                ctx->queue_overflow_count++; /* 压力协议已在入队前解析；兼容字节队列满时只记录诊断计数，不回退泵状态。 */
             }
 
             /* 测试透传只复制被选中通道的原始字节，关闭时不会额外引入任何输出。 */
-            if (SoftUart_TestForwardChannelSelected(channel) &&
+            if (SoftUart_IsForwardSource(channel) &&
                 (test_forward_length < SOFT_UART_ISR_BUFFER_SIZE))
             {
                 test_forward_buffer[test_forward_length++] = byte;
             }
         }
 
+        /* 当前通道本周期收集到测试字节后才执行透传，空批次不占用 UART10。 */
         if (test_forward_length > 0U)
         {
             SoftUart_TestForwardFrame(channel, test_forward_buffer, test_forward_length);
         }
     }
 
-    Cs1237_ServicePumpLossTimeout(); /* 两路字节搬运结束后统一检查有效帧超时，处理拔泵无数据的离线边沿。 */
+    Cs1237_CheckPumpTimeout(); /* 两路字节搬运结束后统一检查有效帧超时，处理拔泵无数据的离线边沿。 */
 }
 
 /*
@@ -1154,6 +1199,7 @@ void SimUartTask_Init(void)
 {
     SimUart_InitAll();
 
+    /* 任务已经注册时不再创建第二份，避免两任务同时搬运同一环形缓冲。 */
     if (s_task_created)
     {
         return;
@@ -1174,6 +1220,7 @@ SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data)
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
     uint32_t primask;
 
+    /* 通道号非法时没有可发送的 GPIO，返回错误且不关闭中断。 */
     if (ctx == NULL)
     {
         return SOFT_UART_ERROR;
@@ -1206,6 +1253,7 @@ SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data)
     SoftUart_WriteTx(ctx, GPIO_PIN_SET);
     delay_us(ctx->bit_time_us);
 
+    /* 进入发送前中断原本开启时才恢复，避免破坏调用方已有的临界区。 */
     if (primask == 0U)
     {
         __enable_irq();
@@ -1221,6 +1269,7 @@ SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data)
 /* 逐字节发送缓冲区数据。 */
 SoftUART_Status SimUart_Send(sim_uart_channel_t channel, const uint8_t *data, uint16_t len)
 {
+    /* 数据指针为空时拒绝批量发送，避免逐字节读取无效内存。 */
     if (data == NULL)
     {
         return SOFT_UART_ERROR;
@@ -1229,6 +1278,7 @@ SoftUART_Status SimUart_Send(sim_uart_channel_t channel, const uint8_t *data, ui
     for (uint16_t i = 0U; i < len; i++)
     {
         SoftUART_Status status = SimUart_SendByte(channel, data[i]);
+        /* 任一字节发送失败时立即返回原错误码，后续字节不再继续破坏帧边界。 */
         if (status != SOFT_UART_OK)
         {
             return status;
@@ -1241,6 +1291,7 @@ SoftUART_Status SimUart_Send(sim_uart_channel_t channel, const uint8_t *data, ui
 /* 发送 C 字符串，不包含字符串结束符。 */
 SoftUART_Status SimUart_SendString(sim_uart_channel_t channel, const char *str)
 {
+    /* 字符串指针为空时没有可发送内容，返回参数错误。 */
     if (str == NULL)
     {
         return SOFT_UART_ERROR;
@@ -1249,6 +1300,7 @@ SoftUART_Status SimUart_SendString(sim_uart_channel_t channel, const char *str)
     while (*str != '\0')
     {
         SoftUART_Status status = SimUart_SendByte(channel, (uint8_t)*str);
+        /* 任一字符发送失败时立即停止，避免输出半段后仍报告成功。 */
         if (status != SOFT_UART_OK)
         {
             return status;
@@ -1265,6 +1317,7 @@ SoftUART_Status SimUart_ReadByte(sim_uart_channel_t channel, uint8_t *data)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
 
+    /* 通道或输出缓存无效时不能访问队列，直接返回参数错误。 */
     if ((ctx == NULL) || (data == NULL))
     {
         return SOFT_UART_ERROR;
@@ -1272,6 +1325,7 @@ SoftUART_Status SimUart_ReadByte(sim_uart_channel_t channel, uint8_t *data)
 
     SimUart_InitAll();
 
+    /* 兼容队列中有字节时返回成功；队列为空保持非阻塞并返回超时。 */
     if (xQueueReceive(ctx->queue_handle, data, 0U) == pdPASS)
     {
         return SOFT_UART_OK;
@@ -1285,11 +1339,13 @@ uint32_t SimUart_GetPendingBytes(sim_uart_channel_t channel)
 {
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
 
+    /* 软件串口尚未初始化时没有有效队列，按可读字节数 0 返回。 */
     if (!s_initialized)
     {
         return 0U;
     }
 
+    /* 非法通道没有队列，按可读字节数 0 返回以避免数组越界。 */
     if (ctx == NULL)
     {
         return 0U;
@@ -1308,11 +1364,13 @@ void SimUart_GetStats(sim_uart_channel_t channel, SimUartStats *stats)
     SoftUartChannelContext *ctx = SoftUart_GetChannel(channel);
     uint32_t primask; /* 统计字段由高优先级软串口 ISR 更新，读取快照时需要用 PRIMASK 保证字段组合一致。 */
 
+    /* 软件串口尚未初始化时没有可信统计值，保持调用方输出结构不变。 */
     if (!s_initialized)
     {
         return;
     }
 
+    /* 通道或输出结构无效时拒绝快照，避免读取错误上下文或写空指针。 */
     if ((ctx == NULL) || (stats == NULL))
     {
         return;
@@ -1370,15 +1428,18 @@ void SimUart_HandleExti(uint16_t GPIO_Pin)
     sim_uart_channel_t channel;
     SoftUartChannelContext *ctx;
 
+    /* 软件串口未初始化时 GPIO 映射和定时器尚不可用，忽略外部中断。 */
     if (!s_initialized)
     {
         return;
     }
 
+    /* PE4 起始位中断固定归属 A 压力通道，选择其独立接收状态机。 */
     if (GPIO_Pin == s_channels[SIM_UART_1].rx_pin)
     {
         channel = SIM_UART_1;
     }
+    /* PE6 起始位中断固定归属 B 压力通道，选择另一套接收状态机。 */
     else if (GPIO_Pin == s_channels[SIM_UART_2].rx_pin)
     {
         channel = SIM_UART_2;
@@ -1389,6 +1450,7 @@ void SimUart_HandleExti(uint16_t GPIO_Pin)
     }
 
     ctx = SoftUart_GetChannel(channel);
+    /* 未映射引脚或引脚已经回高都不是有效低电平起始位，不能启动采样定时器。 */
     if ((ctx == NULL) || (SoftUart_ReadRx(ctx) != GPIO_PIN_RESET))
     {
         return;
@@ -1414,6 +1476,7 @@ void SimUart_TimerIrqHandler(sim_uart_channel_t channel)
 {
     SoftUartChannelContext *ctx; /* 当前中断对应的固定通道上下文。 */
 
+    /* 软件串口未初始化时定时器上下文无效，忽略共享中断入口。 */
     if (!s_initialized)
     {
         return;
@@ -1463,6 +1526,7 @@ SoftUART_Status Soft_UART_Send(uint8_t *data, uint16_t len)
 
 SoftUART_Status Soft_UART_Receive(uint8_t *data, uint16_t len)
 {
+    /* 输出缓存为空时拒绝接收，避免轮询结果写入无效内存。 */
     if (data == NULL)
     {
         return SOFT_UART_ERROR;
@@ -1471,8 +1535,10 @@ SoftUART_Status Soft_UART_Receive(uint8_t *data, uint16_t len)
     for (uint16_t i = 0U; i < len; i++)
     {
         SoftUART_Status status = SimUart_ReadByte(SIM_UART_1, &data[i]);
+        /* 当前字节未成功收到时按首字节超时和中途失败分别返回，避免误报完整帧。 */
         if (status != SOFT_UART_OK)
         {
+            /* 第一个字节等待超时说明本轮完全无数据，向调用方保留明确超时状态。 */
             if ((i == 0U) && (status == SOFT_UART_TIMEOUT))
             {
                 return SOFT_UART_TIMEOUT;

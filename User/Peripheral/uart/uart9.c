@@ -15,7 +15,7 @@ static uint8_t Uart9_DMABuf[UART9_MAX_PACKET_SIZE] = { 0U }; /* UART9 DMA 接收
  * 输入参数：无。
  * 返回参数：无。
  */
-static void Uart9_DMAConfiguration(void)
+static void Uart9_DmaInit(void)
 {
   (void)Bsp_UartReceiveDma(BSP_UART_PORT_9, Uart9_DMABuf, UART9_MAX_PACKET_SIZE); /* 让 UART9 后续收到的 RFID 字节直接进入本地 DMA 缓存。 */
 }
@@ -39,7 +39,7 @@ static void Uart9_DMAReset(void)
  */
 void Uart9_Init(void)
 {
-  Uart9_DMAConfiguration(); /* 系统启动后立即打开 B 通道 RFID DMA 接收，避免首包丢失。 */
+  Uart9_DmaInit(); /* 系统启动后立即打开 B 通道 RFID DMA 接收，避免首包丢失。 */
 }
 
 /*

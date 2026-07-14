@@ -31,6 +31,11 @@ static volatile LCD_DisplayCache_t s_lcd_display_cache = { 0 };  // LCD 图片�
 // 输    出: 无
 // 函数说明: 同一个背景页最多发两次
 //============================================================================
+/*
+ * 函数功能：切换 DWIN 背景页，同一页允许补发一次后再抑制重复串口帧。
+ * 输入参数：MapAddr 为目标背景页编号。
+ * 返回参数：无。
+ */
 void LCD_Show_Which_Map(uint8_t MapAddr)
 {
 	//5A A5 07 82 0084 5A01 XXXX
@@ -38,15 +43,17 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
 
   static uint8_t SendCnt = 1;
 
+  /* 请求页与当前页相同时进入限次补发；新页面走下方分支重置补发次数。 */
   if (MapAddr == s_lcd_background_page)
   {
+    /* 同页仍有补发次数时允许再发一次，次数耗尽后抑制重复 UART6 帧。 */
     if (SendCnt > 0)
-	    SendCnt--;
+	    SendCnt--; /* 同页第一次重复请求仍补发一次，降低屏幕漏收切页帧后停在旧页面的概率。 */
 	  else
-	    return ;
+	    return ; /* 同页已经发送两次后静默返回，避免周期刷新持续占用 UART6。 */
   }
   else
-	  SendCnt = 1;
+	  SendCnt = 1; /* 切到新页时重新开放一次补发机会，保证每个新页面都具备相同容错。 */
 
   s_lcd_background_page = MapAddr;
 
@@ -112,6 +119,7 @@ void LCD_Disappear_Picture(uint16_t PicAddr)
 
   Uart6_SendPacket(dat, 8);
 
+  /* 屏幕隐藏命令发出后同步清本地显示缓存，后续局部刷新不能沿用已经消失的旧状态。 */
   switch (PicAddr)
   {
 	  case UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE : s_lcd_display_cache.UIDisplay0x1403 = 0;	break;  // 往复角度图片隐藏。
@@ -122,8 +130,8 @@ void LCD_Disappear_Picture(uint16_t PicAddr)
 
 		case UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE :
     {
-			s_lcd_display_cache.UIDisplay0x1311 = 0;
-		  s_lcd_display_cache.UIDisplay0x1310 = 0;
+			s_lcd_display_cache.UIDisplay0x1311 = 0; /* 方向组合图隐藏时同步清“组合图可见”状态。 */
+		  s_lcd_display_cache.UIDisplay0x1310 = 0; /* 同时清具体方向编号，避免后续误认为仍选中正/反/往复。 */
 			break;
 		}
 //	  case UIDP_LCD_LEGACY_VP_DIR_OSC_CACHE : s_lcd_display_cache.UIDisplay0x1311 = 0; break;  //往复
@@ -177,64 +185,76 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 
   Uart6_SendPacket(dat, 8);
 
+  /* 资源号写屏后同步记录其业务显示态；这些缓存只描述已发送图片，不替代 WorkMessage 业务状态。 */
   switch (PicAddr)
   {
 	  case UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE :
 	  {
-	    if (PicNum == 400)  //往复角度图片显
+	    /* 资源 400 表示往复角度区已显示，需要同步置位本地可见缓存。 */
+	    if (PicNum == 400)
 		    s_lcd_display_cache.UIDisplay0x1403 = 1;
 	  }
 	  break;
 	  case UIDP_LCD_LEGACY_VP_SPEED_AREA_CACHE :
 	  {
-	    if (PicNum == 340)  //转速 灰
-		    s_lcd_display_cache.UIDisplay0x1303 = 1;
+	    /* 资源 340 表示转速区灰色不可用，缓存记为状态 1。 */
+	    if (PicNum == 340)
+		    s_lcd_display_cache.UIDisplay0x1303 = 1; /* 1 表示转速区已显示但处于灰色不可用态。 */
+	    /* 资源 341 表示转速区可用，缓存记为状态 2。 */
 	    else if (PicNum == 341)
-		    s_lcd_display_cache.UIDisplay0x1303 = 2;
+		    s_lcd_display_cache.UIDisplay0x1303 = 2; /* 2 表示转速区为正常可用态。 */
 	  }
 	  break;
 	  case UIDP_LCD_LEGACY_VP_FREQ_GEAR_CACHE :
 	  {
-	    if ((PicNum == 350) || (PicNum == 355))  //灰色
-		    s_lcd_display_cache.UIDisplay0x1304 = 1;
-	    else if (PicNum == 351)  //频率栏高亮
-		    s_lcd_display_cache.UIDisplay0x1304 = 2;
-	    else if (PicNum == 352)  //I档选中
-		    s_lcd_display_cache.UIDisplay0x1304 = 3;
-	    else if (PicNum == 353)  //Ⅱ档选中
+	    /* 资源 350/355 都表示频率或挡位区灰色，不允许触控选择。 */
+	    if ((PicNum == 350) || (PicNum == 355))
+		    s_lcd_display_cache.UIDisplay0x1304 = 1; /* 1 表示频率/挡位区域显示为灰色。 */
+	    /* 资源 351 表示频率调节栏可用，缓存记为状态 2。 */
+	    else if (PicNum == 351)
+		    s_lcd_display_cache.UIDisplay0x1304 = 2; /* 2 表示频率调节区域可用。 */
+	    /* 资源 352 表示一挡已选中，缓存记为挡位状态 3。 */
+	    else if (PicNum == 352)
+		    s_lcd_display_cache.UIDisplay0x1304 = 3; /* 3~5 分别记录当前显示的一、二、三挡资源。 */
+	    /* 资源 353 表示二挡已选中，缓存记为挡位状态 4。 */
+	    else if (PicNum == 353)
 		    s_lcd_display_cache.UIDisplay0x1304 = 4;
-	    else if (PicNum == 354)  //Ⅲ档选中
+	    /* 资源 354 表示三挡已选中，缓存记为挡位状态 5。 */
+	    else if (PicNum == 354)
 		    s_lcd_display_cache.UIDisplay0x1304 = 5;
 	  }
 	  break;
 		case UIDP_LCD_LEGACY_VP_HANDLE_A_CACHE :
 		{
-	    if (PicNum == 106)  //A手柄未连接
+	    /* 资源 106 是 A 手柄未连接图，必须清除 A 通道在线显示缓存。 */
+	    if (PicNum == 106)
 			{
-				s_lcd_display_cache.UIDisplay0x1500 = 0;
+				s_lcd_display_cache.UIDisplay0x1500 = 0; /* A 离线资源对应缓存 0，避免把未连接图误当可选手柄。 */
 			}
 			else
       {
-				s_lcd_display_cache.UIDisplay0x1500 = 1;
+				s_lcd_display_cache.UIDisplay0x1500 = 1; /* 其它 A 手柄资源均表示该通道已显示在线。 */
 			}
 		}
 		break;
 		case UIDP_LCD_LEGACY_VP_HANDLE_B_CACHE :
 		{
-	    if (PicNum == 206)  //B手柄未连接
+	    /* 资源 206 是 B 手柄未连接图，必须清除 B 通道在线显示缓存。 */
+	    if (PicNum == 206)
 			{
-				s_lcd_display_cache.UIDisplay0x1501 = 0;
+				s_lcd_display_cache.UIDisplay0x1501 = 0; /* B 离线资源对应缓存 0，保持 A/B 状态定义一致。 */
 			}
 			else
       {
-				s_lcd_display_cache.UIDisplay0x1501 = 1;
+				s_lcd_display_cache.UIDisplay0x1501 = 1; /* 其它 B 手柄资源均表示该通道已显示在线。 */
 			}
 		}
 		break;
 	  case UIDP_LCD_LEGACY_VP_PUMP_B_CACHE :
 	  {
-	    if (PicNum == 302)  //流量 灰
-		    s_lcd_display_cache.UIDisplay0x1305 = 1;
+	    /* 资源 302 表示 B 泵区灰色不可用，其它资源按可用泵显示处理。 */
+	    if (PicNum == 302)
+		    s_lcd_display_cache.UIDisplay0x1305 = 1; /* 1 表示 B 泵区灰色不可用，2 表示已显示可用泵资源。 */
 	    else //if (PicNum == 227)
 		    s_lcd_display_cache.UIDisplay0x1305 = 2;
 	  }
@@ -242,17 +262,20 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 
 	  case UIDP_LCD_LEGACY_VP_PUMP_A_CACHE :
 	  {
-	    if (PicNum == 302)  //流量 灰
-		    s_lcd_display_cache.UIDisplay0x1318 = 1;
+	    /* 资源 302 表示 A 泵区灰色不可用，其它资源按可用泵显示处理。 */
+	    if (PicNum == 302)
+		    s_lcd_display_cache.UIDisplay0x1318 = 1; /* 1 表示 A 泵区灰色不可用，2 表示已显示可用泵资源。 */
 	    else //if (PicNum == 227)
 		    s_lcd_display_cache.UIDisplay0x1318 = 2;
 	  }
 	  break;
 	  case UIDP_LCD_LEGACY_VP_CONTROL_FOOT_CACHE :
 	  {
-	    if (PicNum == 260)  //未选中
-		    s_lcd_display_cache.UIDisplay0x1312 = 2;
-	    else if (PicNum == 261)  //选中
+	    /* 资源 260 表示脚踏模式白色可选但未选中，缓存记为状态 2。 */
+	    if (PicNum == 260)
+		    s_lcd_display_cache.UIDisplay0x1312 = 2; /* 2 为白色可选，3 为黄色选中，其它资源记为灰色 1。 */
+	    /* 资源 261 表示脚踏模式黄色选中，缓存记为状态 3。 */
+	    else if (PicNum == 261)
 		    s_lcd_display_cache.UIDisplay0x1312 = 3;
 	    else
 		    s_lcd_display_cache.UIDisplay0x1312 = 1;
@@ -260,9 +283,11 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 	  break;
 	  case UIDP_LCD_LEGACY_VP_CONTROL_HANDLE_CACHE :
 	  {
-	    if (PicNum == 262)  //未选中
-	      s_lcd_display_cache.UIDisplay0x1313 = 2;
-	    else if (PicNum == 263)  //选中
+	    /* 资源 262 表示手控模式白色可选但未选中，缓存记为状态 2。 */
+	    if (PicNum == 262)
+	      s_lcd_display_cache.UIDisplay0x1313 = 2; /* 手控沿用 1 灰、2 白色可选、3 黄色选中的缓存定义。 */
+	    /* 资源 263 表示手控模式黄色选中，缓存记为状态 3。 */
+	    else if (PicNum == 263)
 		    s_lcd_display_cache.UIDisplay0x1313 = 3;
 	    else
 		    s_lcd_display_cache.UIDisplay0x1313 = 1;
@@ -270,32 +295,39 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 	  break;
 	  case UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE :
 	  {
-	    if (PicNum == 360)  //未选中
+	    /* 组合资源 360~365 同时编码方向和往复按钮显隐，两个缓存字段必须在同一分支同步更新。 */
+	    /* 资源 360 表示方向未选且往复按钮隐藏，两个缓存都清零。 */
+	    if (PicNum == 360)
 			{
 		    s_lcd_display_cache.UIDisplay0x1310 = 0;
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
-	    else if (PicNum == 361)  //正3
+	    /* 资源 361 表示正向选中且往复按钮显示。 */
+	    else if (PicNum == 361)
 			{
 		    s_lcd_display_cache.UIDisplay0x1310 = 1;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
-	    else if (PicNum == 362)  //往复3
+	    /* 资源 362 表示往复选中且往复按钮显示。 */
+	    else if (PicNum == 362)
 			{
 				s_lcd_display_cache.UIDisplay0x1310 = 2;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
-			else if (PicNum == 363)  //反3
+			/* 资源 363 表示反向选中且往复按钮显示。 */
+			else if (PicNum == 363)
 			{
 				s_lcd_display_cache.UIDisplay0x1310 = 3;
 			  s_lcd_display_cache.UIDisplay0x1311 = 1;
 			}
-			else if (PicNum == 364)  //正2
+			/* 资源 364 表示正向选中但往复按钮隐藏。 */
+			else if (PicNum == 364)
 			{
 				s_lcd_display_cache.UIDisplay0x1310 = 1;
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
 			}
-			else if (PicNum == 365)  //反2
+			/* 资源 365 表示反向选中但往复按钮隐藏。 */
+			else if (PicNum == 365)
 			{	
 				s_lcd_display_cache.UIDisplay0x1310 = 3;
 			  s_lcd_display_cache.UIDisplay0x1311 = 0;
@@ -417,6 +449,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 记录本次下发是否为公共接头 EPC 原始整数格式，避免影响旧小数直径路径。 */
   uint8_t diameter_decimal_extra = 0U; /* 直径小数格式达到 10.0mm 以上时多占 1 个字符，长度和角度文本需要同步右移。 */
 
+  /* 规格数值和显示模式都未变化时跳过重复写屏，避免周期刷新占用 UART6。 */
   if ((Length == LengthLast) && (Diameter == DiameterLast) && (Angle == AngleLast) && (raw_integer_mode == ModeLast))
     return ;
 
@@ -442,6 +475,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 
   dat[2] = 31; //数据长度
 
+  /* 三项规格都为 0 表示当前没有有效刀具参数，整段文本改为空格以清除旧显示。 */
   if ((Length == 0) && (Diameter == 0) && (Angle == 0))
   {
 	  Common_Memset(0x20, &dat[6], 28);
@@ -468,6 +502,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  dat[12] = 0xA6;
 	  dat[13] = 0xD5; //φ
 
+	  /* 公共接头 EPC 使用原始整数直径，不插入小数点；普通刀具走下方 0.1mm 格式。 */
 	  if(raw_integer_mode != 0U)
 	  {
 		  if(DiameterTemp[2] > 0U)
@@ -520,7 +555,8 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  dat[26 + diameter_decimal_extra] = 0xA2;  //、
 	  dat[27 + diameter_decimal_extra] = 0x20;
 
-	  if(AngleTemp[2] > 0)//百位不为0
+	  /* 角度存在百位时输出三位数字并保留度符号后的清屏空格。 */
+	  if(AngleTemp[2] > 0)
 	  {
    	  dat[28 + diameter_decimal_extra] = AngleTemp[2] + 0x30;
 	    dat[29 + diameter_decimal_extra] = AngleTemp[1] + 0x30;
@@ -529,7 +565,8 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	    dat[32 + diameter_decimal_extra] = 0xE3;  //°
 	    dat[33 + diameter_decimal_extra] = 0x20;
 	  }
-	  else if(AngleTemp[1] > 0)//百位为0，十位不为0
+	  /* 角度没有百位但有十位时输出两位数字，并清除上一帧可能残留的百位。 */
+	  else if(AngleTemp[1] > 0)
 	  {
 	    dat[28 + diameter_decimal_extra] = AngleTemp[1] + 0x30;
 	    dat[29 + diameter_decimal_extra] = AngleTemp[0] + 0x30 ;

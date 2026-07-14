@@ -17,6 +17,11 @@
 //接着从机等待 15-60us（上拉电阻上拉至高电平），从机再拉低总线 60-240us 来产生应答信号，
 //主机接收到从机的应答信号后，表明从机准备就绪，初始化过程完成了。
 //============================================================================
+/*
+ * 函数功能：向 I 路 GX2431 发送复位脉冲，并检查从设备是否返回低电平存在脉冲。
+ * 输入参数：无。
+ * 返回参数：0 表示检测到从设备；1 表示总线保持高电平、设备未应答。
+ */
 uint8_t OneWireI_Reset(void)
 {
 	uint8_t ret = 0;
@@ -30,7 +35,7 @@ uint8_t OneWireI_Reset(void)
   Delay_us(70);
 
 	if (ONEWIREI_STAT > 0)
-		ret = 1;
+		ret = 1; /* 70us 采样点仍为高电平，说明从设备没有拉低存在脉冲，本次访问不可继续。 */
 
 	Delay_us(430);
 
@@ -85,6 +90,7 @@ uint8_t OneWireI_ReceiveBit(void)
 
   Delay_us(7);
 
+  /* 采样点为高电平表示从设备返回位 1；低电平保持默认位 0。 */
   if (ONEWIREI_STAT > 0)
 		bit = 1;
 
@@ -102,6 +108,7 @@ void OneWireI_SendByte(uint8_t byte)
 
   for (i = 0; i < 8; i++)
   {
+    /* 当前待发位为 1 时使用短低脉冲时隙，否则使用写 0 的长低脉冲。 */
     if (tmpByte & (0x01 << i))
       OneWireI_SendBit1();
 	  else
@@ -119,6 +126,7 @@ uint8_t OneWireI_ReceiveByte(void)
   for (i = 0; i < 8; i++)
   {
 	  Tbit = OneWireI_ReceiveBit();
+	  /* 采样到位 1 时写入当前位位置，位 0 保持结果字节原值。 */
 	  if (Tbit)
 	    byte |= (0x01 << i);
   }
@@ -181,7 +189,7 @@ uint8_t OneWireI_DS2431_ReadMemory(uint8_t tgaddr, uint8_t len, uint8_t *buffer)
 	
 	
   if (OneWireI_Reset())  //1ms
-	  return 1;
+	  return 1; /* 复位后没有收到存在脉冲，停止读存储器，避免把空总线高电平当成有效数据。 */
 
   OneWireI_SendByte(Rom_Skip_Cmd);      //写命令 560us
   OneWireI_SendByte(Memory_Read_Cmd);    //写命令 560us
@@ -205,13 +213,18 @@ uint8_t OneWireI_DS2431_ReadMemory(uint8_t tgaddr, uint8_t len, uint8_t *buffer)
 //        2--写暂存器失败;
 //        3--写主存储器错误;
 //============================================================================
+/*
+ * 函数功能：向 I 路 GX2431 指定 8 字节块写入数据，读回暂存器校验后再复制到 EEPROM。
+ * 输入参数：nblock 为 0~17 块号；buffer 指向待写入的 8 字节数据。
+ * 返回参数：0 成功；1 总线不可用；2 暂存器或授权码校验失败；3 地址或复制失败。
+ */
 uint8_t OneWireI_DS2431_WriteMemory(uint8_t nblock, uint8_t *buffer )
 {
   uint8_t sbuf[16] = { 0 };
   uint8_t i, TA1, TA2, E_S;
 
   if (nblock > 17)
-    return 3;                                //地址超出范围
+    return 3; /* GX2431 只允许 0~17 块，越界时禁止继续发送写命令，避免地址回卷。 */
 
   OneWireI_Reset();
 
@@ -239,18 +252,18 @@ uint8_t OneWireI_DS2431_WriteMemory(uint8_t nblock, uint8_t *buffer )
 
   /*校验授权码*/
   if (TA1 != ( nblock * 8))
-	  return 2;
+	  return 2; /* TA1 必须等于目标块首地址，不一致说明暂存器写入地址已经错位。 */
   else if (TA2 != 0)  //TA2(always 0 for GX2431)
-	  return 2;
+	  return 2; /* 当前 GX2431 地址高字节固定为 0，非零时不能把暂存器复制到目标块。 */
   else if (E_S != 7)  //E_S(always 7 for GX2431)
-	  return 2;
+	  return 2; /* 写满 8 字节后结束偏移应为 7，异常值表示暂存器内容不完整。 */
 
   Delay_us(10);
   for (i = 0; i < 8; i++)  //读8个数据
   {
     sbuf[i] = OneWireI_ReceiveByte();
 	  if (sbuf[i] !=  buffer[i])
-	    return 2;
+	    return 2; /* 暂存器任一字节与待写数据不一致时拒绝复制，防止错误数据写入 EEPROM。 */
   }
 
   //crc字节读取，但是没进行校验，需要自己实现CRC16多项式函数：X16 + X15  + X2  + 1
@@ -269,9 +282,9 @@ uint8_t OneWireI_DS2431_WriteMemory(uint8_t nblock, uint8_t *buffer )
 
   Delay_ms(15);  //延时很重要，等待tPROGmax ，完成复制操作
   if (OneWireI_ReceiveByte() == 0xaa)
-    return 0;
+    return 0; /* 0xAA 是 GX2431 复制完成确认码，收到后才判定 EEPROM 写入成功。 */
   else
-	  return 3;
+	  return 3; /* 未收到完成确认码时保留失败状态，避免上层误认为数据已经落盘。 */
 }
 
 //============================================================================

@@ -215,6 +215,7 @@ void MOTORRUN(void)
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    /* 脚踏控制使用实时行程速度；其它控制方式继续使用屏幕或 EEPROM 设定速度。 */
     if(WorkMessage.drivetype_work==JTWORK)
     {
         motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
@@ -229,19 +230,25 @@ void MOTORRUN(void)
     //         ssc_speed_value=0xFFFFU; /* 超过驱动帧可表达范围时按最大值下发，保证验证过程不会因溢出误判。 */
     //     }
     // }
+    /* PXBA/PXBB 分体手柄需要保留原刨刀低速补偿，其它手柄直接使用倍率换算后的速度。 */
     if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)
     {
+        /* 只有刨刀在低速下需要补偿启动扭矩，磨头不得进入该速度修正。 */
         if(WorkMessage.tool_type==PLANER)
         {
+            /* 低于 1500rpm 时按原规则提高 30%，改善刨刀低速启动能力。 */
             if(ssc_speed_value<1500)
           ssc_speed_value=ssc_speed_value*1.3;
+          /* 补偿后仍低于 500rpm 时钳位到最小可驱动速度，避免电机只响不转。 */
           if(ssc_speed_value<500)
           ssc_speed_value=500;
         }
     }
    
+    /* 电机运行标志有效时组装并发送启动帧；无效时进入下方停止帧分支。 */
     if(WorkMessage.runflag_work)
     {
+        /* 首次起转必须刷新；脚踏运行中只有量化显示速度变化时才再次写屏。 */
         if((huci==0) || ((WorkMessage.drivetype_work==JTWORK) && (last_display_speed!=display_speed_value)))
         {
             display_value[0] = (uint8_t)(display_speed_value >> 16); /* 运行速度高字节按 UIDP 协议传输，脚踏时来自实时行程速度。 */
@@ -288,25 +295,25 @@ void MOTORRUN(void)
         {
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
-                msg.motor_type=0x01;
-                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
+                msg.motor_type=0x01; /* A 通道无刷手柄使用驱动协议的 0x01 电机类型，保证命令送到 A 路无刷控制分支。 */
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型由手柄型号换算，保留各型号原有驱动方式。 */
                 
             }
             else{
-             msg.motor_type=0x03;
-              msg.run_type=0x03;
+             msg.motor_type=0x03; /* A 通道有刷手柄固定使用协议类型 0x03，不能与 B 通道的 0x04 混用。 */
+              msg.run_type=0x03; /* 有刷 A 路的运行类型与电机类型保持一致，驱动板据此进入 A 路有刷控制。 */
             }
         }
         else if(WorkMessage.channel_work==2)//通道2
         {
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
-                msg.motor_type=0x02;
-                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model);
+                msg.motor_type=0x02; /* B 通道无刷手柄使用驱动协议的 0x02 电机类型，保证命令送到 B 路无刷控制分支。 */
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型仍按手柄型号换算，通道选择只影响物理驱动路。 */
             }
             else 
-            { msg.motor_type=0x04;
-                 msg.run_type=0x04;
+            { msg.motor_type=0x04; /* B 通道有刷手柄固定使用协议类型 0x04，不能与 A 通道的 0x03 混用。 */
+                 msg.run_type=0x04; /* 有刷 B 路的运行类型与电机类型保持一致，驱动板据此进入 B 路有刷控制。 */
             }
         }
       command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 最终输出给电机前按 GE2433 协议把实际 rpm 转为 rpm/10 字段。 */
@@ -318,6 +325,7 @@ void MOTORRUN(void)
     }
     else
     {
+         /* 只有上一周期确实处于运行显示态时才恢复停止颜色，避免每 50ms 重复刷屏。 */
          if(huci==1){
             huci=0;
             last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 停机后清显示缓存，下次起转必须重新同步运行速度。 */

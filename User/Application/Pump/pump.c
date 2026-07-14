@@ -29,7 +29,7 @@ static void PumpTaskDelayMs(uint32_t delay_ms)
  * 输入参数：无。
  * 返回参数：返回 pumpMessageA；模拟串口层已把 SIM_UART_1/PE4 的 A 泵压力帧写入该结构。
  */
-static const pumpMessage_t *PumpLegacy_GetPressureSourceA(void)
+static const pumpMessage_t *PumpLegacy_PressureA(void)
 {
 	/* 固定读取 pumpMessageA；当前压力线束映射为 A 泵压力传感器接 SIM_UART_1/PE4。 */
 	return &pumpMessageA;
@@ -40,15 +40,15 @@ static const pumpMessage_t *PumpLegacy_GetPressureSourceA(void)
  * 输入参数：无。
  * 返回参数：返回 pumpMessageB；模拟串口层已把 SIM_UART_2/PE6 的 B 泵压力帧写入该结构。
  */
-static const pumpMessage_t *PumpLegacy_GetPressureSourceB(void)
+static const pumpMessage_t *PumpLegacy_PressureB(void)
 {
 	/* 固定读取 pumpMessageB；当前压力线束映射为 B 泵压力传感器接 SIM_UART_2/PE6。 */
 	return &pumpMessageB;
 }
 
-static uint32_t PumpLegacy_ApplyPressureLimit(pumpMessage_t *runtime_msg,
-											  const pumpMessage_t *pressure_source,
-											  uint32_t output_value)
+static uint32_t PumpLegacy_ApplyLimit(pumpMessage_t *runtime_msg,
+									 const pumpMessage_t *pressure_source,
+									 uint32_t output_value)
 {
 	/* protected_value 保存最终允许下发到泵驱动的 16 位速度/脉冲数据。 */
 	uint16_t protected_value;
@@ -137,18 +137,17 @@ uint16_t PumpStartUp[25] =
 };
 
 
-//============================================================================
-// 函数名称: Pump_SetSpeed_B()
-// 功能描述:
-// 输　  入:
-// 输    出:
-// 函数说明: 泵的脉冲翻转周期设置
-//============================================================================
+/*
+ * 函数功能：经过 B 泵压力保护后下发转速，并同步刷新 B 泵输出颜色。
+ * 输入参数：s 为准备下发的泵转速，0 表示停止。
+ * 返回参数：无。
+ */
 void Pump_SetSpeed_B(uint32_t s)
 {
 	/* 旧 B 泵直接输出入口也套压力保护，防止屏幕/参数路径绕过 sscPUMPB 的闭环。 */
-	s = PumpLegacy_ApplyPressureLimit(&pumpMessageB, PumpLegacy_GetPressureSourceB(), s);
+	s = PumpLegacy_ApplyLimit(&pumpMessageB, PumpLegacy_PressureB(), s);
 	//ssc  加上标志位
+	/* 实际输出非零时把 B 泵速度区域显示为黄色，向操作者说明驱动正在转动。 */
 	if(s)
 	{
 			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,0xffE0);
@@ -194,21 +193,21 @@ void Pump_SetSpeed_B(uint32_t s)
 //  PumpSpeed = 18750 / s - 1;
 }
 
-//============================================================================
-// 函数名称: Pump_SetSpeed_A()
-// 功能描述:
-// 输　  入:
-// 输    出:
-// 函数说明: 泵的脉冲翻转周期设置
-//============================================================================
+/*
+ * 函数功能：经过 A 泵压力保护后下发转速，并同步刷新 A 泵输出颜色。
+ * 输入参数：s 为准备下发的泵转速，0 表示停止。
+ * 返回参数：无。
+ */
 void Pump_SetSpeed_A(uint32_t s)
 {
  static	uint8_t repeat_data;
 	/* 旧 A 泵直接输出入口也套压力保护，防止手柄/报警停泵路径绕过 sscPUMPA 的闭环。 */
-	s = PumpLegacy_ApplyPressureLimit(&pumpMessageA, PumpLegacy_GetPressureSourceA(), s);
+	s = PumpLegacy_ApplyLimit(&pumpMessageA, PumpLegacy_PressureA(), s);
 	//ssc  加上标志位
 	
+	/* 非零转速只在数值变化时发送，减少重复控制帧；零速每次都允许发送，确保停泵命令不会被去重。 */
 	if((repeat_data!=s) || (s == 0U)){
+		/* 实际输出非零时显示黄色，零速时恢复白色，屏幕颜色始终跟随真实驱动状态。 */
 		if(s)
 		{
 			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffE0);

@@ -17,6 +17,7 @@
  */
 static void DriveCtrl_StopPump(pumpMessage_t *pump_msg, void (*set_speed)(uint32_t))
 {
+    /* 只有调用方提供了泵状态对象时才清运行来源，兼容仅要求硬件停转的保护调用。 */
     if (pump_msg != NULL)
     {
         pump_msg->run_flag = false;
@@ -26,6 +27,7 @@ static void DriveCtrl_StopPump(pumpMessage_t *pump_msg, void (*set_speed)(uint32
         pump_msg->speed_work = 0U;
     }
 
+    /* 只有硬件速度接口有效时才下发 0 速，避免异常函数指针造成停机路径二次故障。 */
     if (set_speed != NULL)
     {
         set_speed(0U);

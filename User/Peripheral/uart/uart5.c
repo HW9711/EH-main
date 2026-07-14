@@ -15,7 +15,7 @@ static uint8_t Uart5_Flag_Last = 0;
 static uint16_t Uart5_RecvWaitTimeCnt = 0;
 static uint8_t Uart5_DMABuf[UART5_MAX_PACKET_SIZE] = { 0 };
 
-static void Uart5_DMAConfiguration(void)
+static void Uart5_DmaInit(void)
 {
 //	Delay_ms(300);
 
@@ -24,6 +24,7 @@ static void Uart5_DMAConfiguration(void)
 
 void Uart5_Configuration(uint16_t baud)
 {
+  /* UART5 初始化失败时进入统一故障处理，避免逻辑 A 泵出口保持半配置状态。 */
   if (Bsp_UartInit(BSP_UART_PORT_5, baud) != HAL_OK)
   {
     Error_Handler();
@@ -43,7 +44,7 @@ static void Uart5_DMAReset(void)
 
 void Uart5_Init(void)
 {
-  Uart5_DMAConfiguration();
+  Uart5_DmaInit();
 }
 
 void Uart5_SendPacket(uint8_t *pData, uint16_t Length)
@@ -61,6 +62,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
   Uart5_RecvWaitTimeCnt++;
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_5);
 
+  /* DMA 剩余数变化说明数据仍在到达，重新开始帧间静默计时。 */
   if (RemainLen != Uart5_Flag_Last)
   {
 	  Uart5_RecvWaitTimeCnt = 0;
@@ -68,8 +70,10 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
   }
   else
   {
+	  /* 接收长度连续不变达到门限后，才把当前缓存判定为完整帧。 */
 	  if (Uart5_RecvWaitTimeCnt >= UART5_TimeoutComp)
 	  {
+	    /* DMA 至少接收一个字节时才复制，空缓存不触发业务处理。 */
 	    if (RemainLen < UART5_MAX_PACKET_SIZE)
 	    {
 	      rlen = (UART5_MAX_PACKET_SIZE - RemainLen);

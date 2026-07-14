@@ -13,7 +13,7 @@
 
 static uint8_t Uart3_DMABuf[UART3_MAX_PACKET_SIZE] = { 0 };
 
-static void Uart3_DMAConfiguration(void)
+static void Uart3_DmaInit(void)
 {
 //	Delay_ms(300);
 
@@ -22,6 +22,7 @@ static void Uart3_DMAConfiguration(void)
 
 void Uart3_Configuration(uint16_t baud)
 {
+  /* UART3 初始化失败时进入统一故障处理，避免对应业务串口继续使用无效配置。 */
   if (Bsp_UartInit(BSP_UART_PORT_3, baud) != HAL_OK)
   {
     Error_Handler();
@@ -38,7 +39,7 @@ static void Uart3_DMAReset(void)
 
 void Uart3_Init(void)
 {
-  Uart3_DMAConfiguration();
+  Uart3_DmaInit();
 }
 
 void Uart3_SendPacket(uint8_t *pData, uint16_t Length)
@@ -74,6 +75,7 @@ uint16_t Uart3_DMARecvDataPeek(uint8_t *data)
  // {
 //    if (Uart3_RecvWaitTimeCnt >= UART3_TimeoutComp)
 //    {
+      /* DMA 至少消耗一个字节时才复制数据，避免把空缓存当成有效帧。 */
       if (RemainLen < UART3_MAX_PACKET_SIZE)
       {
         rlen = (UART3_MAX_PACKET_SIZE - RemainLen);

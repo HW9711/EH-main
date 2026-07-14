@@ -407,6 +407,7 @@ void HandleSwitchActive(uint8_t key_value);
 void SpeedActive(uint8_t key_value);
 void DirActive(uint8_t key_value);
 void FreqActive(uint8_t key_value);
+bool ScreenKey_CanUse(uint8_t screen_key); /* 判断新屏逻辑按键当前是否真正可用；黑色、隐藏或被业务状态禁用时返回 false。 */
 void HmiExitActive(uint8_t key_value);
 void Pubinterface_RefreshControlModeDisplay(void); /* 统一刷新脚控、手控、触控三个控制方式图标，避免脚踏任务分散直写残留高亮。 */
 void Pubinterface_RefreshRuntimeDisplaySnapshot(void); /* 开机后按当前 WorkMessage/MemoryMsg 快照补刷 A/B 手柄和当前通道参数区。 */

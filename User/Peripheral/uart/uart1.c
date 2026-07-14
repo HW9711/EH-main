@@ -15,7 +15,7 @@ static uint8_t Uart1_Flag_Last = 0;
 static uint16_t Uart1_RecvWaitTimeCnt = 0;
 static uint8_t Uart1_DMABuf[UART1_MAX_PACKET_SIZE] = { 0 };
 
-static void Uart1_DMAConfiguration(void)
+static void Uart1_DmaInit(void)
 {
 //	Delay_ms(300);
 
@@ -24,6 +24,7 @@ static void Uart1_DMAConfiguration(void)
 
 void Uart1_Configuration(uint16_t baud)
 {
+  /* UART1 初始化失败时进入统一故障处理，避免外设保持半配置状态继续收发。 */
   if (Bsp_UartInit(BSP_UART_PORT_1, baud) != HAL_OK)
   {
 	  Error_Handler();
@@ -43,7 +44,7 @@ static void Uart1_DMAReset(void)
 
 void Uart1_Init(void)
 {
-  Uart1_DMAConfiguration();
+  Uart1_DmaInit();
 }
 
 void Uart1_SendPacket(uint8_t *pData, uint16_t Length)
@@ -68,7 +69,7 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
   // 获取DMA当前剩余计数器的值
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_1);
 
-  // 判断剩余数据长度是否发生变化
+  /* DMA 剩余数发生变化说明字节仍在到达，重置静默计时以免拆开同一帧。 */
   if (RemainLen != Uart1_Flag_Last)
   {
     // 如果发生变化，重置等待计数器并更新标志
@@ -77,10 +78,10 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
   }
   else
   {
-    // 如果剩余长度未变化，检查是否超时
+    /* DMA 剩余数连续不变达到门限后，才把当前缓存判定为一帧完整数据。 */
     if (Uart1_RecvWaitTimeCnt >= UART1_TimeoutComp)
     {
-      // 检查剩余长度是否小于最大数据包大小
+      /* DMA 至少收到一个字节时才复制，空缓存不提交给上层协议解析。 */
       if (RemainLen < UART1_MAX_PACKET_SIZE)
       {
         // 计算实际接收到的数据长度
