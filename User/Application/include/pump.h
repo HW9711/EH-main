@@ -15,12 +15,12 @@
 #endif
 
 /*
- * PUMP_INJECTWATER_SPEED_MAX 是注水泵业务速度上限。
- * 屏幕、脚踏和上位机设置最终都会受本宏限制；当前配置为 100。
- * 如果把屏幕固定排空速度改到 100 以上，还必须同步提高本上限，否则实际输出仍会被限制为 100。
+ * PUMP_INJECTWATER_SPEED_MAX 是注水泵正常运行和手柄联动时的速度上限。
+ * 屏幕、脚踏和上位机设置最终都会受本宏限制；当前现场要求最大为 70。
+ * 屏幕定时排空使用独立的 PUMP_TIMING_DRAINAGE_SPEED，不受本上限限制。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
-#define PUMP_INJECTWATER_SPEED_MAX 100U
+#define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
 /* PUMP_BEHAVIOR_TASK_PERIOD_MS 表示 A/B 泵行为任务统一调度周期，排空计时按该周期换算真实毫秒。 */

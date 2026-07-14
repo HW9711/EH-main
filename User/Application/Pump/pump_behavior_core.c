@@ -173,14 +173,15 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
 }
 
 /*
- * 函数功能：按泵类型完成方向选择、速度上限和 UART 数值换算，再执行压力闭环。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；pump_type 为识别出的泵类型；pump_speed 指向待处理业务速度；force_stop 返回压力硬停状态。
+ * 函数功能：按泵类型完成方向选择、普通运行速度上限和 UART 数值换算，再执行压力闭环。
+ * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；pump_type 为识别出的泵类型；pump_speed 指向待处理业务速度；drainage_active 表示当前是否为屏幕定时排空；force_stop 返回压力硬停状态。
  * 返回参数：换算后的 16 位 UART 速度字段。
  */
 static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
                                            uint8_t pump_type,
                                            uint16_t *pump_speed,
+                                           uint8_t drainage_active,
                                            uint8_t *force_stop)
 {
     uint16_t uart_data = 0U; /* 未识别类型或零速状态默认发送 0。 */
@@ -199,9 +200,9 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
 
         case INJECTWATER:
             runtime->business_direction = binding->inject_direction; /* 保留 A/B 原注水业务方向差异。 */
-            if (*pump_speed > PUMP_INJECTWATER_SPEED_MAX)
+            if ((drainage_active == 0U) && (*pump_speed > PUMP_INJECTWATER_SPEED_MAX))
             {
-                *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 注水速度上限继续由现有宏决定。 */
+                *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 普通运行和手柄联动最多输出 70，屏幕定时排空保留独立的 100 档。 */
             }
             *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 换算 UART 前先应用压力保护。 */
             uart_data = (uint16_t)(*pump_speed / 1.6); /* 保留原浮点除数和 AC5 截断结果。 */
@@ -340,10 +341,14 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     if (binding->message->run_flag || binding->message->timingDrainage_flag)
     {
         pump_type = (uint8_t)binding->message->type; /* 运行时使用设备识别流程写入的真实泵类型。 */
+        if ((pump_type == INJECTWATER) && (binding->message->speed_work > PUMP_INJECTWATER_SPEED_MAX))
+        {
+            binding->message->speed_work = PUMP_INJECTWATER_SPEED_MAX; /* 收回旧版本可能保留的 100 档设定，确保排空结束后正常注水仍回到最多 70。 */
+        }
         pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
     }
 
-    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, &force_stop); /* 合并类型换算和压力闭环。 */
+    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active, &force_stop); /* 排空标志用于区分固定 100 档与普通注水 70 档上限。 */
     PumpBehavior_ServiceDrainage(binding->message, drainage_active, force_stop, &pump_speed, &uart_data); /* 保持 10 秒排空与压力停泵优先级。 */
     binding->publish_output_speed(pump_speed); /* 先发布实际速度，再按原顺序发送驱动帧和刷新颜色。 */
     PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction); /* 每个周期继续发送 6 字节帧。 */

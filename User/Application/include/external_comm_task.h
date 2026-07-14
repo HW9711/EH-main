@@ -15,6 +15,8 @@ void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms);
 void ExternalComm_ClearHandleInjectionPumpFollow(void);
 /* 压力保护停泵时清除外控层对应泵的运行请求，避免旧外控锁存再次拉起已堵塞的泵。 */
 void ExternalComm_ClearPumpPressureRunRequest(uint8_t pump_channel);
+/* 屏幕确认退出外控后提交退出请求，由外部通信任务统一释放控制权并通知上位机。 */
+void ExternalComm_RequestExit(void);
 
 #ifdef __cplusplus
 }

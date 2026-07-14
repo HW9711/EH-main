@@ -20,6 +20,7 @@
 #define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
 #define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 2000U  /* 外控链路静默 2s 后只停电机和泵输出，保留外控授权，避免短时串口抖动直接退出外控。 */
 #define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     10000U /* 外控链路静默 10s 后才释放外控授权并熄灭在线图标，上位机仍需按 200ms 周期下发保活。 */
+#define EXTERNAL_COMM_LOCAL_EXIT_REARM_MS          1000U /* 屏幕主动退出后要求申请帧静默 1s，防止串口中已排队的旧保活帧立即重新取得外控。 */
 #define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
 #define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
 #define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
@@ -84,6 +85,9 @@ static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外
 static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
 static uint16_t s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 非外控在线图标计时，合法帧刷新后超时熄灭。 */
 static uint8_t s_external_comm_display_online = 0U;  /* 小电脑图标在线锁存，避免未收到合法外部帧时误显示在线。 */
+static volatile uint8_t s_local_exit_requested = 0U; /* 屏幕任务只置退出请求，外部通信任务负责释放状态和串口回包，避免共用发送缓存并发。 */
+static uint8_t s_local_exit_guard = 0U;              /* 屏幕退出后的旧申请帧拦截标志，1 表示暂不允许上位机重新取得控制权。 */
+static uint16_t s_local_exit_quiet_ms = 0U;          /* 退出后申请帧静默时间；旧保活每次到达都会清零，静默满 1s 后允许重新申请。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
 static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
 static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄校验失败时临时上传的报警码，不写入 WorkMessage。 */
@@ -159,6 +163,32 @@ static void ExternalComm_SendAck(uint8_t ack_code, const uint8_t *ack_info, uint
         /* 应答帧构造成功后立即从 UART2 发回外部设备。 */
         Uart2_SendPacket(s_tx_buf, tx_len);
     }
+}
+
+/*
+ * 函数功能：发送“外部控制已退出”应答，通知上位机停止申请保活并清除已取得控制权状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_SendExitAck(void)
+{
+    uint8_t exit_code = EXTERNAL_COMM_DOWN_HOST_EXIT; /* 沿用上位机已经识别的 0xBB 退出回显，不增加新的协议字段。 */
+
+    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK,
+                         &exit_code,
+                         sizeof(exit_code)); /* 0x03 成功应答携带 0xBB，上位机收到后会停止 200ms 申请保活。 */
+}
+
+/*
+ * 函数功能：隐藏屏幕外部通信图标并清除在线显示锁存，防止旧申请帧让图标退出后再次闪回。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_HideLinkIcon(void)
+{
+    s_external_comm_display_online = 0U; /* 本次主动退出后撤销在线图标锁存，后续必须由新的合法连接重新点亮。 */
+    s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 计时钉到离线值，空闲刷新不能重新显示旧图标。 */
+    Pubinterface_RefreshExternalCommDisplay(false, false); /* 立即隐藏 39/40 小电脑图标，让屏幕与已释放的控制权一致。 */
 }
 
 static void ExternalComm_SendFailAck(uint8_t ack_code, uint8_t value_code, uint8_t reason)
@@ -533,6 +563,14 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
     {
         ExternalComm_SendAck(EXTERNAL_COMM_ACK_AUTH_FAILED, NULL, 0U);
         return 0U;
+    }
+
+    if (s_local_exit_guard != 0U)
+    {
+        s_local_exit_quiet_ms = 0U; /* 仍收到申请帧说明旧 200ms 保活尚未停止，重新开始计算静默时间。 */
+        ExternalComm_HideLinkIcon(); /* 接收层在分发前会点亮在线图标，这里再次隐藏，避免旧保活造成屏幕闪回。 */
+        ExternalComm_SendExitAck(); /* 重发退出成功应答，确保上位机即使漏收第一次回包也能退出申请成功状态。 */
+        return 0U; /* 拦截旧保活，绝不调用控制权申请函数，防止刚退出就重新取得 owner。 */
     }
 
     /* 外控申请必须等待当前脚踏/屏幕/手柄控制结束，不能抢停正在运行的本机来源。 */
@@ -936,17 +974,59 @@ static void ExternalComm_ClearHandleLostAlarm(void)
 
 static void ExternalComm_ApplyHostExit(void)
 {
-    uint8_t info[1];
-
     /* 退出外控时先清除外部通信层自己的 A 泵锁存请求，避免后续刷新又把泵拉起。 */
     ExternalComm_ClearPumpRequests();
     /* 释放公共仲裁锁，并停止外控遗留的电机、脚踏标志和 A/B 泵输出。 */
     ControlArbitration_ReleaseExternalControl();
     ExternalComm_ClearHandleLostAlarm(); /* 上位机主动退出也作为故障确认入口，避免运行中拔手柄报警无法关闭。 */
-    /* ACK 回显 0xBB，Tools 可据此把“已取得外部控制权”状态清掉。 */
-    info[0] = EXTERNAL_COMM_DOWN_HOST_EXIT;
-    /* 退出动作本身按控制成功返回，表示 MCU 已经释放外部控制权。 */
-    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info));
+    ExternalComm_SendExitAck(); /* 返回统一的退出成功应答，让上位机清除已取得控制权状态。 */
+}
+
+/*
+ * 函数功能：接收屏幕双击确认产生的外控退出请求，实际退出动作由外部通信任务执行。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void ExternalComm_RequestExit(void)
+{
+    s_local_exit_requested = 1U; /* 只跨任务提交请求，不在屏幕任务里使用外部通信发送缓存。 */
+}
+
+/*
+ * 函数功能：执行屏幕主动退出，并在旧申请保活停止后重新开放外部控制申请。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ServiceLocalExit(void)
+{
+    if (s_local_exit_requested != 0U)
+    {
+        s_local_exit_requested = 0U; /* 当前请求已由通信任务接管，避免下个 10ms 周期重复退出和回包。 */
+        s_local_exit_guard = 1U; /* 先封锁新的申请帧，再释放 owner，堵住旧保活立即重新申请的时间窗口。 */
+        s_local_exit_quiet_ms = 0U; /* 从本次真实退出时刻开始等待申请帧静默。 */
+        ExternalComm_ClearPumpRequests(); /* 清除外控层保存的 A/B 泵请求，防止退出后刷新重新拉起泵。 */
+        ControlArbitration_ReleaseExternalControl(); /* 停止外控电机和泵输出，并释放公共控制权。 */
+        ExternalComm_ClearHandleLostAlarm(); /* 屏幕主动退出也作为手柄掉线报警的确认入口。 */
+        ExternalComm_HideLinkIcon(); /* 主动退出后立即隐藏屏幕小电脑图标，不保留旧在线显示。 */
+        ExternalComm_SendExitAck(); /* 主动通知上位机停止申请保活，并显示“已退出外部控制”。 */
+        return; /* 本周期已经完成退出，不在同一周期累计静默时间。 */
+    }
+
+    if (s_local_exit_guard == 0U)
+    {
+        return; /* 当前没有屏幕退出保护，不需要维护重新申请计时。 */
+    }
+
+    if (s_local_exit_quiet_ms < EXTERNAL_COMM_LOCAL_EXIT_REARM_MS)
+    {
+        s_local_exit_quiet_ms = (uint16_t)(s_local_exit_quiet_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个通信任务周期累计 10ms 静默时间。 */
+    }
+
+    if (s_local_exit_quiet_ms >= EXTERNAL_COMM_LOCAL_EXIT_REARM_MS)
+    {
+        s_local_exit_guard = 0U; /* 连续 1s 没有旧申请帧后，允许用户在上位机重新点击申请外部控制。 */
+        s_local_exit_quiet_ms = 0U; /* 清掉本轮计时，下一次屏幕退出从零开始。 */
+    }
 }
 
 static void ExternalComm_ResetLinkWatchdog(void)
@@ -3019,6 +3099,9 @@ static void ExternalCommTaskFunc(uint32_t event)
 {
     /* 当前调度器未使用 event，显式丢弃避免编译器告警。 */
     (void)event;
+
+    /* 优先处理屏幕退出请求，确保本周期收到的旧申请帧只能被退出保护拦截。 */
+    ExternalComm_ServiceLocalExit();
 
     /* 每 10ms 检查一次 UART2 是否收到完整空闲包。 */
     ExternalComm_ProcessReceive();

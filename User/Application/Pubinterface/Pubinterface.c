@@ -2382,11 +2382,14 @@ void HmiExitActive(uint8_t key_value)
 		{
 			return; /* EX8 屏幕要求 1 秒内连续两次点击才退出外控，第一次点击只保留蜂鸣反馈。 */
 		}
+		ExternalComm_RequestExit(); /* 双击确认后交给通信任务真实释放 owner 并通知上位机停止申请保活。 */
+	}
+	else
+	{
+		ControlArbitration_ReleaseExternalControl(); /* 旧 HMI 退出入口保持原同步释放行为，不改变历史按键链路。 */
 	}
 
-	ControlArbitration_ReleaseExternalControl();
 	s_screen_external_exit_pending = 0U; /* 任意来源完成外控退出后清掉屏幕双击待确认，避免下一轮外控沿用旧点击。 */
-	/* HMI 和屏幕最终都走同一释放函数；旧的两个空分支没有状态影响，删除后退出行为不变。 */
 }
 
 /*
