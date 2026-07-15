@@ -19,6 +19,7 @@
 
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
 #define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
+#define EXTERNAL_COMM_BATCH_PAGE_PERIOD_MS  30U    /* 导航批量操作每 30ms 处理一页，降低连续上行帧对 USB 串口接收的压力。 */
 #define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 2000U  /* 外控链路静默 2s 后只停电机和泵输出，保留外控授权，避免短时串口抖动直接退出外控。 */
 #define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     10000U /* 外控链路静默 10s 后才释放外控授权并熄灭在线图标，上位机仍需按 200ms 周期下发保活。 */
 #define EXTERNAL_COMM_LOCAL_EXIT_REARM_MS          1000U /* 屏幕主动退出后要求申请帧静默 1s，防止串口中已排队的旧保活帧立即重新取得外控。 */
@@ -65,13 +66,20 @@
 #define EXTERNAL_COMM_DOWN_CONTROL_CMD      0x04U   /* 下行命令：启停泵、启停当前手柄、开口定位、急停。 */
 #define EXTERNAL_COMM_DOWN_READ_PAGE        0x05U   /* 下行命令：读取手柄/刀具 EEPROM 单页业务数据。 */
 #define EXTERNAL_COMM_DOWN_READ_ALL         0x06U   /* 下行命令：读取整区业务数据，V1 禁用。 */
-#define EXTERNAL_COMM_DOWN_WRITE_PAGE       0x07U   /* 下行命令：写入手柄/刀具 EEPROM 单页业务数据。 */
+#define EXTERNAL_COMM_DOWN_WRITE_PAGE       0x07U   /* 下行禁用命令：外部设备不得写入手柄/刀具业务页。 */
 #define EXTERNAL_COMM_DOWN_READ_NAV_PAGE    0x08U   /* 下行命令：读取导航 EEPROM 单页数据。 */
-#define EXTERNAL_COMM_DOWN_READ_NAV_ALL     0x09U   /* 下行命令：读取导航整区数据，V1 禁用。 */
+#define EXTERNAL_COMM_DOWN_READ_NAV_BATCH   0x09U   /* 下行命令：按实际页号范围批量读取导航 EEPROM。 */
 #define EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE   0x0AU   /* 下行命令：写入导航 EEPROM 单页数据。 */
 #define EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION 0x0BU /* 下行命令：读取主控板 AT24C32 Page1 软件版本记录。 */
+#define EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH  0x0CU   /* 下行命令：把同一份 30 字节模板批量写入导航页范围。 */
 #define EXTERNAL_COMM_DOWN_HOST_EXIT        0xBBU   /* 下行命令：上位机主动退出外部控制，释放互斥控制权。 */
 #define EXTERNAL_COMM_DOWN_PERMISSION       0xFAU   /* 下行命令：功能升级或权限开放。 */
+
+#define EXTERNAL_COMM_NAV_PAGE_FIRST        12U     /* 导航 EEPROM 对外开放的第一个实际页号。 */
+#define EXTERNAL_COMM_NAV_PAGE_LAST         128U    /* 导航 EEPROM 对外开放的最后一个实际页号。 */
+#define EXTERNAL_COMM_BATCH_READ_INFO_LEN   1U      /* 批量读载荷只包含结束页号。 */
+#define EXTERNAL_COMM_BATCH_WRITE_INFO_LEN  (AT24CS32_PAGE_DATA_SIZE + 1U) /* 批量写载荷为结束页号加 30 字节模板。 */
+#define EXTERNAL_COMM_BATCH_COMMAND_TARGET  0xFFU   /* 批量启动失败对象，避免 0x0C 与实际 Page12 混淆。 */
 
 typedef struct
 {
@@ -79,6 +87,24 @@ typedef struct
     uint16_t write_index;                            /* FIFO 写指针，指向下一字节写入位置。 */
     uint8_t ready;                                   /* FIFO 初始化完成标志，避免任务启动前误读未准备好的缓存。 */
 } ExternalCommRxFifo_t;
+
+typedef enum
+{
+    EXTERNAL_COMM_EEPROM_BATCH_NONE = 0U,           /* 当前没有批量 EEPROM 操作。 */
+    EXTERNAL_COMM_EEPROM_BATCH_READ_NAV,            /* 正在逐页读取导航区。 */
+    EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV            /* 正在把同一模板逐页写入导航区。 */
+} ExternalCommEepromBatchOperation_t;
+
+typedef struct
+{
+    ExternalCommEepromBatchOperation_t operation;   /* 当前批量操作类型；NONE 表示空闲。 */
+    uint8_t start_page;                              /* 本批起始实际页号，范围 12..128。 */
+    uint8_t current_page;                            /* 下一个任务周期需要处理的实际页号。 */
+    uint8_t end_page;                                /* 本批结束实际页号，包含该页。 */
+    uint8_t use_i2c3;                                /* 批量开始时锁定的 EEPROM 总线，防止中途切通道串写。 */
+    uint16_t page_elapsed_ms;                        /* 距离上一次逐页处理的累计时间，用于限制批量上传速率。 */
+    uint8_t page_data[AT24CS32_PAGE_DATA_SIZE];      /* 批量写共用的 30 字节导航模板；批量读不使用。 */
+} ExternalCommEepromBatchState_t;
 
 static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄，由调度器保存任务状态。 */
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
@@ -103,6 +129,7 @@ static uint8_t s_rx_fifo_buf[EXTERNAL_COMM_RX_FIFO_SIZE]; /* FIFO 实际存储�
 static uint8_t s_frame_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 从 FIFO 中临时取出的单帧缓存，交给现有协议解析器复用。 */
 static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用发送缓存，任务内串行使用。 */
 static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 字节含最后 2 字节页校验。 */
+static ExternalCommEepromBatchState_t s_eeprom_batch; /* 导航批量读写状态，外控任务累计到 30ms 后处理一页。 */
 static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
 
 static void ExternalComm_ResetLinkWatchdog(void);    /* 外控保活计时清零入口，申请外控和收到合法下行帧时复用。 */
@@ -312,6 +339,37 @@ static uint8_t ExternalComm_CurrentBusIsI2C3(uint8_t *use_i2c3)
     return 1U;
 }
 
+/*
+ * 函数功能：使用已经确定的物理 I2C 总线读取一个 EEPROM 页。
+ * 输入参数：use_i2c3 非 0 表示 I2C3，否则表示 I2C2；page_index 为 0 基页下标；page_buf 为 32 字节页缓存。
+ * 返回参数：读取并校验成功返回 1，否则返回 0。
+ */
+static uint8_t ExternalComm_ReadPageByBus(uint8_t use_i2c3, uint16_t page_index, uint8_t *page_buf)
+{
+    /* 批量操作会在开始时锁定总线，因此这里不再读取可能变化的当前逻辑通道。 */
+    return (use_i2c3 != 0U) ?
+           AT24CS32_ReadPage_I2C3(page_index, page_buf) :
+           AT24CS32_ReadPage_I2C2(page_index, page_buf);
+}
+
+/*
+ * 函数功能：使用已经确定的物理 I2C 总线写入一个 EEPROM 页。
+ * 输入参数：use_i2c3 非 0 表示 I2C3，否则表示 I2C2；page_index 为 0 基页下标；page_buf 为 32 字节页缓存。
+ * 返回参数：写入成功返回 1，否则返回 0。
+ */
+static uint8_t ExternalComm_WritePageByBus(uint8_t use_i2c3, uint16_t page_index, const uint8_t *page_buf)
+{
+    /* 页尾校验仍由原 AT24CS32 驱动生成，本函数只固定本次访问的物理总线。 */
+    return (use_i2c3 != 0U) ?
+           AT24CS32_WritePage_I2C3(page_index, page_buf) :
+           AT24CS32_WritePage_I2C2(page_index, page_buf);
+}
+
+/*
+ * 函数功能：按当前选中的逻辑 A/B 通道读取一个 EEPROM 页。
+ * 输入参数：page_index 为 0 基页下标；page_buf 为 32 字节页缓存。
+ * 返回参数：读取成功返回 1，当前无通道或底层失败返回 0。
+ */
 static uint8_t ExternalComm_ReadCurrentPage(uint16_t page_index, uint8_t *page_buf)
 {
     /* use_i2c3 非 0 表示目标 EEPROM 在 I2C3，否则在 I2C2。 */
@@ -323,12 +381,15 @@ static uint8_t ExternalComm_ReadCurrentPage(uint16_t page_index, uint8_t *page_b
         return 0U;
     }
 
-    /* 统一物理映射已经给出实际总线，页校验由对应AT24CS32驱动完成。 */
-    return (use_i2c3 != 0U) ?
-           AT24CS32_ReadPage_I2C3(page_index, page_buf) :
-           AT24CS32_ReadPage_I2C2(page_index, page_buf);
+    /* 单页命令在当前周期确定总线后复用固定总线读取入口。 */
+    return ExternalComm_ReadPageByBus(use_i2c3, page_index, page_buf);
 }
 
+/*
+ * 函数功能：按当前选中的逻辑 A/B 通道写入一个 EEPROM 页。
+ * 输入参数：page_index 为 0 基页下标；page_buf 为 32 字节页缓存。
+ * 返回参数：写入成功返回 1，当前无通道或底层失败返回 0。
+ */
 static uint8_t ExternalComm_WriteCurrentPage(uint16_t page_index, const uint8_t *page_buf)
 {
     /* use_i2c3 非 0 表示目标 EEPROM 在 I2C3，否则在 I2C2。 */
@@ -340,10 +401,8 @@ static uint8_t ExternalComm_WriteCurrentPage(uint16_t page_index, const uint8_t 
         return 0U;
     }
 
-    /* 驱动写页前会刷新最后 2 字节页校验，上位机只需要给 30 字节有效数据。 */
-    return (use_i2c3 != 0U) ?
-           AT24CS32_WritePage_I2C3(page_index, page_buf) :
-           AT24CS32_WritePage_I2C2(page_index, page_buf);
+    /* 单页命令在当前周期确定总线后复用固定总线写入入口。 */
+    return ExternalComm_WritePageByBus(use_i2c3, page_index, page_buf);
 }
 
 static uint8_t ExternalComm_MapAreaToPageIndex(uint8_t area_code, uint16_t *page_index)
@@ -1479,10 +1538,41 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info)); /* 保持原控制成功应答格式。 */
 }
 
+/*
+ * 函数功能：判断当前是否正在执行导航 EEPROM 批量读写。
+ * 输入参数：无。
+ * 返回参数：批量操作进行中返回 1，空闲返回 0。
+ */
+static uint8_t ExternalComm_IsEepromBatchActive(void)
+{
+    /* operation 只有 NONE 表示没有跨周期 EEPROM 操作。 */
+    return (s_eeprom_batch.operation != EXTERNAL_COMM_EEPROM_BATCH_NONE) ? 1U : 0U;
+}
+
+/*
+ * 函数功能：在批量操作占用 EEPROM 时拒绝新的 EEPROM 命令。
+ * 输入参数：command_code 为本次被拒绝的功能码或页码，用于上位机定位失败对象。
+ * 返回参数：无。
+ */
+static void ExternalComm_SendEepromBusy(uint8_t command_code)
+{
+    /* EEPROM 批量状态只能由外控任务串行推进，新命令不得覆盖当前页和总线快照。 */
+    ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                             command_code,
+                             EXTERNAL_COMM_REASON_BUSY);
+}
+
 static void ExternalComm_ReadBusinessPage(const ExternalCommFrame_t *frame)
 {
     /* page_index 是 AT24CS32 驱动使用的 0 基页下标。 */
     uint16_t page_index;
+
+    /* 批量操作进行中不能插入单页读取，否则会共用 s_page_buf 并打乱回包顺序。 */
+    if (ExternalComm_IsEepromBatchActive() != 0U)
+    {
+        ExternalComm_SendEepromBusy(frame->area_code);
+        return;
+    }
 
     /* 先把协议业务 AreaCode 映射到 EEPROM 页。 */
     if (ExternalComm_MapAreaToPageIndex(frame->area_code, &page_index) == 0U)
@@ -1515,6 +1605,13 @@ static void ExternalComm_ReadNavPage(const ExternalCommFrame_t *frame)
     /* page_index 是 AT24CS32 驱动使用的 0 基页下标。 */
     uint16_t page_index;
 
+    /* 批量操作进行中不能插入单页读取，保证逐页回包次序可被上位机核对。 */
+    if (ExternalComm_IsEepromBatchActive() != 0U)
+    {
+        ExternalComm_SendEepromBusy(frame->area_code);
+        return;
+    }
+
     /* 导航区支持实际页号 12~128 或导航序号 1~117。 */
     if (ExternalComm_MapNavPageToIndex(frame->area_code, &page_index) == 0U)
     {
@@ -1541,50 +1638,39 @@ static void ExternalComm_ReadNavPage(const ExternalCommFrame_t *frame)
                            AT24CS32_PAGE_DATA_SIZE);
 }
 
-static void ExternalComm_WriteBusinessPage(const ExternalCommFrame_t *frame)
+/*
+ * 函数功能：固定拒绝外部设备写入业务 EEPROM 页。
+ * 输入参数：frame 为外部设备下发的 0x07 业务页写命令。
+ * 返回参数：无。
+ */
+static void ExternalComm_RejectBusinessPageWrite(const ExternalCommFrame_t *frame)
 {
-    /* page_index 是 AT24CS32 驱动使用的 0 基页下标。 */
-    uint16_t page_index;
-
-    /* 写页只接受 30 字节有效数据，页尾 2 字节校验由驱动生成。 */
-    if (frame->info_len != AT24CS32_PAGE_DATA_SIZE)
-    {
-        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
-                                 frame->area_code,
-                                 EXTERNAL_COMM_REASON_BAD_LENGTH);
-        return;
-    }
-
-    /* 把业务 AreaCode 转为 EEPROM 页下标。 */
-    if (ExternalComm_MapAreaToPageIndex(frame->area_code, &page_index) == 0U)
-    {
-        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
-                                 frame->area_code,
-                                 EXTERNAL_COMM_REASON_BAD_AREA);
-        return;
-    }
-
-    /* 清空 32 字节页缓存，确保未写入的尾部字节是确定值。 */
-    memset(s_page_buf, 0, sizeof(s_page_buf));
-    /* 复制外部设备下发的前 30 字节有效数据。 */
-    memcpy(s_page_buf, frame->info_area, AT24CS32_PAGE_DATA_SIZE);
-    /* 写入当前通道 EEPROM，驱动会刷新最后 2 字节页校验。 */
-    if (ExternalComm_WriteCurrentPage(page_index, s_page_buf) == 0U)
-    {
-        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
-                                 frame->area_code,
-                                 EXTERNAL_COMM_REASON_DEVICE_FAIL);
-        return;
-    }
-
-    /* 写成功后回显被修改的业务 AreaCode。 */
-    ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, &frame->area_code, 1U);
+    /* 业务页属于手柄识别、刀具参数和出厂配置，任何外控 0x07 都只返回“不支持”。 */
+    (void)frame;
+    /* 失败对象固定回显 0x07，避免通过不同长度或 AreaCode 探测业务写实现细节。 */
+    ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                             EXTERNAL_COMM_DOWN_WRITE_PAGE,
+                             EXTERNAL_COMM_REASON_NOT_SUPPORT);
 }
 
 static void ExternalComm_WriteNavPage(const ExternalCommFrame_t *frame)
 {
     /* page_index 是 AT24CS32 驱动使用的 0 基页下标。 */
     uint16_t page_index;
+
+    /* 批量操作进行中不能插入单页写入，防止覆盖批量总线和模板状态。 */
+    if (ExternalComm_IsEepromBatchActive() != 0U)
+    {
+        ExternalComm_SendEepromBusy(frame->area_code);
+        return;
+    }
+
+    /* 导航写入会改变现场导航数据，必须已经取得外部控制权。 */
+    if (ControlArbitration_IsExternalActive() == false)
+    {
+        ExternalComm_SendEepromBusy(frame->area_code);
+        return;
+    }
 
     /* 导航写页同样只接受 30 字节有效数据。 */
     if (frame->info_len != AT24CS32_PAGE_DATA_SIZE)
@@ -1619,6 +1705,284 @@ static void ExternalComm_WriteNavPage(const ExternalCommFrame_t *frame)
 
     /* 写成功后回显导航页码。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, &frame->area_code, 1U);
+}
+
+/*
+ * 函数功能：检查批量导航页范围是否使用实际页号并且起止顺序正确。
+ * 输入参数：start_page 为起始页，end_page 为结束页，均包含在操作范围内。
+ * 返回参数：范围完全位于 Page12..Page128 且 start_page 不大于 end_page 时返回 1，否则返回 0。
+ */
+static uint8_t ExternalComm_IsValidNavBatchRange(uint8_t start_page, uint8_t end_page)
+{
+    /* 批量协议只接受实际页号，不兼容单页命令的 1..117 导航序号，避免重叠区出现歧义。 */
+    return ((start_page >= EXTERNAL_COMM_NAV_PAGE_FIRST) &&
+            (end_page <= EXTERNAL_COMM_NAV_PAGE_LAST) &&
+            (start_page <= end_page)) ? 1U : 0U;
+}
+
+/*
+ * 函数功能：判断当前运行状态是否允许启动或继续导航 EEPROM 批量操作。
+ * 输入参数：无。
+ * 返回参数：手柄与 A/B 泵均停止时返回 1，任一输出正在运行时返回 0。
+ */
+static uint8_t ExternalComm_IsNavBatchRuntimeIdle(void)
+{
+    /* 电机运行期间禁止批量访问 EEPROM，避免阻塞式页操作拖慢共享业务任务调度。 */
+    if (WorkMessage.runflag_work == true)
+    {
+        return 0U;
+    }
+
+    /* A 泵普通运行或屏幕定时排空期间同样禁止批量访问。 */
+    if ((pumpMessageA.run_flag == true) || (pumpMessageA.timingDrainage_flag == true))
+    {
+        return 0U;
+    }
+
+    /* B 泵普通运行或屏幕定时排空期间同样禁止批量访问。 */
+    if ((pumpMessageB.run_flag == true) || (pumpMessageB.timingDrainage_flag == true))
+    {
+        return 0U;
+    }
+
+    return 1U; /* 所有运动输出均停止，允许每周期处理一个 EEPROM 页。 */
+}
+
+/*
+ * 函数功能：发送导航批量命令启动失败应答。
+ * 输入参数：reason 为原协议 EEPROM 失败原因码。
+ * 返回参数：无。
+ */
+static void ExternalComm_SendNavBatchStartFail(uint8_t reason)
+{
+    /* 失败对象固定为 0xFF，避免批量写功能码 0x0C 被上位机误认为实际 Page12。 */
+    ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                             EXTERNAL_COMM_BATCH_COMMAND_TARGET,
+                             reason);
+}
+
+/*
+ * 函数功能：启动一个跨任务周期执行的导航 EEPROM 批量读或批量写。
+ * 输入参数：frame 为批量命令；operation 指定读导航页或写导航页。
+ * 返回参数：无。
+ */
+static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
+                                       ExternalCommEepromBatchOperation_t operation)
+{
+    uint8_t end_page; /* InforArea[0] 固定保存本批结束实际页号。 */
+    uint8_t use_i2c3; /* 批量开始时解析并锁定的实际 EEPROM 总线。 */
+    uint16_t expected_len; /* 不同批量操作要求的精确 InforArea 长度。 */
+
+    /* 已有批量操作时拒绝覆盖状态，普通保活和控制命令仍可继续处理。 */
+    if (ExternalComm_IsEepromBatchActive() != 0U)
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_BUSY);
+        return;
+    }
+
+    /* 批量读只带结束页；批量写还要携带所有目标页共用的 30 字节模板。 */
+    expected_len = (operation == EXTERNAL_COMM_EEPROM_BATCH_READ_NAV) ?
+                   EXTERNAL_COMM_BATCH_READ_INFO_LEN :
+                   EXTERNAL_COMM_BATCH_WRITE_INFO_LEN;
+    /* 长度必须完全匹配，避免缺少结束页或模板时访问越界。 */
+    if (frame->info_len != expected_len)
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_BAD_LENGTH);
+        return;
+    }
+
+    /* 批量写会改变当前手柄 EEPROM，未取得外控权时禁止启动。 */
+    if ((operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV) &&
+        (ControlArbitration_IsExternalActive() == false))
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_BUSY);
+        return;
+    }
+
+    /* 批量页操作会在共享业务任务互斥区内执行，运行输出未停止时禁止启动。 */
+    if (ExternalComm_IsNavBatchRuntimeIdle() == 0U)
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_BUSY);
+        return;
+    }
+
+    /* 载荷首字节是结束页；起始页放在 AreaCode。 */
+    end_page = frame->info_area[0];
+    /* 批量范围必须使用 Page12..Page128 的实际页号，并保持从小到大。 */
+    if (ExternalComm_IsValidNavBatchRange(frame->area_code, end_page) == 0U)
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_BAD_AREA);
+        return;
+    }
+
+    /* 启动时快照当前逻辑通道对应的物理总线，防止批量中途切通道跨写另一颗 EEPROM。 */
+    if (ExternalComm_CurrentBusIsI2C3(&use_i2c3) == 0U)
+    {
+        ExternalComm_SendNavBatchStartFail(EXTERNAL_COMM_REASON_NO_CHANNEL);
+        return;
+    }
+
+    /* 先清空旧状态和模板，保证批量读不会携带上一次批量写残留数据。 */
+    memset(&s_eeprom_batch, 0, sizeof(s_eeprom_batch));
+    /* 保存操作类型，任务入口从下一次服务调用开始逐页执行。 */
+    s_eeprom_batch.operation = operation;
+    /* 保存起始页，最终完成 ACK 会原样回显整个范围。 */
+    s_eeprom_batch.start_page = frame->area_code;
+    /* 第一页就是 AreaCode 指定的起始实际页号。 */
+    s_eeprom_batch.current_page = frame->area_code;
+    /* 保存包含式结束页号。 */
+    s_eeprom_batch.end_page = end_page;
+    /* 保存总线快照，后续页面不再读取 WorkMessage.channel_work。 */
+    s_eeprom_batch.use_i2c3 = use_i2c3;
+
+    /* 批量写载荷 byte1..30 是每个导航页共用的 30 字节数据模板。 */
+    if (operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV)
+    {
+        /* 只复制有效数据，页尾 2 字节校验仍由原 EEPROM 驱动生成。 */
+        memcpy(s_eeprom_batch.page_data,
+               &frame->info_area[1],
+               AT24CS32_PAGE_DATA_SIZE);
+    }
+}
+
+/*
+ * 函数功能：结束当前批量操作并发送包含功能码、起始页和结束页的成功应答。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_FinishNavBatch(void)
+{
+    uint8_t ack_info[3]; /* 完成 ACK 用 3 字节让上位机核对操作类型和完整范围。 */
+
+    /* byte0 回显原批量功能码，区分批量读 0x09 与批量写 0x0C。 */
+    ack_info[0] = (s_eeprom_batch.operation == EXTERNAL_COMM_EEPROM_BATCH_READ_NAV) ?
+                  EXTERNAL_COMM_DOWN_READ_NAV_BATCH :
+                  EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH;
+    /* byte1 回显批量起始实际页号。 */
+    ack_info[1] = s_eeprom_batch.start_page;
+    /* byte2 回显批量结束实际页号。 */
+    ack_info[2] = s_eeprom_batch.end_page;
+
+    /* 先把状态置为空闲，确保发送完成 ACK 后立即允许新的 EEPROM 命令。 */
+    s_eeprom_batch.operation = EXTERNAL_COMM_EEPROM_BATCH_NONE;
+    /* 复用 EEPROM 成功 ACK 0x05，不增加新的应答码。 */
+    ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, ack_info, sizeof(ack_info));
+}
+
+/*
+ * 函数功能：按限定发送节拍推进一页导航 EEPROM 批量读写，并保证单周期最多发送一个批量结果帧。
+ * 输入参数：无。
+ * 返回参数：本周期发送了批量页结果或最终应答时返回 1，否则返回 0。
+ */
+static uint8_t ExternalComm_ServiceNavBatch(void)
+{
+    uint8_t page; /* 本周期要处理的实际导航页号。 */
+    uint8_t page_ack; /* 批量写单页成功时回显该实际页号。 */
+    uint16_t page_index; /* AT24CS32 驱动使用的 0 基页下标。 */
+
+    /* 没有批量任务时立即返回，不占用 EEPROM 和 UART。 */
+    if (ExternalComm_IsEepromBatchActive() == 0U)
+    {
+        return 0U;
+    }
+
+    /* 每个10ms任务周期只累计时间，达到30ms后才允许访问一页并发送一次结果。 */
+    s_eeprom_batch.page_elapsed_ms = (uint16_t)(s_eeprom_batch.page_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
+    /* 尚未达到批量页周期时保持状态不变，让本周期可以优先发送到期心跳。 */
+    if (s_eeprom_batch.page_elapsed_ms < EXTERNAL_COMM_BATCH_PAGE_PERIOD_MS)
+    {
+        return 0U;
+    }
+    /* 达到周期后先清零，本次底层读写结束后重新累计下一页间隔。 */
+    s_eeprom_batch.page_elapsed_ms = 0U;
+
+    /* 最后一页的逐页结果已经在上一批量周期发出，本周期只发送最终完成应答。 */
+    if (s_eeprom_batch.current_page > s_eeprom_batch.end_page)
+    {
+        ExternalComm_FinishNavBatch();
+        return 1U;
+    }
+
+    /* 批量执行期间若手柄或任一泵开始运行，当前页不再访问 EEPROM 并立即终止整批。 */
+    if (ExternalComm_IsNavBatchRuntimeIdle() == 0U)
+    {
+        page = s_eeprom_batch.current_page; /* 回显尚未处理的实际页，便于上位机定位中止位置。 */
+        s_eeprom_batch.operation = EXTERNAL_COMM_EEPROM_BATCH_NONE; /* 先释放批量状态，后续周期不得继续访问。 */
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                 page,
+                                 EXTERNAL_COMM_REASON_BUSY);
+        return 1U;
+    }
+
+    /* 批量写执行期间外控权一旦释放就停止，禁止退出外控后继续改 EEPROM。 */
+    if ((s_eeprom_batch.operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV) &&
+        (ControlArbitration_IsExternalActive() == false))
+    {
+        /* current_page 是尚未写入的失败页，上位机可据此判断已完成范围。 */
+        page = s_eeprom_batch.current_page;
+        /* 先结束状态，避免失败 ACK 期间仍被判断为忙。 */
+        s_eeprom_batch.operation = EXTERNAL_COMM_EEPROM_BATCH_NONE;
+        /* 返回 Busy 表示外控授权已经失效。 */
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                 page,
+                                 EXTERNAL_COMM_REASON_BUSY);
+        return 1U;
+    }
+
+    /* 取出本周期处理页；批量状态只在本任务内串行修改。 */
+    page = s_eeprom_batch.current_page;
+    /* 批量范围已经校验为实际页号，因此直接减 1 转为驱动页下标。 */
+    page_index = (uint16_t)(page - 1U);
+
+    /* 批量读每页仍使用现有单页读取驱动并立即返回该页 30 字节数据。 */
+    if (s_eeprom_batch.operation == EXTERNAL_COMM_EEPROM_BATCH_READ_NAV)
+    {
+        /* 使用启动时锁定的总线，读取过程中不受逻辑 A/B 通道切换影响。 */
+        if (ExternalComm_ReadPageByBus(s_eeprom_batch.use_i2c3, page_index, s_page_buf) == 0U)
+        {
+            /* 导航页可能尚未初始化或页和无效；返回真实失败页，但继续读取后续页面。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                     page,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL);
+        }
+        else
+        {
+            /* 读取成功页沿用原导航单页上传格式：AreaCode=FF，InforCode=实际页号。 */
+            ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_EEPROM_UPLOAD,
+                                   EXTERNAL_COMM_AREA_NONE,
+                                   page,
+                                   s_page_buf,
+                                   AT24CS32_PAGE_DATA_SIZE);
+        }
+    }
+    else
+    {
+        /* 写页前清空 32 字节缓存，防止上次读取残留影响驱动生成页尾校验。 */
+        memset(s_page_buf, 0, sizeof(s_page_buf));
+        /* 把本批固定的 30 字节模板复制到页有效数据区。 */
+        memcpy(s_page_buf, s_eeprom_batch.page_data, AT24CS32_PAGE_DATA_SIZE);
+        /* 使用启动时锁定的总线写入当前页。 */
+        if (ExternalComm_WritePageByBus(s_eeprom_batch.use_i2c3, page_index, s_page_buf) == 0U)
+        {
+            /* 任一页写失败立即停止，禁止继续形成无法追踪的半成功范围。 */
+            s_eeprom_batch.operation = EXTERNAL_COMM_EEPROM_BATCH_NONE;
+            /* 失败对象直接使用实际页号。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
+                                     page,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL);
+            return 1U;
+        }
+
+        /* 每页写成功都回显实际页号，满足外部设备逐页确认要求。 */
+        page_ack = page;
+        /* 复用单页导航写成功 ACK 格式，外部设备无需维护另一套逐页结果解析。 */
+        ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, &page_ack, sizeof(page_ack));
+    }
+
+    /* 下一批量周期继续处理相邻下一页；结束页后会得到 end_page+1，用于单独发送最终 ACK。 */
+    s_eeprom_batch.current_page = (uint8_t)(page + 1U);
+    /* 本周期无论返回成功页还是失败页都只发送了一个批量结果帧。 */
+    return 1U;
 }
 
 /*
@@ -1687,8 +2051,8 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
             ExternalComm_ReadBusinessPage(frame);
             break;
         case EXTERNAL_COMM_DOWN_WRITE_PAGE:
-            /* 写入业务 EEPROM 单页。 */
-            ExternalComm_WriteBusinessPage(frame);
+            /* 业务页包含识别和出厂数据，协议层固定拒绝任何外部写入。 */
+            ExternalComm_RejectBusinessPageWrite(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_NAV_PAGE:
             /* 读取导航 EEPROM 单页。 */
@@ -1698,13 +2062,20 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
             /* 写入导航 EEPROM 单页。 */
             ExternalComm_WriteNavPage(frame);
             break;
+        case EXTERNAL_COMM_DOWN_READ_NAV_BATCH:
+            /* 批量读请求只登记范围，任务随后按 30ms 节拍读取并返回一页。 */
+            ExternalComm_StartNavBatch(frame, EXTERNAL_COMM_EEPROM_BATCH_READ_NAV);
+            break;
+        case EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH:
+            /* 批量写请求只登记范围和模板，任务随后按 30ms 节拍写入并确认一页。 */
+            ExternalComm_StartNavBatch(frame, EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV);
+            break;
         case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
             /* 读取主控板 AT24C32 Page1 软件版本记录。 */
             ExternalComm_ReadSoftwareVersion(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_ALL:
-        case EXTERNAL_COMM_DOWN_READ_NAV_ALL:
-            /* 整区读取接近 4KB，超过当前单帧策略，V1 明确返回不支持。 */
+            /* 业务页只开放单页读取，整区命令保持禁用，避免业务页写边界被误解。 */
             ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
                                      frame->fun_code,
                                      EXTERNAL_COMM_REASON_NOT_SUPPORT);
@@ -3102,6 +3473,8 @@ static void ExternalComm_ProcessReceive(void)
 
 static void ExternalCommTaskFunc(uint32_t event)
 {
+    uint8_t batch_frame_sent; /* 记录本周期批量服务是否已占用 UART2，避免紧接着叠加心跳帧。 */
+
     /* 当前调度器未使用 event，显式丢弃避免编译器告警。 */
     (void)event;
 
@@ -3114,15 +3487,19 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
     ExternalComm_CheckLinkWatchdog();
 
+    /* 看门狗确认外控权仍有效后再处理一页批量写；批量读不依赖外控权但共用同一服务入口。 */
+    batch_frame_sent = ExternalComm_ServiceNavBatch();
+
     /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
     ExternalComm_SendAlarmInfoIfChanged();
 
     /* 累加心跳计时，任务周期由 EXTERNAL_COMM_TASK_PERIOD_MS 定义。 */
     s_heartbeat_elapsed_ms = (uint16_t)(s_heartbeat_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
     /* 到达心跳周期后主动上传 0xAA 心跳帧。 */
-    if (s_heartbeat_elapsed_ms >= EXTERNAL_COMM_HEARTBEAT_PERIOD_MS)
+    if ((s_heartbeat_elapsed_ms >= EXTERNAL_COMM_HEARTBEAT_PERIOD_MS) &&
+        (batch_frame_sent == 0U))
     {
-        /* 先清零计时，避免发送阻塞时重复触发。 */
+        /* 本周期没有批量帧占用 UART2 时才清零并发送，避免两个阻塞帧连续叠加。 */
         s_heartbeat_elapsed_ms = 0U;
         /* 采集当前工作状态并发送心跳。 */
         ExternalComm_SendHeartbeat();

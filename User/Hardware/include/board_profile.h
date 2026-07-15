@@ -10,7 +10,7 @@
  */
 
 #define BOARD_PROFILE_HAS_K1K2            BOARD_HAS_K1K2
-#define RFID_USE_DUAL_UART_MODE           0U  /* RFID硬件模式：1表示逻辑A固定UART3、逻辑B固定UART9；0表示UART3+R200-K8选通。 */
+#define RFID_USE_DUAL_UART_MODE           1U  /* RFID硬件模式：1表示逻辑A固定UART3、逻辑B固定UART9；0表示UART3+R200-K8选通。 */
 
 /*
  * R200-K8旧硬件的RFID通道交换开关，仅在RFID_USE_DUAL_UART_MODE=0U时生效：
@@ -35,7 +35,7 @@
  * MemoryMsgA/B、界面区域、报警归属和业务状态始终保持逻辑A/B不变。
  */
 #ifndef HANDLE_PHYSICAL_AB_SWAP_ENABLE
-#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    0U
+#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    1U
 #endif
 
 #if ((HANDLE_PHYSICAL_AB_SWAP_ENABLE != 0U) && (HANDLE_PHYSICAL_AB_SWAP_ENABLE != 1U))
