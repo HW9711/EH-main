@@ -383,15 +383,15 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
  */
 static void HandleKey_ScanRunKeys(void)
 {
-	bool key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 读取A通道PE12实体键并生成一次稳定按下沿事件。 */
-	bool key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 读取B通道PE13实体键并生成一次稳定按下沿事件。 */
+	bool key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 读取逻辑A映射后的实体键并生成一次稳定按下沿事件。 */
+	bool key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 读取逻辑B映射后的实体键并生成一次稳定按下沿事件。 */
 
 	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理A，按型号选择翻转启停或松开停止。 */
 	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理B，若A已取得owner则B会被忽略。 */
 }
 
 /*
- * 函数功能：手柄实体按键周期扫描任务，按手柄型号处理PE12/PE13实体键启停。
+ * 函数功能：手柄实体按键周期扫描任务，按统一物理映射和手柄型号处理A/B实体键启停。
  * 输入参数：event 调度器事件参数，当前任务不使用。
  * 返回参数：无。
  */

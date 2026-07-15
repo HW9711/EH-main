@@ -172,7 +172,7 @@ void MX_UART9_Init(void)
 
   /* USER CODE END UART9_Init 1 */
   huart9.Instance = UART9;
-  huart9.Init.BaudRate = 115200;              /* UART9 作为 B 通道 RFID，波特率与 A 通道 USART3 保持一致。 */
+  huart9.Init.BaudRate = 115200;              /* UART9连接原物理B侧RFID，波特率与原物理A侧USART3一致。 */
   huart9.Init.WordLength = UART_WORDLENGTH_8B;
   huart9.Init.StopBits = UART_STOPBITS_2;     /* RFID 模块当前按 UART3 的 2 stop bits 时序工作，新串口保持同配置。 */
   huart9.Init.Parity = UART_PARITY_NONE;
@@ -599,7 +599,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
   }
   else if (uartHandle->Instance == UART9)
   {
-    BOARD_UART9_CLK_ENABLE();        /* 使能 UART9 APB2 时钟，B 通道 RFID 独立串口才能收发。 */
+    BOARD_UART9_CLK_ENABLE();        /* 使能UART9 APB2时钟，原物理B侧RFID独立串口才能收发。 */
     __HAL_RCC_GPIOD_CLK_ENABLE();    /* UART9 使用 PD14/PD15，必须先打开 GPIOD 时钟。 */
 
     GPIO_InitStruct.Pin = BOARD_UART9_TX_PIN;
@@ -731,7 +731,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
   }
   else if (uartHandle->Instance == UART9)
   {
-    __HAL_RCC_UART9_CLK_DISABLE(); /* 释放 B 通道 RFID 串口时钟，低功耗或重初始化时使用。 */
+    __HAL_RCC_UART9_CLK_DISABLE(); /* 释放原物理B侧RFID串口时钟，低功耗或重初始化时使用。 */
     HAL_GPIO_DeInit(BOARD_UART9_TX_PORT, BOARD_UART9_TX_PIN);
     HAL_GPIO_DeInit(BOARD_UART9_RX_PORT, BOARD_UART9_RX_PIN);
     HAL_DMA_DeInit(uartHandle->hdmarx);

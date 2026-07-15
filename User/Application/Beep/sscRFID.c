@@ -20,8 +20,16 @@
 #define RFID_REGION_CHINA_840           0x04U /* 中国 840.125~844.875MHz 频段。 */
 #define RFID_REGION_KOREA               0x06U /* 韩国 917.1~923.3MHz 频段。 */
 
+#define RFID_TX_POWER_0_DBM_X100        0U     /* 0dBm，对应模块协议功率值 0。 */
+#define RFID_TX_POWER_10_DBM_X100       1000U  /* 10dBm，对应模块协议功率值 1000。 */
+#define RFID_TX_POWER_13_DBM_X100       1300U  /* 13dBm，对应模块协议功率值 1300。 */
+#define RFID_TX_POWER_15_DBM_X100       1500U  /* 15dBm，对应模块协议功率值 1500。 */
+
 /* 修改下面这一项即可切换 RFID 地区频段；当前产品配置由该宏唯一决定。 */
 #define RFID_REGION_SELECT              RFID_REGION_US
+
+/* 修改下面这一项即可切换 RFID 发射功率；默认保持重构前实际使用的 10dBm。 */
+#define RFID_TX_POWER_SELECT            RFID_TX_POWER_10_DBM_X100
 
 #if ((RFID_REGION_SELECT != RFID_REGION_CHINA_920) && \
      (RFID_REGION_SELECT != RFID_REGION_US) && \
@@ -31,7 +39,17 @@
 #error "RFID_REGION_SELECT is invalid"
 #endif
 
+#if ((RFID_TX_POWER_SELECT != RFID_TX_POWER_0_DBM_X100) && \
+     (RFID_TX_POWER_SELECT != RFID_TX_POWER_10_DBM_X100) && \
+     (RFID_TX_POWER_SELECT != RFID_TX_POWER_13_DBM_X100) && \
+     (RFID_TX_POWER_SELECT != RFID_TX_POWER_15_DBM_X100))
+#error "RFID_TX_POWER_SELECT is invalid"
+#endif
+
 #define RFID_REGION_COMMAND_CHECKSUM    (0x08U + RFID_REGION_SELECT) /* 区域命令校验和随地区编号变化，避免切换地区后继续发送旧校验值。 */
+#define RFID_TX_POWER_HIGH_BYTE         ((RFID_TX_POWER_SELECT >> 8U) & 0xFFU) /* 功率协议值高字节，随选择宏自动生成。 */
+#define RFID_TX_POWER_LOW_BYTE          (RFID_TX_POWER_SELECT & 0xFFU) /* 功率协议值低字节，随选择宏自动生成。 */
+#define RFID_TX_POWER_COMMAND_CHECKSUM  ((0xB8U + RFID_TX_POWER_HIGH_BYTE + RFID_TX_POWER_LOW_BYTE) & 0xFFU) /* 功率命令累加和低8位，避免手工修改功率后校验字节错误。 */
 #define RFID_FRAME_TAIL                 0x7EU /* RFID 模块帧尾，帧尾前一字节是累加和校验。 */
 #define RFID_RESP_SECOND_EPC            0x02U /* EPC 读取回包第二字节，协议指定为 BB 02 22。 */
 #define RFID_RESP_CMD_EPC               0x22U /* EPC 读取回包命令码。 */
@@ -69,7 +87,7 @@ typedef struct
 
 static uint8_t NO_MASK3_WRITE_EPC[7] = {0XBB, 0X00, 0X22, 0X00, 0X00, 0X22, 0X7E}; /* 无掩码读取 EPC 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
-static unsigned char  pa_gain10[]={0XBB, 0X00, 0XB6, 0X00, 0X02, 0X03, 0Xe8, 0Xa3, 0X7E};//发射功率
+static uint8_t rfid_tx_power_command[] = {0xBBU, 0x00U, 0xB6U, 0x00U, 0x02U, RFID_TX_POWER_HIGH_BYTE, RFID_TX_POWER_LOW_BYTE, RFID_TX_POWER_COMMAND_CHECKSUM, 0x7EU}; /* 根据功率选择宏生成唯一命令，避免未选功率数组产生编译告警。 */
 static uint8_t region_set_command[] = {0xBBU, 0x00U, 0x07U, 0x00U, 0x01U, RFID_REGION_SELECT, RFID_REGION_COMMAND_CHECKSUM, 0x7EU}; /* 根据上方地区配置生成唯一一条有效区域命令，避免未选地区数组产生告警。 */
 
 static kernel_task_t AUTOMODEGETDATATaskHandle;     /* RFID 轮询任务句柄，任务实际按请求工作。 */
@@ -131,18 +149,35 @@ static bool Rfid_IsSourceValid(RfidReadSource_t source)
 static void Rfid_SelectHardwareChannel(uint8_t channel)
 {
 #if (RFID_USE_DUAL_UART_MODE == 0U)
+    uint8_t physical_channel = channel; /* 默认保持逻辑A/B与R200-K8物理A/B一致。 */
+
+#if (RFID_R200_AB_SWAP_ENABLE == 1U)
+    /* 旧硬件线束交叉时，逻辑A必须选通R200-K8物理B。 */
     if (channel == CHANNEL_A)
     {
-        R200_K8_SELECT_A(); /* 旧硬件 A 通道通过 R200-K8 高电平连接到 UART3。 */
-        return; /* A 通道已经完成选通，不再继续判断 B 通道。 */
+        physical_channel = CHANNEL_B;
+    }
+    /* 旧硬件线束交叉时，逻辑B必须选通R200-K8物理A。 */
+    else if (channel == CHANNEL_B)
+    {
+        physical_channel = CHANNEL_A;
+    }
+#endif
+
+    /* R200-K8物理A侧由高电平接入UART3。 */
+    if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A)
+    {
+        R200_K8_SELECT_A();
+        return; /* 物理A已经完成选通，不再继续判断物理B。 */
     }
 
-    if (channel == CHANNEL_B)
+    /* R200-K8物理B侧由低电平接入UART3。 */
+    if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_B)
     {
-        R200_K8_SELECT_B(); /* 旧硬件 B 通道通过 R200-K8 低电平连接到 UART3。 */
+        R200_K8_SELECT_B();
     }
 #else
-    (void)channel; /* 双串口模式下 A/B RFID 已经固定到 UART3/UART9，不再驱动 R200-K8。 */
+    (void)channel; /* 双串口模式下原物理A/B已固定到UART3/UART9，不再驱动R200-K8。 */
 #endif
 }
 
@@ -154,15 +189,16 @@ static void Rfid_SelectHardwareChannel(uint8_t channel)
 static void Rfid_ClearChannelUartData(uint8_t channel)
 {
 #if (RFID_USE_DUAL_UART_MODE == 1U)
+    /* 双串口线束没有随手柄接口交叉，逻辑B始终清理UART9，避免B回包进入A缓存。 */
     if (channel == CHANNEL_B)
     {
-        Uart9_ClearRecvData(); /* 新硬件 B 通道独占 UART9，清缓存只影响 B 通道 RFID 回包。 */
-        return; /* B 通道已经清理完成，不再误清 A 通道 UART3 缓存。 */
+        Uart9_ClearRecvData();
+        return; /* B通道缓存已清理，不再误清A通道UART3缓存。 */
     }
 #else
     (void)channel; /* 旧硬件 A/B 仍共用 UART3，通道参数只用于 R200-K8 选通。 */
 #endif
-    Uart3_ClearRecvData(); /* A 通道或旧硬件共用模式都清 UART3，防止旧回包污染下一次解析。 */
+    Uart3_ClearRecvData(); /* 逻辑A或旧硬件共用模式清UART3，防止旧回包污染下一次解析。 */
 }
 
 /*
@@ -173,15 +209,16 @@ static void Rfid_ClearChannelUartData(uint8_t channel)
 static void Rfid_SendPacketForChannel(uint8_t channel, uint8_t *pData, uint16_t Length)
 {
 #if (RFID_USE_DUAL_UART_MODE == 1U)
+    /* 双串口线束固定不交换，逻辑B命令始终由UART9发往B侧RFID模块。 */
     if (channel == CHANNEL_B)
     {
-        Uart9_SendPacket(pData, Length); /* 新硬件 B 通道命令固定从 UART9 发往 B 侧 RFID 模块。 */
-        return; /* B 通道已经发送完成，不再从 UART3 重发。 */
+        Uart9_SendPacket(pData, Length);
+        return; /* B通道已经发送完成，不再从A通道UART3重复发送。 */
     }
 #else
     (void)channel; /* 旧硬件由 R200-K8 决定 UART3 当前连到 A 还是 B。 */
 #endif
-    Uart3_SendPacket(pData, Length); /* A 通道或旧硬件模式继续使用 UART3，保持原 RFID 命令时序。 */
+    Uart3_SendPacket(pData, Length); /* 逻辑A或旧硬件模式继续使用UART3，保持原RFID命令时序。 */
 }
 
 /*
@@ -192,14 +229,15 @@ static void Rfid_SendPacketForChannel(uint8_t channel, uint8_t *pData, uint16_t 
 static uint16_t Rfid_PeekChannelUartData(uint8_t channel, uint8_t *data)
 {
 #if (RFID_USE_DUAL_UART_MODE == 1U)
+    /* 双串口线束固定不交换，逻辑B只读取UART9，确保结果继续写入B缓存和B界面。 */
     if (channel == CHANNEL_B)
     {
-        return Uart9_DMARecvDataPeek(data); /* 新硬件 B 通道只解析 UART9 收到的 RFID 回包。 */
+        return Uart9_DMARecvDataPeek(data);
     }
 #else
     (void)channel; /* 旧硬件共用 UART3，实际通道由 R200-K8 保证。 */
 #endif
-    return Uart3_DMARecvDataPeek(data); /* A 通道或旧硬件模式继续从 UART3 DMA 缓存取数据。 */
+    return Uart3_DMARecvDataPeek(data); /* 逻辑A或旧硬件模式继续从UART3 DMA缓存取数据。 */
 }
 
 /*
@@ -354,7 +392,7 @@ static void Rfid_SendReadCommand(uint8_t channel, RfidReadSource_t source)
 {
     if (source == RFID_READ_SOURCE_EPC)
     {
-        Rfid_SendPacketForChannel(channel, NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* A/B 通道按宏选择 UART3 或 UART9 发送 EPC 读取命令。 */
+        Rfid_SendPacketForChannel(channel, NO_MASK3_WRITE_EPC, (uint16_t)sizeof(NO_MASK3_WRITE_EPC)); /* 双串口模式按逻辑A=UART3、逻辑B=UART9发送EPC读取命令。 */
     }
 }
 
@@ -581,7 +619,7 @@ static void AUTOMODEGETDATATaskFunc(uint32_t event)
  */
 static void Rfid_InitModuleOnChannel(uint8_t channel)
 {
-    Rfid_SendPacketForChannel(channel, pa_gain10, (uint16_t)sizeof(pa_gain10)); /* 按通道发送发射功率配置，保证 A/B 模块功率一致。 */
+    Rfid_SendPacketForChannel(channel, rfid_tx_power_command, (uint16_t)sizeof(rfid_tx_power_command)); /* 按通道发送当前选定功率，保证 A/B 模块使用同一配置。 */
     Delay_ms(50); /* 等待 RFID 模块处理功率命令，避免连续命令粘连。 */
 
     Rfid_SendPacketForChannel(channel, region_set_command, (uint16_t)sizeof(region_set_command)); /* 按通道发送当前选定地区的频段配置，A/B 两个 RFID 模块保持一致。 */
@@ -599,10 +637,13 @@ static void Rfid_InitModuleOnChannel(uint8_t channel)
 void SscRadioFreq_Init(void)
 {
 #if (RFID_USE_DUAL_UART_MODE == 1U)
-    Rfid_InitModuleOnChannel(CHANNEL_A); /* 双串口模式先初始化 A 通道 UART3 上的 RFID 模块。 */
-    Rfid_InitModuleOnChannel(CHANNEL_B); /* 双串口模式再初始化 B 通道 UART9 上的 RFID 模块。 */
+    Rfid_InitModuleOnChannel(CHANNEL_A); /* 双串口模式先通过UART3初始化逻辑A侧RFID模块。 */
+    Rfid_InitModuleOnChannel(CHANNEL_B); /* 双串口模式再通过UART9初始化逻辑B侧RFID模块。 */
 #else
-    Rfid_InitModuleOnChannel(CHANNEL_A); /* 旧模式保持原行为，只初始化 UART3 当前经 R200-K8 选通的模块。 */
+    Rfid_SelectHardwareChannel(CHANNEL_A); /* 旧模式先按独立交换宏选通逻辑A对应的物理RFID模块。 */
+    Rfid_InitModuleOnChannel(CHANNEL_A); /* 通过共享UART3配置逻辑A当前选中的模块。 */
+    Rfid_SelectHardwareChannel(CHANNEL_B); /* 再选通逻辑B对应模块，保证两套RFID都完成上电配置。 */
+    Rfid_InitModuleOnChannel(CHANNEL_B); /* 通过共享UART3配置逻辑B当前选中的模块。 */
 #endif
 }
 

@@ -3,6 +3,7 @@
 #include "external_comm_protocol.h"
 
 #include "at24cs32.h"
+#include "board_profile.h"
 #include "bsp_uart.h"
 #include "eeprom.h"
 #include "kernel_scheduler.h"
@@ -281,30 +282,34 @@ static uint8_t ExternalComm_IsAuthorizedCode(const uint8_t *code, uint16_t code_
     return (code_len == 8U) ? 1U : 0U;
 }
 
+/**
+ * 函数功能：根据当前逻辑工作通道和统一交换配置，选择实际连接手柄EEPROM的I2C总线。
+ * 输入参数：use_i2c3 为输出指针，返回1表示使用I2C3，返回0表示使用I2C2。
+ * 返回参数：1表示已选中有效A/B通道，0表示参数无效或当前没有选中手柄通道。
+ */
 static uint8_t ExternalComm_CurrentBusIsI2C3(uint8_t *use_i2c3)
 {
+    uint8_t physical_channel; /* 保存当前逻辑通道对应的物理接口，避免外控读错手柄EEPROM。 */
+
     /* use_i2c3 是输出参数，用来告诉读写函数选择 I2C2 还是 I2C3。 */
     if (use_i2c3 == NULL)
     {
         return 0U;
     }
 
-    /* 当前选中 A 通道时，按硬件约定读写 I2C2 上的手柄 EEPROM。 */
-    if (WorkMessage.channel_work == CHANNEL_A)
-    {
-        *use_i2c3 = 0U;
-        return 1U;
-    }
-
-    /* 当前选中 B 通道时，按硬件约定读写 I2C3 上的手柄 EEPROM。 */
-    if (WorkMessage.channel_work == CHANNEL_B)
-    {
-        *use_i2c3 = 1U;
-        return 1U;
-    }
-
     /* 未选中 A/B 时不能判断目标 EEPROM，调用者回失败应答。 */
-    return 0U;
+    if ((WorkMessage.channel_work != CHANNEL_A) &&
+        (WorkMessage.channel_work != CHANNEL_B))
+    {
+        return 0U;
+    }
+
+    /* 外控继续使用逻辑A/B选择业务对象，只在访问硬件前换算物理接口。 */
+    physical_channel = BoardProfile_MapHandlePhysicalChannel(WorkMessage.channel_work);
+
+    /* 原物理B接口使用I2C3；原物理A接口使用I2C2。 */
+    *use_i2c3 = (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_B) ? 1U : 0U;
+    return 1U;
 }
 
 static uint8_t ExternalComm_ReadCurrentPage(uint16_t page_index, uint8_t *page_buf)
@@ -318,7 +323,7 @@ static uint8_t ExternalComm_ReadCurrentPage(uint16_t page_index, uint8_t *page_b
         return 0U;
     }
 
-    /* B 通道走 I2C3，A 通道走 I2C2，页校验由 AT24CS32 驱动内部完成。 */
+    /* 统一物理映射已经给出实际总线，页校验由对应AT24CS32驱动完成。 */
     return (use_i2c3 != 0U) ?
            AT24CS32_ReadPage_I2C3(page_index, page_buf) :
            AT24CS32_ReadPage_I2C2(page_index, page_buf);

@@ -81,7 +81,7 @@ void Userparser_Init(void)
   Uart2_Init();  //外部通讯
   Uart3_Init();  //射频
 #if (RFID_USE_DUAL_UART_MODE == 1U)
-  Uart9_Init();  //B 通道射频独立串口，旧模式关闭时不占用 PD14/PD15。
+  Uart9_Init();  //启动逻辑B侧RFID DMA；固定UART线束不跟随手柄物理交换。
 #endif
   Uart4_Init();  //脚踏
   Uart5_Init();  //步进1
@@ -106,7 +106,7 @@ void Userparser_Init(void)
   Delay_ms(500);
   Delay_ms(500);
   Userparser_PubinterfaceInit();
-	SscRadioFreq_Init();  //150ms射频初始化...串口3
+	SscRadioFreq_Init();  //按单/双串口硬件模式初始化两侧RFID模块，旧模式由R200-K8依次选通。
   Iwdg_Reset();
 	
 	//ssc任务初始化开始

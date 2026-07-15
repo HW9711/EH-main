@@ -244,3 +244,42 @@
 - 双踏板左右侧代码基本镜像，但分别使用 `switchhandle_counts`、`switchhandle_countss` 和不同控制标志；这些现有状态字段必须原样保留，不能为了合并代码擅自改成共享计数。
 - 当前存在需要保持而非顺手修正的分支差异，例如 JTB 轻踩时 A 泵取默认注水流量、B 泵取当前工作速度，以及左右踏板释放时检查对侧状态。若无单独缺陷复现，本轮只做结构提取。
 - 最低风险边界是先在 `sscFOOT.c` 内把连接处理、三类踏板周期处理、共用启动/停止动作提取成静态函数；暂不拆文件，也暂不同时重写 `Foot_ParseDataS()` 的 UART4 收包状态机。
+
+## 2026-07-14 当前工程行为保持优化审查发现
+
+- 当前审查基线为 `040cd17`，开始审查时工作区干净；历史 `a39c3b1` 文件规模、warning 和职责统计只能作为对照，不能直接作为当前结论。
+- `handlescan.c`、泵行为内核、`FootControlTask()`、`PUMPActive()` 和 `ScreenKey_Scan()` 已完成多轮实机验证后提交，本轮不会把这些已治理模块再次列为首选重构对象。
+- 用户唯一硬约束是业务功能不变，因此本轮把“减少代码行数”置于“保持隐式调用顺序和共享状态语义”之后；不能为追求对称而改动历史 A/B 差异。
+- 规划技能会追加三份审查记录，但生产业务源码、构建清单和协议文件保持只读。
+- 当前业务大文件仍集中在：`handlescan.c` 3139 行、`external_comm_task.c` 3135 行、`Pubinterface.c` 2941 行、`sscFOOT.c` 1836 行、`soft_uart.c` 1556 行、`sscUIDP.c` 1090 行；文件行数本身不能作为再次重写已验证模块的理由。
+- `Pubinterface.h` 当前约 462 行，被 21 个项目业务文件直接包含，并且没有 include guard 或 `#pragma once`；补充头文件保护是可独立完成、零业务语义变化的安全修正。
+- 五个受保护公共对象的直接字段写入仍分散：`Pubinterface.c` 133 处、`pump_control.c` 82 处、`sscFOOT.c` 65 处、`external_comm_task.c` 63 处、`handle_control.c` 34 处，其余模块还有少量写入。后续只能集中完整业务动作，不能搬移或改造这些数据结构。
+- `ControlSigleMessage_t / ControlSigleMssage` 当前只发现定义与声明，未发现业务引用；必须再由 map 证明未进入镜像，才可作为独立死代码清理项。
+- `external_comm_task.c` 仍是下一轮最值得梳理的数据流模块；它同时承担命令执行、状态回传、收包缓存和连接生命周期，且仍有大量公共状态直接写入。
+- map 显示 `ControlSigleMssage` 虽无源码调用，仍作为 8 字节全局数据进入镜像；它不是“已被链接器裁掉”的代码，只能在确认没有调试器/外部符号依赖后单独删除。
+- `drivectrl_adapter.c` 的三个函数、`footpedal_ui_adapter.c` 的函数与 4 字节状态全部被链接器裁掉；全工程也没有业务调用。两者属于真实的无效兼容层，连同 `userparser.c` 的旧 `drivectrl.h` include 和头文件内未实现的旧任务声明，可作为第一批纯清理对象。
+- 当前 map 还裁掉 `RfidHandle()`、`ChannelMessageInit()`、`ScreenKey_LegacyEventTake()`、旧电机运行接口及 `pedal.c` 旧接收任务。后者仍被旧脚踏定标 UI 源码引用，删除前必须先确认该 UI 构建变体已永久停用，不能只凭默认 map 直接整批删除。
+- 当前标准函数块注释在已重构的 `handlescan.c`、`Pubinterface.c`、`screenkey.c`、`control_arbitration.c` 等文件覆盖较好；剩余注释治理应跟随具体模块改动，不应为覆盖率单独批量重写。
+- `sscRFID.c` 的 `CUTTERSCANTaskHandle` 是 `static` 私有对象，未创建、未启动，只被 `(void)` 人工引用；map 证实它仍占 4240B RW。删除该对象和无效引用不改变任何运行路径，是当前收益最高且风险最低的单点优化。
+- `datahand.c/.h` 的函数、130B 状态和1B数据均被 map 裁掉，且 `handlescan.c/handlekey.c` 仅包含头文件、不使用其符号；该乱码旧状态模块与两个空适配层应一并作为“构建清单瘦身”阶段处理。
+- `Pubinterface.c` 当前约89个函数；`control_arbitration` 与 `work_alarm` 已具备清晰所有权，不是冗余层，应保留。仍可把仅本文件使用的4个接口改为 `static`，并让业务调用者直接包含真实模块头文件，取消 `Pubinterface.h` 对仲裁、报警、泵和手柄接口的隐式转发。
+- `Pubinterface.c` 最值得继续处理的是约195行的 `SpeedActive()` 和约157行的 `ControlTypeActive()`；只在原文件内按真实动作拆静态函数，并集中 A/B 通道指针选择，不拆 `ScreenKey_CanUse()` 这种可直接按键值查阅的线性规则。
+- `handlescan.c` 仍有一处直接写报警字段，可等价改走现有 `WorkAlarm_Set/Clear`，完成报警唯一写入口；不能全面为五个公共结构生成逐字段包装函数。
+- 外控当前真实数据流已经清楚，`external_comm_task.c` 不宜拆文件。优先把下行命令、失败原因、心跳字段和 AreaCode 数值集中到现有 `external_comm_protocol.h`，再修正 UART5/RxFifoFull 等误导性私有名称，最后用一个私有通道选择函数减少 `MemoryMsgA/B` 重复。
+- `sscUIDP.c` 的 A/B 泵显示和手柄图标仍存在镜像重复，可用文件内通道显示配置合并；必须逐项锁定 VP、图片号和 LCD 调用顺序，泵镜像宏保持不变。
+- `MOTORRUN()` 仍约140行，可按目标速度、低速补偿、方向命令、通道/闭环、显示/组帧拆为文件内静态阶段；必须保持50ms调用顺序、EMBD输出层取反和脚踏速度仅量化显示不量化电机目标。
+- `screenkey.c`、`sscKEYBH.c`、LED、蜂鸣状态机及当前 RFID 主流程的职责边界已经足够清楚，不建议继续表驱动或拆文件，否则只会增加跳转层。
+- 独立缺陷包括 RFID 重试次数不递减、电机回包粘包跳13字节、电机故障停机不对称、看门狗实际未启用、蜂鸣队列失败后同类报警不重试。它们都涉及行为，应单独复现和修复，不能混入“业务不变”的重构提交。
+- 2026-07-14 14:18 使用 EIDE/AC5 对当前 HEAD 全量重建：127个C、1个汇编，0 error、0 warning；RO 106040B、RW 130664B、ROM 106524B。
+
+## 2026-07-14 手柄物理 A/B 接口交换发现
+
+- 当前逻辑 A 固定绑定 PD1 短接检测、I2C2 EEPROM、PE12 实体键、RFID A 硬件通道和电机驱动物理通道 1；逻辑 B 对应 PD0、I2C3、PE13、RFID B 和电机驱动物理通道 2。
+- 不能交换 `s_a_binding/s_b_binding` 或 `CHANNEL_A/B`，否则识别缓存、记忆、报警、UI、RFID结果和事件会一起串位。
+- 正确方式是保留逻辑 A/B，只在硬件访问边界把逻辑通道映射到物理通道。
+- `handlescan.c` 的 EEPROM认证、字节读取和整页读取都直接按逻辑通道选择 I2C2/I2C3；需改为按物理通道选择。
+- `external_comm_task.c` 也独立按 `WorkMessage.channel_work` 选择 EEPROM 总线，必须复用同一物理映射，否则扫描和上位机读写会访问不同手柄。
+- RFID 缓存必须继续按逻辑通道存放，仅 R200-K8/UART3/UART9 的硬件选择按物理通道映射。
+- `sscDrive.c` 的 `motor_type` 0x01/0x03 表示物理通道1，0x02/0x04 表示物理通道2；整根线束交换时必须同步映射。
+- 统一配置集中在 `board_profile.h`，`board_resource_map.h` 只负责把逻辑短接脚和运行键指向对应物理资源；业务模块只在硬件访问前调用同一个通道映射函数。
+- 开关 `1U` 时逻辑A使用PD0、PE13、I2C3、原物理B RFID和电机通道，逻辑B使用PD1、PE12、I2C2、原物理A RFID和电机通道；开关 `0U` 恢复原接线。

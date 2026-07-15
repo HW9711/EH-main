@@ -1,5 +1,6 @@
 #include "sscDRIVE.h"
 #include "data.h"
+#include "board_profile.h"
 
 
 #include "lcd.h"
@@ -176,14 +177,20 @@ static uint32_t MotorDrive_QuantizeFootDisplaySpeed(uint32_t actual_speed)
     return (actual_speed / MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM) * MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM; /* 只截掉百位以下数值，不回写 WorkMessage，也不影响电机驱动帧。 */
 }
 
-/// 开口定位
-void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)//通道，方向，角度
+/**
+ * 函数功能：按逻辑手柄通道生成开口定位命令，并发送给对应的物理电机通道。
+ * 输入参数：channel_number 为逻辑通道；direction 为定位方向；angel 为定位角度。
+ * 返回参数：无。
+ */
+void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 {
  uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0xBB ,0xAA };
- channel_number==1?(cmd[3]=1):(cmd[3]=2);
- direction==true?(cmd[1]=4):(cmd[1]=5);
- cmd[5]=angel;
- Uart1_SendPacket(cmd,motor_frem_length);
+ uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(channel_number); /* 定位命令只交换物理电机路，调用方仍传逻辑A/B。 */
+
+ cmd[3]=(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A)?BOARD_PROFILE_HANDLE_CHANNEL_A:BOARD_PROFILE_HANDLE_CHANNEL_B; /* 驱动帧第3字节选择原物理A或B电机通道。 */
+ direction==true?(cmd[1]=4):(cmd[1]=5); /* 定位方向沿用原协议4/5，不受通道交换影响。 */
+ cmd[5]=angel; /* 定位角度继续写入协议第5字节，保持原单位和范围。 */
+ Uart1_SendPacket(cmd,motor_frem_length); /* 通过UART1把完整定位帧发给电机驱动板。 */
 }
 
 
@@ -211,6 +218,7 @@ void MOTORRUN(void)
     static uint32_t last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 记录脚踏运行时上一次发给屏幕的实时速度，避免每 50ms 无变化也刷屏。 */
     uint8_t display_value[10]={0};
     uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
+    uint8_t physical_channel=BoardProfile_MapHandlePhysicalChannel(WorkMessage.channel_work); /* 仅把当前逻辑手柄通道换算成物理电机通道。 */
     uint32_t motor_source_speed=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕/EEPROM 当前设定速度就是电机运行目标速度。 */
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
@@ -291,29 +299,29 @@ void MOTORRUN(void)
              default:
              break;
         }
-        if(WorkMessage.channel_work==1)//通道1
+        if(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A) /* 原物理A电机通道。 */
         {
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
-                msg.motor_type=0x01; /* A 通道无刷手柄使用驱动协议的 0x01 电机类型，保证命令送到 A 路无刷控制分支。 */
+                msg.motor_type=0x01; /* 原物理A无刷电机使用协议类型0x01；逻辑状态不随物理交换改变。 */
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型由手柄型号换算，保留各型号原有驱动方式。 */
                 
             }
             else{
-             msg.motor_type=0x03; /* A 通道有刷手柄固定使用协议类型 0x03，不能与 B 通道的 0x04 混用。 */
-              msg.run_type=0x03; /* 有刷 A 路的运行类型与电机类型保持一致，驱动板据此进入 A 路有刷控制。 */
+             msg.motor_type=0x03; /* 原物理A有刷电机固定使用协议类型0x03。 */
+              msg.run_type=0x03; /* 有刷物理A路的运行类型与电机类型保持一致。 */
             }
         }
-        else if(WorkMessage.channel_work==2)//通道2
+        else if(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_B) /* 原物理B电机通道。 */
         {
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
-                msg.motor_type=0x02; /* B 通道无刷手柄使用驱动协议的 0x02 电机类型，保证命令送到 B 路无刷控制分支。 */
+                msg.motor_type=0x02; /* 原物理B无刷电机使用协议类型0x02；逻辑状态仍归原A/B业务通道。 */
                 msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型仍按手柄型号换算，通道选择只影响物理驱动路。 */
             }
             else 
-            { msg.motor_type=0x04; /* B 通道有刷手柄固定使用协议类型 0x04，不能与 A 通道的 0x03 混用。 */
-                 msg.run_type=0x04; /* 有刷 B 路的运行类型与电机类型保持一致，驱动板据此进入 B 路有刷控制。 */
+            { msg.motor_type=0x04; /* 原物理B有刷电机固定使用协议类型0x04。 */
+                 msg.run_type=0x04; /* 有刷物理B路的运行类型与电机类型保持一致。 */
             }
         }
       command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 最终输出给电机前按 GE2433 协议把实际 rpm 转为 rpm/10 字段。 */

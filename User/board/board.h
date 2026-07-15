@@ -85,11 +85,11 @@ extern "C" {
 #define BOARD_UART8_RX_PIN    GPIO_PIN_0
 #define BOARD_UART8_RX_AF     GPIO_AF8_UART8
 
-#define BOARD_UART9_TX_PORT   GPIOD        /* UART9_TX - PD15，RFID B 通道发送脚。 */
+#define BOARD_UART9_TX_PORT   GPIOD        /* UART9_TX - PD15，原物理B侧RFID发送脚。 */
 #define BOARD_UART9_TX_PIN    GPIO_PIN_15    /* UART9_TX 实际对应 PD15，按 STM32F413 引脚复用表修正发送脚。 */
 #define BOARD_UART9_TX_AF     GPIO_AF11_UART9
 /* UART9 引脚方向以 STM32F413 复用表为准：TX=PD15，RX=PD14。 */
-#define BOARD_UART9_RX_PORT   GPIOD        /* UART9_RX - PD14，RFID B 通道接收脚。 */
+#define BOARD_UART9_RX_PORT   GPIOD        /* UART9_RX - PD14，原物理B侧RFID接收脚。 */
 #define BOARD_UART9_RX_PIN    GPIO_PIN_14    /* UART9_RX 实际对应 PD14，按 STM32F413 引脚复用表修正接收脚。 */
 #define BOARD_UART9_RX_AF     GPIO_AF11_UART9
 

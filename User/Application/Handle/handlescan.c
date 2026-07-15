@@ -2,6 +2,7 @@
 
 #include "handlescan.h"
 #include "board.h"
+#include "board_profile.h"
 #include "bsp_gpio.h"
 #include "bsp_uart.h"
 #include "data.h"
@@ -339,11 +340,11 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
 {
     if (channel == CHANNEL_A)
     {
-        return &s_a_binding; /* A 通道固定关联 I2C2、PD1 和 A 侧业务缓存。 */
+        return &s_a_binding; /* 逻辑A固定关联A侧业务缓存，物理接口由统一交换配置决定。 */
     }
     if (channel == CHANNEL_B)
     {
-        return &s_b_binding; /* B 通道固定关联 I2C3、PD0 和 B 侧业务缓存。 */
+        return &s_b_binding; /* 逻辑B固定关联B侧业务缓存，物理接口由统一交换配置决定。 */
     }
 
     return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
@@ -2274,12 +2275,17 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(uint8_t channel, AT24CS32_CRC_S
 static AT24CS32_CRC_Status Handlescan_VerifyEeprom(const HandlescanChannelBinding *binding,
                                                    AT24CS32_CRC_Result *result)
 {
-    if (binding->channel == CHANNEL_A)
+    /* 只把逻辑通道换算成物理接口，认证结果仍写回原逻辑A/B上下文。 */
+    uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
+
+    /* 原物理A接口连接I2C2，交换开启后逻辑B会进入此分支。 */
+    if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A)
     {
-        return AT24CS32_VerifyCrc_I2C2(result); /* A 通道固定走 I2C2。 */
+        return AT24CS32_VerifyCrc_I2C2(result);
     }
 
-    return AT24CS32_VerifyCrc_I2C3(result); /* B 通道固定走 I2C3。 */
+    /* 原物理B接口连接I2C3，交换开启后逻辑A会进入此分支。 */
+    return AT24CS32_VerifyCrc_I2C3(result);
 }
 
 /*
@@ -2292,12 +2298,17 @@ static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *bindin
                                           uint8_t *data,
                                           uint16_t len)
 {
-    if (binding->channel == CHANNEL_A)
+    /* 连续读取必须与短接检测使用同一套物理映射，避免读到另一侧手柄。 */
+    uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
+
+    /* 原物理A接口的EEPROM固定挂在I2C2。 */
+    if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A)
     {
-      return AT24CS32_ReadBytes_I2C2(addr, data, len); /* A 通道固定走 I2C2。 */
+        return AT24CS32_ReadBytes_I2C2(addr, data, len);
     }
 
-    return AT24CS32_ReadBytes_I2C3(addr, data, len); /* B 通道固定走 I2C3。 */
+    /* 原物理B接口的EEPROM固定挂在I2C3。 */
+    return AT24CS32_ReadBytes_I2C3(addr, data, len);
 }
 
 /*
@@ -2311,12 +2322,16 @@ static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *bindin
 static uint8_t
 Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding,
                           uint16_t page_index, uint8_t *page_buf) {
-  if (binding->channel == CHANNEL_A) {
-    return AT24CS32_ReadPage_I2C2(page_index,
-                                  page_buf); /* A 通道固定走 I2C2。 */
+  /* 整页读取沿用统一物理映射，逻辑消息和页面数据归属不发生交换。 */
+  uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
+
+  /* 原物理A接口的EEPROM页固定从I2C2读取。 */
+  if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A) {
+    return AT24CS32_ReadPage_I2C2(page_index, page_buf);
   }
 
-  return AT24CS32_ReadPage_I2C3(page_index, page_buf); /* B 通道固定走 I2C3。 */
+  /* 原物理B接口的EEPROM页固定从I2C3读取。 */
+  return AT24CS32_ReadPage_I2C3(page_index, page_buf);
 }
 
 /*
@@ -2497,8 +2512,7 @@ Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
   if (context->stage == HANDLESCAN_STAGE_VERIFY) {
     AT24CS32_ClearLastDebugInfo(); /* 认证前先清掉上一轮底层 I2C 调试信息。 */
     verify_status = Handlescan_VerifyEeprom(
-        binding, &verify_result); /* 按固定绑定选择 A/I2C2 或 B/I2C3 完成 EEPROM
-                                     认证。 */
+        binding, &verify_result); /* 按逻辑绑定和统一物理映射选择对应I2C总线完成EEPROM认证。 */
     Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_VERIFY_STATUS,
                           (uint8_t)verify_status); /* 输出当前认证结果码。 */
 

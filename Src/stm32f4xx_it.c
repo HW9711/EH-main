@@ -480,7 +480,7 @@ void DMA2_Stream7_IRQHandler(void)
   /* USER CODE BEGIN DMA2_Stream7_IRQn 0 */
 
   /* USER CODE END DMA2_Stream7_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_uart9_rx); /* UART9_RX DMA 中断交给 HAL，维护 B 通道 RFID 接收状态。 */
+  HAL_DMA_IRQHandler(&hdma_uart9_rx); /* UART9_RX DMA中断交给HAL，维护原物理B侧RFID接收状态。 */
   /* USER CODE BEGIN DMA2_Stream7_IRQn 1 */
 
   /* USER CODE END DMA2_Stream7_IRQn 1 */
@@ -522,7 +522,7 @@ void UART9_IRQHandler(void)
   /* USER CODE BEGIN UART9_IRQn 0 */
 
   /* USER CODE END UART9_IRQn 0 */
-  HAL_UART_IRQHandler(&huart9); /* UART9 全局中断用于 B 通道 RFID 串口错误和状态维护。 */
+  HAL_UART_IRQHandler(&huart9); /* UART9全局中断用于原物理B侧RFID串口错误和状态维护。 */
   /* USER CODE BEGIN UART9_IRQn 1 */
 
   /* USER CODE END UART9_IRQn 1 */

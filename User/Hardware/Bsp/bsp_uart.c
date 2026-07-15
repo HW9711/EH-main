@@ -29,7 +29,7 @@ UART_HandleTypeDef *Bsp_UartHandle(bsp_uart_port_t port)
     case BSP_UART_PORT_7:
         return &huart7;
     case BSP_UART_PORT_9:
-        return &huart9; /* UART9 固定连接 B 通道 RFID，供双串口模式独立收发。 */
+        return &huart9; /* UART9固定连接逻辑B侧RFID，不跟随手柄物理接口交换。 */
     case BSP_UART_PORT_10:
         return &huart10;
     default:
