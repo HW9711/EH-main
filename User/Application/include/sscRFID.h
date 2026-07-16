@@ -28,11 +28,20 @@ typedef struct
     uint16_t presence_sequence;                      /* 每次有效读到 RFID 标签都递增，在线监测用它区分“同一标签仍在”和“连续读不到标签”。 */
 } RfidToolResult_t;
 
+typedef struct
+{
+    uint32_t request_count;                          /* 已发送的 EPC 读取命令总数，A/B 通道分别累计。 */
+    uint32_t valid_response_count;                   /* 已收到并通过协议校验的有效回包总数。 */
+    uint32_t lost_response_count;                    /* 下一条命令发送前仍未收到有效回包的已完成请求总数。 */
+    uint32_t invalid_frame_count;                    /* 收到数据但没有解析出有效 EPC 帧的异常批次总数。 */
+} RfidLinkStatistics_t;
+
 void SscSplitTypeAutoModeGetData_Init(void);
 void SscRadioFreq_Init(void);
 
 bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode);
 bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result);
+bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics);
 bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                              uint16_t length,
                              RfidReadSource_t expected_source,

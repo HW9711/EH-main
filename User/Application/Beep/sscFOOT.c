@@ -1488,17 +1488,16 @@ static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
 void FootControlTask(uint32_t event)
 {
     static FootMessage_t msg; /* 保存最近一次脚踏连接状态和定标值，无新消息时继续使用。 */
-    FootMessage_t discard_msg; /* 其它控制源占用时只丢弃一条旧脚踏消息，保持原队列行为。 */
     FootControlFlow_t flow = FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 默认完成本周期并执行 owner 释放检查。 */
 
     (void)event;
     if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_FOOT))
     {
-        if (FootMsgQueue != NULL)
+        if ((FootMsgQueue != NULL) && (Kernel_QueueReceive(FootMsgQueue, &msg, 0) == pdTRUE))
         {
-            (void)Kernel_QueueReceive(FootMsgQueue, &discard_msg, 0); /* 其它控制源占用时丢弃旧消息，避免稍后误启动。 */
+            Foot_HandleConnectionUpdate(&msg); /* 外控占用时仍更新脚踏在线状态和图标，但下方行程控制继续被直接跳过。 */
         }
-        return; /* 保持原逻辑：被占用时立即退出，不执行本周期 owner 释放。 */
+        return; /* 连接状态更新后立即退出，脚踏不得在外控期间启动电机、泵或切换通道。 */
     }
 
     if ((FootMsgQueue != NULL) && (Kernel_QueueReceive(FootMsgQueue, &msg, 0) == pdTRUE))

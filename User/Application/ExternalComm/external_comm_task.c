@@ -41,10 +41,18 @@
 #define EXTERNAL_COMM_HANDLE_MODE_REVERSE   0x02U   /* 心跳手柄工作模式：当前手柄反转。 */
 #define EXTERNAL_COMM_HANDLE_MODE_OSC       0x03U   /* 心跳手柄工作模式：当前手柄往复。 */
 #define EXTERNAL_COMM_HANDLE_MODE_UNKNOWN   0xFFU   /* 心跳手柄工作模式：当前没有可识别方向。 */
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 新版心跳 InforArea 最大长度：44 字节旧状态 + 最多 43 字节 A/B 刀具扩展，仍小于协议 134 字节上限。 */
+#if (RFID_LINK_STATS_ENABLE == 1U)
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 128U   /* 旧状态和刀具扩展之后再容纳 37 字节 A/B RFID 统计，仍小于协议 134 字节上限。 */
+#else
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 关闭 RFID 统计时恢复原心跳缓冲上限，不增加任务栈占用。 */
+#endif
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 心跳刀具扩展魔术字，放在泵字段之后，旧上位机可把它当尾部剩余字节忽略。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x01U /* 心跳刀具扩展版本，当前固定为 1，便于后续扩字段时区分。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN 20U /* 单通道刀具扩展块长度：通道/来源/规格/速度/方向/减速比共 20 字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_MAGIC 0xA6U /* RFID 链路统计扩展魔术字，固定放在心跳最后，便于上位机可靠定位。 */
+#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_VERSION 0x01U /* RFID 链路统计扩展版本，当前固定为 1。 */
+#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_BLOCK_LEN 17U /* 单通道块：通道1字节 + 请求/有效/丢失/异常各4字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_CHANNEL_COUNT 2U /* 每轮固定上报逻辑 A/B 两个通道，离线通道也保留累计值。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_EEPROM_PAGE3 0x00U /* 普通不可拆手柄，刀具信息来自 EEPROM 第三页。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC 0x01U /* 公共接头和 PXBA/PXBB 分体式手柄，刀具信息来自 RFID EPC。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD 0x00U /* 刀具扩展方向字段：正转。 */
@@ -2945,6 +2953,80 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     }
 }
 
+#if (RFID_LINK_STATS_ENABLE == 1U)
+/*
+ * 函数功能：向心跳末尾追加一个逻辑通道的 RFID 请求/应答统计块。
+ * 输入参数：info_area/info_len 为心跳缓存和当前长度；channel 为 A/B；statistics 为统计快照。
+ * 返回参数：无。
+ */
+static void ExternalComm_AppendRfidStatisticsBlock(uint8_t *info_area,
+                                                   uint16_t *info_len,
+                                                   uint8_t channel,
+                                                   const RfidLinkStatistics_t *statistics)
+{
+    /* 任一参数无效时不能追加半个统计块，避免上位机错位解析后续字段。 */
+    if ((info_area == NULL) || (info_len == NULL) || (statistics == NULL))
+    {
+        return;
+    }
+
+    /* block byte0 固定是逻辑通道号，1 表示 A，2 表示 B。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, channel);
+    /* block byte1~4 按大端上传实际发送的 EPC 读取命令总数。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, statistics->request_count);
+    /* block byte5~8 按大端上传通过协议校验的有效回包总数。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, statistics->valid_response_count);
+    /* block byte9~12 按大端上传没有等到有效回包的已完成请求总数。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, statistics->lost_response_count);
+    /* block byte13~16 按大端上传收到数据但协议校验失败的异常批次数。 */
+    ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, statistics->invalid_frame_count);
+}
+
+/*
+ * 函数功能：把主控累计的 A/B RFID 链路统计作为 A6 扩展追加到心跳最末尾。
+ * 输入参数：info_area 为心跳载荷；info_len 为当前已经写入的载荷长度。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendRfidStatistics(uint8_t *info_area, uint16_t *info_len)
+{
+    RfidLinkStatistics_t statistics_a; /* 保存 A 通道本轮上报的一致统计快照。 */
+    RfidLinkStatistics_t statistics_b; /* 保存 B 通道本轮上报的一致统计快照。 */
+    const uint16_t extension_len = (uint16_t)(3U +
+                                   (EXTERNAL_COMM_HEARTBEAT_RFID_STATS_CHANNEL_COUNT *
+                                    EXTERNAL_COMM_HEARTBEAT_RFID_STATS_BLOCK_LEN)); /* A6头3字节加两个17字节通道块。 */
+
+    /* 参数无效时保持前面已经构造的心跳内容不变。 */
+    if ((info_area == NULL) || (info_len == NULL))
+    {
+        return;
+    }
+
+    /* 必须一次容纳完整 A/B 扩展，空间不足时不写魔术字，避免生成残缺协议。 */
+    if ((uint16_t)(*info_len + extension_len) > EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN)
+    {
+        return;
+    }
+
+    /* 统计开关开启时两个逻辑通道都必须能复制；异常时整段跳过，不能只上报一侧。 */
+    if ((Rfid_CopyLinkStatistics(CHANNEL_A, &statistics_a) == false) ||
+        (Rfid_CopyLinkStatistics(CHANNEL_B, &statistics_b) == false))
+    {
+        return;
+    }
+
+    /* 扩展头 byte0 使用 A6，与现有 A5 刀具信息扩展明确区分。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RFID_STATS_MAGIC);
+    /* 扩展头 byte1 是版本 1，后续协议升级时可以安全拒绝未知布局。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RFID_STATS_VERSION);
+    /* 扩展头 byte2 固定为两个逻辑通道统计块。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RFID_STATS_CHANNEL_COUNT);
+    /* 先上报 A，再上报 B，保证上位机展示顺序稳定。 */
+    ExternalComm_AppendRfidStatisticsBlock(info_area, info_len, CHANNEL_A, &statistics_a);
+    /* B 块使用独立累计器，物理串口或 R200-K8 映射不会改变逻辑归属。 */
+    ExternalComm_AppendRfidStatisticsBlock(info_area, info_len, CHANNEL_B, &statistics_b);
+}
+#endif
+
 static void ExternalComm_HeartbeatAppendHandle(uint8_t *info_area,
                                                uint16_t *info_len,
                                                uint8_t online,
@@ -3076,6 +3158,10 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);
     /* 追加 A/B 刀具扩展信息；无有效刀具时不追加，保持旧心跳兼容。 */
     ExternalComm_HeartbeatAppendToolInfo(heartbeat_info, &heartbeat_len);
+#if (RFID_LINK_STATS_ENABLE == 1U)
+    /* 统计开关开启时在心跳最末尾追加 A/B 请求/应答计数；关闭时不改变原心跳任何字节。 */
+    ExternalComm_HeartbeatAppendRfidStatistics(heartbeat_info, &heartbeat_len);
+#endif
 
     /* 按 0xAA 功能码构造心跳帧。 */
     if (ExternalCommProtocol_BuildHeartbeat(heartbeat_info,

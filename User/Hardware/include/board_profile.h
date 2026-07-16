@@ -10,7 +10,20 @@
  */
 
 #define BOARD_PROFILE_HAS_K1K2            BOARD_HAS_K1K2
-#define RFID_USE_DUAL_UART_MODE           1U  /* RFID硬件模式：1表示逻辑A固定UART3、逻辑B固定UART9；0表示UART3+R200-K8选通。 */
+#define RFID_USE_DUAL_UART_MODE           0U  /* RFID硬件模式：1表示逻辑A固定UART3、逻辑B固定UART9；0表示UART3+R200-K8选通。 */
+
+/*
+ * RFID 请求/应答统计开关：
+ * 1U：主控分别累计 A/B 通道的读取命令、有效回包、无有效回包和异常帧，并在心跳尾部上报。
+ * 0U：不保留统计状态，也不追加心跳统计扩展，心跳字节格式恢复为原版本。
+ */
+#ifndef RFID_LINK_STATS_ENABLE
+#define RFID_LINK_STATS_ENABLE             1U
+#endif
+
+#if ((RFID_LINK_STATS_ENABLE != 0U) && (RFID_LINK_STATS_ENABLE != 1U))
+#error "RFID_LINK_STATS_ENABLE must be 0U or 1U"
+#endif
 
 /*
  * R200-K8旧硬件的RFID通道交换开关，仅在RFID_USE_DUAL_UART_MODE=0U时生效：
@@ -35,7 +48,7 @@
  * MemoryMsgA/B、界面区域、报警归属和业务状态始终保持逻辑A/B不变。
  */
 #ifndef HANDLE_PHYSICAL_AB_SWAP_ENABLE
-#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    1U
+#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    0U
 #endif
 
 #if ((HANDLE_PHYSICAL_AB_SWAP_ENABLE != 0U) && (HANDLE_PHYSICAL_AB_SWAP_ENABLE != 1U))
