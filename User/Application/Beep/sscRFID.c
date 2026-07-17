@@ -104,7 +104,7 @@ static RfidReadSource_t s_request_source = RFID_READ_SOURCE_NONE; /* 当前活�
 static uint8_t s_request_attempts_left = 0U;        /* 当前请求剩余发送次数，归零后任务停止本次请求。 */
 static bool s_request_fast_mode = false;            /* true 表示本次请求来自上线/重试快速识别，同标签也要让扫描层重新消费。 */
 #if (RFID_LINK_STATS_ENABLE == 1U)
-static RfidLinkStatistics_t s_link_statistics[2];   /* A/B 通道请求、有效回包、丢失回包和异常帧累计值。 */
+static RfidLinkStatistics_t s_link_statistics[2];   /* A/B 通道请求应答、在线监测和确认掉线累计值。 */
 static bool s_link_response_pending[2] = {false, false}; /* true 表示该通道最近一条读取命令尚未收到有效回包。 */
 #endif
 
@@ -257,8 +257,11 @@ static void Rfid_LinkStatsRecordInvalidFrame(uint8_t channel)
         return;
     }
 
-    /* 异常帧单独累计；当前命令仍保持待响应，允许本周期继续等待或重发。 */
-    s_link_statistics[index].invalid_frame_count++;
+    /* 16 位异常计数达到上限后保持饱和，避免长期运行回绕成 0 误导现场判断。 */
+    if (s_link_statistics[index].invalid_frame_count < 0xFFFFU)
+    {
+        ++s_link_statistics[index].invalid_frame_count; /* 异常帧只影响统计，不结束当前命令等待。 */
+    }
 #else
     (void)channel; /* 关闭统计时不增加异常帧处理分支。 */
 #endif
@@ -925,6 +928,55 @@ bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics)
 #else
     (void)channel; /* 关闭统计时保留稳定 API，但不分配内部计数数组。 */
     return false;
+#endif
+}
+
+/*
+ * 函数功能：记录一次已经得到成功或未响应结论的 RFID 在线监测。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+void Rfid_RecordMonitorCompletion(uint8_t channel)
+{
+#if (RFID_LINK_STATS_ENABLE == 1U)
+    uint8_t index; /* 保存逻辑通道对应的统计数组下标。 */
+
+    /* 非 A/B 通道没有可归属的在线监测，禁止污染任一侧统计。 */
+    if (Rfid_ChannelToIndex(channel, &index) == false)
+    {
+        return;
+    }
+
+    /* 成功确认标签仍在或等待到下一监测周期未确认，都属于一次已完成监测。 */
+    ++s_link_statistics[index].monitor_completion_count;
+#else
+    (void)channel; /* 关闭统计时编译为空操作，不增加运行状态和 RAM。 */
+#endif
+}
+
+/*
+ * 函数功能：记录一次达到 handlescan 既有缺失时间阈值的 RFID 刀具确认掉线。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+void Rfid_RecordConfirmedDropout(uint8_t channel)
+{
+#if (RFID_LINK_STATS_ENABLE == 1U)
+    uint8_t index; /* 保存逻辑通道对应的统计数组下标。 */
+
+    /* 非 A/B 通道不能形成有效掉线事件。 */
+    if (Rfid_ChannelToIndex(channel, &index) == false)
+    {
+        return;
+    }
+
+    /* 掉线计数使用 16 位饱和值，保证长期运行后不会从最大值回绕到 0。 */
+    if (s_link_statistics[index].confirmed_dropout_count < 0xFFFFU)
+    {
+        ++s_link_statistics[index].confirmed_dropout_count; /* 每次真实在线到离线边沿只由扫描层调用一次。 */
+    }
+#else
+    (void)channel; /* 关闭统计时保持扫描层调用稳定，不产生额外计数。 */
 #endif
 }
 

@@ -63,7 +63,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       900U
-#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     200U  /* RFID 在线监测按 1 秒一轮执行，发读后下一轮仍未确认即可把用户可见清除时间压到约 2 秒。 */
+#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     200U  /* RFID 在线监测每 200ms 一轮，连续缺失次数达到阈值后约 2 秒确认掉线。 */
 #define HANDLESCAN_RFID_MISS_MAX              10U
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS    (HANDLESCAN_RFID_WAIT_TIMEOUT_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_MONITOR_PERIOD_TICKS  (HANDLESCAN_RFID_MONITOR_PERIOD_MS / HANDLESCAN_TASK_PERIOD_MS)
@@ -1009,6 +1009,7 @@ static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *bindi
         //SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
     }
     context->rfid_tool_online = 0U; /* 先切到离线边沿状态，后续不重复提示。 */
+    Rfid_RecordConfirmedDropout(binding->channel); /* 与既有蜂鸣共用同一确认边沿，统计值不会早于实际掉线判定。 */
     Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头离线确认时单响一次，让使用者知道刀具头已移开。 */
     if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
     {
@@ -1191,6 +1192,7 @@ static void Handlescan_RequestOnlineRfidMonitor(const HandlescanChannelBinding *
         context->rfid_monitor_ticks = 0U; /* 到周期后清零，避免连续投递请求。 */
         if (context->rfid_monitor_pending != 0U)
         {
+            Rfid_RecordMonitorCompletion(binding->channel); /* 到下一监测周期仍未确认，结算一次未响应监测。 */
             context->rfid_monitor_pending = 0U; /* 上一轮请求未被 presence 序号确认，先结束等待。 */
             if (context->rfid_miss_count < 0xFFU)
             {
@@ -1259,6 +1261,7 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 
     if (result.presence_sequence != context->rfid_last_presence_sequence)
     {
+        Rfid_RecordMonitorCompletion(binding->channel); /* 新 presence 序号表示本轮在线监测已经成功确认。 */
         context->rfid_last_presence_sequence = result.presence_sequence; /* 读到标签就刷新存在序号。 */
         context->rfid_miss_count = 0U; /* 标签仍在时清连续缺失。 */
         context->rfid_monitor_pending = 0U; /* 本轮请求已被回包确认。 */

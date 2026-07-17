@@ -33,7 +33,9 @@ typedef struct
     uint32_t request_count;                          /* 已发送的 EPC 读取命令总数，A/B 通道分别累计。 */
     uint32_t valid_response_count;                   /* 已收到并通过协议校验的有效回包总数。 */
     uint32_t lost_response_count;                    /* 下一条命令发送前仍未收到有效回包的已完成请求总数。 */
-    uint32_t invalid_frame_count;                    /* 收到数据但没有解析出有效 EPC 帧的异常批次总数。 */
+    uint32_t monitor_completion_count;               /* handlescan 在线监测已得到成功或未响应结论的累计次数。 */
+    uint16_t invalid_frame_count;                    /* 收到数据但没有解析出有效 EPC 帧的异常批次总数，饱和后保持 65535。 */
+    uint16_t confirmed_dropout_count;                /* 按现有缺失时间阈值确认并蜂鸣的 RFID 刀具掉线次数。 */
 } RfidLinkStatistics_t;
 
 void SscSplitTypeAutoModeGetData_Init(void);
@@ -42,6 +44,8 @@ void SscRadioFreq_Init(void);
 bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode);
 bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result);
 bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics);
+void Rfid_RecordMonitorCompletion(uint8_t channel);
+void Rfid_RecordConfirmedDropout(uint8_t channel);
 bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                              uint16_t length,
                              RfidReadSource_t expected_source,
