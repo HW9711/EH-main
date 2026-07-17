@@ -1951,7 +1951,11 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 	WorkMessage.current_work = memory->current_work;			  /* 同步当前通道保护电流，单位 0.01A，后续启动时按该手柄限流。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 同步刀具减速比，保证速度换算跟随通道。 */
 	WorkMessage.dir_work = memory->dir;						  /* 同步当前方向，速度选择依赖这个方向字段。 */
-	if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
+	if (ControlArbitration_IsExternalActive() == true)
+	{
+		WorkMessage.drivetype_work = TOUCHWORK; /* 外控切换 A/B 时只装载目标通道参数，运行控制方式继续归属外控，避免脚踏在线导致图标短暂变黄。 */
+	}
+	else if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
 	{
 		WorkMessage.drivetype_work = memory->drive_type = JTWORK;		  /* 脚踏在线且未被屏幕手动锁住时，切通道仍按脚控优先装载。 */
 	}

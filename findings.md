@@ -446,3 +446,22 @@
 - 最终采用双`requestAnimationFrame`：当前帧更新页签和页面骨架，下一稳定帧只补画目标页图表或日志；快速连点会取消旧页面待执行任务。
 - 正式Edge进行每版本80次切换与50条隐藏日志压力测试：无运行异常、无长任务；隐藏日志批次耗时由约379.8ms降为0ms，第一可见帧P95由约33.1ms降为31.9ms。
 - 日志改为有界数据缓存、单次HTML解析和父容器事件委托；当前可见180条另用有界Map保存，避免手动模式长期运行后旧行失去解析能力或DOM文本节点无界增长。
+
+## 2026-07-17 外控切换通道无蜂鸣核实
+
+- 上位机 A/B 通道按钮正确下发 `FunCode=0x03`、`AreaCode=0x01/0x02`；主控 `ExternalComm_ApplySwitchSetting()` 完成通道状态装载、实体屏幕刷新和成功 ACK，但没有发送蜂鸣消息。
+- 本地实体屏幕触摸链在业务投递前调用 `SendKeyBeepMessage(1U)`，因此本地切换有按键音；外控协议链与该入口相互独立，不是上位机切换失败。
+- 普通 `BEEP_MSG_KEY` 会清除蜂鸣任务内部的持续报警和限时报警倒计时，不能直接用于外控通道提示，否则可能打断正在进行的报警声。
+- 最小安全方案是增加“仅蜂鸣任务空闲时播放”的独立消息类型，并只在 `WorkMessage.channel_work` 真实发生 A/B 变化且命令成功后投递一次。
+- 最终实现中 `BEEP_MSG_KEY_IF_IDLE` 只在内部 `alarm_flag==0` 时装载按键音周期，不写 `alarm_flag` 或 `alarm_limited_ticks`；外控成功 ACK、实体屏幕刷新和其它切换项保持原顺序。
+
+## 2026-07-17 外控切通道脚踏图标黄色瞬态
+
+- 外控 A/B 切换成功分支调用 `Pubinterface_LoadChannelMemory()`；脚踏在线且没有屏幕手动锁存时，该函数会同时把目标通道 `memory->drive_type` 和 `WorkMessage.drivetype_work` 写成 `JTWORK`。
+- 随后的 `Pubinterface_RefreshRuntimeDisplaySnapshot()` 会进入 `Pubinterface_RefreshSelectedChannelDisplay()`，脚踏在线且 `drivetype_work==JTWORK` 时发送 `UI_CONTROL_ID` 选中值 1，因此实体屏幕脚踏图标立即变黄。
+- 外控仲裁 owner 在整个通道切换过程中没有退出；黄色瞬态来自运行状态字段与外控 owner 不一致，不等于脚踏已经取得控制权。
+- 上位机周期性重复申请/保活会再次进入 `ControlArbitration_EnterExternalControl()`，把 `drivetype_work` 写回 `TOUCHWORK` 并调用 `Pubinterface_RefreshControlModeDisplay()`，脚踏选中值随即变为 0，图标恢复白色。
+- 上位机保活周期为 200ms，因此黄色持续时间取决于切换命令落在两个保活帧之间的位置，通常小于 200ms。
+- `FootControlTask()` 在外控 owner 占用时只消费脚踏连接消息并立即返回，不处理踏板行程、电机、泵或通道切换；因此黄色期间脚踏不会实际取得控制权。
+- 该现象仍属于真实状态不一致：`s_control_owner` 保持外控，但 `WorkMessage.drivetype_work` 短暂变成脚控。当前心跳不直接上传该字段；主要影响是实体屏幕脚踏图标瞬态，以及停机状态下依赖该字段选择显示来源的路径。
+- 确认后的最小修复把外控 owner 判断放到通道记忆装载的脚踏优先判断之前；外控期间只把当前快照保持为 `TOUCHWORK`，不改目标通道 `memory->drive_type`，退出外控后的脚踏优先规则保持原样。

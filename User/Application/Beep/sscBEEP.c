@@ -14,7 +14,7 @@ static QueueHandle_t BeepMsgQueue = NULL;
 
 //蜂鸣器消息类型
 typedef struct {
-    uint8_t msgType;         //消息类型: 1=按键响应, 2=报警
+    uint8_t msgType;         //消息类型: 1=按键响应, 2=报警, 3=限时报警, 4=报警空闲时按键响应
     uint8_t keyBeepTime;     //按键蜂鸣器响应时长
     uint8_t alarmFlag;       //报警标志位
     uint16_t alarmHoldTicks;  //限时报警保持周期，单位为蜂鸣任务100ms周期
@@ -33,6 +33,28 @@ typedef struct {
     msg.alarmFlag = 0;
     msg.alarmHoldTicks = 0U;
     (void)Kernel_QueueSend(BeepMsgQueue, &msg, 0);
+}
+
+/*
+ * 函数功能：向蜂鸣任务发送仅在报警空闲时播放的普通提示音。
+ * 输入参数：time 为提示音保持的蜂鸣任务周期数，每周期 100ms。
+ * 返回参数：无。
+ */
+void SendKeyBeepMessageIfIdle(uint8_t time)
+{
+    BeepMessage_t msg; /* 独立消息类型让蜂鸣任务决定是否播放，调用者不直接读取任务内部报警状态。 */
+
+    /* 蜂鸣队列尚未初始化时不能投递提示音，直接返回避免访问空队列。 */
+    if(BeepMsgQueue == NULL)
+    {
+        return;
+    }
+
+    msg.msgType = BEEP_MSG_KEY_IF_IDLE; /* 该消息不得使用会清除报警锁存的普通按键音类型。 */
+    msg.keyBeepTime = time;             /* 保存需要播放的 100ms 周期数，本次通道提示传入 1。 */
+    msg.alarmFlag = 0U;                 /* 空闲提示不携带报警码，保持现有报警来源不变。 */
+    msg.alarmHoldTicks = 0U;            /* 空闲提示不创建限时报警倒计时。 */
+    (void)Kernel_QueueSend(BeepMsgQueue, &msg, 0); /* 非阻塞投递，避免外控任务等待蜂鸣队列。 */
 }
 
 /*
@@ -115,6 +137,15 @@ if(BeepMsgQueue != NULL)
             key_flag = msg.keyBeepTime;
             alarm_flag = 0;
             alarm_limited_ticks = 0U;
+        }
+        /* 外控通道切换提示只能在报警空闲时播放，不得清除持续报警或限时报警。 */
+        else if(msg.msgType == BEEP_MSG_KEY_IF_IDLE)
+        {
+            /* 报警蜂鸣占用时静默忽略提示；报警结束后不补响，避免产生与操作时点不一致的声音。 */
+            if(alarm_flag == 0U)
+            {
+                key_flag = msg.keyBeepTime; /* 仅更新普通按键音周期数，不改报警码和报警倒计时。 */
+            }
         }
         /* 持续报警由外部发送 0 才结束，因此清掉内部限时倒计时。 */
         else if(msg.msgType == BEEP_MSG_ALARM)

@@ -805,6 +805,8 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
     uint8_t info[2];
     /* value 保存 InforArea 第 1 字节切换值。 */
     uint8_t value;
+    /* 保存命令执行前的逻辑通道，只在 A/B 真实互换成功时产生操作提示音。 */
+    uint8_t previous_channel = WorkMessage.channel_work;
 
     if (ControlArbitration_IsExternalActive() == false)
     {
@@ -925,6 +927,15 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
     info[1] = value;
     /* 返回运行值设置成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_RUN_SET_OK, info, sizeof(info));
+
+    /* 只有有效逻辑通道从 A 切到 B 或从 B 切到 A 时才提示，初次选中和重复选择保持静默。 */
+    if ((((previous_channel == CHANNEL_A) && (WorkMessage.channel_work == CHANNEL_B)) ||
+         ((previous_channel == CHANNEL_B) && (WorkMessage.channel_work == CHANNEL_A))) &&
+        ((frame->area_code == 0x01U) || (frame->area_code == 0x02U)))
+    {
+        /* 报警蜂鸣占用时由蜂鸣任务丢弃本次 100ms 提示，避免切通道声音清除安全报警。 */
+        SendKeyBeepMessageIfIdle(1U);
+    }
 }
 
 static uint8_t ExternalComm_EnsureActiveForRun(uint8_t area_code)
