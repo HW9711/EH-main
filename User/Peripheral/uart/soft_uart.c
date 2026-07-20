@@ -36,6 +36,11 @@
 #define CS1237_DEVICE_CODE_DRAW_WATER   0x0EU  /* 单磁铁触发 PA4 后上报 1110，主控识别为抽水泵。 */
 #define CS1237_PUMP_LOSS_SUSPECT_MS     1500U  /* 超过 1.5 秒无有效帧先进入疑似丢失，避免单次软串口错帧立刻清在线状态。 */
 #define CS1237_PUMP_LOSS_CONFIRM_MS     3000U  /* 疑似丢失持续到 3 秒仍无有效帧才确认离线，兼顾拔泵响应和偶发错帧容错。 */
+#define CS1237_RAW_MIN_VALUE            (-8388608L) /* CS1237原始值必须是24位二进制补码符号扩展后的最小值。 */
+#define CS1237_RAW_MAX_VALUE            8388607L /* CS1237原始值必须是24位二进制补码符号扩展后的最大值。 */
+#define CS1237_WEIGHT_MAX_X10           500000U /* 重量最大接受50000.0g，与压力板现有50000g配置上限一致。 */
+#define CS1237_THRESHOLD_MAX_G          50000U /* 阈值上限复用压力板存储边界，避免CRC正确的异常大值进入业务状态。 */
+#define CS1237_RECOVERY_VALID_FRAMES    3U /* 发现业务异常后必须连续收到3帧合理数据，才重新信任压力链路。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -123,6 +128,8 @@ static uint8_t s_rx_timers_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
 static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 记录每路最近一次有效帧时间，用于拔泵后无数据场景的离线判定。 */
 static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 记录每路首次进入疑似丢失的时间，用于连续确认后再清在线状态。 */
+static uint8_t s_cs1237_recovery_valid_count[SIM_UART_COUNT]; /* 业务异常后记录每路连续合理帧数，防止单帧恢复再次制造尖峰。 */
+static bool s_cs1237_recovery_required[SIM_UART_COUNT]; /* true表示该路刚出现业务越界，必须完成连续合理帧确认。 */
 
 /* 私有函数声明区：
  * 这些函数按“时基/硬件控制 -> 缓冲区 -> 状态机 -> 对外接口”的顺序组织。 */
@@ -149,6 +156,7 @@ static uint16_t Cs1237_CalcCrc16Modbus(const uint8_t *data, uint16_t length);
 static uint16_t Cs1237_ReadU16Le(const uint8_t *data);
 static uint32_t Cs1237_ReadU32Le(const uint8_t *data);
 static bool Cs1237_FrameValid(const uint8_t *frame);
+static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t *frame);
 static pumpMessage_t *Cs1237_GetPump(sim_uart_channel_t channel);
 static void Cs1237_BeepOnceIfNoAlarm(void);
 static void Cs1237_RefreshPumpUi(sim_uart_channel_t channel);
@@ -809,6 +817,60 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
 }
 
 /*
+ * 函数功能：检查CRC正确的压力帧是否符合CS1237硬件和压力板业务范围，并管理异常后的连续恢复确认。
+ * 输入参数：channel 为A/B压力软串口通道；frame 指向已通过固定字段和CRC校验的21字节帧。
+ * 返回参数：当前帧可以刷新泵业务状态时返回true；越界或仍在连续恢复确认阶段时返回false。
+ */
+static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t *frame)
+{
+    uint32_t channel_index; /* 通道枚举直接对应A/B两路恢复状态数组下标。 */
+    int32_t raw_cs1237; /* 保存24位符号扩展后的原始ADC值，用于拒绝字段错位产生的32位尖峰。 */
+    uint32_t weight_x10; /* 保存0.1g单位重量，用于限制压力板支持的最大业务范围。 */
+    uint16_t threshold_g; /* 保存g单位阈值，用于拒绝超过压力板配置上限的异常值。 */
+    bool data_in_range; /* 汇总本帧三个数值字段和设备码高位是否都满足协议业务约束。 */
+
+    if (SoftUart_ChannelValid(channel) == false)
+    {
+        return false; /* 非法通道没有独立恢复状态，不能把数据写入任一泵。 */
+    }
+
+    channel_index = (uint32_t)channel; /* 通道合法后再转换下标，避免数组越界。 */
+    raw_cs1237 = (int32_t)Cs1237_ReadU32Le(&frame[6]); /* 按协议小端读取RawCs1237并解释为有符号值。 */
+    weight_x10 = Cs1237_ReadU32Le(&frame[10]); /* 按协议小端读取最终重量，单位保持0.1g。 */
+    threshold_g = Cs1237_ReadU16Le(&frame[14]); /* 按协议小端读取压力阈值，单位保持g。 */
+    data_in_range = (raw_cs1237 >= CS1237_RAW_MIN_VALUE) &&
+                    (raw_cs1237 <= CS1237_RAW_MAX_VALUE) &&
+                    (weight_x10 <= CS1237_WEIGHT_MAX_X10) &&
+                    (threshold_g <= CS1237_THRESHOLD_MAX_G) &&
+                    ((frame[16] & 0xF0U) == 0U); /* 设备码只允许使用PA1~PA4对应的低4位，高位污染说明载荷不可信。 */
+
+    if (data_in_range == false)
+    {
+        s_cs1237_recovery_required[channel_index] = true; /* 记录该路出现业务异常，后续单个正常帧不能立即恢复。 */
+        s_cs1237_recovery_valid_count[channel_index] = 0U; /* 新异常会打断已有恢复计数，必须重新连续确认。 */
+        return false; /* 越界帧不刷新在线时间、压力闭环、UI或外控上传数据。 */
+    }
+
+    if (s_cs1237_recovery_required[channel_index] == false)
+    {
+        return true; /* 链路此前可信时，当前合理帧沿用原有单帧实时更新行为。 */
+    }
+
+    if (s_cs1237_recovery_valid_count[channel_index] < CS1237_RECOVERY_VALID_FRAMES)
+    {
+        s_cs1237_recovery_valid_count[channel_index]++; /* 每个连续合理帧只累计一次恢复确认。 */
+    }
+    if (s_cs1237_recovery_valid_count[channel_index] < CS1237_RECOVERY_VALID_FRAMES)
+    {
+        return false; /* 尚未连续达到3帧时保留最后可信压力状态，避免异常和恢复值来回闪动。 */
+    }
+
+    s_cs1237_recovery_required[channel_index] = false; /* 第3个连续合理帧到达后恢复该路业务更新。 */
+    s_cs1237_recovery_valid_count[channel_index] = 0U; /* 恢复完成后清计数，下一次异常重新开始。 */
+    return true; /* 当前第3帧同时作为恢复后的第一帧可信业务数据写入。 */
+}
+
+/*
  * 函数功能：把 CS1237 模拟串口帧中的设备码转换成业务泵类型。
  * 输入参数：device_code 为下位机上报帧第 16 字节设备码。
  * 返回参数：DRAWWATER/INJECTWATER/POURWATER 表示已识别泵类型，0 表示备用码或未知码。
@@ -1064,7 +1126,10 @@ static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
 
     if (Cs1237_FrameValid(parser->frame))
     {
-        Cs1237_UpdatePumpMessage(channel, parser->frame); /* 完整帧通过固定字段和 CRC 后才写入对应泵状态。 */
+        if (Cs1237_BusinessDataTrusted(channel, parser->frame))
+        {
+            Cs1237_UpdatePumpMessage(channel, parser->frame); /* 结构、CRC和业务范围全部可信后才写入泵状态。 */
+        }
         parser->length = 0U; /* 本帧已经消费，清长度等待下一帧。 */
     }
     else

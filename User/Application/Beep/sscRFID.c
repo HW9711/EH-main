@@ -745,7 +745,7 @@ static void SplitType_AutoModeGetData_Task(void)
 
     Rfid_SelectHardwareChannel(s_request_channel); /* 发读命令前再次确认 R200-K8 指向目标通道，避免排队期间通道被切走。 */
     Rfid_SendReadCommand(s_request_channel, s_request_source); /* 未读到有效帧时发送下一次读命令。 */
-    //s_request_attempts_left--; /* 记录已消耗一次命令发送机会。 */
+    s_request_attempts_left--; /* 每发送一条读取命令就消耗一次机会，确保普通3次和快速10次请求能够自然结束。 */
 }
 
 /*

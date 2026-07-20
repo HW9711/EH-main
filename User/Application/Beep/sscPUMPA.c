@@ -22,26 +22,34 @@ static void PUMPAQueue_Init(void)
 }
 
 /*
- * 函数功能：向 A 泵队列提交新的业务速度，相同类型和速度不重复入队。
+ * 函数功能：向 A 泵队列提交新的业务速度，仅过滤已经成功入队的连续重复消息。
  * 输入参数：pump_type 为调用方携带的泵类型；value 为新的业务速度。
  * 返回参数：无。
  */
 void SendPumpAMessage(uint8_t pump_type, uint16_t value)
 {
-    static PumpBehaviorMessage_t msg; /* 保留上一次成功准备的命令，用于过滤连续重复消息。 */
+    static PumpBehaviorMessage_t last_queued_msg; /* 只保存最后一次成功入队的命令，队列满时不能提前覆盖它。 */
+    static uint8_t last_queued_valid = 0U; /* 0表示尚无成功入队记录，保证上电后的首条零值命令也可正常提交。 */
+    PumpBehaviorMessage_t new_msg; /* 本次待提交消息使用局部副本，发送失败后调用方下周期仍可重试同一设定。 */
 
     if (PUMPAMsgQueue == NULL)
     {
         return; /* 队列尚未创建时保持旧静默返回行为，不阻塞启动流程。 */
     }
-    if ((msg.pump_type == pump_type) && (msg.Value == value))
+    if ((last_queued_valid != 0U) &&
+        (last_queued_msg.pump_type == pump_type) &&
+        (last_queued_msg.Value == value))
     {
-        return; /* 相同命令不重复入队，避免 25ms 任务反复处理同一设定。 */
+        return; /* 只有相同命令已经成功排队时才去重，避免队列满后永久丢失最新设定。 */
     }
 
-    msg.pump_type = pump_type; /* 保存调用方类型，仅用于下一次去重。 */
-    msg.Value = value;         /* 保存本次业务速度，任务出队后只更新 speed_work。 */
-    (void)Kernel_QueueSend(PUMPAMsgQueue, &msg, 0); /* 非阻塞发送，队列满时保持原失败处理。 */
+    new_msg.pump_type = pump_type; /* 把调用方泵类型写入本次候选消息，不提前改变去重状态。 */
+    new_msg.Value = value; /* 把最新业务速度写入候选消息，任务出队后只更新 speed_work。 */
+    if (Kernel_QueueSend(PUMPAMsgQueue, &new_msg, 0) == pdPASS)
+    {
+        last_queued_msg = new_msg; /* 发送成功后才更新去重基准，表示该设定已经由泵任务排队接收。 */
+        last_queued_valid = 1U; /* 标记去重基准有效，后续连续相同消息可以安全过滤。 */
+    }
 }
 
 /*
