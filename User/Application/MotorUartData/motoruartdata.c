@@ -37,7 +37,9 @@ kernel_task_t MOTORUARTTaskHandle;
 
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
-static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录驱动报警第一次弹出的系统 tick，用于计算 3 秒保持时间。 */
+static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录非脚踏驱动报警的最少显示起点，脚踏过载不使用该时间退出。 */
+static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=0 后置位，脚踏松开时必须同时满足该条件才能解除报警。 */
+static volatile uint8_t s_motor_uart_overload_wait_foot_release = 0U; /* 过载发生时由脚踏控制手柄则置位，驱动任务不得按固定时间自动清报警。 */
 
 /*
  * UART2 已由 ExternalComm 独立任务接管。
@@ -99,6 +101,8 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 		return; /* 防御：无故障不应调用设置报警，直接返回避免误清其他模块状态。 */
 	}
 
+	s_motor_uart_driver_recovered = 0U; /* 每一帧非零 Err 都撤销恢复状态，重复故障去重也不能沿用旧的 Err=0 结果。 */
+
 	if ((s_motor_uart_last_driver_error == driver_error) && /* 同一故障已由本模块持有且屏幕仍显示时，不重复上报。 */
 	    (s_motor_uart_alarm_owned == alarm_value) &&
 	    (WorkMessage.alarm_flag == true) &&
@@ -107,36 +111,79 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 		return; /* 同一个驱动故障已上报过，本帧不重复投递蜂鸣/上位机报警。 */
 	}
 
+	/* 过流/堵转第一次接管报警时快照控制来源；只有脚踏来源要求“松脚后清除”。 */
+	if ((alarm_value == MOTOR_UART_ALARM_OVERLOAD) &&
+	    (s_motor_uart_alarm_owned != MOTOR_UART_ALARM_OVERLOAD))
+	{
+		s_motor_uart_overload_wait_foot_release =
+			(ControlSignalMessage.jtL_control_flag || ControlSignalMessage.jtR_control_flag) ? 1U : 0U; /* 故障帧到达时脚踏运行标志仍有效，可准确记录本次报警来源。 */
+	}
+	else if (alarm_value != MOTOR_UART_ALARM_OVERLOAD)
+	{
+		s_motor_uart_overload_wait_foot_release = 0U; /* 非过载故障保持原有自动清除规则，不占用脚踏释放条件。 */
+	}
+
 	s_motor_uart_last_driver_error = driver_error; /* 记录真实驱动 Err，便于下一帧判断是否发生了故障变化。 */
 	s_motor_uart_alarm_owned = alarm_value;        /* 记录本模块拥有的主控报警码，后续驱动恢复正常时才允许自动清除。 */
-	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 新报警出现时记录弹窗起点，后续即使 Err 很快恢复也要显示满 3 秒。 */
+	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 非脚踏驱动报警沿用最少显示时间；脚踏过载只用松脚和恢复条件。 */
 	MotorUart_SetAlarm(alarm_value);               /* 同步 WorkMessage、蜂鸣任务和外部通信报警上传。 */
 }
 
 /*
- * 函数功能：驱动 Err 恢复为 0 后，延时到 3 秒保持时间结束再清除本模块拥有的报警弹窗。
- * 输入参数：无。
- * 返回参数：无。
+ * 函数功能：按报警来源处理驱动故障退出；脚踏过载等待松脚，其它驱动报警沿用最少显示时间。
+ * 输入参数：skip_hold_time 非 0 表示脚踏已经松开，直接解除；为 0 时保留普通故障最少显示时间。
+ * 返回参数：无；退出条件未满足时继续保持报警、蜂鸣和弹窗。
  */
-static void MotorUart_ClearDriverAlarmIfOwned(void)
+static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
 {
+	/* 脚踏运行期间产生的过流/堵转只能由脚踏松开入口清除，驱动恢复帧本身永远不关闭报警。 */
+	if ((s_motor_uart_alarm_owned == MOTOR_UART_ALARM_OVERLOAD) &&
+	    (s_motor_uart_overload_wait_foot_release != 0U))
+	{
+		return; /* 即使 Err 已恢复也保持报警，等待脚踏任务确认当前物理位置已经松开。 */
+	}
+
 	if ((s_motor_uart_alarm_owned != 0U) && /* 只清除本模块持有且当前仍显示的驱动报警，不能误清其它报警。 */
 	    (WorkMessage.alarm_flag == true) &&
 	    (WorkMessage.alarm_value == s_motor_uart_alarm_owned))
 	{
-		if ((uint32_t)(HAL_GetTick() - s_motor_uart_alarm_start_tick) < ALARM_DRV_MS)
+		if ((skip_hold_time == 0U) &&
+		    ((uint32_t)(HAL_GetTick() - s_motor_uart_alarm_start_tick) < ALARM_DRV_MS))
 		{
-			return; /* 驱动 Err 已经恢复但 3 秒显示时间未到，继续保持 WorkMessage 和屏幕报警，避免现场只看到闪屏。 */
+			return; /* 非脚踏过载及其它驱动报警继续保持原 3 秒提示规则，避免弹窗闪一下。 */
 		}
 
-		WorkAlarm_Clear();                 /* 驱动 Err 已恢复且弹窗已满 3 秒，释放本模块写入的报警码。 */
-		SendAlarmMessage(WORK_ALARM_NONE); /* 3 秒提示结束后同步释放蜂鸣，避免蜂鸣锁存继续保持。 */
-		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 3 秒提示结束后关闭屏幕报警弹窗，NULL 参数由 UIDP 统一补零。 */
+		WorkAlarm_Clear();                 /* 满足当前报警退出条件后释放本模块写入的报警码。 */
+		SendAlarmMessage(WORK_ALARM_NONE); /* 报警退出后同步释放蜂鸣，避免蜂鸣锁存继续保持。 */
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 报警退出后关闭屏幕弹窗，NULL 参数由 UIDP 统一补零。 */
 	}
 
 	s_motor_uart_alarm_owned = 0U;        /* 无论当前报警是否被其他模块接管，都释放本模块报警所有权。 */
 	s_motor_uart_last_driver_error = 0U;  /* 驱动恢复正常后清掉上一次真实 Err，下一次新故障可以重新上报。 */
 	s_motor_uart_alarm_start_tick = 0U;   /* 本次保持周期结束或报警归属已转移，清掉旧 tick 防止下次沿用。 */
+	s_motor_uart_driver_recovered = 0U;   /* 本次报警生命周期结束，下一次故障必须重新等待 Err=0。 */
+	s_motor_uart_overload_wait_foot_release = 0U; /* 清除脚踏过载等待状态，允许下一次故障重新识别来源。 */
+}
+
+/*
+ * 函数功能：通知电机反馈模块，过载/堵转发生后的脚踏已经真实松开。
+ * 输入参数：无。
+ * 返回参数：无；驱动已恢复时立即清除脚踏过载报警，否则等待后续 Err=0 再清除。
+ */
+void MotorUart_ReleaseFootOverload(void)
+{
+	if (s_motor_uart_overload_wait_foot_release == 0U)
+	{
+		return; /* 当前报警不是脚踏运行触发的过流/堵转，不能改变其它驱动报警生命周期。 */
+	}
+
+	if (s_motor_uart_driver_recovered == 0U)
+	{
+		return; /* 当前脚踏虽已松开，但驱动仍未回报 Err=0，继续保持报警直到故障真实恢复。 */
+	}
+
+	s_motor_uart_overload_wait_foot_release = 0U; /* 当前物理脚踏已经松开且驱动已恢复，允许统一清除入口结束报警。 */
+	MotorUart_ClearDriverAlarmIfOwned(1U); /* 两个条件在当前周期同时成立，跳过普通故障计时并立即关闭报警、蜂鸣和弹窗。 */
 }
 
 /*
@@ -192,13 +239,14 @@ void BrushlessMotorUartData_ReceiveData(void)
 					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */
 					if (dat1[7] == MOTOR_UART_DRIVER_ERR_NONE)
 					{
+						s_motor_uart_driver_recovered = 1U; /* 本帧确认驱动故障已经消失；脚踏过载仍需等待松脚条件。 */
 						/* 只在“上一帧故障、本帧恢复”的边沿再次全停，防止旧运行请求随故障解除自动恢复输出。 */
 						if(clean_huic==1){
 							clean_huic=0;
 							MotorUart_StopAllWork();
 						}
 						/* 仅清理由驱动故障创建的报警，不能覆盖手柄掉线等更高层报警。 */
-						MotorUart_ClearDriverAlarmIfOwned();
+						MotorUart_ClearDriverAlarmIfOwned(0U); /* 普通驱动恢复路径保留原最少显示时间。 */
 						
 					}
 					else

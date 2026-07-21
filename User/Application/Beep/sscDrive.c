@@ -16,8 +16,7 @@
 
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
-#define MOTOR_DRIVE_RATIO_UNIT 1U /* 机械变速倍率为 1 时表示屏幕速度和电机速度一致。 */
-#define MOTOR_DRIVE_RATIO_X10_UNIT 10U /* 内部完整齿轮比按 x10 保存，50 表示 5.0 倍。 */
+#define MOTOR_DRIVE_RATIO_X100_UNIT 100U /* 当前倍率只使用 x100 单位，100 表示 1.00 倍直联。 */
 #define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* GE2433 启动帧速度字段单位为 10rpm，3000rpm 需要下发 300。 */
 #define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* GE2433 启动帧速度字段只有 16 位，超过时必须钳位。 */
 #define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 电机实际 rpm 的协议可表达上限。 */
@@ -97,38 +96,49 @@ static uint16_t MotorDrive_BuildCommandSpeed(uint32_t motor_speed_rpm)
 }
 
 /*
- * 函数功能：把内部 x10 倍率或历史整数倍率换算成减速机构需要的电机速度。
- * 输入参数：motor_speed 为已从屏幕 x10 速度恢复后的 rpm；ratio 为低 16 位减速比。
- * 返回参数：换算后的电机 rpm，未做 16 位钳位。
+ * 函数功能：按 x100 减速倍率换算机械减速机构需要的电机速度。
+ * 输入参数：motor_speed 为倍率换算前的目标 rpm；ratio 为低 16 位 x100 减速比。
+ * 返回参数：换算并钳位到驱动协议上限后的电机 rpm；倍率不大于 1.00 时返回原速度。
  */
 static uint32_t MotorDrive_ApplyReductionRatioValue(uint32_t motor_speed, uint32_t ratio)
 {
-    if (ratio >= MOTOR_DRIVE_RATIO_X10_UNIT)
+    uint64_t converted_speed; /* 使用 64 位保存乘法结果，避免最大速度乘 x100 倍率时发生 32 位回绕。 */
+
+    if (ratio <= MOTOR_DRIVE_RATIO_X100_UNIT)
     {
-        return (motor_speed * ratio) / MOTOR_DRIVE_RATIO_X10_UNIT; /* 内部倍率按 x10 保存，50 表示 5.0 倍减速，电机端速度需要乘 5.0。 */
+        return motor_speed; /* 0~100 都表示未配置或不大于 1.00，运行链路统一按直联处理。 */
     }
 
-    return motor_speed * ratio; /* 兼容历史直接写入的整数倍率，2 表示 2 倍减速。 */
+    converted_speed = ((uint64_t)motor_speed * ratio) / MOTOR_DRIVE_RATIO_X100_UNIT; /* 例如 525 表示 5.25 倍减速，电机端速度需要乘 5.25。 */
+    if (converted_speed > MOTOR_DRIVE_RPM_MAX)
+    {
+        converted_speed = MOTOR_DRIVE_RPM_MAX; /* 在收窄回 uint32_t 前先钳位，保证超大倍率不会截断成异常低速。 */
+    }
+
+    return (uint32_t)converted_speed; /* 返回驱动协议可表达范围内的实际 rpm。 */
 }
 
 /*
- * 函数功能：把内部 x10 倍率或历史整数倍率换算成增速机构需要的电机速度。
- * 输入参数：motor_speed 为已从屏幕 x10 速度恢复后的 rpm；ratio 为高 16 位增速比。
- * 返回参数：换算后的电机 rpm，倍率异常时返回原速度。
+ * 函数功能：按 x100 增速倍率换算机械增速机构需要的电机速度。
+ * 输入参数：motor_speed 为倍率换算前的目标 rpm；ratio 为高 16 位 x100 增速比。
+ * 返回参数：换算后的电机 rpm；倍率不大于 1.00 时返回原速度。
  */
 static uint32_t MotorDrive_ApplySpeedUpRatioValue(uint32_t motor_speed, uint32_t ratio)
 {
-    if (ratio >= MOTOR_DRIVE_RATIO_X10_UNIT)
+    uint64_t converted_speed; /* 增速换算分子使用 64 位，避免 motor_speed×100 在异常输入下溢出 32 位。 */
+
+    if (ratio <= MOTOR_DRIVE_RATIO_X100_UNIT)
     {
-        return (motor_speed * MOTOR_DRIVE_RATIO_X10_UNIT) / ratio; /* 内部倍率按 x10 保存，50 表示 5.0 倍增速，电机端速度需要除以 5.0。 */
+        return motor_speed; /* 0~100 都表示未配置或不大于 1.00，保持屏幕目标速度不变。 */
     }
 
-    if (ratio > MOTOR_DRIVE_RATIO_UNIT)
+    converted_speed = ((uint64_t)motor_speed * MOTOR_DRIVE_RATIO_X100_UNIT) / ratio; /* 例如 525 表示 5.25 倍增速，电机端速度需要除以 5.25。 */
+    if (converted_speed > MOTOR_DRIVE_RPM_MAX)
     {
-        return motor_speed / ratio; /* 兼容历史直接写入的整数倍率，2 表示 2 倍增速。 */
+        converted_speed = MOTOR_DRIVE_RPM_MAX; /* 在类型收窄前保留统一钳位，防御异常上游速度。 */
     }
 
-    return motor_speed; /* 0 或 1 表示无有效增速，保护为原速度。 */
+    return (uint32_t)converted_speed; /* 返回本次增速机构换算后的实际 rpm。 */
 }
 
 /*
@@ -138,25 +148,25 @@ static uint32_t MotorDrive_ApplySpeedUpRatioValue(uint32_t motor_speed, uint32_t
  */
 static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed)
 {
-    uint32_t ratio = WorkMessage.tool_reduction_ratio;        /* 当前通道记忆装载的完整倍率，高 16 位增速、低 16 位减速。 */
+    uint32_t ratio = WorkMessage.tool_reduction_ratio;        /* 当前通道记忆装载的 x100 完整倍率，高 16 位增速、低 16 位减速。 */
     uint32_t reduction_ratio = ratio & MOTOR_DRIVE_REDUCTION_MASK; /* 低 16 位减速比，减速机构需要放大电机速度。 */
     uint32_t speed_up_ratio = ratio >> MOTOR_DRIVE_SPEED_UP_SHIFT; /* 高 16 位增速比，增速机构需要降低电机速度。 */
     uint32_t motor_speed = display_speed;                     /* 设定速度已经是实际 rpm，例如 6000 表示 6000rpm，倍率换算前不能再除以 10。 */
 
-    if ((reduction_ratio > MOTOR_DRIVE_RATIO_UNIT) &&
-        (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT))
+    if ((reduction_ratio > MOTOR_DRIVE_RATIO_X100_UNIT) &&
+        (speed_up_ratio > MOTOR_DRIVE_RATIO_X100_UNIT))
     {
-        reduction_ratio = MOTOR_DRIVE_RATIO_UNIT;             /* 双倍率同时有效属于 EEPROM 写入错误，保护为无减速。 */
+        reduction_ratio = MOTOR_DRIVE_RATIO_X100_UNIT;        /* 双倍率同时大于 1.00 属于 EEPROM 写入错误，保护为 x100 直联值。 */
         speed_up_ratio = 0U;                                  /* 同时清增速分支，避免错误标签让电机速度不可预测。 */
     }
 
-    if (reduction_ratio > MOTOR_DRIVE_RATIO_UNIT)
+    if (reduction_ratio > MOTOR_DRIVE_RATIO_X100_UNIT)
     {
-        motor_speed = MotorDrive_ApplyReductionRatioValue(motor_speed, reduction_ratio); /* 减速机构：正常内部 50 表示 5.0 倍，历史值 2 仍兼容为 2 倍。 */
+        motor_speed = MotorDrive_ApplyReductionRatioValue(motor_speed, reduction_ratio); /* 低 16 位大于 100 时按 x100 减速倍率换算。 */
     }
-    else if (speed_up_ratio > MOTOR_DRIVE_RATIO_UNIT)
+    else if (speed_up_ratio > MOTOR_DRIVE_RATIO_X100_UNIT)
     {
-        motor_speed = MotorDrive_ApplySpeedUpRatioValue(motor_speed, speed_up_ratio); /* 增速机构：正常内部 50 表示 5.0 倍，历史值 2 仍兼容为 2 倍。 */
+        motor_speed = MotorDrive_ApplySpeedUpRatioValue(motor_speed, speed_up_ratio); /* 高 16 位大于 100 时按 x100 增速倍率换算。 */
     }
 
     if (motor_speed > MOTOR_DRIVE_RPM_MAX)

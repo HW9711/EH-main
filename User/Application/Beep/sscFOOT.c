@@ -37,6 +37,7 @@
 #include "sscPUMPA.h"
 #include "sscPUMPB.h"
 #include "pump.h"
+#include "motoruartdata.h"
 
 
 
@@ -58,6 +59,7 @@ static uint8_t s_double_pedal_release_before_run_channel = CHANNEL_NONE;
 static uint8_t s_double_left_gently_pump_channel = CHANNEL_NONE; /* 记录左脚踏轻踩实际启动的泵，松脚时不能再按泵类型重新猜测。 */
 static uint8_t s_double_right_gently_pump_channel = CHANNEL_NONE; /* 记录右脚踏轻踩实际启动的泵，A/B 都是注水泵时确保停止 B。 */
 static bool s_common_socket_missing_wait_release = false; /* 公共接头缺刀具触发后等待脚踏真实释放，防止同一次长踩反复弹 80。 */
+static bool s_motor_overload_wait_release = false; /* 驱动过载发生在脚踏运行期间时锁住本次踩踏，报警恢复后仍必须松脚再启动。 */
 
 
 
@@ -650,6 +652,53 @@ static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
     return ((uint32_t)ad_value <= ((uint32_t)low_value + (uint32_t)JT_threshold)); /* 用和运行入口一致的低阈值判断释放，避免双脚踏一边未松就清压力锁存。 */
 }
 
+/*
+ * 函数功能：驱动过载后阻止保持踩下的脚踏自动重新启动手柄和联动泵。
+ * 输入参数：msg 为最近一次有效脚踏连接和定标消息。
+ * 返回参数：当前必须保持停机返回 true；允许继续正常脚踏处理返回 false。
+ */
+static bool Foot_BlockOverloadRun(const FootMessage_t *msg)
+{
+    bool is_released = false; /* 保存当前脚踏是否已真实回到释放区，双脚踏必须左右均释放。 */
+    if (WorkAlarm_Is(WORK_ALARM_MOTOR_OVERLOAD) || WorkAlarm_Is(WORK_ALARM_MOTOR_OVERLOAD_ALT))
+    {
+        s_motor_overload_wait_release = true; /* 过载报警出现时锁住本次踩踏，即使报警弹窗随后自动关闭也不能直接恢复运行。 */
+    }
+    if (s_motor_overload_wait_release == false)
+    {
+        return false; /* 本次脚踏没有经历过载报警，保持原有启动流程。 */
+    }
+    if ((msg == NULL) || (msg->connect_flag == false))
+    {
+        is_released = true; /* 脚踏掉线等价于用户已经释放，不能让旧过载锁存永久保留。 */
+    }
+    else
+    {
+        switch (msg->pedalType)
+        {
+            case 1U:
+                is_released = Foot_IsPedalReleased(jt_adcvalue, msg->LValue_Left); /* 单踏板只检查单路 AD。 */
+                break;
+            case 2U:
+                is_released = Foot_IsPedalReleased(jtb_adcvalue, msg->LValue_Left); /* 双段踏板只检查共用踏板 AD。 */
+                break;
+            case 3U:
+                is_released = Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left) &&
+                              Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right); /* 双脚踏必须左右都释放，不能由另一侧持续踩住恢复运行。 */
+                break;
+            default:
+                break; /* 未知脚踏类型无法可靠确认释放，保持锁存比误启动更安全。 */
+        }
+    }
+    if (is_released)
+    {
+        MotorUart_ReleaseFootOverload(); /* 通知驱动报警模块脚踏已释放；只有驱动 Err 同时恢复后才真正清除过载弹窗和蜂鸣。 */
+        s_motor_overload_wait_release = false; /* 真实松脚后解除锁存，下一次新的踩下动作才允许重新启动。 */
+        return false;
+    }
+    Foot_ClearRunRequestAfterGateFail(); /* 长踩期间持续撤销电机、脚踏来源和联动泵请求，防止报警恢复后下一周期自动运行。 */
+    return true;
+}
 static void Foot_RequireDoublePedalRelease(uint8_t channel)
 {
     s_double_pedal_release_before_run_channel = channel;
@@ -1505,6 +1554,10 @@ void FootControlTask(uint32_t event)
         Foot_HandleConnectionUpdate(&msg); /* 只有收到新消息时才处理上线或掉线边沿。 */
     }
 
+    if (Foot_BlockOverloadRun(&msg))
+    {
+        return; /* 过载后的持续踩踏已由锁存统一停机并释放脚踏 owner，不能再进入任一种脚踏启动分支。 */
+    }
     if (msg.connect_flag == true) /* 脚踏在线时才按踏板类型处理动作；离线消息只更新连接状态。 */
     {
         switch (msg.pedalType)

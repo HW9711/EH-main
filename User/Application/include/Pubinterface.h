@@ -208,7 +208,7 @@ typedef struct
   /* 32 位字段集中放在结构体前部，避免在 8/16 位字段之间产生对齐空洞。 */
   volatile uint32_t  speed_work;//当前实际工作速度，运行时由控制源和驱动任务共同维护
   volatile uint32_t  speed_set_work;//用户设置速度，停止后继续保留供下次启动使用
-  volatile uint32_t  tool_reduction_ratio;//减速比：高16位表示增速比，低16位表示减速比
+  volatile uint32_t  tool_reduction_ratio;//刀具倍率：高16位表示x100增速比，低16位表示x100减速比，100表示1.00倍
 
   /* 16 位运行量保持原类型和业务单位，只调整存放顺序。 */
   volatile uint16_t  freq_work;//当前工作频率
@@ -270,7 +270,7 @@ typedef struct {
   volatile uint32_t  osc_speed;//往复速度
   volatile uint32_t  speed_alarm_for;//Page4正转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
   volatile uint32_t  speed_alarm_rev;//Page4反转速度报警阈值，单位与WorkMessage.speed_work一致为实际rpm
-  volatile uint32_t  tool_reduction_ratio;//刀具减速比：高16位表示增速比，低16位表示减速比
+  volatile uint32_t  tool_reduction_ratio;//刀具倍率：高16位表示x100增速比，低16位表示x100减速比，兼容历史运行值
 
   /* 16 位参数保持原协议单位和装载规则。 */
   volatile uint16_t  freq;//工作频率
@@ -304,8 +304,8 @@ typedef struct
   
 	volatile uint8_t   draw;//角度
 	volatile uint8_t   diameter;//直径
-	volatile uint8_t   meioticratio;//减数比
-	volatile uint32_t  tool_reduction_ratio;//RFID/EEPROM 解析出的完整刀具减速比，高16位表示增速、低16位表示减速
+	volatile uint8_t   meioticratio;//旧减速比整数镜像，仅用于兼容历史状态，不保存x100低字节
+	volatile uint32_t  tool_reduction_ratio;//RFID/EEPROM解析出的完整x100刀具倍率，高16位增速、低16位减速
   volatile uint32_t  speed_zzmax;
     volatile uint32_t  speed_zzmin;
     volatile uint32_t  speed_fzmax;

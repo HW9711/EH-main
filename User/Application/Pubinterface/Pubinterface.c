@@ -2071,7 +2071,7 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	memory->hand_type_raw_major = recognize->hand_type_raw_major; /* 保存 EEPROM 原始主类型，上位机心跳需要区分真实编码。 */
 	memory->hand_type_raw_minor = recognize->hand_type_raw_minor; /* 保存 EEPROM 原始子类型，便于上位机显示和售后定位。 */
 	memory->current_work = recognize->overloadThresholdFor;		  /* 保存 Page4/RFID 保护电流，单位 0.01A；当前通道被选中后才影响 WorkMessage。 */
-	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* RFID 手柄保存完整 32 位减速比，普通 EEPROM 手柄继续兼容旧 8 位减速比。 */
+	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((recognize->meioticratio > 1U) ? ((uint32_t)recognize->meioticratio * 100U) : 100U); /* 完整x100倍率优先；旧整数镜像乘100，0/1统一归一为1.00倍。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 保存 Page4 默认注水流量，选中该通道时初始化泵。 */
 	memory->speed_alarm_for = recognize->speed_alarm_for;		  /* 保存正转速度报警阈值，运行阈值检查按当前通道读取。 */
 	memory->speed_alarm_rev = recognize->speed_alarm_rev;		  /* 保存反转速度报警阈值，运行阈值检查按当前通道读取。 */

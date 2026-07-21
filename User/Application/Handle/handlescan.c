@@ -85,24 +85,30 @@ kernel_task_t HANDLESCANTaskHandle;
 
 /*
  * EEPROM 中刀具信息区定义。
- * 第三页起始地址为 0x0040，本次先按旧工程联动需求，只解析：
- * 1. 前两个字节的刀具类型编码；
- * 2. 直径、长度、角度三个参数。
- * 说明：
- * 1. 参数按大端 16 位读取；
- * 2. AT24CS32 内部使用 0.1 精度存储，例如 12.5mm 会存成十进制 125，即 0x00 0x7D。
+ * 第三页起始地址为 0x0040，刀具规格继续沿用大端 16 位和 0.1 精度。
+ * Page3[8]/[9] 保留整数倍率，Page3[11..14] 为 GR02 标记，Page3[15]/[16] 保存两位小数。
+ * 没有 GR02 标记的历史 EEPROM 只读取整数倍率，保证旧数据继续按原倍率运行。
  */
 #define HANDLESCAN_TOOL_INFO_ADDR             0x0040U
-#define HANDLESCAN_TOOL_INFO_SIZE             16U
+#define HANDLESCAN_TOOL_INFO_SIZE             17U  /* 新格式需要读取到 Page3[16] 增速比百分位，仍不跨越 Page3 数据区。 */
 #define HANDLESCAN_TOOL_MAJOR_OFFSET          0U
 #define HANDLESCAN_TOOL_MINOR_OFFSET          1U
 #define HANDLESCAN_TOOL_DIAMETER_OFFSET       2U
 #define HANDLESCAN_TOOL_LENGTH_OFFSET         4U
 #define HANDLESCAN_TOOL_ANGLE_OFFSET          6U
-#define HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET 8U  /* Page3[8] 保存手柄机械减速比，0/1 都按无减速处理。 */
-#define HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET 9U   /* Page3[9] 保存手柄机械增速比，0/1 都按无增速处理。 */
-#define HANDLESCAN_TOOL_RATIO_UNIT            1U   /* 运行换算的等效 1 倍倍率，用于保护异常 EEPROM 数据。 */
-#define HANDLESCAN_TOOL_RATIO_X10_UNIT        10U  /* 内部完整倍率按 x10 保存，50 表示 5.0 倍，兼容 RFID EPC 小数倍率。 */
+#define HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET 8U  /* Page3[8] 保存减速比整数部分，旧 EEPROM 仍直接使用该字节。 */
+#define HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET 9U   /* Page3[9] 保存增速比整数部分，旧 EEPROM 仍直接使用该字节。 */
+#define HANDLESCAN_TOOL_RATIO_MARK_OFFSET     11U  /* Page3[11..14] 保存新倍率格式标记，Page3[10] 继续保留给夹持范围。 */
+#define HANDLESCAN_TOOL_RATIO_MARK_0          0x47U /* GR02 byte0：ASCII 字符 G。 */
+#define HANDLESCAN_TOOL_RATIO_MARK_1          0x52U /* GR02 byte1：ASCII 字符 R。 */
+#define HANDLESCAN_TOOL_RATIO_MARK_2          0x30U /* GR02 byte2：ASCII 字符 0。 */
+#define HANDLESCAN_TOOL_RATIO_MARK_3          0x32U /* GR02 byte3：ASCII 字符 2，表示两位小数格式。 */
+#define HANDLESCAN_TOOL_REDUCTION_DECIMAL_OFFSET 15U /* Page3[15] 保存减速比百分位，合法范围为 0~99。 */
+#define HANDLESCAN_TOOL_SPEED_UP_DECIMAL_OFFSET 16U  /* Page3[16] 保存增速比百分位，合法范围为 0~99。 */
+#define HANDLESCAN_TOOL_RATIO_DECIMAL_MAX     99U  /* 百分位超过 99 说明扩展数据损坏，整组回退为旧整数格式。 */
+#define HANDLESCAN_TOOL_RATIO_UNIT            100U /* 活动倍率统一按 x100 保存，100 表示 1.00 倍直联。 */
+#define HANDLESCAN_TOOL_RATIO_X100_UNIT       100U /* Page3 整数部分乘 100 后进入公共倍率字段。 */
+#define HANDLESCAN_RFID_RATIO_X10_TO_X100     10U  /* RFID EPC 原倍率为 x10，乘 10 后与 Page3 的 x100 单位统一。 */
 #define HANDLESCAN_TOOL_SPEED_UP_SHIFT        16U  /* tool_reduction_ratio 高 16 位表示增速比，低 16 位表示减速比。 */
 
 /*
@@ -557,29 +563,53 @@ static bool Handlescan_SupportsOscDirection(const ChannelrecognizeMessage_t *mes
 }
 
 /*
- * 函数功能：把 Page3 的减速比和增速比构造成运行链路使用的 32 位倍率字段。
- * 输入参数：reduction_ratio 为 Page3[8] 减速比；speed_up_ratio 为 Page3[9] 增速比。
- * 返回参数：低 16 位为 x10 减速比，高 16 位为 x10 增速比；异常或未配置时返回 1。
+ * 函数功能：解析 Page3 新旧倍率格式，并构造成运行链路使用的 32 位 x100 倍率字段。
+ * 输入参数：tool_info_buf 为至少包含 Page3[0..16] 的刀具信息缓存。
+ * 返回参数：低 16 位为 x100 减速比，高 16 位为 x100 增速比；异常或未配置时返回 100。
  */
-static uint32_t Handlescan_BuildToolReductionRatio(uint8_t reduction_ratio, uint8_t speed_up_ratio)
+static uint32_t Handlescan_BuildToolReductionRatio(const uint8_t *tool_info_buf)
 {
+    uint16_t reduction_ratio; /* 保存解析后的 x100 减速比，最大 25599，可完整放入低 16 位。 */
+    uint16_t speed_up_ratio;  /* 保存解析后的 x100 增速比，最大 25599，可完整放入高 16 位。 */
+    bool decimal_format;      /* true 表示 GR02 和两个百分位均有效，本次使用两位小数格式。 */
+
+    if (tool_info_buf == NULL)
+    {
+        return HANDLESCAN_TOOL_RATIO_UNIT; /* 缓存无效时按 1.00 倍直联，禁止沿用上一把手柄倍率。 */
+    }
+
+    decimal_format = (bool)((tool_info_buf[HANDLESCAN_TOOL_RATIO_MARK_OFFSET] == HANDLESCAN_TOOL_RATIO_MARK_0) &&
+                            (tool_info_buf[HANDLESCAN_TOOL_RATIO_MARK_OFFSET + 1U] == HANDLESCAN_TOOL_RATIO_MARK_1) &&
+                            (tool_info_buf[HANDLESCAN_TOOL_RATIO_MARK_OFFSET + 2U] == HANDLESCAN_TOOL_RATIO_MARK_2) &&
+                            (tool_info_buf[HANDLESCAN_TOOL_RATIO_MARK_OFFSET + 3U] == HANDLESCAN_TOOL_RATIO_MARK_3) &&
+                            (tool_info_buf[HANDLESCAN_TOOL_REDUCTION_DECIMAL_OFFSET] <= HANDLESCAN_TOOL_RATIO_DECIMAL_MAX) &&
+                            (tool_info_buf[HANDLESCAN_TOOL_SPEED_UP_DECIMAL_OFFSET] <= HANDLESCAN_TOOL_RATIO_DECIMAL_MAX)); /* 标记和两个百分位必须同时有效，避免半新半旧解析。 */
+
+    reduction_ratio = (uint16_t)((uint16_t)tool_info_buf[HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET] * HANDLESCAN_TOOL_RATIO_X100_UNIT); /* 历史整数部分先统一换成 x100。 */
+    speed_up_ratio = (uint16_t)((uint16_t)tool_info_buf[HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET] * HANDLESCAN_TOOL_RATIO_X100_UNIT); /* 增速整数部分使用同一 x100 单位。 */
+    if (decimal_format != false)
+    {
+        reduction_ratio = (uint16_t)(reduction_ratio + tool_info_buf[HANDLESCAN_TOOL_REDUCTION_DECIMAL_OFFSET]); /* GR02 有效时追加减速百分位，例如 5 和 25 组合为 525。 */
+        speed_up_ratio = (uint16_t)(speed_up_ratio + tool_info_buf[HANDLESCAN_TOOL_SPEED_UP_DECIMAL_OFFSET]); /* GR02 有效时追加增速百分位，保留两位小数。 */
+    }
+
     if ((reduction_ratio > HANDLESCAN_TOOL_RATIO_UNIT) &&
         (speed_up_ratio > HANDLESCAN_TOOL_RATIO_UNIT))
     {
-        return HANDLESCAN_TOOL_RATIO_UNIT; /* 两个倍率同时有效说明 EEPROM 写入矛盾，为保护电机按无变速处理。 */
+        return HANDLESCAN_TOOL_RATIO_UNIT; /* 两个倍率同时大于 1.00 说明 EEPROM 配置矛盾，为保护电机按直联处理。 */
     }
 
     if (speed_up_ratio > HANDLESCAN_TOOL_RATIO_UNIT)
     {
-        return (((uint32_t)speed_up_ratio * HANDLESCAN_TOOL_RATIO_X10_UNIT) << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构用高 16 位保存，Page3 整数倍率转成 x10 后与 RFID 单位统一。 */
+        return ((uint32_t)speed_up_ratio << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构把完整 x100 倍率写入高 16 位，低 16 位保持 0。 */
     }
 
     if (reduction_ratio > HANDLESCAN_TOOL_RATIO_UNIT)
     {
-        return ((uint32_t)reduction_ratio * HANDLESCAN_TOOL_RATIO_X10_UNIT); /* 减速机构用低 16 位保存，Page3 整数倍率转成 x10 后与 RFID 单位统一。 */
+        return (uint32_t)reduction_ratio; /* 减速机构把完整 x100 倍率写入低 16 位，高 16 位保持 0。 */
     }
 
-    return HANDLESCAN_TOOL_RATIO_UNIT; /* 0 或 1 都表示无机械变速，运行链路保持屏幕速度。 */
+    return HANDLESCAN_TOOL_RATIO_UNIT; /* 0、1.00 或小于 1.00 的异常值都按 1.00 倍直联。 */
 }
 
 /*
@@ -593,32 +623,33 @@ static uint32_t Handlescan_RfidEpcSpeedToWorkSpeed(uint8_t speed_k)
 }
 
 /*
- * 函数功能：把 EPC 两字节齿轮比转换为运行链路使用的完整倍率字段。
+ * 函数功能：把 EPC 两字节 x10 齿轮比转换为运行链路使用的 x100 完整倍率字段。
  * 输入参数：ratio_hi 为 EPC byte4；ratio_lo 为 EPC byte5。
- * 返回参数：低 16 位表示减速比，高 16 位表示增速比；未知或 0 倍率按 1 倍保护。
+ * 返回参数：低 16 位表示 x100 减速比，高 16 位表示 x100 增速比；未知或不大于 1.00 时按 100 保护。
  */
 static uint32_t Handlescan_BuildRfidEpcReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
 {
     uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 先合成 EPC 原始两字节，便于按高 4 位方向标记解析。 */
     uint16_t ratio_value = (uint16_t)(raw_ratio & HANDLESCAN_RFID_RATIO_VALUE_MASK); /* 去掉方向标记后得到 x10 倍率值，例如 0x0032 表示 5.0。 */
+    uint16_t ratio_x100 = (uint16_t)(ratio_value * HANDLESCAN_RFID_RATIO_X10_TO_X100); /* EPC x10 倍率乘 10 转成公共 x100 单位，例如 50 转成 500。 */
     uint8_t ratio_mark = (uint8_t)(ratio_hi & HANDLESCAN_RFID_RATIO_MARK_MASK); /* 只读取最高 4 位，0 表示减速，F 表示增速。 */
 
-    if (ratio_value <= HANDLESCAN_TOOL_RATIO_UNIT)
+    if (ratio_x100 <= HANDLESCAN_TOOL_RATIO_UNIT)
     {
-        return HANDLESCAN_TOOL_RATIO_UNIT; /* 0 或 1 都按无机械变速处理，避免空标签把电机速度变成 0。 */
+        return HANDLESCAN_TOOL_RATIO_UNIT; /* 0、1.00 或小于 1.00 的标签值都按直联处理，避免异常标签改变电机速度。 */
     }
 
     if (ratio_mark == HANDLESCAN_RFID_RATIO_REDUCTION_MARK)
     {
-        return (uint32_t)ratio_value; /* 减速机构写入低 16 位，RFID 倍率按 x10 保存，例如 0x0032 表示 5.0 倍。 */
+        return (uint32_t)ratio_x100; /* 减速机构把 x100 倍率写入低 16 位，例如 500 表示 5.00 倍。 */
     }
 
     if (ratio_mark == HANDLESCAN_RFID_RATIO_SPEEDUP_MARK)
     {
-        return ((uint32_t)ratio_value << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构写入高 16 位，RFID 倍率同样按 x10 保存。 */
+        return ((uint32_t)ratio_x100 << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构把 x100 倍率写入高 16 位，与 Page3 单位保持一致。 */
     }
 
-    return HANDLESCAN_TOOL_RATIO_UNIT; /* 方向标记不是 F/0 时说明标签不符合协议，按 1 倍保护运行安全。 */
+    return HANDLESCAN_TOOL_RATIO_UNIT; /* 方向标记不是 F/0 时说明标签不符合协议，按 1.00 倍保护运行安全。 */
 }
 
 /*
@@ -663,7 +694,7 @@ static uint8_t Handlescan_BuildRfidRunDirection(uint8_t business_tool_type, uint
  */
 static void Handlescan_UpdateToolRatioMessage(ChannelrecognizeMessage_t *message, const uint8_t *tool_info_buf)
 {
-    uint32_t ratio = HANDLESCAN_TOOL_RATIO_UNIT;              /* 默认无变速，避免 Page3 读取失败时沿用旧倍率。 */
+    uint32_t ratio = HANDLESCAN_TOOL_RATIO_UNIT;              /* 默认 100 表示 1.00 倍直联，避免 Page3 读取失败时沿用旧倍率。 */
 
     if (message == NULL)
     {
@@ -672,12 +703,11 @@ static void Handlescan_UpdateToolRatioMessage(ChannelrecognizeMessage_t *message
 
     if (tool_info_buf != NULL)
     {
-        ratio = Handlescan_BuildToolReductionRatio(tool_info_buf[HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET],
-                                                   tool_info_buf[HANDLESCAN_TOOL_SPEED_UP_RATIO_OFFSET]); /* 按 Page3[8]/[9] 构造完整倍率。 */
+        ratio = Handlescan_BuildToolReductionRatio(tool_info_buf); /* 按 GR02 新格式或历史整数格式构造完整 x100 倍率。 */
     }
 
-    message->tool_reduction_ratio = ratio;                    /* 保存完整倍率，后续通道记忆和驱动下发都读取该字段。 */
-    message->meioticratio = (uint8_t)(ratio & 0xFFU);          /* 旧 8 位字段只保留低位减速比，增速机构下该字段为 0。 */
+    message->tool_reduction_ratio = ratio;                    /* 保存完整 x100 倍率，后续通道记忆和驱动下发都读取该字段。 */
+    message->meioticratio = (tool_info_buf != NULL) ? tool_info_buf[HANDLESCAN_TOOL_REDUCTION_RATIO_OFFSET] : 1U; /* 旧 8 位字段只保留 Page3 减速整数镜像，不能截取 x100 低字节。 */
 }
 
 /*
@@ -787,7 +817,8 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint32_t default_speed;      /* RFID 标签转换后的默认速度；EPC 最大可到 255000，必须保留32位。 */
     uint32_t max_speed;          /* RFID 标签转换后的最大速度；EPC 最大可到 255000，必须保留32位。 */
     uint32_t min_speed;          /* RFID 标签转换后的最小速度；统一用32位避免和默认速度比较时截断。 */
-    uint32_t reduction_ratio = 0U; /* RFID 标签解析出的完整减速比，EPC 需要保留 32 位增/减速方向信息。 */
+    uint32_t reduction_ratio = HANDLESCAN_TOOL_RATIO_UNIT; /* RFID 标签解析出的 x100 完整倍率，默认 100 表示直联。 */
+    uint16_t reduction_integer; /* 保存低 16 位减速倍率的整数部分，用于兼容旧 8 位镜像字段。 */
     uint8_t default_flow;        /* RFID 标签中的默认泵流量。 */
     uint8_t direction;           /* RFID 标签中的方向字段。 */
     uint8_t business_tool_type = 0U; /* 业务层使用的刀具能力类型，和 RFID 原始型号分开保存。 */
@@ -839,7 +870,8 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
     reduction_ratio = Handlescan_BuildRfidEpcReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比，自动识别模式下按标签倍率换算电机速度。 */
     business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0：0x01 刨刀、0x02 磨头，未知值保护为磨头。 */
-    message->meioticratio = (uint8_t)(reduction_ratio & 0xFFU); /* 旧 8 位字段继续保留低 8 位，兼容历史开口逻辑。 */
+    reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* x100 减速值除以 100 得到旧字段需要的整数镜像，增速时低 16 位为 0。 */
+    message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 旧字段最大只能表示 255，超限时钳位而不是低字节回绕。 */
     message->overloadThresholdFor = payload[11]; /* EPC byte11：电流阈值，当前按原始值保存。 */
     message->overloadThresholdRev = payload[11]; /* 反转阈值沿用同一 RFID 电流阈值。 */
     message->overloadThresholdOSC = payload[11]; /* 往复阈值沿用同一 RFID 电流阈值。 */
@@ -950,7 +982,7 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
     message->speed_zzstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
     message->speed_fzstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
     message->speed_oscstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
-    message->tool_reduction_ratio=1;
+    message->tool_reduction_ratio=HANDLESCAN_TOOL_RATIO_UNIT; /* 基座尚未识别刀具时使用 100 表示 1.00 倍直联，等待 Page3/RFID 刷新。 */
     message->default_injection_flow=20;
     message->freq_default=40;
     if (mapped_model == COMMON_SOCKET_ONLINES)

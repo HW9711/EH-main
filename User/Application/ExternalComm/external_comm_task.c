@@ -47,8 +47,10 @@
 #define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 关闭 RFID 统计时恢复原心跳缓冲上限，不增加任务栈占用。 */
 #endif
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 心跳刀具扩展魔术字，放在泵字段之后，旧上位机可把它当尾部剩余字节忽略。 */
-#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x01U /* 心跳刀具扩展版本，当前固定为 1，便于后续扩字段时区分。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x02U /* 刀具扩展版本2保持块长不变，倍率字段统一改为x100。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN 20U /* 单通道刀具扩展块长度：通道/来源/规格/速度/方向/减速比共 20 字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT 100U /* A5 v2 的倍率单位值，100表示1.00倍直联。 */
+#define EXTERNAL_COMM_RFID_RATIO_X10_TO_X100 10U /* RFID EPC倍率由x10乘10转换为A5 v2使用的x100。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_MAGIC 0xA6U /* RFID 链路统计扩展魔术字，固定放在心跳最后，便于上位机可靠定位。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_VERSION 0x02U /* 版本2在原请求/应答统计后增加在线监测完成数和确认掉线数。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_BLOCK_LEN 20U /* 单通道块：请求/有效/丢失各4字节，异常2字节，监测完成4字节，掉线2字节。 */
@@ -2485,26 +2487,32 @@ static uint16_t ExternalComm_RfidSpeedToWorkSpeed(uint8_t speed_k)
 }
 
 /*
- * 函数功能：把 RFID 齿轮比字段转换为心跳使用的 32 位减速比。
+ * 函数功能：把 RFID x10 齿轮比字段转换为 A5 v2 心跳使用的 32 位 x100 倍率。
  * 输入参数：ratio_hi/ratio_lo 为 EPC 两字节齿轮比。
- * 返回参数：高 16 位表示增速，低 16 位表示减速；未知格式保留原始低 16 位。
+ * 返回参数：高 16 位表示 x100 增速，低 16 位表示 x100 减速；未知或不大于1.00时返回100。
  */
 static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
 {
     uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 保留 EPC 原始齿轮比，便于未知格式仍能追溯。 */
     uint16_t ratio_value = (uint16_t)(raw_ratio & 0x0FFFU); /* 去掉高 4 位方向标记，剩余 12 位是比例数值。 */
+    uint16_t ratio_x100 = (uint16_t)(ratio_value * EXTERNAL_COMM_RFID_RATIO_X10_TO_X100); /* EPC x10倍率乘10转成A5 v2的x100，例如50转成500。 */
+
+    if (ratio_x100 <= EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 0、1.00和小于1.00的异常倍率都按直联上报。 */
+    }
 
     if ((ratio_hi & 0xF0U) == 0x00U)
     {
-        return (uint32_t)ratio_value; /* 高 4 位为 0 时表示减速，写入低 16 位，和 handlescan 解析一致。 */
+        return (uint32_t)ratio_x100; /* 高4位为0表示减速，x100倍率写入低16位。 */
     }
 
     if ((ratio_hi & 0xF0U) == 0xF0U)
     {
-        return ((uint32_t)ratio_value << 16); /* 高 4 位为 F 时表示增速，写入高 16 位。 */
+        return ((uint32_t)ratio_x100 << 16); /* 高4位为F表示增速，x100倍率写入高16位。 */
     }
 
-    return (uint32_t)raw_ratio; /* 未知方向标记不强行解释，原样放在低 16 位供上位机和售后判断。 */
+    return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 未知方向不能混入A5 v2倍率语义，按1.00倍保护。 */
 }
 
 /*
@@ -2954,7 +2962,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
         default_speed = ExternalComm_HeartbeatDefaultSpeed(recognize); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认速度先给上位机显示。 */
         default_flow = recognize->default_injection_flow; /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的泵流量先给上位机显示。 */
         direction = ExternalComm_HeartbeatToolDirection(recognize->run_direction); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认方向先给上位机显示。 */
-        reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* RFID 结果优先使用完整减速比，旧字段作为兼容兜底。 */
+        reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((uint32_t)recognize->meioticratio * EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT); /* 完整倍率优先；旧整数镜像乘100后再按A5 v2上报。 */
     }
 
     /* block byte0：通道号，1 为 A，2 为 B。 */
@@ -2979,7 +2987,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_flow);
     /* block byte15：当前方向能力/默认方向。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, direction);
-    /* block byte16~19：完整刀具减速比，RFID EPC 可保留 32 位。 */
+    /* block byte16~19：A5 v2完整x100刀具倍率，高16位增速、低16位减速。 */
     ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, reduction_ratio);
 }
 
@@ -3025,7 +3033,7 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
         ++count;
     }
 
-    /* 没有任何有效刀具时不发 A5 01 00，保持旧上位机完全兼容。 */
+    /* 没有任何有效刀具时不发 A5 02 00，保持旧上位机完全兼容。 */
     if (count == 0U)
     {
         return;
@@ -3039,7 +3047,7 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
 
     /* 扩展头 byte0：魔术字 A5。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC);
-    /* 扩展头 byte1：版本号 1。 */
+    /* 扩展头 byte1：版本号2，20字节块长度不变，仅倍率单位升级为x100。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION);
     /* 扩展头 byte2：后续 20 字节 block 数量。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, count);

@@ -218,7 +218,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	memory->tool_type = tool_type; /* 通道记忆同步手动刀具能力，切通道后仍保持手动磨/刨选择。 */
 	memory->raw_tool_type = 0U; /* 通道记忆清 RFID 原始型号，避免上位机把手动模式当自动标签显示。 */
 	memory->auto_identify = 0U; /* 通道记忆进入手动模式，后续切回该通道不自动恢复 RFID。 */
-	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : (uint32_t)recognize->meioticratio; /* 手动模式倍率来自手柄 EEPROM Page3，不再使用 RFID 标签倍率。 */
+	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((recognize->meioticratio > 1U) ? ((uint32_t)recognize->meioticratio * 100U) : 100U); /* 手动模式完整倍率优先；旧Page3整数镜像乘100后进入统一x100运行态。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 手动模式仍使用手柄 Page4 默认注水流量，保证泵显示和运行一致。 */
 	memory->speed_alarm_for = recognize->speed_alarm_for; /* 手动模式同步手柄 EEPROM 正转速度报警阈值。 */
 	memory->speed_alarm_rev = recognize->speed_alarm_rev; /* 手动模式同步手柄 EEPROM 反转速度报警阈值。 */
