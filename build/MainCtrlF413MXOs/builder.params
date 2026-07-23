@@ -99,6 +99,7 @@
         "../User/Application/DataHand/datahand.c",
         "../User/Application/DriveCtrl/drivectrl_adapter.c",
         "../User/Application/ExternalComm/external_comm_protocol.c",
+        "../User/Application/ExternalComm/external_comm_simple_protocol.c",
         "../User/Application/ExternalComm/external_comm_task.c",
         "../User/Application/FootPedal/footpedal_ui_adapter.c",
         "../User/Application/Handle/handlekey.c",

@@ -966,6 +966,11 @@
               <FilePath>..\User\Application\ExternalComm\external_comm_protocol.c</FilePath>
             </File>
             <File>
+              <FileName>external_comm_simple_protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Application\ExternalComm\external_comm_simple_protocol.c</FilePath>
+            </File>
+            <File>
               <FileName>external_comm_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\ExternalComm\external_comm_task.c</FilePath>

@@ -26,6 +26,19 @@
 #endif
 
 /*
+ * UART2 简易外控协议开关：
+ * 1U：识别并执行 AA BB CC FunCode EE FF 固定 6 字节指令，同时保留原外控协议。
+ * 0U：完全屏蔽简易协议识别和执行，UART2 只运行原外控协议。
+ */
+#ifndef EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE
+#define EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE 1U
+#endif
+
+#if ((EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE != 0U) && (EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE != 1U))
+#error "EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE must be 0U or 1U"
+#endif
+
+/*
  * R200-K8旧硬件的RFID通道交换开关，仅在RFID_USE_DUAL_UART_MODE=0U时生效：
  * 1U：逻辑A选通R200-K8物理B，逻辑B选通物理A，用于旧硬件A/B线束交叉安装。
  * 0U：逻辑A选通物理A，逻辑B选通物理B，恢复旧硬件原始通道顺序。
@@ -48,7 +61,7 @@
  * MemoryMsgA/B、界面区域、报警归属和业务状态始终保持逻辑A/B不变。
  */
 #ifndef HANDLE_PHYSICAL_AB_SWAP_ENABLE
-#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    0U
+#define HANDLE_PHYSICAL_AB_SWAP_ENABLE    1U
 #endif
 
 #if ((HANDLE_PHYSICAL_AB_SWAP_ENABLE != 0U) && (HANDLE_PHYSICAL_AB_SWAP_ENABLE != 1U))

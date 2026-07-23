@@ -1,6 +1,7 @@
 #include "external_comm_task.h"
 
 #include "external_comm_protocol.h"
+#include "external_comm_simple_protocol.h"
 
 #include "at24cs32.h"
 #include "board_profile.h"
@@ -142,11 +143,11 @@ static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收
 static uint8_t s_rx_fifo_buf[EXTERNAL_COMM_RX_FIFO_SIZE]; /* FIFO 实际存储区，使用本文件静态数组，不依赖额外工程源文件。 */
 static uint8_t s_frame_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 从 FIFO 中临时取出的单帧缓存，交给现有协议解析器复用。 */
 static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用发送缓存，任务内串行使用。 */
+static uint8_t s_response_suppressed = 0U;          /* 简易协议静默复用原分发时临时禁止发送旧协议 ACK/上传帧。 */
 static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 字节含最后 2 字节页校验。 */
 static ExternalCommEepromBatchState_t s_eeprom_batch; /* EEPROM 批量读写状态，外控任务累计到 30ms 后处理一页。 */
 static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
 
-static void ExternalComm_ResetLinkWatchdog(void);    /* 外控保活计时清零入口，申请外控和收到合法下行帧时复用。 */
 static void ExternalComm_RefreshIdleLinkDisplay(void); /* 非外控状态下维护小电脑在线图标超时。 */
 static void ExternalComm_RefreshRunDisplay(void); /* 按外控输出请求刷新 39/40 小电脑图标。 */
 
@@ -164,12 +165,21 @@ static void ExternalComm_WriteBE16(uint8_t *data, uint16_t value)
     data[1] = (uint8_t)(value & 0xFFU);
 }
 
+/*
+ * 函数功能：按原外控协议构造并发送主动上传帧。
+ * 输入参数：fun_code、area_code、info_code 为协议字段；info_area 和 info_len 为载荷。
+ * 返回参数：无。
+ */
 static void ExternalComm_SendFrame(uint8_t fun_code,
                                    uint8_t area_code,
                                    uint8_t info_code,
                                    const uint8_t *info_area,
                                    uint16_t info_len)
 {
+    if (s_response_suppressed != 0U)
+    {
+        return; /* 简易协议没有定义旧协议上行帧，静默桥接期间禁止发送。 */
+    }
     /* tx_len 接收协议层实际组出的完整帧长度。 */
     uint16_t tx_len = 0U;
 
@@ -189,8 +199,17 @@ static void ExternalComm_SendFrame(uint8_t fun_code,
     }
 }
 
+/*
+ * 函数功能：按原外控协议构造并发送 ACK。
+ * 输入参数：ack_code 为应答码；ack_info 和 ack_info_len 为可选应答载荷。
+ * 返回参数：无。
+ */
 static void ExternalComm_SendAck(uint8_t ack_code, const uint8_t *ack_info, uint16_t ack_info_len)
 {
+    if (s_response_suppressed != 0U)
+    {
+        return; /* 简易协议仅定义下行 6 字节指令，静默复用时不能混入原协议 ACK。 */
+    }
     /* tx_len 接收 0xDD 应答帧长度。 */
     uint16_t tx_len = 0U;
 
@@ -668,7 +687,7 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
         return 0U;
     }
     /* 申请成功后从“已经持有外控锁”的时刻重新计算保活窗口，避免边界时序误释放。 */
-    ExternalComm_ResetLinkWatchdog();
+    ExternalComm_NotifyLink();
     /* 返回外部控制开启成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_EXTERNAL_OK, NULL, 0U);
     /* 告诉调用方认证通过。 */
@@ -1135,7 +1154,12 @@ static void ExternalComm_ServiceLocalExit(void)
     }
 }
 
-static void ExternalComm_ResetLinkWatchdog(void)
+/*
+ * 函数功能：刷新外控链路活动时间并同步小电脑在线/运行图标。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void ExternalComm_NotifyLink(void)
 {
     /* 每收到一帧合法上位机下行命令，都认为 RS485 外控链路仍然存在。 */
     s_external_link_elapsed_ms = 0U;
@@ -2217,6 +2241,61 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
                                      EXTERNAL_COMM_REASON_BAD_AREA);
             break;
     }
+}
+
+/*
+ * 函数功能：静默复用原外控协议业务分发，不向 UART2 发送原协议 ACK。
+ * 输入参数：fun_code、area_code 为原协议分发字段；info_area 和 info_len 为可选载荷。
+ * 返回参数：无。
+ */
+void ExternalComm_RunSilent(uint8_t fun_code,
+                            uint8_t area_code,
+                            const uint8_t *info_area,
+                            uint16_t info_len)
+{
+    ExternalCommFrame_t frame; /* 在任务内部构造原协议业务帧，只复用已经验证的安全分发。 */
+    uint8_t previous_suppressed; /* 保存进入前的静默状态，允许后续嵌套调用安全恢复。 */
+
+    if ((info_len > EXTERNAL_COMM_MAX_INFO_SIZE) ||
+        ((info_len > 0U) && (info_area == NULL)))
+    {
+        return; /* 载荷越界或长度非零但指针为空时拒绝分发，避免复制越界。 */
+    }
+
+    memset(&frame, 0, sizeof(frame)); /* 清零未使用字段，避免业务分发读取未初始化数据。 */
+    frame.tran_code = EXTERNAL_COMM_TRAN_DOWNLOAD; /* 原分发只接受外部设备下行方向。 */
+    frame.length = (uint16_t)(EXTERNAL_COMM_FRAME_FIXED_SIZE + info_len); /* 保持帧元数据与载荷长度一致。 */
+    frame.fun_code = fun_code; /* 使用适配层指定的原协议功能码。 */
+    frame.area_code = area_code; /* 使用适配层指定的原协议动作区域码。 */
+    frame.info_code = EXTERNAL_COMM_INFO_NONE; /* 原下行控制入口要求信息码固定为 FF。 */
+    frame.info_len = info_len; /* 把可选载荷长度交给原业务校验。 */
+    if (info_len > 0U)
+    {
+        memcpy(frame.info_area, info_area, info_len); /* 只复制已校验范围内的内部适配载荷。 */
+    }
+
+    previous_suppressed = s_response_suppressed; /* 保存旧值，避免改变原协议后续正常回包。 */
+    s_response_suppressed = 1U; /* 本次分发只执行状态机，不向简易协议设备发送旧格式 ACK。 */
+    ExternalComm_DispatchFrame(&frame); /* 复用 owner、报警、在线、压力和联动泵安全门禁。 */
+    s_response_suppressed = previous_suppressed; /* 分发结束立即恢复原协议发送能力。 */
+}
+
+/*
+ * 函数功能：查询 A/B 泵是否存在外控独立运行请求。
+ * 输入参数：pump_channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：存在请求返回 1，否则返回 0。
+ */
+uint8_t ExternalComm_PumpRunRequested(uint8_t pump_channel)
+{
+    if (pump_channel == CHANNEL_A)
+    {
+        return (s_uart5_pump_manual_run_request != 0U) ? 1U : 0U; /* A 泵返回原外控独立请求锁存。 */
+    }
+    if (pump_channel == CHANNEL_B)
+    {
+        return (s_external_pump_b_manual_run_request != 0U) ? 1U : 0U; /* B 泵返回原外控独立请求锁存。 */
+    }
+    return 0U; /* 非 A/B 通道没有对应外控泵请求。 */
 }
 
 static void ExternalComm_HeartbeatAppendU8(uint8_t *info_area, uint16_t *info_len, uint8_t value)
@@ -3538,12 +3617,23 @@ static void ExternalComm_WriteRxChunk(const uint8_t *data, uint16_t data_len)
     (void)ExternalComm_RxFifoWrite(data, data_len);
 }
 
+/*
+ * 函数功能：从共用 UART2 FIFO 中选择最早的旧协议或简易协议候选帧并处理一步。
+ * 输入参数：无，直接访问本任务私有 FIFO。
+ * 返回参数：消费或跳过数据返回 1；当前只有半帧或无数据返回 0。
+ */
 static uint8_t ExternalComm_ProcessRxFifoFrame(void)
 {
     /* full 保存 FIFO 当前已有字节数，读取前先做长度判断，避免 peek 越界。 */
     uint16_t full;
-    /* head_offset 保存帧头在 FIFO 中的偏移，非 0 时会先丢弃前导噪声。 */
-    uint16_t head_offset;
+    /* head_offset 保存旧协议帧头在 FIFO 中的偏移，非 0 时会先丢弃前导噪声。 */
+    uint16_t head_offset = 0U;
+    /* simple_head_offset 保存独立简易协议模块找到的 AA BB CC 偏移。 */
+    uint16_t simple_head_offset = 0U;
+    /* legacy_head_found 标记当前 FIFO 是否存在完整 D7 CA F8 F1 帧头。 */
+    uint8_t legacy_head_found;
+    /* simple_probe 保存简易协议帧头未找到、半帧或固定 6 字节就绪状态。 */
+    ExtSimpleProbeResult_t simple_probe;
     /* length_bytes 保存 Length_H/Length_L 两个字节。 */
     uint8_t length_bytes[2];
     /* frame_len 是协议 Length 字段声明的完整帧长。 */
@@ -3566,11 +3656,49 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         return 0U;
     }
 
-    /* 在 FIFO 中搜索 D7 CA F8 F1，支持前面带噪声或上一次残留半帧。 */
-    if (ExternalComm_RxFifoFind(s_external_comm_frame_head,
-                                EXTERNAL_COMM_FRAME_HEAD_SIZE,
-                                0U,
-                                &head_offset) == 0U)
+    /* 两种协议只在共用 FIFO 边界比较帧头，具体简易协议解析仍完全留在独立文件。 */
+    legacy_head_found = ExternalComm_RxFifoFind(s_external_comm_frame_head,
+                                                EXTERNAL_COMM_FRAME_HEAD_SIZE,
+                                                0U,
+                                                &head_offset);
+    simple_probe = ExtSimple_Probe(full,
+                                   ExternalComm_RxFifoPeek,
+                                   &simple_head_offset);
+
+    /* 简易帧头比旧协议更早时优先处理，避免旧协议载荷内偶然字节被跨帧误识别。 */
+    if ((simple_probe != EXT_SIMPLE_PROBE_NOT_FOUND) &&
+        ((legacy_head_found == 0U) || (simple_head_offset < head_offset)))
+    {
+        if (simple_head_offset > 0U)
+        {
+            (void)ExternalComm_RxFifoSkip(simple_head_offset); /* 只清掉简易帧头前的噪声，候选帧保持完整。 */
+        }
+
+        if (simple_probe == EXT_SIMPLE_PROBE_INCOMPLETE)
+        {
+            return 0U; /* 简易半帧留在 FIFO，等待下一次 DMA 空闲包补齐。 */
+        }
+
+        if (ExternalComm_RxFifoPeek(0U,
+                                    s_frame_buf,
+                                    EXTERNAL_COMM_SIMPLE_FRAME_SIZE) == 0U)
+        {
+            return 0U; /* FIFO 数据不足时不移动读指针，防止半帧被提前消费。 */
+        }
+
+        if (ExtSimple_HandleFrame(s_frame_buf, EXTERNAL_COMM_SIMPLE_FRAME_SIZE) != 0U)
+        {
+            (void)ExternalComm_RxFifoSkip(EXTERNAL_COMM_SIMPLE_FRAME_SIZE); /* 合法结构固定消费 6 字节。 */
+        }
+        else
+        {
+            (void)ExternalComm_RxFifoSkip(1U); /* 尾部错误只跳过首字节，保留后续重新同步机会。 */
+        }
+        return 1U;
+    }
+
+    /* 在 FIFO 中未找到旧协议帧头时，保留末尾 3 字节等待跨包拼接。 */
+    if (legacy_head_found == 0U)
     {
         /* 没找到完整帧头时保留最后 3 字节，防止帧头被拆成前后两包。 */
         if (full > (EXTERNAL_COMM_FRAME_HEAD_SIZE - 1U))
@@ -3629,7 +3757,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     if (parse_result == EXTERNAL_COMM_PARSE_OK)
     {
         /* 合法下行帧到达说明 RS485 链路仍存在，先喂外控保活计时。 */
-        ExternalComm_ResetLinkWatchdog();
+        ExternalComm_NotifyLink();
         /* 消费当前完整帧，后续循环会继续处理同一 FIFO 里的下一帧。 */
         (void)ExternalComm_RxFifoSkip(frame_len);
         /* 按 FunCode 分发下行命令，业务层仍然只看到一帧完整协议数据。 */

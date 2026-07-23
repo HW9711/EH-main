@@ -137,6 +137,7 @@ virtualFolder:
             - path: ../User/Application/Motor/motor.c
             - path: ../User/Application/MotorUartData/motoruartdata.c
             - path: ../User/Application/ExternalComm/external_comm_protocol.c
+            - path: ../User/Application/ExternalComm/external_comm_simple_protocol.c
             - path: ../User/Application/ExternalComm/external_comm_task.c
             - path: ../User/Application/Pedal/pedal.c
             - path: ../User/Application/Pump/pump.c
