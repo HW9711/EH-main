@@ -584,6 +584,11 @@ static void ExternalComm_SaveCurrentFreq(uint16_t freq)
     }
 }
 
+/*
+ * 函数功能：处理外控方向设置，并按当前手柄方向能力决定是否允许改写通道记忆。
+ * 输入参数：dir_value 为外控协议方向值，兼容 0 和 1/2/3 两套编码。
+ * 返回参数：1 表示方向合法且已保持或更新；0 表示方向非法、固定方向冲突或当前无有效通道。
+ */
 static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
 {
     /* dir 是项目内部方向值：ZZDIR/FZDIR/OSCDIR。 */
@@ -603,6 +608,21 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
     {
         /* 其他值不是合法方向。 */
         return 0U;
+    }
+
+    if (Pubinterface_IsDirLocked(WorkMessage.hand_model))
+    {
+        if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
+        {
+            return 0U; /* 固定方向必须归属于当前有效通道，无通道时不能把外控请求当成成功。 */
+        }
+
+        if (dir != WorkMessage.dir_work)
+        {
+            return 0U; /* 外控请求与 EEPROM 默认方向或 MXYTP 固定往复方向不一致时拒绝，禁止绕过本机方向门禁。 */
+        }
+
+        return 1U; /* 重复设置当前固定方向属于幂等成功，不改 WorkMessage 和通道方向记忆。 */
     }
 
     /* 更新当前工作方向。 */

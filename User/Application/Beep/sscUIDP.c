@@ -458,7 +458,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 			case 1://顺时针
 			if(light_flag == 1U) /* 1 表示正转已选中，显示黄色高亮资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,22U);
-			else if(light_flag == 2U) /* 2 表示正转不可用，显示黑色禁用资源。 */
+			else if(light_flag == 2U) /* 2 表示正转不可用，显示灰色禁用资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,20U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD,21U);
@@ -466,7 +466,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 			case 2://逆时针
 			if(light_flag == 1U) /* 1 表示反转已选中，显示黄色高亮资源。 */
 				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,25U);
-			else if(light_flag == 2U) /* 2 表示反转不可用，显示黑色禁用资源。 */
+			else if(light_flag == 2U) /* 2 表示反转不可用，显示灰色禁用资源。 */
 				LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,23U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_REVERSE,24U);
@@ -474,7 +474,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 			case 3://往复
 			if(light_flag == 1U) /* 1 表示往复已选中，显示黄色高亮资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,28U);
-			else if(light_flag == 2U) /* 2 表示往复不可用，显示黑色禁用资源。 */
+			else if(light_flag == 2U) /* 2 表示往复不可用，显示灰色禁用资源。 */
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,26U);
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC,27U);
@@ -483,7 +483,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 	}
 	else
 	{
-		if(dir_type == 0U) /* 方向类型为 0 表示整组不可用，三个方向同时回到黑色禁用态。 */
+		if(dir_type == 0U) /* 方向类型为 0 表示整组不可用，三个方向同时回到灰色禁用态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_FORWARD, 20U);
 			LCD_Show_Picture(UIDP_LCD_VP_DIR_OSC, 26U);

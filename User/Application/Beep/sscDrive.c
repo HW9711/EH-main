@@ -227,7 +227,7 @@ void MOTORRUN(void)
     static uint8_t huci=0;
     static uint32_t last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 记录脚踏运行时上一次发给屏幕的实时速度，避免每 50ms 无变化也刷屏。 */
     uint8_t display_value[10]={0};
-    uint8_t effective_dir_work=0U; /* 保存本次真正下发给驱动板的方向，EMBD 只在输出层取反，避免改写屏幕和通道记忆。 */
+    uint8_t effective_dir_work=0U; /* 保存真正下发给驱动板的方向，MXYTP 固定正转、EMBD 仅在输出层取反，均不改屏幕和通道记忆。 */
     uint8_t physical_channel=BoardProfile_MapHandlePhysicalChannel(WorkMessage.channel_work); /* 仅把当前逻辑手柄通道换算成物理电机通道。 */
     uint32_t motor_source_speed=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕/EEPROM 当前设定速度就是电机运行目标速度。 */
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
@@ -281,7 +281,11 @@ void MOTORRUN(void)
         }
         //msg的数据填充
         effective_dir_work=(uint8_t)WorkMessage.dir_work; /* 默认按当前工作方向下发，保证其它手柄完全沿用原方向逻辑。 */
-        if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
+        if(WorkMessage.hand_model==MX_YIP_ONLINES)
+        {
+            effective_dir_work=ZZDIR; /* MXYTP 的往复由机械结构完成，屏幕保持 OSCDIR，但驱动控制模式必须始终下发正转。 */
+        }
+        else if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
         {
             if(effective_dir_work==ZZDIR) /* 屏幕/记忆认为正转时，EMBD 实际需要向驱动板发送反转。 */
             {

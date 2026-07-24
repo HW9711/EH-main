@@ -819,6 +819,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint32_t min_speed;          /* RFID 标签转换后的最小速度；统一用32位避免和默认速度比较时截断。 */
     uint32_t reduction_ratio = HANDLESCAN_TOOL_RATIO_UNIT; /* RFID 标签解析出的 x100 完整倍率，默认 100 表示直联。 */
     uint16_t reduction_integer; /* 保存低 16 位减速倍率的整数部分，用于兼容旧 8 位镜像字段。 */
+    uint16_t current_threshold; /* 保存 RFID 电流阈值换算结果；标签单位 0.1A，主控与驱动协议统一使用 0.01A。 */
     uint8_t default_flow;        /* RFID 标签中的默认泵流量。 */
     uint8_t direction;           /* RFID 标签中的方向字段。 */
     uint8_t business_tool_type = 0U; /* 业务层使用的刀具能力类型，和 RFID 原始型号分开保存。 */
@@ -872,9 +873,10 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0：0x01 刨刀、0x02 磨头，未知值保护为磨头。 */
     reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* x100 减速值除以 100 得到旧字段需要的整数镜像，增速时低 16 位为 0。 */
     message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 旧字段最大只能表示 255，超限时钳位而不是低字节回绕。 */
-    message->overloadThresholdFor = payload[11]; /* EPC byte11：电流阈值，当前按原始值保存。 */
-    message->overloadThresholdRev = payload[11]; /* 反转阈值沿用同一 RFID 电流阈值。 */
-    message->overloadThresholdOSC = payload[11]; /* 往复阈值沿用同一 RFID 电流阈值。 */
+    current_threshold = (uint16_t)payload[11] * 10U; /* EPC byte11 每单位表示 0.1A，乘 10 后转换为驱动帧要求的 0.01A；100 对应 10.00A。 */
+    message->overloadThresholdFor = current_threshold; /* 正转使用标签换算后的保护电流，0 仍表示不覆盖驱动内部默认阈值。 */
+    message->overloadThresholdRev = current_threshold; /* 反转沿用同一刀具电机阈值，保持标签只配置一个电流值。 */
+    message->overloadThresholdOSC = current_threshold; /* 往复沿用同一刀具电机阈值，驱动侧按 0.01A 直接解释。 */
     message->freq_default = (business_tool_type == PLANER) ? 40U : 0U; /* EPC 刨刀协议默认 4Hz，工程内部频率按 x10 保存为 40。 */
 
     if ((max_speed != 0U) && (default_speed > max_speed))
@@ -1510,15 +1512,20 @@ static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t mi
 }
 
 /*
- * 函数功能：解析 Page4 默认运动方向。
- * 输入参数：raw_direction EEPROM Page4 方向字节，当前业务确认初始方向按正转使用。
- * 返回参数：项目内部方向值，当前固定返回 ZZDIR。
+ * 函数功能：解析 Page4 默认运动方向，并为机械往复 MXYTP 建立独立的界面方向。
+ * 输入参数：message 为当前通道识别缓存；raw_direction 为 EEPROM Page4 方向字节。
+ * 返回参数：项目内部方向值；MXYTP 固定返回 OSCDIR，其它手柄按 Page4 和型号能力返回。
  */
 static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t *message, uint8_t raw_direction)
 {
+    if ((message != NULL) && (message->handle_type == MX_YIP_ONLINES))
+    {
+        return OSCDIR; /* MXYTP 靠机械结构往复，业务和屏幕固定显示往复；电机正转转换延后到 UART1 输出层处理。 */
+    }
+
     if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_REVERSE)
     {
-        return FZDIR; /* Page4[8]=0x02 表示默认反转，所有有效手柄都允许正/反方向切换。 */
+        return FZDIR; /* Page4[8]=0x02 表示默认反转；固定方向型号上线后会锁住该方向，不允许后续切换。 */
     }
 
     if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_OSC)

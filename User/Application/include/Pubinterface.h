@@ -421,6 +421,7 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按 A/B 在线和当前通道刷新手柄图标。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断刀具是否具备刨刀能力。 */
+bool Pubinterface_IsDirLocked(uint8_t hand_model); /* 判断手柄方向是否由 EEPROM 或机械结构锁定，锁定后不得由本机或外控切换。 */
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
 void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
 void Pubinterface_ClearSelectedChannelDisplay(void); /* 无当前手柄时关闭运行参数区。 */
