@@ -13,6 +13,7 @@
 #include "uart1.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
+#include "sscRFID.h"
 
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
@@ -65,7 +66,46 @@ static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type, u
                      (tool_type == PX_YIP_ONLINES) ||
                      (tool_type == PX_YIM_ONLINES) ||
                      (raw_tool_type == PX_YIP_ONLINES) ||
-                     (raw_tool_type == PX_YIM_ONLINES)); /* tool_type 归一为 PLANER/GRINDH 后，仍用 raw_tool_type 保留 PXM/PXP 有刷判定。 */
+                     (raw_tool_type == PX_YIM_ONLINES)); /* 只有PXYTM/PXYTP进入有刷类型；RFID 0x04/0x05明确保持公共接头无刷通道。 */
+}
+
+/*
+ * 函数功能：把屏幕显示方向转换为当前RFID机械刀具需要的实际电机方向。
+ * 输入参数：hand_model为当前Page2基座型号；display_direction为屏幕方向；raw_tool_type为EPC byte0原始刀具型号。
+ * 返回参数：写入驱动控制模式的ZZDIR/FZDIR/OSCDIR；不修改屏幕和通道记忆。
+ */
+static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t display_direction, uint8_t raw_tool_type)
+{
+    bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
+                             (hand_model == PXBB_ONLINES) ||
+                             (hand_model == COMMON_SOCKET_ONLINES)); /* 只有通过公共接头/PXB基座读取EPC时，0x03~0x05才表示机械刀具型号。 */
+
+    if (rfid_tool_handle == false)
+    {
+        return display_direction; /* EEPROM Page3历史刀具码可能与0x03~0x05重号，非RFID基座必须保持原方向。 */
+    }
+
+    if (raw_tool_type == RFID_TOOL_MODEL_MXYTP)
+    {
+        return ZZDIR; /* MXYTP由机械结构形成往复，电机必须始终单向正转。 */
+    }
+
+    if (raw_tool_type == RFID_TOOL_MODEL_REVERSE_ROTATION)
+    {
+        if (display_direction == ZZDIR)
+        {
+            return FZDIR; /* 标签要求屏幕显示正向时，反旋机械结构需要电机实际反转。 */
+        }
+
+        if (display_direction == FZDIR)
+        {
+            return ZZDIR; /* 标签要求屏幕显示反向时，反旋机械结构需要电机实际正转。 */
+        }
+
+        return ZZDIR; /* 反旋刀具不支持电气往复，异常方向保护为电机正转且上层仍保持停机门禁。 */
+    }
+
+    return display_direction; /* 普通刨磨刀具和MXYTM的屏幕方向就是实际电机方向。 */
 }
 
 static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
@@ -227,7 +267,7 @@ void MOTORRUN(void)
     static uint8_t huci=0;
     static uint32_t last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 记录脚踏运行时上一次发给屏幕的实时速度，避免每 50ms 无变化也刷屏。 */
     uint8_t display_value[10]={0};
-    uint8_t effective_dir_work=0U; /* 保存真正下发给驱动板的方向，MXYTP 固定正转、EMBD 仅在输出层取反，均不改屏幕和通道记忆。 */
+    uint8_t effective_dir_work=0U; /* 保存真正下发给驱动板的方向，RFID机械刀具和EMBD只在输出层转换，不改屏幕和通道记忆。 */
     uint8_t physical_channel=BoardProfile_MapHandlePhysicalChannel(WorkMessage.channel_work); /* 仅把当前逻辑手柄通道换算成物理电机通道。 */
     uint32_t motor_source_speed=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕/EEPROM 当前设定速度就是电机运行目标速度。 */
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
@@ -280,12 +320,8 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        effective_dir_work=(uint8_t)WorkMessage.dir_work; /* 默认按当前工作方向下发，保证其它手柄完全沿用原方向逻辑。 */
-        if(WorkMessage.hand_model==MX_YIP_ONLINES)
-        {
-            effective_dir_work=ZZDIR; /* MXYTP 的往复由机械结构完成，屏幕保持 OSCDIR，但驱动控制模式必须始终下发正转。 */
-        }
-        else if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
+        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type); /* 仅RFID基座按原始刀具型号转换实际方向，屏幕显示方向保持不变。 */
+        if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
         {
             if(effective_dir_work==ZZDIR) /* 屏幕/记忆认为正转时，EMBD 实际需要向驱动板发送反转。 */
             {

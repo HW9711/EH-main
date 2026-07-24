@@ -610,7 +610,7 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
         return 0U;
     }
 
-    if (Pubinterface_IsDirLocked(WorkMessage.hand_model))
+    if (Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type))
     {
         if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
         {
@@ -619,7 +619,7 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
 
         if (dir != WorkMessage.dir_work)
         {
-            return 0U; /* 外控请求与 EEPROM 默认方向或 MXYTP 固定往复方向不一致时拒绝，禁止绕过本机方向门禁。 */
+            return 0U; /* 外控请求与 EEPROM 默认方向或 RFID 机械刀具固定显示方向不一致时拒绝，禁止绕过本机方向门禁。 */
         }
 
         return 1U; /* 重复设置当前固定方向属于幂等成功，不改 WorkMessage 和通道方向记忆。 */
@@ -3036,6 +3036,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
                                                      const ChannelrecognizeMessage_t *recognize)
 {
     uint8_t handle_model; /* 保存本块使用的基座型号，用于生成刀具来源字段。 */
+    uint8_t tool_type; /* 保存本块上报的刀具型号；RFID来源保留EPC byte0，EEPROM来源保持原业务类型。 */
     uint16_t default_speed; /* 保存本块上报的默认速度，优先来自 MemoryMsg，必要时来自扫描缓存。 */
     uint16_t default_flow; /* 保存本块上报的默认注水流量，避免 MemoryMsg 未刷新时显示 0。 */
     uint8_t direction; /* 保存本块上报的默认方向字段。 */
@@ -3049,6 +3050,14 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     }
 
     handle_model = ExternalComm_ResolveHandleModel(memory, recognize); /* 先解析基座型号，后续来源字段依赖它。 */
+    tool_type = recognize->tool_type; /* EEPROM来源继续沿用现有业务刀具类型，普通RFID 0x01/0x02也保持原值兼容。 */
+    if (((handle_model == COMMON_SOCKET_ONLINES) ||
+         (handle_model == PXBA_ONLINES) ||
+         (handle_model == PXBB_ONLINES)) &&
+        (recognize->raw_tool_type != 0U))
+    {
+        tool_type = recognize->raw_tool_type; /* RFID来源上报EPC byte0原始0x01~0x05，使反旋、MXYTP和MXYTM可被上位机区分。 */
+    }
     use_recognize_tool_fields = (bool)((recognize->tool_type != 0U) &&
                                        ((memory->tool_type == 0U) ||
                                         (memory->tool_reduction_ratio == 0U))); /* RFID 已解析而通道记忆未装载时，刀具参数用扫描缓存兜底。 */
@@ -3069,7 +3078,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     /* block byte1：刀具信息来源，区分 EEPROM 和 RFID EPC。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_GetHandleToolSource(handle_model));
     /* block byte2：实际刀具类型，RFID 手柄来自标签，普通手柄来自 EEPROM 第三页。 */
-    ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->tool_type);
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, tool_type); /* RFID保留0x01~0x05原始型号；EEPROM来源保持现有类型码。 */
     /* block byte3：刀具直径，沿用扫描层已解析单位。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->diameter);
     /* block byte4~5：刀具长度，按大端 16 位上报。 */

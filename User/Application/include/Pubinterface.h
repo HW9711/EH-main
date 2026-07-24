@@ -12,8 +12,8 @@
 #define EMBB_ONLINES 4
 #define PXBA_ONLINES 5
 #define PXBB_ONLINES 6
-#define MX_YIM_ONLINES 7  //磨削 一体磨
-#define MX_YIP_ONLINES 8  //磨削 一体刨
+#define MX_YIM_ONLINES 7  //历史保留编号；现行MXYTM由RFID EPC型号0x05识别，不再作为Page2手柄型号
+#define MX_YIP_ONLINES 8  //历史保留编号；现行MXYTP由RFID EPC型号0x04识别，不再作为Page2手柄型号
 #define PX_YIM_ONLINES 9  //刨削 一体磨
 #define PX_YIP_ONLINES 10 //刨削 一体刨
 #define JMB_ONLINES    11 //
@@ -421,7 +421,7 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按 A/B 在线和当前通道刷新手柄图标。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断刀具是否具备刨刀能力。 */
-bool Pubinterface_IsDirLocked(uint8_t hand_model); /* 判断手柄方向是否由 EEPROM 或机械结构锁定，锁定后不得由本机或外控切换。 */
+bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type); /* 判断EEPROM手柄或RFID刀具方向是否锁定，锁定后不得由本机或外控切换。 */
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
 void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
 void Pubinterface_ClearSelectedChannelDisplay(void); /* 无当前手柄时关闭运行参数区。 */

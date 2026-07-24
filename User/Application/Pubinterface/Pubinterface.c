@@ -190,16 +190,13 @@ bool Pubinterface_IsRfidAutoIdentifyEnabled(uint8_t channel)
 /*
  * 函数功能：判断当前手柄是否为规格来自手柄自身 EEPROM Page3 的一体式刀具头手柄。
  * 输入参数：hand_model EEPROM Page2 识别出的手柄型号。
- * 返回参数：true 表示 MXYTM/MXYTP/PXYTM/PXYTP，需要显示手柄 EEPROM 内的直径、长度、角度；false 表示不是该类手柄。
+ * 返回参数：true表示PXYTM/PXYTP需要显示手柄EEPROM内的直径、长度和角度；MXYTP/MXYTM改走公共接头RFID规格显示。
  */
 static bool IsIntegratedToolModel(uint8_t hand_model)
 {
-	return ((hand_model == MX_YIM_ONLINES) ||  /* MXYTM：一体式磨头，刀具规格来自手柄自身 EEPROM。 */
-			(hand_model == MX_YIP_ONLINES) ||  /* MXYTP：一体式刨刀，刀具规格来自手柄自身 EEPROM。 */
-			(hand_model == PX_YIM_ONLINES) ||  /* PXYTM：一体式磨头，刀具规格来自手柄自身 EEPROM。 */
-			(hand_model == PX_YIP_ONLINES));   /* PXYTP：一体式刨刀，刀具规格来自手柄自身 EEPROM。 */
+    return ((hand_model == PX_YIM_ONLINES) ||  /* PXYTM规格来自手柄自身EEPROM Page3。 */
+            (hand_model == PX_YIP_ONLINES));   /* PXYTP规格来自手柄自身EEPROM Page3；MXY型号改由公共接头RFID显示。 */
 }
-
 /*
  * 函数功能：判断当前手柄型号是否允许使用屏幕刀具规格窗口显示 RFID/EPC 解析出的长度、直径和角度。
  * 输入参数：hand_model EEPROM 识别出的手柄型号。
@@ -209,7 +206,7 @@ static bool IsRfidToolModel(uint8_t hand_model)
 {
 	return ((Pubinterface_IsSplitToolSpecDisplayModel(hand_model) == true) ||
 			(IsIntegratedToolModel(hand_model) == true) ||
-			(hand_model == COMMON_SOCKET_ONLINES)); /* PXBA/PXBB 和公共接头显示 RFID 刀具头标签规格；四类一体式显示手柄 EEPROM Page3 规格。 */
+			(hand_model == COMMON_SOCKET_ONLINES)); /* PXBA/PXBB 和公共接头显示 RFID 刀具头标签规格；两类PXY一体式显示手柄EEPROM Page3规格。 */
 }
 
 /*
@@ -219,58 +216,75 @@ static bool IsRfidToolModel(uint8_t hand_model)
  */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
 {
-	return (tool_type == PLANER); /* 刀具能力只看归一后的 PLANER，MXYTP/PXYTP 只作为手柄型号参与往复能力判断。 */
+	return (tool_type == PLANER); /* 普通刨刀、MXYTP和PXYTP均归一为PLANER，是否允许电气往复还要结合基座与raw_tool_type判断。 */
 }
 
 /*
- * 函数功能：判断当前手柄是否使用固定方向，统一拦截屏幕、实体键和外控方向切换。
- * 输入参数：hand_model 为 EEPROM Page2 识别后的手柄型号。
- * 返回参数：true 表示只能保留上线时确定的方向；false 表示沿用原方向切换规则。
+ * 函数功能：判断EEPROM手柄或RFID机械刀具是否锁定方向，统一拦截屏幕、实体键和外控换向。
+ * 输入参数：hand_model为Page2手柄/基座型号；raw_tool_type为EPC byte0原始刀具型号，非RFID来源传0或原兼容值。
+ * 返回参数：true表示只能保留上线识别方向；false表示沿用原方向切换规则。
  */
-bool Pubinterface_IsDirLocked(uint8_t hand_model)
+bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type)
 {
-	return ((hand_model == TMBA_ONLINES) ||   /* TMBA 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == TMBB_ONLINES) ||   /* TMBB 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == EMBA_ONLINES) ||   /* EMBA 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == EMBB_ONLINES) ||   /* EMBB 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == JMB_ONLINES) ||    /* JMB 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == MX_YIM_ONLINES) || /* MXYTM 的运行方向只服从本手柄 EEPROM Page4 默认方向。 */
-			(hand_model == MX_YIP_ONLINES));  /* MXYTP 的界面方向固定为往复，电机方向在驱动输出层另行固定为正转。 */
-}
+    bool fixed_eeprom_handle = ((hand_model == TMBA_ONLINES) || /* TMBA只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == TMBB_ONLINES) || /* TMBB只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == EMBA_ONLINES) || /* EMBA只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == EMBB_ONLINES) || /* EMBB只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == JMB_ONLINES));   /* JMB只服从本手柄EEPROM Page4默认方向。 */
+    bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
+                             (hand_model == PXBB_ONLINES) ||
+                             (hand_model == COMMON_SOCKET_ONLINES)); /* 只有EPC基座才按raw_tool_type解释0x03~0x05。 */
 
+    if (fixed_eeprom_handle)
+    {
+        return true; /* EEPROM固定方向手柄继续禁止屏幕、实体键和外控切换方向。 */
+    }
+
+    if (rfid_tool_handle == false)
+    {
+        return false; /* 普通可换向手柄不读取RFID原始型号，保持现有方向切换能力。 */
+    }
+
+    return ((raw_tool_type == RFID_TOOL_MODEL_REVERSE_ROTATION) ||
+            (raw_tool_type == RFID_TOOL_MODEL_MXYTP) ||
+            (raw_tool_type == RFID_TOOL_MODEL_MXYTM)); /* 三类机械刀具方向由EPC定义，运行期不得改写标签语义。 */
+}
 /*
- * 函数功能：判断当前手柄型号是否具备往复业务显示和频率能力。
- * 输入参数：hand_model EEPROM 识别出的手柄型号。
- * 返回参数：true 表示该手柄具备往复能力；是否允许切换方向还需经过固定方向门禁。
+ * 函数功能：判断当前手柄基座是否可承载支持电气往复的普通刨刀。
+ * 输入参数：hand_model为EEPROM识别出的手柄或公共接头基座型号。
+ * 返回参数：true表示基座具备电气往复能力；MXYTP机械往复仍由raw_tool_type在下一层排除。
  */
 static bool IsOscSupportedModel(uint8_t hand_model)
 {
-	return ((hand_model == PXBA_ONLINES) ||
-			(hand_model == PXBB_ONLINES) ||
-			(hand_model == MX_YIP_ONLINES) ||
-			(hand_model == PX_YIP_ONLINES)); /* PXBA/PXBB、MXYTP/PXYTP 具备往复业务能力，MXYTP 的方向切换由固定方向门禁单独拦截。 */
+    return ((hand_model == PXBA_ONLINES) ||
+            (hand_model == PXBB_ONLINES) ||
+            (hand_model == COMMON_SOCKET_ONLINES) ||
+            (hand_model == PX_YIP_ONLINES)); /* PXB和公共接头可随0x01刨刀进入电气往复；PXYTP保持原有一体式往复能力。 */
 }
-
 /*
- * 函数功能：综合手柄型号和刀具类型判断当前通道是否支持往复方向。
- * 输入参数：hand_model 当前选中通道手柄型号；tool_type 当前选中通道刀具类型。
- * 返回参数：true 表示方向键可切入 OSCDIR；false 表示往复键保持禁用或按键无效。
+ * 函数功能：综合基座型号、业务刀具能力和RFID原始型号判断是否支持电气往复。
+ * 输入参数：hand_model为当前基座型号；tool_type为归一刀具能力；raw_tool_type为EPC byte0原始型号。
+ * 返回参数：true表示允许切入OSCDIR并调频；MXYTP仅显示机械往复，因此返回false。
  */
-static bool IsOscDirectionAllowed(uint8_t hand_model, uint8_t tool_type)
+static bool IsOscDirectionAllowed(uint8_t hand_model, uint8_t tool_type, uint8_t raw_tool_type)
 {
-	if (IsOscSupportedModel(hand_model) == false)
-	{
-		return false; /* 手柄本体不支持往复时，屏幕不能开放往复方向按钮，避免普通手柄被刨刀字段误带入 OSCDIR。 */
-	}
+    if (raw_tool_type == RFID_TOOL_MODEL_MXYTP)
+    {
+        return false; /* MXYTP仅在界面显示机械往复，不允许频率调节，也不能向驱动下发电气往复模式。 */
+    }
 
-	if (Pubinterface_IsPlanerCapabilityTool(tool_type) == false)
-	{
-		return false; /* 手柄支持往复但当前刀具不是刨刀能力时，继续隐藏往复按钮和频率窗口。 */
-	}
+    if (IsOscSupportedModel(hand_model) == false)
+    {
+        return false; /* 手柄基座不支持往复时，刨刀字段也不能单独开放OSCDIR。 */
+    }
 
-	return true; /* 只有手柄本体支持往复且当前刀具为刨刀能力时，才允许屏幕进入 OSCDIR。 */
+    if (Pubinterface_IsPlanerCapabilityTool(tool_type) == false)
+    {
+        return false; /* 当前刀具不是刨刀能力时，继续禁用往复方向和频率窗口。 */
+    }
+
+    return true; /* 普通0x01刨刀配合支持往复的基座时，允许正反转和电气往复切换。 */
 }
-
 /*
  * 函数功能：判断开口定位入口是否允许显示和发送。
  * 输入参数：hand_model 当前手柄基座型号；tool_type 当前刀具能力类型。
@@ -607,7 +621,7 @@ bool ScreenKey_CanUse(uint8_t screen_key)
 	case SCREENKey_FREQ_Sub:
 		return (current_handle_available &&
 				(WorkMessage.dir_work == OSCDIR) &&
-				IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type)); /* 频率区仅在当前确实处于往复方向时可见并可调。 */
+				IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type)); /* 频率区仅在当前确实处于往复方向时可见并可调。 */
 
 	case SCREENKey_HANDLE_A:
 		return ((WorkMessage.runflag_work == false) && (WorkMessage.Channel_Aonline == true)); /* A 在线且电机停止时才允许切换到 A。 */
@@ -630,13 +644,13 @@ bool ScreenKey_CanUse(uint8_t screen_key)
 	case SCREENKey_Dir_Reverse:
 		return ((WorkMessage.runflag_work == false) &&
 				current_handle_available &&
-				(Pubinterface_IsDirLocked(WorkMessage.hand_model) == false)); /* 固定方向手柄的已显示方向只是状态指示，任何正反转触控都必须静默丢弃。 */
+				(Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type) == false)); /* 固定方向手柄的已显示方向只是状态指示，任何正反转触控都必须静默丢弃。 */
 
 	case SCREENKey_Dir_OSC:
 		return ((WorkMessage.runflag_work == false) &&
 				current_handle_available &&
-				(Pubinterface_IsDirLocked(WorkMessage.hand_model) == false) &&
-				IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type)); /* 灰色往复按钮不得仅因保留旧方向而重新切入往复。 */
+				(Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type) == false) &&
+				IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type)); /* 灰色往复按钮不得仅因保留旧方向而重新切入往复。 */
 
 	case SCREENKey_OpenPos_ClockWise:
 	case SCREENKey_OpenPos_AntiClockWise:
@@ -1169,13 +1183,13 @@ void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 {
 	uint8_t display_value[10] = {0U}; /* 所有 UI 消息都使用 10 字节缓冲，保持 UIDP 队列拷贝格式稳定。 */
 	bool planer_selected = Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type); /* 只有归一后的 PLANER 才按刨刀能力显示往复相关入口。 */
-	bool osc_supported = IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type); /* 往复方向同时看手柄硬件和刨刀能力，普通手柄或磨头刀具都不误亮往复。 */
+	bool osc_supported = IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type); /* 往复方向同时看手柄硬件和刨刀能力，普通手柄或磨头刀具都不误亮往复。 */
 	bool osc_display_retained = ((osc_supported == false) &&
 								 (Pubinterface_IsSplitToolSpecDisplayModel(WorkMessage.hand_model) == true) &&
 								 (WorkMessage.tool_type == 0U) &&
 								 (WorkMessage.dir_work == OSCDIR)); /* PXBA/PXBB 拔掉 RFID 刀具后会清当前刀具类型，但保留上次往复方向；显示层需要继续点亮往复图标来匹配实际运行状态。 */
 	bool osc_display_available = (osc_supported || osc_display_retained); /* 正常有刨刀时按能力开放往复；无刀具但方向已保留为往复时只恢复显示，不改变按键切入往复的安全门槛。 */
-	bool dir_locked = Pubinterface_IsDirLocked(WorkMessage.hand_model); /* 固定方向型号高亮当前方向、其余方向置灰，屏幕、实体键和外控均不得改变。 */
+	bool dir_locked = Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type); /* 固定方向型号高亮当前方向、其余方向置灰，屏幕、实体键和外控均不得改变。 */
 	bool foot_control_available = (ControlSignalMessage.jt_enable_flag == true); /* 切通道刷新时脚踏图标也按实际在线状态显示。 */
 	bool external_control_active = (WorkMessage.hmiactive_work != 0U); /* 外控占用时内部驱动方式也可能是 TOUCHWORK，但屏幕不能显示为触控。 */
 	bool handle_control_available = ((external_control_active == false) && Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model)); /* 切换 A/B 后也按当前手柄型号决定手控是否可用，LGZI 同样允许手控入口。 */
@@ -1204,7 +1218,7 @@ void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel)
 	{
 		SendDirectionDisplay(1U, (WorkMessage.dir_work == ZZDIR), (WorkMessage.dir_work == ZZDIR)); /* 固定正转时高亮正转；其它固定方向仍显示灰色正转图标但不可选。 */
 		SendDirectionDisplay(2U, (WorkMessage.dir_work == FZDIR), (WorkMessage.dir_work == FZDIR)); /* 固定反转时高亮反转；其它固定方向仍显示灰色反转图标但不可选。 */
-		SendDirectionDisplay(3U, (WorkMessage.dir_work == OSCDIR), (WorkMessage.dir_work == OSCDIR)); /* MXYTP 高亮往复；六类单向型号保留灰色往复图标但不可选。 */
+		SendDirectionDisplay(3U, (WorkMessage.dir_work == OSCDIR), (WorkMessage.dir_work == OSCDIR)); /* MXYTP高亮往复；其它固定方向手柄或刀具保留灰色往复图标但不可选。 */
 	}
 	else
 	{
@@ -2132,9 +2146,10 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 		{
 			memory->freq = keep_freq;							  /* 同一 EPC 恢复时保留用户往复频率，屏幕频率和实际运行频率继续一致。 */
 		}
-		if ((keep_dir == ZZDIR) ||
-			(keep_dir == FZDIR) ||
-			((keep_dir == OSCDIR) && (IsOscDirectionAllowed(memory->hand_model, memory->tool_type) == true)))
+		if ((Pubinterface_IsDirLocked(memory->hand_model, memory->raw_tool_type) == false) &&
+			((keep_dir == ZZDIR) ||
+			 (keep_dir == FZDIR) ||
+			 ((keep_dir == OSCDIR) && (IsOscDirectionAllowed(memory->hand_model, memory->tool_type, memory->raw_tool_type) == true))))
 		{
 			memory->dir = keep_dir;								  /* 方向仍被当前手柄和刀具支持时才恢复，避免异常方向写回运行状态。 */
 		}
@@ -2826,7 +2841,7 @@ void FreqActive(uint8_t key_value)
 	uint8_t display_value[10] = {0U};
 	if ((WorkMessage.alarm_flag == true) ||
 		(WorkMessage.hand_model == 0U) ||
-		(IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type) == false))
+		(IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == false))
 	{
 		return; /* 只有已识别且支持往复的当前手柄才允许调频，避免无手柄或普通手柄进入无效频率窗口。 */
 	}
@@ -2921,7 +2936,7 @@ void DirActive(uint8_t key_value)
 		return; /* EX8 表格要求方向键必须有有效手柄才生效，避免无手柄残留通道状态被方向键改写。 */
 	if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
 		return; /* 未选中 A/B 通道时没有可保存的方向记忆，直接拒绝方向键，避免屏幕显示被误刷新。 */
-	if (Pubinterface_IsDirLocked(WorkMessage.hand_model))
+	if (Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type))
 	{
 		return; /* 固定方向手柄只服从上线时确定的方向，实体键、屏幕和内部 HMI 消息都不能改写方向记忆。 */
 	}
@@ -2960,7 +2975,7 @@ void DirActive(uint8_t key_value)
 	case HANDLEKey_dir_OSC:
 	case HMIkey_Dir_OSC:
 	case SCREENKey_Dir_OSC:
-		if (IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type) == false)
+		if (IsOscDirectionAllowed(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == false)
 		{
 			return; /* 当前选中手柄不支持往复时拒绝 OSCDIR，避免屏幕误发往复键后切入驱动不支持模式。 */
 		}

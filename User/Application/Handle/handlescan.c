@@ -276,7 +276,7 @@ typedef struct
 
 /*
  * 当前已支持的手柄类型映射表。
- * 手柄信息来自 EEPROM 第 2 页，0x6B 为普通基座码，0x7C/01..06 为一体式手柄型号码。
+ * 手柄信息来自 EEPROM 第 2 页，0x6B 为普通基座码，0x7C/03..06 为一体式手柄型号码；MXYTP/MXYTM改由公共接头RFID标签识别。
  */
 static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
 {
@@ -286,8 +286,7 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
     {0x6B, 0x04, EMBB_ONLINES,  "EMBB"},//无刷，单向
     {0x6B, 0x05, PXBA_ONLINES,  "PXBA"},//无刷，往复，默认4Hz，转速默认30000
     {0x6B, 0x06, PXBB_ONLINES,  "PXBB"},//无刷，往复，默认4Hz，转速默认30000
-    {0x7C, 0x01, MX_YIM_ONLINES,   "MXYTM"},//无刷
-    {0x7C, 0x02, MX_YIP_ONLINES,   "MXYTP"},//无刷，靠机械结构实现往复。屏幕只显示往复按钮，但不显示正反转按钮，和频率显示，单机还是按照单项协议处理。
+
     {0x7C, 0x03, PX_YIM_ONLINES,   "PXYTM"},//有刷，单向
     {0x7C, 0x04, PX_YIP_ONLINES,   "PXYTP"},//有刷，往复
     {0x7C, 0x05, JMB_ONLINES,      "JMB"},//无刷，单向
@@ -554,8 +553,7 @@ static bool Handlescan_SupportsOscDirection(const ChannelrecognizeMessage_t *mes
 
     handle_supported = ((message->handle_type == PXBA_ONLINES) ||
                         (message->handle_type == PXBB_ONLINES) ||
-                        (message->handle_type == MX_YIP_ONLINES) ||
-                        (message->handle_type == PX_YIP_ONLINES)); /* 只有表中明确支持往复的手柄才允许 Page4 默认往复生效。 */
+                        (message->handle_type == PX_YIP_ONLINES)); /* EEPROM Page4只对真实支持电气往复的手柄生效，MXYTP改由RFID标签单独处理。 */
 
     tool_supported = (message->tool_type == PLANER);          /* 当前刀具能力必须已经归一为刨刀，MXYTP/PXYTP 不再作为旧刀具码兼容。 */
 
@@ -654,39 +652,43 @@ static uint32_t Handlescan_BuildRfidEpcReductionRatio(uint8_t ratio_hi, uint8_t 
 
 /*
  * 函数功能：把 EPC 标签刀具型号转换为业务刀具能力。
- * 输入参数：tool_model 为 EPC byte0，协议定义 1 为刨刀具、2 为磨刀具。
- * 返回参数：PLANER 或 GRINDH；未知值按磨头处理，避免误开放往复。
+ * 输入参数：tool_model为EPC byte0，协议定义0x01普通刨刀、0x02普通磨刀、0x03反旋、0x04 MXYTP、0x05 MXYTM。
+ * 返回参数：PLANER或GRINDH；MXYTP按刨刀外观显示，其它机械刀具按磨刀外观显示，未知值按磨刀保护。
  */
 static uint8_t Handlescan_MapRfidToolType(uint8_t tool_model)
 {
-    if (tool_model == PLANER)
+    if ((tool_model == RFID_TOOL_MODEL_PLANER) ||
+        (tool_model == RFID_TOOL_MODEL_MXYTP))
     {
-        return PLANER; /* 0x01 表示刨刀具，允许往复能力。 */
+        return PLANER; /* 普通刨刀和MXYTP都按刨刀外观显示；MXYTP的机械往复能力由原始型号继续区分。 */
     }
 
-    return GRINDH; /* 0x02 或异常值按磨头/单向能力处理，保护未知标签不进入往复。 */
+    return GRINDH; /* 普通磨刀、反旋刀具、MXYTM和异常值按磨头能力处理，禁止误开放电气往复。 */
 }
-
 /*
- * 函数功能：按 RFID 刀具能力约束默认方向。
- * 输入参数：business_tool_type 为业务刀具能力；rfid_direction 为 RFID 方向字段解析后的内部方向。
- * 返回参数：允许写入 WorkMessage 的方向值。
+ * 函数功能：按RFID原始刀具型号约束屏幕默认方向。
+ * 输入参数：tool_model为EPC byte0原始型号；rfid_direction为EPC方向字段解析后的内部方向。
+ * 返回参数：允许写入WorkMessage的显示方向；MXYTP固定OSCDIR，单向刀具拒绝电气往复。
  */
-static uint8_t Handlescan_BuildRfidRunDirection(uint8_t business_tool_type, uint8_t rfid_direction)
+static uint8_t Handlescan_BuildRfidRunDirection(uint8_t tool_model, uint8_t rfid_direction)
 {
-    if (business_tool_type == PLANER)
+    if (tool_model == RFID_TOOL_MODEL_MXYTP)
     {
-        return rfid_direction; /* 刨刀具允许正转、反转和往复，自动识别模式直接服从 EPC 方向字段。 */
+        return OSCDIR; /* MXYTP由机械结构把电机单向转动转换成往复，屏幕固定显示往复。 */
+    }
+
+    if (tool_model == RFID_TOOL_MODEL_PLANER)
+    {
+        return rfid_direction; /* 普通刨刀支持正转、反转和电气往复，默认方向直接服从EPC标签。 */
     }
 
     if (rfid_direction == FZDIR)
     {
-        return FZDIR; /* 磨头类允许反向单向运行，但不允许往复。 */
+        return FZDIR; /* 普通磨刀、反旋刀具和MXYTM允许标签指定反向单向显示。 */
     }
 
-    return ZZDIR; /* 磨头类遇到正向或异常往复方向时保护为正转。 */
+    return ZZDIR; /* 单向刀具遇到正向或异常往复值时保护为正转，避免下发不支持的电气往复。 */
 }
-
 /*
  * 函数功能：把 Page3 的减速/增速比写入通道识别缓存。
  * 输入参数：message 为目标识别缓存；tool_info_buf 为已读出的 Page3 缓存，读取失败可传 NULL。
@@ -712,55 +714,46 @@ static void Handlescan_UpdateToolRatioMessage(ChannelrecognizeMessage_t *message
 
 /*
  * 函数功能：把查表后的型号值转换成业务刀具能力。
- * 输入参数：raw_tool_type 为 Page3 刀具型号或 0x7C 自带能力手柄型号。
- * 返回参数：PLANER/GRINDH 或原值；YIP 后缀归一为 PLANER，YIM 后缀归一为 GRINDH。
+ * 输入参数：raw_tool_type为Page3刀具型号或仍保留的一体式PXY/MXYTM16手柄型号。
+ * 返回参数：PLANER/GRINDH或原值；PXYTP归一为PLANER，PXYTM/MXYTM16归一为GRINDH。
  */
 static uint8_t Handlescan_MapToolType(uint8_t raw_tool_type)
 {
-    if ((raw_tool_type == PX_YIP_ONLINES) ||
-        (raw_tool_type == MX_YIP_ONLINES))
+    if (raw_tool_type == PX_YIP_ONLINES)
     {
-        return PLANER; /* YIP 后缀表示刨削能力，按 PLANER 开放往复和频率显示入口。 */
+        return PLANER; /* PXYTP后缀表示刨削能力，按PLANER开放其原有电气往复和频率入口。 */
     }
 
     if ((raw_tool_type == PX_YIM_ONLINES) ||
-        (raw_tool_type == MX_YIM_ONLINES) ||
         (raw_tool_type == MX_YIM16_ONLINES))
     {
-        return GRINDH; /* YIM 后缀表示磨削能力，按 GRINDH 关闭往复能力。 */
+        return GRINDH; /* PXYTM和MXYTM16按磨削能力处理，MXYTP/MXYTM现行型号不再从EEPROM手柄表进入。 */
     }
 
-    return raw_tool_type; /* 其它 EEPROM 刀具暂时保持原值，避免扩大本次规则变更范围。 */
+    return raw_tool_type; /* 其它EEPROM刀具保持原值，避免扩大本次RFID协议适配范围。 */
 }
-
 /*
  * 函数功能：判断 EEPROM 第二页识别出的手柄型号是否自带刀具能力。
  * 输入参数：mapped_model 为手柄表映射后的系统内部型号。
- * 返回参数：true 表示该型号本身就是手柄型号和刀具能力来源；false 表示仍需按 Page3 或 RFID 读取刀具信息。
+ * 返回参数：true表示PXYTM/PXYTP/JMB/MXYTM16由手柄型号直接给出刀具能力；false表示仍需按Page3或RFID读取。
  */
 static bool Handlescan_IsSelfTypedHandleModel(uint8_t mapped_model)
 {
-    return ((mapped_model == MX_YIM_ONLINES) ||     /* MXYTM 是一体式手柄型号，不再作为 Page3 刀具型号解析。 */
-            (mapped_model == MX_YIP_ONLINES) ||     /* MXYTP 是一体式手柄型号，业务能力沿用该型号自身。 */
-            (mapped_model == PX_YIM_ONLINES) ||     /* PXYTM 是一体式手柄型号，后续由映射函数转成磨头能力。 */
-            (mapped_model == PX_YIP_ONLINES) ||     /* PXYTP 是一体式手柄型号，后续由映射函数转成刨刀能力。 */
-            (mapped_model == JMB_ONLINES) ||        /* JMB 是手柄型号，不能再挂在刀具 Page3 表中。 */
-            (mapped_model == MX_YIM16_ONLINES));    /* MXYTM16 是手柄型号，按手柄编号顺序接在 MXYTM 后。 */
+    return ((mapped_model == PX_YIM_ONLINES) ||     /* PXYTM是一体式有刷磨削手柄，刀具能力仍由Page2型号给出。 */
+            (mapped_model == PX_YIP_ONLINES) ||     /* PXYTP是一体式有刷刨削手柄，继续沿用EEPROM手柄识别。 */
+            (mapped_model == JMB_ONLINES) ||        /* JMB是独立手柄型号，不能再挂在刀具Page3表中。 */
+            (mapped_model == MX_YIM16_ONLINES));    /* MXYTM16保持现有独立手柄型号；MXYTP/MXYTM已改由RFID EPC识别。 */
 }
-
 /*
  * 函数功能：判断一体式手柄是否需要从手柄自身 EEPROM Page3 显示刀具规格。
  * 输入参数：mapped_model 为 EEPROM Page2 映射后的手柄型号。
- * 返回参数：true 表示 MXYTM/MXYTP/PXYTM/PXYTP 需要显示直径、长度、角度；false 表示其它自带型号不显示规格。
+ * 返回参数：true表示PXYTM/PXYTP需要显示EEPROM Page3直径、长度和角度；MXYTP/MXYTM规格改由RFID EPC路径显示。
  */
 static bool Handlescan_IsIntegratedSpecHandle(uint8_t mapped_model)
 {
-    return ((mapped_model == MX_YIM_ONLINES) ||  /* MXYTM：规格来自手柄 EEPROM Page3。 */
-            (mapped_model == MX_YIP_ONLINES) ||  /* MXYTP：规格来自手柄 EEPROM Page3。 */
-            (mapped_model == PX_YIM_ONLINES) ||  /* PXYTM：规格来自手柄 EEPROM Page3。 */
-            (mapped_model == PX_YIP_ONLINES));   /* PXYTP：规格来自手柄 EEPROM Page3。 */
+    return ((mapped_model == PX_YIM_ONLINES) ||  /* PXYTM规格继续来自手柄EEPROM Page3。 */
+            (mapped_model == PX_YIP_ONLINES));   /* PXYTP规格继续来自手柄EEPROM Page3；MXY型号改读公共接头EPC。 */
 }
-
 /*
  * 函数功能：把 handlescan 的刀具来源转换成 RFID 读取来源。
  * 输入参数：tool_source 为手柄扫描判断出的刀具来源。
@@ -870,14 +863,14 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
     direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
     reduction_ratio = Handlescan_BuildRfidEpcReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比，自动识别模式下按标签倍率换算电机速度。 */
-    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0：0x01 刨刀、0x02 磨头，未知值保护为磨头。 */
+    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0按0x01~0x05映射业务外观，机械能力继续由原始型号区分。 */
     reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* x100 减速值除以 100 得到旧字段需要的整数镜像，增速时低 16 位为 0。 */
     message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 旧字段最大只能表示 255，超限时钳位而不是低字节回绕。 */
     current_threshold = (uint16_t)payload[11] * 10U; /* EPC byte11 每单位表示 0.1A，乘 10 后转换为驱动帧要求的 0.01A；100 对应 10.00A。 */
     message->overloadThresholdFor = current_threshold; /* 正转使用标签换算后的保护电流，0 仍表示不覆盖驱动内部默认阈值。 */
     message->overloadThresholdRev = current_threshold; /* 反转沿用同一刀具电机阈值，保持标签只配置一个电流值。 */
     message->overloadThresholdOSC = current_threshold; /* 往复沿用同一刀具电机阈值，驱动侧按 0.01A 直接解释。 */
-    message->freq_default = (business_tool_type == PLANER) ? 40U : 0U; /* EPC 刨刀协议默认 4Hz，工程内部频率按 x10 保存为 40。 */
+    message->freq_default = (tool_model == RFID_TOOL_MODEL_PLANER) ? 40U : 0U; /* 只有普通刨刀使用4Hz电气往复默认值；机械往复MXYTP不下发频率。 */
 
     if ((max_speed != 0U) && (default_speed > max_speed))
     {
@@ -887,7 +880,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     {
         default_speed = min_speed; /* RFID 默认速度不能低于 RFID 下限。 */
     }
-    message->run_direction = Handlescan_BuildRfidRunDirection(business_tool_type, direction); /* 自动识别默认方向来自 EPC，但磨头类强制屏蔽往复方向。 */
+    message->run_direction = Handlescan_BuildRfidRunDirection(tool_model, direction); /* 默认显示方向按RFID型号和标签共同决定，MXYTP固定显示往复。 */
     message->tool_type = business_tool_type; /* 保存业务刀具类型，屏幕/方向/开口定位按 PLANER/GRINDH 判断。 */
     message->raw_tool_type = tool_model; /* 保存 RFID 原始刀具型号，供上位机扩展和售后核对标签原值。 */
     message->diameter = diameter; /* 保存 RFID 直径。 */
@@ -1512,35 +1505,29 @@ static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t mi
 }
 
 /*
- * 函数功能：解析 Page4 默认运动方向，并为机械往复 MXYTP 建立独立的界面方向。
- * 输入参数：message 为当前通道识别缓存；raw_direction 为 EEPROM Page4 方向字节。
- * 返回参数：项目内部方向值；MXYTP 固定返回 OSCDIR，其它手柄按 Page4 和型号能力返回。
+ * 函数功能：解析EEPROM Page4默认运动方向，并按EEPROM手柄能力限制电气往复。
+ * 输入参数：message为当前通道识别缓存；raw_direction为EEPROM Page4方向字节。
+ * 返回参数：项目内部方向值；MXYTP/MXYTM不再进入本函数，统一由公共接头RFID EPC路径解析。
  */
 static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t *message, uint8_t raw_direction)
 {
-    if ((message != NULL) && (message->handle_type == MX_YIP_ONLINES))
-    {
-        return OSCDIR; /* MXYTP 靠机械结构往复，业务和屏幕固定显示往复；电机正转转换延后到 UART1 输出层处理。 */
-    }
-
     if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_REVERSE)
     {
-        return FZDIR; /* Page4[8]=0x02 表示默认反转；固定方向型号上线后会锁住该方向，不允许后续切换。 */
+        return FZDIR; /* Page4[8]=0x02表示默认反转；固定方向EEPROM手柄上线后会锁住该方向。 */
     }
 
     if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_OSC)
     {
         if (Handlescan_SupportsOscDirection(message))
         {
-            return OSCDIR; /* Page4[8]=0x03 且当前手柄/刀具支持往复时，默认进入往复方向。 */
+            return OSCDIR; /* Page4[8]=0x03且EEPROM手柄/刀具支持电气往复时，默认进入往复方向。 */
         }
 
-        return ZZDIR; /* EEPROM 写了往复但型号不支持时保护回正转，避免屏幕误亮频率窗口。 */
+        return ZZDIR; /* EEPROM写了往复但型号不支持时保护回正转，MXYTP由RFID解析路径另行固定显示往复。 */
     }
 
-    return ZZDIR; /* Page4[8]=0x01 或异常值都按正转处理，保持旧手柄安全默认。 */
+    return ZZDIR; /* Page4[8]=0x01或异常值按正转处理，保持普通EEPROM手柄安全默认。 */
 }
-
 /*
  * 函数功能：把 EEPROM Page4 初始值信息解析到通道识别结构，供插入事件装载默认速度、频率、注水流量和阈值。
  * 输入参数：message 目标通道识别结构；initial_info_buf 已通过页尾校验的 Page4 缓存。

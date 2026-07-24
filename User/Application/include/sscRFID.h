@@ -9,6 +9,12 @@
 #define RFID_PAYLOAD_EPC_LENGTH     12U  /* EPC 模式按协议提取 data[8..19]，公共接头和 PXBA/PXBB 均只使用这一种射频数据区。 */
 #define RFID_PAYLOAD_MAX_LENGTH     RFID_PAYLOAD_EPC_LENGTH /* 当前最终协议只保留 EPC，结果缓存按 12 字节预留。 */
 
+#define RFID_TOOL_MODEL_PLANER            0x01U /* 普通刨刀具，支持正转、反转和电气往复，默认频率为 4Hz。 */
+#define RFID_TOOL_MODEL_GRINDER           0x02U /* 普通磨刀具，只允许单向旋转模式，不进入电气往复。 */
+#define RFID_TOOL_MODEL_REVERSE_ROTATION  0x03U /* 反旋机械刀具，屏幕方向服从标签，驱动实际方向与屏幕方向相反。 */
+#define RFID_TOOL_MODEL_MXYTP             0x04U /* MXYTP 机械往复刀具，屏幕固定往复，驱动实际固定正转。 */
+#define RFID_TOOL_MODEL_MXYTM             0x05U /* MXYTM 单向磨刀具，屏幕和驱动方向均服从标签。 */
+
 typedef enum
 {
     RFID_READ_SOURCE_NONE = 0U, /* 无 RFID 读取来源，用于清空或无效请求。 */
