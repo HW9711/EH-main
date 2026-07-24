@@ -1995,10 +1995,10 @@ static void Handlescan_SendHandleVerifyAlarmUi(uint8_t alarm_value, bool enable_
     {
         if (Handlescan_IsHandleVerifyAlarm(alarm_value) == 0U)
         {
-            return;                                          /* 只处理手柄 EEPROM 校验系列报警，避免运行中插拔等其它码误占用 84 号弹窗。 */
+            return;                                          /* 只处理手柄 EEPROM 校验系列报警，避免运行中插拔等其它码误占用 90 号弹窗。 */
         }
 
-        display_value[0] = alarm_value;                      /* 把 A/B/AB 来源报警码送给 UIAIARMDP，当前屏幕统一映射到 84 号图。 */
+        display_value[0] = alarm_value;                      /* 把 A/B/AB 来源报警码送给 UIAIARMDP，当前屏幕统一映射到 90 号手柄校验异常图。 */
         SendUIDSMessage(UI_AIARM_ID, true, display_value);   /* 持续报警建立后立即弹窗，避免只有蜂鸣和上位机报警但屏幕无提示。 */
         return;                                              /* 显示路径已经完成，不再执行关闭弹窗分支。 */
     }

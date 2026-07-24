@@ -29,11 +29,10 @@ kernel_task_t MOTORUARTTaskHandle;
 #define MOTOR_UART_DRIVER_ERR_PHASELOSS  14U /* 参考驱动 Err=14：缺相，主控按电机相位错误处理。 */
 #define MOTOR_UART_DRIVER_ERR_POSDRAG    15U /* 参考驱动 Err=15：有 Hall 拖动错误，归入驱动板故障。 */
 
-#define MOTOR_UART_ALARM_PHASE           3U  /* UI 绑定报警码 0x03：电机相位错误。 */
-#define MOTOR_UART_ALARM_HALL            4U  /* UI 绑定报警码 0x04：电机霍尔错误。 */
-#define MOTOR_UART_ALARM_OVERLOAD        5U  /* UI 绑定报警码 0x05：电机过载或刀具卡住。 */
-#define MOTOR_UART_ALARM_VOLTAGE         8U  /* UI 绑定报警码 0x08：系统供电电压不稳定。 */
-#define MOTOR_UART_ALARM_DRIVER_BOARD    11U /* UI 绑定报警码 0x0B：驱动板故障。 */
+#define MOTOR_UART_ALARM_HALL         WORK_ALARM_HALL_ERROR         /* 霍尔断线/学习错误使用统一报警码 9，避免误触发过载锁存。 */
+#define MOTOR_UART_ALARM_OVERLOAD     WORK_ALARM_MOTOR_OVERLOAD_ALT /* 过流/堵转沿用统一报警码 5，保持脚踏松开门禁不变。 */
+#define MOTOR_UART_ALARM_VOLTAGE      WORK_ALARM_MOTOR_COMM_ERROR   /* 过压/欠压沿用统一报警码 8，外控报警协议保持兼容。 */
+#define MOTOR_UART_ALARM_DRIVER_BOARD WORK_ALARM_MOTOR_DRIVER_BOARD /* 缺相及未细分错误在逻辑层归入驱动板故障，避免占用控制方式报警码。 */
 
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
@@ -42,19 +41,26 @@ static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=
 static volatile uint8_t s_motor_uart_overload_wait_foot_release = 0U; /* 过载发生时由脚踏控制手柄则置位，驱动任务不得按固定时间自动清报警。 */
 
 /*
- * UART2 已由 ExternalComm 独立任务接管。
- * 本模块只保留 UART1 驱动板接收解析，避免旧 6 字节 HMI 短帧再次读取 UART2 DMA 缓冲。
+ * 函数功能：设置驱动报警，并把逻辑报警码和屏幕图片覆盖值分别投递给各自消费者。
+ * 输入参数：alarm_value 为主控统一报警码；picture_value 为屏幕图片号或 MOTOR_ALARM_PICTURE_NONE。
+ * 返回参数：无。
  */
-static void MotorUart_SetAlarm(uint8_t alarm_value)
+static void MotorUart_SetAlarm(uint8_t alarm_value, uint8_t picture_value)
 {
-	uint8_t display_value[10] = {0U};     /* UI_AIARM_ID 只读取 Value[0]，其余补零避免残留旧报警参数。 */
+	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 的 Value[0] 保存逻辑报警码，Value[1] 保存屏幕专用图片覆盖值。 */
 
-	display_value[0] = alarm_value;       /* 把驱动细分报警码直接传给 UI 绑定表。 */
-	WorkAlarm_Set(alarm_value);           /* 统一报警状态仍由 WorkAlarm_Set 维护，避免直接改 WorkMessage。 */
-	SendAlarmMessage(alarm_value);         /* 同步蜂鸣任务进入对应报警声。 */
-	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 同步屏幕报警弹窗，报警码仍来自统一 WorkMessage 体系。 */
+	display_value[0] = alarm_value;   /* 逻辑报警码继续供 WorkMessage、蜂鸣和外控协议使用，不能替换成 91~99 图片号。 */
+	display_value[1] = picture_value; /* 图片覆盖值只进入屏幕队列，宏开关不会改变其它安全状态。 */
+	WorkAlarm_Set(alarm_value);       /* 统一报警状态仍由 WorkAlarm_Set 维护，避免直接改 WorkMessage。 */
+	SendAlarmMessage(alarm_value);    /* 同步蜂鸣任务进入对应报警声。 */
+	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 同步屏幕报警弹窗，并保留原始逻辑报警语义。 */
 }
 
+/*
+ * 函数功能：把驱动板 Err 编码转换为主控统一报警码。
+ * 输入参数：driver_error 为驱动板回包 dat1[7] 的原始错误码。
+ * 返回参数：主控统一报警码；Err=0 返回 WORK_ALARM_NONE。
+ */
 static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 {
 	switch (driver_error)
@@ -69,10 +75,10 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 
 		case MOTOR_UART_DRIVER_ERR_NOHALL:
 		case MOTOR_UART_DRIVER_ERR_SDAHALL:
-			return MOTOR_UART_ALARM_HALL; /* 霍尔断线/学习错误均走 0x04 霍尔错误报警。 */
+			return MOTOR_UART_ALARM_HALL; /* 霍尔断线/学习错误统一使用报警码 9，屏幕公用 86 号图且不再误判为过载。 */
 
 		case MOTOR_UART_DRIVER_ERR_PHASELOSS:
-			return MOTOR_UART_ALARM_PHASE; /* 缺相比普通驱动故障更具体，优先映射到相位错误。 */
+			return MOTOR_UART_ALARM_DRIVER_BOARD; /* 缺相没有独立对外报警码，逻辑层使用驱动板故障，屏幕层按原始 Err 显示 84。 */
 
 		case MOTOR_UART_DRIVER_ERR_NONE:
 			return WORK_ALARM_NONE; /* 无故障不产生报警，调用方会负责释放本模块拥有的旧报警。 */
@@ -83,18 +89,82 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 }
 
 /*
+ * 函数功能：根据驱动原始 Err 和调试宏选择屏幕报警图片。
+ * 输入参数：driver_error 为驱动板回包 dat1[7] 的原始错误码。
+ * 返回参数：84~99 的有效图片号；MOTOR_ALARM_PICTURE_NONE 表示不显示误导图片。
+ */
+static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
+{
+	switch (driver_error)
+	{
+		case MOTOR_UART_DRIVER_ERR_PHASELOSS:
+			return 84U; /* 缺相 Err=14 始终使用 84 号“缺相保护”图片，不受内部调试宏影响。 */
+
+		case MOTOR_UART_DRIVER_ERR_RUNSTALL:
+			return 87U; /* 运行堵转 Err=5 始终使用 87 号“电机过载/刀具卡住”公用图片。 */
+
+		case MOTOR_UART_DRIVER_ERR_OC1:
+#if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
+			return 92U; /* 内部调试时把过流 Err=2 细分为 92 号“手柄过流保护”。 */
+#else
+			return 87U; /* 生产模式下过流与堵转共用 87 号过载图片。 */
+#endif
+
+		case MOTOR_UART_DRIVER_ERR_NOHALL:
+#if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
+			return 93U; /* 内部调试时把 Err=11 显示为 93 号“手柄霍尔断线”。 */
+#else
+			return 86U; /* 生产模式下霍尔断线与学习错误共用 86 号 HALL 图片。 */
+#endif
+
+		case MOTOR_UART_DRIVER_ERR_SDAHALL:
+#if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
+			return 94U; /* 内部调试时把 Err=12 显示为 94 号“手柄霍尔学习错误”。 */
+#else
+			return 86U; /* 生产模式下霍尔学习错误与断线共用 86 号 HALL 图片。 */
+#endif
+
+#if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
+		case MOTOR_UART_DRIVER_ERR_ENOC:
+			return 91U; /* 编码器错误 Err=9 使用内部调试图片 91。 */
+		case MOTOR_UART_DRIVER_ERR_START:
+			return 95U; /* 开环启动检测错误 Err=10 使用内部调试图片 95。 */
+		case MOTOR_UART_DRIVER_ERR_OV:
+			return 96U; /* 母线过压 Err=3 使用内部调试图片 96。 */
+		case MOTOR_UART_DRIVER_ERR_TEMP:
+			return 97U; /* 驱动器过温 Err=6 使用内部调试图片 97。 */
+		case MOTOR_UART_DRIVER_ERR_POSDRAG:
+			return 98U; /* 有霍尔拖动错误 Err=15 使用内部调试图片 98。 */
+		case MOTOR_UART_DRIVER_ERR_OVR:
+			return 99U; /* 制动时间过长 Err=8 使用内部调试图片 99。 */
+#endif
+
+		case MOTOR_UART_DRIVER_ERR_FAIL:
+		case MOTOR_UART_DRIVER_ERR_UV:
+		case MOTOR_UART_DRIVER_ERR_SAVE:
+		case MOTOR_UART_DRIVER_ERR_HANDSHAKE:
+		default:
+			return MOTOR_ALARM_PICTURE_NONE; /* 未配置图片的错误仍执行安全保护，但不再借用 84 号缺相图片。 */
+	}
+}
+
+/*
  * 函数功能：把驱动板 Err 编码转换为主控报警，并记录本次弹窗开始时间。
  * 输入参数：driver_error 为驱动板回包 dat1[7] 的错误码。
  * 返回参数：无。
  */
 static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 {
+	uint8_t alarm_value;   /* 保存驱动原始 Err 对应的主控统一报警码。 */
+	uint8_t picture_value; /* 保存本次屏幕图片号，调试宏只影响该值。 */
+
 	/* 运行手柄掉线属于当前首要故障，驱动报警不能覆盖该报警，否则用户将失去掉线确认入口。 */
 	if (WorkMessage.alarm_value == WORK_ALARM_HANDLE_NOT_CONNECTED) /* 运行手柄掉线报警必须保留用户确认入口，驱动故障不能覆盖。 */
 	{
 		return;
 	}
-	uint8_t alarm_value = MotorUart_MapDriverErrorToAlarm(driver_error); /* 把参考驱动 Err 编码转换为主控统一报警码。 */
+	alarm_value = MotorUart_MapDriverErrorToAlarm(driver_error);     /* 把参考驱动 Err 编码转换为主控统一报警码。 */
+	picture_value = MotorUart_MapDriverErrorToPicture(driver_error); /* 独立计算屏幕图号，避免图片号污染对外报警码。 */
 
 	if (alarm_value == 0U)
 	{
@@ -126,7 +196,7 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 	s_motor_uart_last_driver_error = driver_error; /* 记录真实驱动 Err，便于下一帧判断是否发生了故障变化。 */
 	s_motor_uart_alarm_owned = alarm_value;        /* 记录本模块拥有的主控报警码，后续驱动恢复正常时才允许自动清除。 */
 	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 非脚踏驱动报警沿用最少显示时间；脚踏过载只用松脚和恢复条件。 */
-	MotorUart_SetAlarm(alarm_value);               /* 同步 WorkMessage、蜂鸣任务和外部通信报警上传。 */
+	MotorUart_SetAlarm(alarm_value, picture_value); /* 同步安全报警状态，并按宏选择公用或内部调试图片。 */
 }
 
 /*

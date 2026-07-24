@@ -8,6 +8,7 @@
 #include "Pubinterface.h"
 #include "screen_address.h"
 #include "sscBEEP.h"
+#include "motoruartdata.h"
 
 uint8_t DisPlayData[10] = {0};
 
@@ -796,16 +797,26 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 	}
 }
 /*
- * 函数功能：刷新报警提示图片。
- * 输入参数：enable_flag 表示是否显示报警；arm_value 为 WorkMessage 统一报警码。
+ * 函数功能：刷新报警提示图片，驱动报警可使用独立图片覆盖值。
+ * 输入参数：enable_flag 表示是否显示报警；arm_value 为 WorkMessage 统一报警码；picture_value 为驱动报警图片覆盖值。
  * 返回参数：无。
  */
-void UIAIARMDP(bool enable_flag,uint8_t arm_value)
+void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 {
 	if(enable_flag)
 	{
+	  if(picture_value == MOTOR_ALARM_PICTURE_NONE)
+	  {
+		LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP); /* 该驱动错误没有对应图片时清除旧图，但停机、蜂鸣和外控报警继续有效。 */
+		return; /* 图片处理已经完成，不能再按逻辑报警码误落到 84 号缺相图片。 */
+	  }
+	  if(picture_value != 0U)
+	  {
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,picture_value); /* 驱动报警使用上游选定的84~99图片，逻辑报警码不参与图号重映射。 */
+		return; /* 已显示驱动专用图片，避免后续公用报警分支覆盖。 */
+	  }
       //根据报警值显示图片
-	  /* 报警图片号按 EX8 屏幕表格 80~88 绑定，避免旧屏图号导致报警文字错位。 */
+	  /* 非驱动报警按 EX8 屏幕表格 80~90 绑定，驱动报警已在上方使用独立图片覆盖值处理。 */
 	  switch(arm_value)
 	  {
 		case WORK_ALARM_HANDLE_NOT_CONNECTED:
@@ -829,19 +840,13 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value)
 		case WORK_ALARM_UID_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,85U);//UID错误
 		break;
-		case WORK_ALARM_MOTOR_COMM_ERROR:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//当前 EX8 未提供通讯异常专图，先落到通用保护图 84
-		break;
 		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,86U);//HALL 值错误使用 EX8 86 号报警图
 		break;
 		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,90U);//手柄型号校验失败暂无专图，使用通用保护图，避免误显示外部控制
-		break;
-		case WORK_ALARM_MOTOR_DRIVER_BOARD:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,84U);//驱动板故障暂无专图，使用 EX8 84 号通用保护图
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,90U);//手柄校验失败统一显示 EX8 90 号“手柄校验异常”报警图
 		break;
 		case WORK_ALARM_PUMP_PRESSURE_BLOCKED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,89U);//泵压力达到阈值时显示屏幕新增 89 号压力报警图
@@ -1017,7 +1022,7 @@ void UIDISPLAYBehavior()
 					UISPEEDDP(msg.enable_flag,msg.Value[0]<<16|msg.Value[1]<<8|msg.Value[2],msg.Value[3],msg.Value[4]);
 					break;
 				    case UI_AIARM_ID:
-					UIAIARMDP(msg.enable_flag,msg.Value[0]);
+					UIAIARMDP(msg.enable_flag,msg.Value[0],msg.Value[1]);
 					break;
 					case UI_MANUALBUTTON_ID:
 					UIMANUALBUTTONDP(msg.enable_flag,msg.Value[0],msg.Value[1],msg.Value[2]);
@@ -1045,7 +1050,7 @@ void UIDISPLAYBehavior()
 					UIORALDP(0);
 					UIFREQDP(0,0,0);
 					UISPEEDDP(0,0,0,0);
-					UIAIARMDP(0,0);
+					UIAIARMDP(0,0,0);
 					UIMANUALBUTTONDP(0,0,0,0);
 					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
 					SendKeyBeepMessage(1U); /* 主运行页已经切换完成，蜂鸣一次提示开机进入运行界面。 */
