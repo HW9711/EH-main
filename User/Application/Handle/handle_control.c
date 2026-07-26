@@ -502,6 +502,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 {
 	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于防止自动切到另一通道。 */
 	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
+	uint8_t close_idle_touch = 0U;			   /* 记录当前手柄是否在本机触控待运行态拔出，清屏完成后再关闭触控窗，避免关闭消息被队列复位清掉。 */
 
 	switch (key_value)
 	{
@@ -543,6 +544,11 @@ void PlugORunPLUGActive(uint8_t key_value)
 
 	case SCREENKey_UNPLUG_A: // 拔出A
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_A); /* 先记录拔出前 A 是否为当前选中通道。 */
+		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
+									 (WorkMessage.runflag_work == false) &&
+									 (WorkMessage.touchactive_work == TOUCHWORK) &&
+									 (WorkMessage.drivetype_work == TOUCHWORK) &&
+									 (WorkMessage.hmiactive_work == 0U)); /* 只关闭本机触控待运行窗；运行中掉线继续走停机、报警和松手确认链，外控也不受影响。 */
 		WorkMessage.Channel_Aonline = false;					   /* A 拔出后立刻离线，心跳会报告 A 不可用。 */
 		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 A 才需要决定回落 B 或清空当前通道。 */
@@ -580,6 +586,11 @@ void PlugORunPLUGActive(uint8_t key_value)
 
 	case SCREENKey_UNPLUG_B: // 拔出B
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_B); /* 先记录拔出前 B 是否为当前选中通道。 */
+		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
+									 (WorkMessage.runflag_work == false) &&
+									 (WorkMessage.touchactive_work == TOUCHWORK) &&
+									 (WorkMessage.drivetype_work == TOUCHWORK) &&
+									 (WorkMessage.hmiactive_work == 0U)); /* B 通道使用与 A 相同的触控待运行判定，防止 A/B 插拔行为不一致。 */
 		WorkMessage.Channel_Bonline = false;					   /* B 拔出后立刻离线，心跳会报告 B 不可用。 */
 		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 B 才需要决定回落 A 或清空当前通道。 */
@@ -617,6 +628,11 @@ void PlugORunPLUGActive(uint8_t key_value)
 
 	default:
 		break;												   /* 其它按键不是插拔事件，本函数不处理。 */
+	}
+
+	if (close_idle_touch != 0U)
+	{
+		ControlTypeActive(SCREENKey_TouchEXIT); /* 原有插拔清屏和 UI 队列复位完成后再复用触控退出链，确保 70 号工作窗关闭、触控状态清零并释放屏幕控制权。 */
 	}
 }
 
