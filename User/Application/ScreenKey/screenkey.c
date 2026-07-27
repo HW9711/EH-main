@@ -474,9 +474,18 @@ static void ScreenKey_DispatchFrame(const uint8_t *frame)
     return;
   }
 
+  if ((frame[4] == 0x20U) && (section == 0x01U)) /* 0x2001 是 EX8 启动页脚踏定标入口。 */
+  {
+    if (key_index == 0x01U) /* 启动页只定义 key1 为脚踏定标按钮，其它值保持静默。 */
+    {
+      ScreenKey_LegacyEventPost(KEY_CONTINUOUSCLICK); /* 复用启动期一次性事件，不创建运行期业务队列。 */
+    }
+    return; /* 启动页事件只交给 UI_Start_Fun，不能进入主运行页按键映射。 */
+  }
+
   if (frame[4] != 0x24U) /* 非主运行页地址在本分发器中没有业务按键。 */
   {
-    return; /* 启动页 0x20 和其它未定义地址只消费串口帧，不进入业务。 */
+    return; /* 其它未定义地址只消费串口帧，不进入业务。 */
   }
 
   switch (section)

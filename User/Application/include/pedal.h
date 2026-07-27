@@ -5,54 +5,50 @@
 
 #include <stdint.h>
 
+#define PEDAL_CAL_TYPE_NONE       0U  // 尚未收到可识别的脚踏实时数据，定标页保持空闲显示。
+#define PEDAL_CAL_TYPE_SINGLE     1U  // 单踏板使用左侧低点和高点两点定标。
+#define PEDAL_CAL_TYPE_TWO_STAGE  2U  // 双段踏板使用左侧低点、中点和高点三点定标。
+#define PEDAL_CAL_TYPE_DUAL       3U  // 双脚踏分别保存左右两组三点定标值。
+
 typedef struct
 {
-  uint16_t FootPedalADValue;              // 单踏板或左踏板实时 AD 值，定标页用于显示当前踩踏量。
-  uint16_t FootPedalMemoryLValue;         // 单踏板低点定标值，脚踏板回包后刷新。
-  uint16_t FootPedalMemoryHValue;         // 单踏板高点定标值，脚踏板回包后刷新。
-  uint16_t FootPedalADValue_Right;        // 右踏板实时 AD 值，双踏板定标页用于显示。
-  uint16_t FootPedalADValue_Left;         // 左踏板实时 AD 值，双踏板定标页用于显示。
-  uint16_t FootPedalMemoryLValue_Right;   // 右踏板低点定标值。
-  uint16_t FootPedalMemoryLValue_Left;    // 左踏板低点定标值。
-  uint16_t FootPedalMemoryHValue_Right;   // 右踏板高点定标值。
-  uint16_t FootPedalMemoryHValue_Left;    // 左踏板高点定标值。
-  uint16_t FootPedalMemoryMValue_Right;   // 右踏板中点定标值。
-  uint16_t FootPedalMemoryMValue_Left;    // 左踏板中点定标值。
-  uint8_t FootPedalType;                  // 脚踏类型：0=单踏板，1=双踏板，定标页按此决定左右值显示。
-  uint8_t FootPedalConnectFlag;           // 最近一次定标串口回包连接标志，保留给定标流程判断。
-  uint8_t FootPedalOffTimes;              // 定标串口离线计数，保持原接收流程的断线计时入口。
-  uint8_t FootPedalKeyValue;              // 脚踏按键原始编号，调试或后续联动时可读取。
+  uint16_t FootPedalADValue_Left;       // 单踏板、双段踏板或双脚踏左路的实时 AD 值。
+  uint16_t FootPedalADValue_Right;      // 双脚踏右路的实时 AD 值，非双脚踏时保持为零。
+  uint16_t FootPedalMemoryLValue_Left;  // 左路或单路低点定标值。
+  uint16_t FootPedalMemoryMValue_Left;  // 左路中点定标值，单踏板不使用。
+  uint16_t FootPedalMemoryHValue_Left;  // 左路或单路高点定标值。
+  uint16_t FootPedalMemoryLValue_Right; // 双脚踏右路低点定标值。
+  uint16_t FootPedalMemoryMValue_Right; // 双脚踏右路中点定标值。
+  uint16_t FootPedalMemoryHValue_Right; // 双脚踏右路高点定标值。
+  uint16_t FootPedalOffTimes;           // 标定模式下连续未收到合法帧的2ms扫描次数。
+  uint8_t FootPedalType;                // 当前识别出的脚踏类型，使用 PEDAL_CAL_TYPE_* 取值。
+  uint8_t FootPedalConnectFlag;         // 合法脚踏帧到达后置1，约1秒无合法帧后清零。
+  uint8_t FootPedalKeyValue;            // 最近一次脚踏实体按键的规范化编号：1左、2中、3右。
 } PedalCalibrationData_t;
 
 extern PedalCalibrationData_t PedalCalibrationData;
 
-void Pedal_StorageHValue(void);  //JT_Memory_H
-void Pedal_StorageLValue(void);  //JT_Memory_L
-void Pedal_StorageMValue(void);  //JT_Memory_M
+void PedalCal_Reset(void);
 
-void Pedal_StorageHValue_Left(void);  //JT_Memory_H
-void Pedal_StorageLValue_Left(void);  //JT_Memory_L
-void Pedal_StorageMValue_Left(void);  //JT_Memory_M 
+void Pedal_StorageHValue(void);        // 保存单路或左路高点值。
+void Pedal_StorageLValue(void);        // 保存单路或左路低点值。
+void Pedal_StorageMValue(void);        // 保存左路中点值。
+void Pedal_StorageHValue_Right(void);  // 保存双脚踏右路高点值。
+void Pedal_StorageLValue_Right(void);  // 保存双脚踏右路低点值。
+void Pedal_StorageMValue_Right(void);  // 保存双脚踏右路中点值。
 
-void Pedal_ReadHValue(void);  //JT_Read_H
-void Pedal_ReadHValue_Left(void);
+void Pedal_ReadHValue(void);        // 请求脚踏板重新加载高点存储值。
+void Pedal_ReadLValue(void);        // 请求脚踏板重新加载低点存储值。
+void Pedal_ReadMValue(void);        // 请求脚踏板重新加载中点存储值。
+void Pedal_ReadHValue_Right(void);  // 兼容旧双脚踏协议的右路高点读取命令。
+void Pedal_ReadLValue_Right(void);  // 兼容旧双脚踏协议的右路低点读取命令。
+void Pedal_ReadMValue_Right(void);  // 兼容旧双脚踏协议的右路中点读取命令。
 
-void Pedal_ReadLValue(void);  //JT_Read_L
-void Pedal_ReadLValue_Left(void);
-	
-void Pedal_ReadMValue(void);	
-void Pedal_ReadMValue_Left(void);	
-	
-void Pedal_SendState(uint8_t State, uint8_t Type);  //JT_Read_State
-
-void Pedal_SendStateWarn(uint8_t State, uint8_t Type);  //JT_Read_StateWarn
-
-void Pedal_ReadStorageHLValue(void);  //Read_JT_Memory
-
+void Pedal_SendState(uint8_t State, uint8_t Type);
+void Pedal_SendStateWarn(uint8_t State, uint8_t Type);
+void Pedal_ReadStorageHLValue(void);
 void PedalRecv_Scan(void);
-
 void PedalRecvTask_Init(void);
-
 #endif  //__PEDAL_H
 
 

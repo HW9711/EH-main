@@ -3,6 +3,8 @@
 
 /* 启动页页号：上电等待期固定停留在 EX8 启动页，避免屏幕复位后沿用上一次背景页。 */
 #define UIDP_LCD_PAGE_STARTUP 0U
+/* 脚踏定标页页号：启动页专用入口触发后进入该页面，正常业务任务尚未创建。 */
+#define UIDP_LCD_PAGE_PEDAL_CALIBRATION 3U
 /* 主运行页页号：开机后强制切换到8寸屏主运行页面。 */
 #define UIDP_LCD_PAGE_MAIN_RUN 4U
 /* A手柄识别VP：用于刷新A通道手柄类型和在线状态图标。 */

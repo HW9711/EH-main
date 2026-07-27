@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-uint8_t UI_FootPedalCalibration_Fun(void);
+void UI_FootPedalCalibration_Fun(void);
 
 #endif  //__UI_FOOTPEDALCALIBRATION_H
 

@@ -5,7 +5,8 @@
 #include "queue.h"
 #include <string.h>
 #include "sscBEEP.h"
-#include "board.h" 
+#include "board.h"
+#include "delay.h"
 
 static kernel_task_t  BeepHandle;
 
@@ -22,6 +23,17 @@ typedef struct {
 
 //消息类型定义
 
+/*
+ * 函数功能：在启动期蜂鸣任务尚未创建时，直接驱动蜂鸣器输出一次100ms按键音。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Beep_Pulse100ms(void)
+{
+    BEEP_ON();       /* 启动页GPIO已经初始化，可直接打开蜂鸣器而不依赖尚未创建的消息队列。 */
+    Delay_ms(100U);  /* 保持与老工程按键反馈一致的100ms响声。 */
+    BEEP_OFF();      /* 阻塞提示结束后立即关闭，避免进入定标循环后蜂鸣器保持高电平。 */
+}
 
 //发送按键蜂鸣器消息
  void SendKeyBeepMessage(uint8_t time)

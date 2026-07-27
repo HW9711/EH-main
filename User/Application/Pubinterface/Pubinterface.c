@@ -691,13 +691,23 @@ void Pubinterface_ClearSelectedChannelDisplay(void)
 {
 	uint8_t display_value[10] = {0U};
 
-	SendUIDSMessage(UI_CONTROL_ID, false, display_value);
-	/* 脚踏仍在线时保留脚控选中图标，避免只因当前手柄离线就把控制来源显示清空。 */
+	/* 脚踏在线时直接刷新稳定的脚控状态，避免开机补刷先写暗态再写选中态导致图标闪烁。 */
 	if(ControlSignalMessage.jt_enable_flag==true)
 	{
-		display_value[0]=1;
-		display_value[1]=1;
-		SendUIDSMessage(UI_CONTROL_ID, true, display_value);
+		display_value[0]=1U; /* 保持原无手柄且脚踏在线时的脚控选中显示，不改变脚控运行状态。 */
+		display_value[1]=1U; /* 选中标志保持为真，使脚踏图标每次补刷都稳定显示选中图片。 */
+		SendUIDSMessage(UI_CONTROL_ID, true, display_value); /* 仅写一次脚踏最终状态，不制造暗态与选中态往返。 */
+
+		display_value[0]=2U; /* 无手柄时手控入口不可用，但不能通过整组清屏连带改写脚踏图标。 */
+		display_value[1]=0U; /* 清除选中标志，确保手控图标保持灰色不可选状态。 */
+		SendUIDSMessage(UI_CONTROL_ID, false, display_value); /* 单独刷新手控图标为不可用状态。 */
+
+		display_value[0]=3U; /* 无手柄时触控入口同样不可用。 */
+		SendUIDSMessage(UI_CONTROL_ID, false, display_value); /* 单独刷新触控图标，保持脚踏图标稳定。 */
+	}
+	else
+	{
+		SendUIDSMessage(UI_CONTROL_ID, false, display_value); /* 脚踏也离线时才整组恢复三种控制图标的暗态。 */
 	}
 	SendUIDSMessage(UI_DIR_ID, false, display_value);
 	SendUIDSMessage(UI_FREQ_ID, false, display_value);

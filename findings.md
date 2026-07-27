@@ -580,3 +580,179 @@
 - RFID电流阈值仍按EPC byte11的0.1A解释，标签100转换为驱动字段1000，即10.00A。
 - EEPROM写入工具的Page2型号表与内置CSV原先仍保留7C 01/7C 02，必须移除，避免继续写出已废弃的MXY手柄身份；MXYTM16的7C 06保持不变。
 - A5刀具块若只上报归一后的PLANER/GRINDH，0x03～0x05会在上位机失去型号差异；RFID基座必须保留EPC byte0原始型号，EEPROM来源继续保持原业务类型。
+
+## 2026-07-27 脚踏定标功能迁移初始事实
+
+- 用户指定老工程为D:\EH_main\old_soft\F413EXOsSSCH，其中存在可参考的脚踏定标功能。
+- 当前主控工程为D:\EH_main\soft\FinalSoft\EH-main-R1\EH-main-R1，本轮只读核对并设计，不修改业务代码。
+- 屏幕工程为D:\EH_main\soft\屏幕工程\DL-EX8中文 抽吸\DL-EX8中文 抽吸；起始页已经有进入定标页的按钮，必须从工程配置确认键值和页面地址。
+- 截图中的定标页包含按钮1/2/3值、左右中间值、左右实时值、左右存储低值/高值及确认按钮；这些视觉文字只能作为字段线索，不能代替VP和按键码证据。
+- 设计重点是复用当前脚踏类型与存储协议，并在定标期间隔离手柄和泵控制，避免踩踏采样同时触发业务动作。
+- 首次通过rtk直接执行PowerShell内建Get-Content失败，未读取或修改任何工程文件；已改用rtk powershell。
+### 截图核对
+- 截图原图为1912x881，DWIN编辑器当前选中3.jpg；页面标题为“定标”。
+- 页面上方有按钮1值、按钮2值、按钮3值及左右两个中间值显示；下方左右各有实时值、存储低值、存储高值和确认按钮。
+- 左右区域分别有“左”“右”动作按钮及各自确认按钮，表明页面同时覆盖踏板类型识别/中间点与左右两路端点定标。
+- view_image在当前Windows分离写入根沙箱下无法打开原始或工作区副本；以上视觉事实来自用户消息中已渲染原图，不把视觉位置当作协议地址。
+- 为查看原图生成的工作区临时副本将在本轮立即删除。
+### 老工程入口初步定位
+- 老工程确有User/UI/src/UI_FootPedalCalibration.c，且Keil链接图证明UI_Start_Fun会调用UI_FootPedalCalibration_Fun，不是仅保留的死文件。
+- 定标模块链接依赖pedal.c、screenkey.c、screen.c、data.c、flash.c与iwdg.c，说明旧实现同时涉及屏幕键值、脚踏命令、公共数据和持久化/看门狗。
+- 老工程还存在User/Application/Pedal/pedal.c和User/Application/ScreenKey/screenkey.c，应以这三份源码及UI_Start.c为主链，避免被历史build/map文件干扰。
+- 全仓宽泛搜索被CMSIS中的CALIBR等无关符号污染；后续限定User目录和目标文件。
+### 老工程定标协议与页面映射
+- UI_Start_Fun在起始页识别KEY_CONTINUOUSCLICK后切到图3并直接进入UI_FootPedalCalibration_Fun；旧实现是阻塞式while(1)，没有显式返回路径。
+- 屏幕定标按键统一使用VP高字节0x20，返回值dat1[8]映射为：0x01左低、0x02左高、0x03右低、0x04右高、0x07左中、0x08右中。
+- 老工程内部键值分别为KEY_STORAGEMIN=15、KEY_STORAGEMAX=16、KEY_STORAGEMIN2=80、KEY_STORAGEMAX2=81、KEY_STORAMEDIAN=82、KEY_STORAMEDIAN2=83。
+- 定标值并不写主控Flash或手柄EEPROM；Pedal_Storage*函数把固定8字节命令经UART4发给脚踏板，由脚踏板捕获当前ADC并持久化。
+- 左侧命令使用带_Left后缀的独立帧，右侧使用无后缀帧；页面定时发送读低/中/高命令，再从脚踏回包缓存刷新显示。
+- 页面显示VP：0x3730左/单路实时值，0x3760右实时值；0x3740/0x3750/0x3790为左或单路低/高/中；0x3770/0x3780/0x37A0为右路低/高/中。
+- M_KEY_FOOT/L_KEY_FOOT/R_KEY_FOOT来自脚踏实体按键回包，只在页面上显示三个按键计数，不参与端点保存。
+- 老模块引用flash.h但源码未调用Flash写入；持久化责任明确在脚踏板协议，不应在新主控另造一份主控侧标定存储。
+### 老工程脚踏板侧保存链
+- 写命令共六条：右/单路高FE EF D0 B4 B8 DF 6C 8B、低FE EF D0 B4 B5 CD F1 0F、中FE EF D0 B4 B2 EE 7F 3D；左路对应末字节9B、1F、4D。
+- 读命令共六条：右/单路高FE EF B6 C1 B8 DF 3E 84、低FE EF B6 C1 B5 CD A3 00、中FE EF B6 C1 B2 EE 42 29；左路对应末字节94、10、28。
+- UART4回包固定10字节并做CRC16；实时帧B6 C1 01 01表示单路，01 0A/01 0B分别表示双踏板左右ADC。
+- 回读存储值帧使用D0 B4；B5/B6 CD区分右/左低值，B8/B9 DF区分右/左高值，B2/B3 EE区分右/左中值。
+- Workvalue_s.Foot_type在实时帧中动态确定：1为单路，2为双路。老模块没有进入定标前主动查询类型，因此必须先收到脚踏实时帧。
+- 老代码只显示和发送命令，没有确认写命令ACK、写后立即回读比对、参数顺序校验或超时提示；新设计不能原样复制这一可靠性缺口。
+### 当前主控并非完全缺少定标代码
+- 当前工程仍编译并链接UI_FootPedalCalibration.c，pedal.c中的六条读写命令、PedalCalibrationData缓存、screen_address.h中的0x3700～0x37A0 VP和screenkey.c中的0x20按键映射也全部存在。
+- 实际缺口首先在入口：当前UI_Start_Fun只做约4秒启动等待，明确移除了旧LOGO连击入口，也没有调用UI_FootPedalCalibration_Fun。
+- 当前screenkey.c能把定标页0x20区域的六个按钮投递到一次性LegacyEvent，但没有任何正常运行任务消费这些事件；UI_FootPedalCalibration_Fun是唯一消费者，却永远未进入。
+- 现有UI_FootPedalCalibration_Fun仍是阻塞式while(1)，内部直接调用ScreenKey_Scan、PedalRecv_Scan和Delay_ms；当前主控已经有独立RTOS软任务，不能简单在启动任务或屏幕任务中调用它，否则会永久占住调用链并与正常扫描任务重复消费UART。
+- 因此最小正确方案不是“恢复一行旧调用”，而是把现存定标代码改成可进入/退出的非阻塞状态机，由现有周期任务驱动。
+### 当前调度与UART4所有权
+- Userparser_Init在创建RTOS业务任务前只调用一次UI_Start_Fun；该函数只等待4秒且不扫描屏幕，因此启动页按钮即使由DWIN本机切到图3，也不会让主控进入定标逻辑。
+- 正常运行只启动SscFootControlTask_Init：10ms的Foot_ParseDataS解析UART4，25ms的FootControlTask执行脚踏业务；旧PedalRecvTask_Init没有被调用。
+- pedal.c虽然保留完整老定标解析器和3ms任务初始化函数，但该任务未启动；PedalCalibrationData因此不会在正常运行链刷新。
+- screenkey.c的30ms任务已经启动，能接收0x20定标按钮并投递LegacyEvent；当前没有消费者。
+- 直接再启动PedalRecvTask_Init或调用旧UI无限循环会让pedal.c与sscFOOT.c同时读取UART4 DMA，产生数据竞争，同时定标踩踏仍可能被25ms业务任务解释为运行命令。
+- 正确架构应保持sscFOOT.c为UART4唯一解析所有者，并增加显式“定标会话”状态；会话活动时仍解析在线/实时ADC/存储值回包，但不向脚踏运行队列发布动作。
+### 当前脚踏解析能力与迁移约束
+- 当前10ms解析器Foot_ParseDataS是UART4数据的唯一正常消费者，25ms FootControlTask执行控制；所有旧业务回调还经同一全局互斥锁串行化。
+- 单踏板实时帧B6 C1 01 01只携带当前ADC；主控随后依次查询低、高值并验证两点区间，合格后才上线。
+- 双段踏板BB AA DD 01帧本身携带实时ADC和高/中/低三点；双脚踏BB AA DD 02帧本身携带左右实时ADC及左右各高/中/低三点。
+- 当前业务脚踏类型为1单踏板、2双段、3双脚踏；PedalCalibrationData旧UI类型只有0单路、1双路，不能直接用旧二值类型覆盖三类业务语义。
+- 定标会话中，单踏板应显示一套低/高，双段应显示一套低/中/高，双脚踏应显示左右两套低/中/高；页面可以复用现有字段，但必须按三类显隐/禁用。
+- 当前Foot_ParseSinglePedalFrame只把D0 B4低/高值写入业务footmessage，不解析中值，也不镜像PedalCalibrationData；双段/双脚踏则从主动帧直接取得全部点。
+- 新状态机应从sscFOOT唯一解析器取得类型、实时值和存储值快照；不能依赖未启动的pedal.c旧解析器。
+### 屏幕工程可编辑真值
+- 屏幕工程根目录包含DisplayConfig.xls、TouchConfig.xls、DWprj.hmi、DWprj.tft、3.jpg、DWIN_SET与TFT目录。
+- DWprj.hmi明确映射3=3.jpg，确认截图中的定标页是图号/page 3资源。
+- 文本搜索无法解析二进制XLS中的控件表；需要只读导入两份XLS确认起始页按钮的页面跳转、触控VP和图3各控件返回值。
+- 本轮不会修改或另存屏幕工作簿。
+### XLS读取工具边界
+- 按电子表格技能使用bundled artifact-tool只读导入DisplayConfig.xls，返回FileContainsCorruptedData。
+- 该文件是旧版二进制XLS而不是OpenXML XLSX，artifact-tool的importXlsx不能直接解析；源文件未被修改或导出。
+- 后续只做数据提取，可使用工作区依赖提供的Python读取旧BIFF工作簿；若运行时缺少旧XLS解析器，则把屏幕控件精确映射列为实施前阻塞项，不猜测。
+### 旧XLS提取依赖
+- bundled Python没有xlrd，不能直接用pandas读取BIFF .xls；该检查只读且未安装任何依赖。
+- bundled Python有olefile、pandas和openpyxl；olefile可用于确认复合文档流，但手写BIFF解析成本高，不作为首选。
+- bundled Node模块中没有SheetJS xlsx包，未安装新依赖。
+- 两份XLS均为标准OLE复合文档且各自只有Workbook主流：TouchConfig为5392字节，DisplayConfig为7405字节；文件本体不是损坏，只是artifact-tool不支持BIFF。
+### 屏幕页与主控入口精确映射
+- 只读Excel COM成功读取两份旧XLS并关闭且未保存：TouchConfig图3共有8个Return Key Code控件，全部使用VP 0x2420；图0入口按钮使用VP 0x2001。
+- DisplayConfig图3正好包含11个数据变量：0x3700、3710、3720、3730、3740、3750、3760、3770、3780、3790、37A0，与当前screen_address.h及定标UI字段完全一致。
+- DWprj.hmi只包含图0、图3、图4；启动图0、定标图3、主运行图4的资源关系明确。
+- 当前ScreenKey_DispatchFrame显式拒绝frame[4]不是0x24/0x55的帧，所以图0的0x2001入口一定被静默丢弃；图3的0x2420六个已定义键则可正常投递。
+- 老screenkey.c把0x2001每次上报计数，累计5次产生KEY_CONTINUOUSCLICK；当前新屏已在屏内把按钮配置为跳到图3，但主控仍需要重新接受0x2001作为进入定标模式的请求。
+- 图3配置共有8个触控控件，而当前主控只定义key 1、2、3、4、7、8；需要继续确认key 5、6是纯页面标签/切换还是遗漏业务。
+### 13TouchFile与启动前定标模式
+- 13TouchFile.bin由32字节定长触控记录组成。图3前8条记录依次配置0x2420并返回键1～8；key5/6分别对应截图中的“左”“右”按钮，当前主控确实没有处理。
+- 图0入口记录位于0x100：页面0、VP 0x2001、返回数据低字节为1；因此主控入口条件可精确写成地址0x2001且key=1，不应接受任意0x20地址。
+- 当前启动顺序在创建任何RTOS业务任务前已经初始化UART4/UART6并强制显示page0；所以可以沿用老工程的“启动阶段专用定标模式”，定标期间不会与10ms脚踏任务争用UART4。
+- 该模式的退出语义与老工程一致：进入后不启动正常业务任务，完成定标后通过重启退出。当前图3没有返回主运行页控件。
+- pedal.c的旧定标解析器在启动前可安全独占UART4，但只识别B6 C1实时帧和D0 B4回读帧，不识别当前sscFOOT支持的BB AA DD 01/02双段/双脚踏主动帧；新方案必须补足三种当前脚踏类型，不能只恢复旧调用。
+- 定标确认时调用SendKeyBeepMessage会因蜂鸣队列尚未初始化而安全返回，因此启动前方案默认没有按键蜂鸣；若产品要求反馈，应使用独立且明确的启动期蜂鸣方式，不能提前创建整套业务任务。
+- 全盘搜索13TouchFile解析器超时且未产生修改，已改为直接解析当前1202字节配置文件，不继续做无边界搜索。
+### 当前定标有效性规则与脚踏板源码线索
+- 当前运行代码的有效性门槛为JT_threshold=20：两点必须high>low且差值>20；三点必须low到mid、mid到high各自差值>20。
+- 单踏板运行链已有读低/读高命令；双段与双脚踏依赖主动帧携带三点/六点，不发送读命令。
+- 全树命令搜索只在历代主控pedal.c副本中命中六条写命令；同时定位到脚踏板工程线索D:\EH_main\soft\JT_SOFT\JTCONE，下一步直接检查该固件是否对各型号支持相同存储命令。
+### 脚踏板固件复核补充（2026-07-27）
+
+- D:\EH_main\soft\JT_SOFT\JTCONE 当前 Keil 配置定义 DualPedals，实时上报为 FE EF BB AA DD 02，包含左右实时值以及左右高、中、低定标值。
+- 脚踏板收到 D0 B4 写命令时，会用当时 ADC_left/ADC_right 写入自身 Flash；高、中、低三组值分别存储，主控并不保存这些定标值。
+- B6 C1 读取命令只触发脚踏板从 Flash 重新装载；随后通过周期实时帧回传完整定标值，不存在独立写入 ACK。
+- 因而迁移方案必须采用 发送写命令后等待后续实时帧回读确认，不能把 UART 发送成功等同于定标成功。
+- 当前可找到的 JTCONE 工程验证了双脚踏协议；单踏板/双段踏板仍需由主控现有解析格式兼容，实施前应分别做实物回包确认。
+
+### 当前主控入口与所有权边界（2026-07-27）
+
+- UI_Start_Fun 当前只保留约 4 秒启动等待和喂狗，没有扫描 UART6，也没有进入 UI_FootPedalCalibration_Fun。
+- ScreenKey_DispatchFrame 对非 0x24/0x55 地址直接返回，所以启动页按钮的 0x2001 回包目前会被消费但不会产生事件；定标页 0x2420 的 1、2、3、4、7、8 号键已映射。
+- UI_FootPedalCalibration_Fun 仍是无限循环，并直接调用 ScreenKey_Scan 与 PedalRecv_Scan；它只适合在正常业务任务创建之前作为独占工厂模式运行。
+- Userparser_Init 中 UI_Start_Fun 位于公共业务初始化、SscFootControlTask_Init 和 ScreenKey_ScanInit 之前，故从启动阶段进入标定可保证 UART4/UART6 单一消费者，也能保证电机与泵任务未启动。
+- 不建议把旧无限循环直接挂到运行期任务或主界面按钮，否则会与 10ms 脚踏解析任务、30ms 屏幕任务争用串口并阻塞正常控制。
+
+### 当前三类脚踏协议差异（2026-07-27）
+
+- 正常脚踏任务明确区分 pedalType 1=单踏板、2=双段踏板、3=双脚踏；旧定标缓存只有 0=单踏板、1=双踏板，无法表达双段踏板。
+- 正常解析支持 BB AA DD 01 的双段踏板 18 字节帧和 BB AA DD 02 的双脚踏 24 字节帧，并从周期帧直接取得实时值与高、中、低定标值。
+- 旧 PedalRecv_Scan 仅按固定 10 字节截帧，支持旧 B6 C1/D0 B4 格式，不支持当前 BB AA DD 01/02 完整帧；迁移时必须扩展定标专用解析器。
+- 不应在启动标定模式调用 sscFOOT 的正常解析函数，因为该函数会写运行状态、队列、蜂鸣和报警；应只复用帧格式与有效性规则，在 pedal 模块维护无业务副作用的标定快照。
+- 定标有效性应与正常运行保持一致：两点脚踏要求高值大于低值且间距超过现有 JT_threshold；三点脚踏要求低到中、中到高两段均超过同一阈值。
+
+### 可复用范围与启动顺序（2026-07-27）
+
+- 老工程入口也是开机等待期扫描屏幕后进入无限标定循环；当前工程启动顺序仍先完成 UART4/UART6 初始化，再调用 UI_Start_Fun，之后才创建全部业务任务，适合恢复这一安全边界。
+- 当前 screen_address.h 已完整保留 page3 的 11 个数据显示 VP，UI_FootPedalCalibration.c 也已使用这些地址刷新左右实时值及高、中、低存储值。
+- 因此屏幕图片、数据显示地址、六个保存键和底层写命令均可复用；主要缺口是启动页 0x2001 入口事件、三类脚踏定标解析、写后回读确认与错误状态。
+- 页面3的 5、6号触控键当前无业务映射，老工程也只把对应实体左/右键用于测试计数；第一版应保持 5、6 号键无动作，避免猜测新业务。
+
+### 写入确认与左右映射风险（2026-07-27）
+
+- JTCONE 写 Flash 后设置 flash_read_flag，下一次周期上报前会从 Flash 地址重新读取 JTCV，因此后续 DD 01/DD 02 周期帧中的存储值可以作为实际 Flash 回读结果，而不只是 RAM 镜像。
+- 脚踏板主循环约每 40ms 进入一轮处理并另有约 30ms 间隔，写后确认应等待后续有效周期帧，不应使用 5ms 固定延时判成功。
+- 当前 JTCONE 源码定义 8B/0F/3D 选择 ADC_left，9B/1F/4D 选择 ADC_right；而主控现有带 _Left 的函数使用后一组字节，命名与板端字段语义相反。
+- 实施时应按帧内 ADC_left/ADC_right 与屏幕左/右列建立显式映射，并用实物逐侧踩踏验证；不能按历史函数名直接决定物理左右。
+
+### 定标状态时限与有效性（2026-07-27）
+
+- 正常脚踏链路以 10ms 周期累计 100 次无完整帧后确认掉线，即约 1 秒；定标模式可复用同一掉线尺度，避免再猜一套设备时限。
+- 两点有效性为 high > low 且差值大于 20；三点有效性为 low 到 mid、mid 到 high 两段都满足同一规则。
+- 写入确认的状态机应以 收到同类型、CRC 正确、序号晚于写命令的周期帧为完成条件，超出约 1 秒则取消本次等待并保留页面，不能自动重复写 Flash。
+
+### 脚踏定标实施复核（2026-07-27）
+
+- 现有screenkey.h已保留KEY_CONTINUOUSCLICK一次性事件，最小入口可直接把启动页0x2001/key1投递为该事件，并在UI_Start局部累计5次，无需新增队列或公共状态。
+- UI_Start_Fun当前未包含screenkey和定标页头文件，也未扫描UART6；恢复入口只需在现有4秒循环内扫描并消费一次性事件。
+- screen_address.h缺少Page3页号宏，实施时补UIDP_LCD_PAGE_PEDAL_CALIBRATION=3U，避免业务代码写裸页号。
+- PedalRecv_Scan仍按固定10字节截帧，FootPedalType的0/1语义与正常任务的1/2/3不一致；必须改为显式未知、单、双段、双脚踏四态。
+- 参考JTCONE定义8B/0F/3D写ADC_left、9B/1F/4D写ADC_right；现有主控带_Left函数实际发送后一组，实施时应改名为_Right并调整Page3调用。
+- Pedal_Storage/Read函数除定标页面外没有外部调用，局部改名不会影响正常运行期sscFOOT链。
+
+### 标定解析实现边界（2026-07-27）
+
+- 正常sscFOOT定义的当前帧真值为：单踏板B6 C1 01 01；双段BB AA DD 01共18字节；双脚踏BB AA DD 02共24字节。
+- DD01的高/中/低位于10..15，DD02左右高/中/低位于10..21；JTCONE在末尾附CRC16高字节、低字节，标定解析器可做严格长度和CRC检查。
+- PedalCalibrationData仅被pedal.c和UI_FootPedalCalibration.c使用，可以在不影响正常运行期脚踏任务的情况下统一字段和类型语义。
+- UART4 DMA取数会在数据停止增长后复制当前整包并立即重启DMA；标定解析应在同一批数据内按FE EF帧头和已知帧长扫描粘包。
+
+### 修改方式与兼容范围（2026-07-27）
+
+- screenkey.c、screen_address.h、UI_Start.c、pedal.c、UI_FootPedalCalibration.c和定标页头文件均为严格UTF-8无BOM且主体CRLF；screenkey.h、pedal.h历史上存在CRLF/LF混用，修改时必须保留未触碰字节，不能机械整文件换行。
+- 现有UART4最大DMA包为150字节，足以容纳18字节DD01和24字节DD02，并可在一批数据内解析多个完整帧。
+- 标定缓存没有其它模块调用，可改为0未知、1单踏板、2双段、3双脚踏；正常运行期sscFOOT和公共控制对象不受影响。
+- Page3第一版不需要新增成功状态VP；Flash回读字段只有在新合法帧到达后才更新，未回包时页面自然保留旧值。
+- UI_Start运行早于蜂鸣任务和蜂鸣队列创建；启动入口第五次触发及Page3六个保存按钮必须使用受控的100ms GPIO直驱蜂鸣，不能向尚未创建的队列投递。
+- 老工程启动入口原本要求连续触发5次；当前恢复同样的五次门禁，前4次不蜂鸣、不切页，第5次才进入Page3。
+
+### 本轮实施补充
+- 启动页入口已接入当前屏幕地址 0x2001/按键1，标定页固定为 Page3，入口运行在业务任务创建之前。
+- 主控旧定标解析仅支持固定10字节帧，类型值 0/1 与正式脚踏协议的 1/2/3 不一致，必须改为按10/18/24字节识别单踏板、双段踏板和双脚踏。
+- 脚踏参考固件确认：命令尾字节 8B/0F/3D 写第一路（左路或单路），9B/1F/4D 写第二路（右路）；旧主控函数名中的 Left 与真实通道相反。
+- 工具记录：apply_patch 受 Windows 分离写根沙箱限制无法读取目标文件；一次 Base64 生成尝试因 V8 中无 btoa 失败，已改为手工编码；误读不存在的 User/Application/Src/common.c 未改动工程，实际只需要 common.h 中的接口声明。
+### 定标协议实施确认
+- 当前参考脚踏固件的 DD01 完整帧为18字节，DD02完整帧为24字节，末尾均为CRC16；主控标定解析已改为按实际长度识别。
+- 第一组写命令尾码 8B/0F/3D 对应左路，第二组 9B/1F/4D 对应右路；主控旧 Left 命名已更正为 Right。
+- 工具记录：一次 ripgrep 负向前瞻未加 PCRE2 导致只读检查失败；一次超长 EncodedCommand 被 Windows 在创建进程前拒绝；C:\tmp 在当前受限令牌下不可写。均未造成源码部分写入，最终改用工作区内临时载荷并已删除。
+
+### 脚踏定标实施结论
+- 当前主控已在启动约4秒窗口内扫描0x2001/按键1，命中后进入Page3独占定标循环；未命中时保持原启动路径。
+- 标定解析器已支持单踏板10字节、双段脚踏18字节和双脚踏24字节帧，并按总长度减2校验CRC。
+- 左列保存使用ADC_left命令组8B/0F/3D，右列保存使用ADC_right命令组9B/1F/4D；历史误导性的Left后缀已更正为Right。
+- 保存后不以UART发送成功作为Flash成功证据，页面仅由后续CRC正确的脚踏周期帧刷新存储值。
+- 约1秒没有收到受支持的完整CRC帧时，定标快照与页面数据清零；本轮按用户要求不处理脚踏板端可靠性。
+- 最终EIDE/AC5全量构建为128个C文件、1个汇编文件，0 error、0 warning；HEX SHA256为1BBDC488277E581E42A15883D66E0C9AC7A8509A4083D5F2CB6BDA44F307690E。
