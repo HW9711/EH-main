@@ -637,8 +637,7 @@ bool ScreenKey_CanUse(uint8_t screen_key)
 
 	case SCREENKey_AutoIdentify:
 		return ((WorkMessage.runflag_work == false) &&
-				split_handle_available &&
-				((WorkMessage.auto_identify == 0U) || (current_tool_spec_visible == false))); /* 有效规格窗口覆盖自动识别按钮时不再响应旧坐标。 */
+				split_handle_available); /* PXBA/PXBB 停机时始终允许切换自动/手动模式，标签规格已显示也不能屏蔽该按钮。 */
 
 	case SCREENKey_Dir_Forward:
 	case SCREENKey_Dir_Reverse:

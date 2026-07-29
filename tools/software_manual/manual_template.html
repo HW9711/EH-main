@@ -1,0 +1,1764 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="EH-main-R1 主控工程软件说明手册浏览器阅读版">
+  <title>EH-main-R1 软件说明手册</title>
+  <style>
+    :root {
+      --sidebar-width: 354px;
+      --topbar-height: 70px;
+      --page-max: 1220px;
+      --paper: #fbfaf6;
+      --paper-raised: #ffffff;
+      --canvas: #e8e7e1;
+      --canvas-grid: rgba(21, 35, 48, 0.045);
+      --ink: #17212b;
+      --ink-soft: #52606d;
+      --ink-faint: #7f8b95;
+      --line: #d8d8d1;
+      --line-strong: #bfc4c4;
+      --nav: #101a24;
+      --nav-raised: #172533;
+      --nav-text: #d8e1e7;
+      --nav-muted: #8597a5;
+      --accent: #d55a2a;
+      --accent-bright: #f37a3d;
+      --accent-soft: rgba(213, 90, 42, 0.12);
+      --signal: #20a5a2;
+      --signal-soft: rgba(32, 165, 162, 0.13);
+      --warning: #c28b20;
+      --code: #111b24;
+      --code-text: #e5edf2;
+      --shadow: 0 22px 60px rgba(21, 31, 40, 0.12);
+      --radius: 4px;
+      --display-font: "STZhongsong", "FZYaoti", "Noto Serif CJK SC", serif;
+      --body-font: "Microsoft YaHei UI", "Noto Sans CJK SC", "PingFang SC", sans-serif;
+      --mono-font: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+    }
+
+    html[data-theme="dark"] {
+      --paper: #172029;
+      --paper-raised: #1c2731;
+      --canvas: #0c131a;
+      --canvas-grid: rgba(167, 196, 212, 0.045);
+      --ink: #e7edf0;
+      --ink-soft: #aab8c1;
+      --ink-faint: #738692;
+      --line: #35434c;
+      --line-strong: #4d5d67;
+      --nav: #080e13;
+      --nav-raised: #101b24;
+      --nav-text: #dfe8ed;
+      --nav-muted: #8295a2;
+      --accent: #ee7541;
+      --accent-bright: #ff915f;
+      --accent-soft: rgba(238, 117, 65, 0.14);
+      --signal: #35bbb5;
+      --signal-soft: rgba(53, 187, 181, 0.14);
+      --warning: #e0ad48;
+      --code: #080d12;
+      --code-text: #dce8ee;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.32);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: calc(var(--topbar-height) + 24px);
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background-color: var(--canvas);
+      background-image:
+        linear-gradient(var(--canvas-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--canvas-grid) 1px, transparent 1px);
+      background-size: 32px 32px;
+      font-family: var(--body-font);
+      font-size: 15px;
+      line-height: 1.78;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    a {
+      color: var(--signal);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    a:hover {
+      color: var(--accent);
+    }
+
+    ::selection {
+      color: #fff;
+      background: var(--accent);
+    }
+
+    .reading-progress {
+      position: fixed;
+      inset: 0 auto auto 0;
+      z-index: 1000;
+      width: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+      box-shadow: 0 0 18px rgba(243, 122, 61, 0.5);
+      transition: width 80ms linear;
+    }
+
+    .topbar {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 700;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      min-height: var(--topbar-height);
+      padding: 0 18px;
+      color: #eef4f6;
+      background: rgba(11, 19, 27, 0.96);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.15);
+      backdrop-filter: blur(14px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 12px;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 38px;
+      height: 38px;
+      place-items: center;
+      flex: 0 0 auto;
+      color: #fff6ed;
+      background: var(--accent);
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      font-family: var(--mono-font);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      transform: rotate(-2deg);
+      box-shadow: 5px 5px 0 rgba(243, 122, 61, 0.16);
+    }
+
+    .brand-copy {
+      min-width: 0;
+    }
+
+    .brand-title {
+      overflow: hidden;
+      margin: 0;
+      font-family: var(--display-font);
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 0.035em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .brand-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 1px;
+      color: #8da0ad;
+      font-family: var(--mono-font);
+      font-size: 10px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 auto;
+      background: var(--warning);
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px rgba(194, 139, 32, 0.13);
+    }
+
+    .status-dot.is-live {
+      background: var(--signal);
+      box-shadow: 0 0 0 4px rgba(32, 165, 162, 0.13);
+    }
+
+    .topbar-spacer {
+      min-width: 12px;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .icon-button {
+      display: inline-grid;
+      width: 38px;
+      height: 38px;
+      padding: 0;
+      place-items: center;
+      color: #cbd7dd;
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: 150ms ease;
+    }
+
+    .icon-button:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.24);
+      transform: translateY(-1px);
+    }
+
+    .icon-button svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.7;
+    }
+
+    .menu-button {
+      display: none;
+      margin-right: 10px;
+    }
+
+    .sidebar {
+      position: fixed;
+      inset: var(--topbar-height) auto 0 0;
+      z-index: 600;
+      display: flex;
+      width: var(--sidebar-width);
+      flex-direction: column;
+      color: var(--nav-text);
+      background: var(--nav);
+      border-right: 1px solid rgba(255, 255, 255, 0.07);
+      transition: transform 220ms cubic-bezier(0.2, 0.78, 0.24, 1);
+    }
+
+    .sidebar::before {
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), transparent 70%);
+      content: "";
+    }
+
+    .sidebar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 22px 14px;
+    }
+
+    .sidebar-kicker {
+      margin: 0;
+      color: var(--nav-muted);
+      font-family: var(--mono-font);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .sidebar-title {
+      margin: 3px 0 0;
+      font-family: var(--display-font);
+      font-size: 19px;
+      letter-spacing: 0.04em;
+    }
+
+    .collapse-button {
+      width: 32px;
+      height: 32px;
+    }
+
+    .search-panel {
+      position: relative;
+      padding: 0 16px 14px;
+    }
+
+    .search-box {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-box svg {
+      position: absolute;
+      left: 13px;
+      width: 16px;
+      height: 16px;
+      color: var(--nav-muted);
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+    }
+
+    .search-input {
+      width: 100%;
+      height: 42px;
+      padding: 0 66px 0 38px;
+      color: #f1f6f8;
+      background: var(--nav-raised);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: var(--radius);
+      outline: none;
+      transition: 150ms ease;
+    }
+
+    .search-input::placeholder {
+      color: #758896;
+    }
+
+    .search-input:focus {
+      border-color: rgba(243, 122, 61, 0.72);
+      box-shadow: 0 0 0 3px rgba(243, 122, 61, 0.11);
+    }
+
+    .search-key {
+      position: absolute;
+      right: 9px;
+      padding: 2px 7px;
+      color: #7f929e;
+      background: #0c151d;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 3px;
+      font-family: var(--mono-font);
+      font-size: 9px;
+    }
+
+    .search-results {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% - 7px);
+      right: 16px;
+      left: 16px;
+      overflow: hidden auto;
+      max-height: min(62vh, 620px);
+      background: #14212c;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius);
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
+    }
+
+    .search-results[hidden] {
+      display: none;
+    }
+
+    .search-summary {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 10px 12px;
+      color: #8fa1ad;
+      background: #101b24;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+    }
+
+    .search-result {
+      display: block;
+      width: 100%;
+      padding: 11px 12px;
+      color: #dbe5ea;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .search-result:hover,
+    .search-result:focus-visible {
+      background: rgba(255, 255, 255, 0.06);
+      outline: 0;
+    }
+
+    .search-result strong {
+      display: block;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .search-result small {
+      display: block;
+      overflow: hidden;
+      margin-top: 3px;
+      color: #91a2ad;
+      font-size: 10px;
+      line-height: 1.5;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .toc {
+      overflow: hidden auto;
+      flex: 1 1 auto;
+      padding: 0 12px 24px;
+      scrollbar-color: #40515d transparent;
+      scrollbar-width: thin;
+    }
+
+    .toc details {
+      margin: 0 0 4px;
+    }
+
+    .toc summary {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 6px 28px 6px 10px;
+      list-style: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: 130ms ease;
+    }
+
+    .toc summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .toc summary::after {
+      position: absolute;
+      right: 11px;
+      width: 7px;
+      height: 7px;
+      border-right: 1px solid #7e929f;
+      border-bottom: 1px solid #7e929f;
+      content: "";
+      transform: rotate(45deg) translateY(-2px);
+      transition: transform 130ms ease;
+    }
+
+    .toc details[open] > summary::after {
+      transform: rotate(225deg) translate(-2px, -1px);
+    }
+
+    .toc summary:hover {
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .toc a {
+      display: block;
+      overflow: hidden;
+      color: inherit;
+      text-decoration: none;
+      text-overflow: ellipsis;
+    }
+
+    .toc-section-link {
+      color: #e8eff2 !important;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .toc-children {
+      position: relative;
+      margin: 2px 0 8px 14px;
+      padding-left: 12px;
+      border-left: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .toc-link {
+      position: relative;
+      margin: 1px 0;
+      padding: 6px 10px;
+      color: #9fb0ba !important;
+      border-radius: 3px;
+      font-size: 11px;
+      line-height: 1.45;
+      transition: 130ms ease;
+    }
+
+    .toc-link.level-4 {
+      padding-left: 22px;
+      color: #7f929e !important;
+      font-size: 10px;
+    }
+
+    .toc-link:hover {
+      color: #e6eef2 !important;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .toc-link.is-active,
+    .toc-section-link.is-active {
+      color: #fff !important;
+      background: rgba(213, 90, 42, 0.18);
+      box-shadow: inset 2px 0 var(--accent-bright);
+    }
+
+    .sidebar-foot {
+      padding: 14px 18px 18px;
+      color: var(--nav-muted);
+      background: rgba(0, 0, 0, 0.15);
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      font-family: var(--mono-font);
+      font-size: 9px;
+      line-height: 1.65;
+    }
+
+    .sidebar-foot strong {
+      color: #b9c6cd;
+      font-weight: 600;
+    }
+
+    .workspace {
+      min-height: 100vh;
+      margin-left: var(--sidebar-width);
+      padding: calc(var(--topbar-height) + 34px) clamp(24px, 4vw, 64px) 84px;
+      transition: margin-left 220ms cubic-bezier(0.2, 0.78, 0.24, 1);
+    }
+
+    body.nav-collapsed .sidebar {
+      transform: translateX(calc(-1 * var(--sidebar-width)));
+    }
+
+    body.nav-collapsed .workspace {
+      margin-left: 0;
+    }
+
+    .manual-content {
+      width: min(100%, var(--page-max));
+      min-height: calc(100vh - var(--topbar-height) - 90px);
+      margin: 0 auto;
+      padding: clamp(34px, 5vw, 76px) clamp(28px, 6vw, 92px) 96px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .manual-content > h1:first-child {
+      position: relative;
+      margin: -2px 0 58px;
+      padding: 44px clamp(24px, 5vw, 54px) 48px;
+      color: #f1f5f6;
+      background:
+        linear-gradient(115deg, rgba(213, 90, 42, 0.16), transparent 46%),
+        #13202b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-family: var(--display-font);
+      font-size: clamp(30px, 4vw, 54px);
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      line-height: 1.22;
+      text-wrap: balance;
+      box-shadow: 9px 9px 0 var(--accent-soft);
+    }
+
+    .manual-content > h1:first-child::before {
+      display: block;
+      margin-bottom: 18px;
+      color: var(--accent-bright);
+      font-family: var(--mono-font);
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      content: "EH · MAIN CONTROLLER / ENGINEERING MANUAL";
+    }
+
+    .manual-content h1,
+    .manual-content h2,
+    .manual-content h3,
+    .manual-content h4,
+    .manual-content h5,
+    .manual-content h6 {
+      position: relative;
+      color: var(--ink);
+      line-height: 1.38;
+      scroll-margin-top: calc(var(--topbar-height) + 24px);
+      text-wrap: balance;
+    }
+
+    .manual-content h2 {
+      margin: 78px 0 26px;
+      padding: 0 0 13px 18px;
+      border-bottom: 2px solid var(--line-strong);
+      font-family: var(--display-font);
+      font-size: clamp(25px, 3vw, 34px);
+      letter-spacing: 0.02em;
+    }
+
+    .manual-content h2::before {
+      position: absolute;
+      inset: 3px auto 10px 0;
+      width: 5px;
+      background: var(--accent);
+      content: "";
+    }
+
+    .manual-content h3 {
+      margin: 52px 0 18px;
+      padding-left: 14px;
+      font-size: clamp(19px, 2vw, 23px);
+      font-weight: 760;
+    }
+
+    .manual-content h3::before {
+      position: absolute;
+      top: 0.48em;
+      left: 0;
+      width: 6px;
+      height: 6px;
+      background: var(--signal);
+      content: "";
+      transform: rotate(45deg);
+    }
+
+    .manual-content h4 {
+      margin: 36px 0 14px;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 760;
+    }
+
+    .manual-content h5,
+    .manual-content h6 {
+      margin: 28px 0 12px;
+      font-size: 15px;
+    }
+
+    .heading-anchor {
+      position: absolute;
+      right: calc(100% + 8px);
+      width: 20px;
+      color: var(--accent);
+      font-family: var(--mono-font);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: center;
+      text-decoration: none;
+      opacity: 0;
+      transition: opacity 130ms ease;
+    }
+
+    h1:hover > .heading-anchor,
+    h2:hover > .heading-anchor,
+    h3:hover > .heading-anchor,
+    h4:hover > .heading-anchor {
+      opacity: 0.75;
+    }
+
+    .manual-content p {
+      margin: 0 0 17px;
+    }
+
+    .manual-content ul,
+    .manual-content ol {
+      margin: 0 0 20px;
+      padding-left: 1.6em;
+    }
+
+    .manual-content li {
+      margin: 5px 0;
+      padding-left: 0.2em;
+    }
+
+    .manual-content li::marker {
+      color: var(--accent);
+      font-family: var(--mono-font);
+      font-weight: 700;
+    }
+
+    .manual-content strong {
+      color: var(--ink);
+      font-weight: 780;
+    }
+
+    .manual-content hr {
+      height: 1px;
+      margin: 48px 0;
+      background: var(--line);
+      border: 0;
+    }
+
+    .manual-content blockquote {
+      margin: 24px 0;
+      padding: 17px 20px;
+      color: var(--ink-soft);
+      background: var(--signal-soft);
+      border-left: 4px solid var(--signal);
+    }
+
+    .manual-content :not(pre) > code {
+      padding: 0.15em 0.42em;
+      color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+      background: var(--accent-soft);
+      border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+      border-radius: 3px;
+      font-family: var(--mono-font);
+      font-size: 0.88em;
+      overflow-wrap: anywhere;
+    }
+
+    .manual-content table {
+      display: block;
+      overflow: auto;
+      width: 100%;
+      margin: 22px 0 30px;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--line);
+      scrollbar-color: var(--line-strong) transparent;
+      scrollbar-width: thin;
+    }
+
+    .manual-content th,
+    .manual-content td {
+      min-width: 118px;
+      padding: 10px 13px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      line-height: 1.58;
+    }
+
+    .manual-content th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: var(--ink);
+      background: color-mix(in srgb, var(--paper) 88%, var(--ink) 12%);
+      font-size: 12px;
+      font-weight: 780;
+      letter-spacing: 0.025em;
+    }
+
+    .manual-content tr:nth-child(even) td {
+      background: color-mix(in srgb, var(--paper) 96%, var(--ink) 4%);
+    }
+
+    .manual-content tr:hover td {
+      background: var(--signal-soft);
+    }
+
+    .manual-content th:last-child,
+    .manual-content td:last-child {
+      border-right: 0;
+    }
+
+    .manual-content tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .code-card {
+      overflow: hidden;
+      margin: 24px 0 30px;
+      color: var(--code-text);
+      background: var(--code);
+      border: 1px solid color-mix(in srgb, var(--code) 72%, white 28%);
+      border-radius: var(--radius);
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.13);
+    }
+
+    .code-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 37px;
+      padding: 0 12px 0 15px;
+      color: #8296a4;
+      background: rgba(255, 255, 255, 0.035);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-family: var(--mono-font);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+    }
+
+    .copy-code {
+      padding: 4px 8px;
+      color: #9db0bc;
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .copy-code:hover {
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    .code-card pre {
+      overflow: auto;
+      margin: 0;
+      padding: 18px 20px 20px;
+      scrollbar-color: #405260 transparent;
+      scrollbar-width: thin;
+    }
+
+    .code-card code {
+      color: inherit;
+      background: transparent;
+      border: 0;
+      font-family: var(--mono-font);
+      font-size: 12px;
+      line-height: 1.68;
+      white-space: pre;
+    }
+
+    .diagram-card {
+      overflow: auto;
+      margin: 26px 0 32px;
+      padding: 0;
+      background: color-mix(in srgb, var(--paper) 96%, var(--signal) 4%);
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--signal);
+    }
+
+    .diagram-card figcaption {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      color: var(--ink-soft);
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono-font);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .diagram-dot {
+      width: 7px;
+      height: 7px;
+      background: var(--signal);
+      border-radius: 50%;
+    }
+
+    .diagram-card .mermaid {
+      min-width: 680px;
+      padding: 24px;
+      color: var(--ink-soft);
+      font-family: var(--mono-font);
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+
+    .diagram-card[data-diagram-state="ready"] .mermaid {
+      min-width: unset;
+      white-space: normal;
+    }
+
+    .diagram-card svg {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 0 auto;
+    }
+
+    .manual-content details {
+      margin: 22px 0;
+      background: color-mix(in srgb, var(--paper) 97%, var(--ink) 3%);
+      border: 1px solid var(--line);
+    }
+
+    .manual-content details > summary {
+      padding: 13px 16px;
+      color: var(--ink);
+      background: color-mix(in srgb, var(--paper) 93%, var(--ink) 7%);
+      font-weight: 760;
+      cursor: pointer;
+    }
+
+    .manual-content details > :not(summary) {
+      margin-right: 16px;
+      margin-left: 16px;
+    }
+
+    .manual-content img {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid var(--line);
+    }
+
+    .page-foot {
+      width: min(100%, var(--page-max));
+      margin: 20px auto 0;
+      color: var(--ink-faint);
+      font-family: var(--mono-font);
+      font-size: 9px;
+      line-height: 1.7;
+      text-align: center;
+    }
+
+    .back-to-top {
+      position: fixed;
+      z-index: 520;
+      right: 22px;
+      bottom: 24px;
+      display: grid;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      place-items: center;
+      color: #fff;
+      background: var(--accent);
+      border: 0;
+      border-radius: 50%;
+      box-shadow: 0 10px 26px rgba(213, 90, 42, 0.28);
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: 160ms ease;
+    }
+
+    .back-to-top.is-visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .back-to-top svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .toast {
+      position: fixed;
+      z-index: 1100;
+      right: 24px;
+      bottom: 80px;
+      max-width: 340px;
+      padding: 10px 14px;
+      color: #f0f5f7;
+      background: #101b24;
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.26);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: 160ms ease;
+    }
+
+    .toast.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .nav-backdrop {
+      position: fixed;
+      inset: var(--topbar-height) 0 0;
+      z-index: 550;
+      display: none;
+      background: rgba(4, 9, 13, 0.58);
+      backdrop-filter: blur(2px);
+    }
+
+    @media (max-width: 980px) {
+      :root {
+        --sidebar-width: min(88vw, 366px);
+      }
+
+      .menu-button {
+        display: inline-grid;
+      }
+
+      .collapse-button {
+        display: none;
+      }
+
+      .sidebar {
+        transform: translateX(calc(-1 * var(--sidebar-width)));
+        box-shadow: 18px 0 48px rgba(0, 0, 0, 0.28);
+      }
+
+      body.nav-open .sidebar {
+        transform: translateX(0);
+      }
+
+      body.nav-open .nav-backdrop {
+        display: block;
+      }
+
+      .workspace,
+      body.nav-collapsed .workspace {
+        margin-left: 0;
+        padding-right: 18px;
+        padding-left: 18px;
+      }
+
+      .manual-content {
+        padding-right: clamp(20px, 5vw, 44px);
+        padding-left: clamp(20px, 5vw, 44px);
+      }
+
+      .heading-anchor {
+        display: none;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .topbar {
+        padding: 0 10px;
+      }
+
+      .brand-mark {
+        width: 34px;
+        height: 34px;
+      }
+
+      .brand-title {
+        font-size: 14px;
+      }
+
+      .brand-meta {
+        display: none;
+      }
+
+      .topbar-actions .print-button {
+        display: none;
+      }
+
+      .workspace {
+        padding: calc(var(--topbar-height) + 12px) 0 56px;
+      }
+
+      .manual-content {
+        border-right: 0;
+        border-left: 0;
+        box-shadow: none;
+      }
+
+      .manual-content > h1:first-child {
+        margin-bottom: 38px;
+        padding: 30px 22px 34px;
+        font-size: 30px;
+      }
+
+      .manual-content h2 {
+        margin-top: 58px;
+      }
+
+      .manual-content th,
+      .manual-content td {
+        min-width: 108px;
+        padding: 8px 10px;
+        font-size: 12px;
+      }
+
+      .back-to-top {
+        right: 14px;
+        bottom: 16px;
+      }
+    }
+
+    @media print {
+      @page {
+        size: A4;
+        margin: 14mm 12mm;
+      }
+
+      body {
+        color: #000;
+        background: #fff;
+        font-size: 10pt;
+      }
+
+      .topbar,
+      .sidebar,
+      .nav-backdrop,
+      .back-to-top,
+      .toast,
+      .reading-progress,
+      .copy-code,
+      .heading-anchor,
+      .page-foot {
+        display: none !important;
+      }
+
+      .workspace {
+        margin: 0;
+        padding: 0;
+      }
+
+      .manual-content {
+        width: 100%;
+        max-width: none;
+        padding: 0;
+        background: #fff;
+        border: 0;
+        box-shadow: none;
+      }
+
+      .manual-content > h1:first-child {
+        color: #000;
+        background: #fff;
+        border: 2px solid #222;
+        box-shadow: none;
+      }
+
+      .manual-content h2,
+      .manual-content h3,
+      .manual-content h4 {
+        break-after: avoid;
+      }
+
+      .manual-content table,
+      .manual-content pre,
+      .diagram-card {
+        break-inside: avoid;
+      }
+
+      .manual-content table {
+        display: table;
+        width: 100%;
+        font-size: 7.5pt;
+      }
+
+      .manual-content th {
+        position: static;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="reading-progress" id="reading-progress" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <button class="icon-button menu-button" id="menu-button" type="button" aria-label="打开导航目录">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16"></path>
+        </svg>
+      </button>
+      <div class="brand-mark" aria-hidden="true">EH</div>
+      <div class="brand-copy">
+        <p class="brand-title">主控工程软件说明手册</p>
+        <div class="brand-meta">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="sync-status">静态离线版</span>
+          <span>·</span>
+          <span>SHA __SOURCE_SHA_SHORT__</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="topbar-actions">
+      <button class="icon-button print-button" id="print-button" type="button" aria-label="打印手册" title="打印">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 9V4h10v5M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+          <path d="M7 14h10v6H7z"></path>
+        </svg>
+      </button>
+      <button class="icon-button" id="theme-button" type="button" aria-label="切换明暗主题" title="切换主题">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"></path>
+          <circle cx="12" cy="12" r="4"></circle>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <aside class="sidebar" id="sidebar" aria-label="手册导航目录">
+    <div class="sidebar-head">
+      <div>
+        <p class="sidebar-kicker">Document map</p>
+        <h2 class="sidebar-title">导航目录</h2>
+      </div>
+      <button class="icon-button collapse-button" id="collapse-button" type="button" aria-label="收起导航目录" title="收起目录">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m14 6-6 6 6 6"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="search-panel">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="m20 20-4-4"></path>
+        </svg>
+        <input
+          class="search-input"
+          id="search-input"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="搜索功能、变量、报警码…"
+          aria-label="全文搜索">
+        <span class="search-key">Ctrl K</span>
+      </div>
+      <div class="search-results" id="search-results" hidden></div>
+    </div>
+
+    <nav class="toc" id="toc" aria-label="章节目录"></nav>
+
+    <div class="sidebar-foot">
+      <div><strong>源文件：</strong>docs/软件说明手册.md</div>
+      <div><strong>源文件时间：</strong>__SOURCE_UPDATED_AT__</div>
+      <div><strong>HTML生成：</strong>__GENERATED_AT__</div>
+      <div><strong>SHA256：</strong>__SOURCE_SHA_SHORT__</div>
+    </div>
+  </aside>
+
+  <div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
+
+  <main class="workspace">
+    <article class="manual-content" id="manual">
+__MANUAL_CONTENT__
+    </article>
+    <footer class="page-foot">
+      此HTML由 tools/software_manual/build_manual.js 根据 docs/软件说明手册.md 自动生成。
+      业务内容只在Markdown中维护。
+    </footer>
+  </main>
+
+  <button class="back-to-top" id="back-to-top" type="button" aria-label="返回顶部" title="返回顶部">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m6 14 6-6 6 6"></path>
+    </svg>
+  </button>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const body = document.body;
+      const documentElement = document.documentElement;
+      const manual = document.getElementById("manual");
+      const toc = document.getElementById("toc");
+      const sidebar = document.getElementById("sidebar");
+      const menuButton = document.getElementById("menu-button");
+      const collapseButton = document.getElementById("collapse-button");
+      const navBackdrop = document.getElementById("nav-backdrop");
+      const themeButton = document.getElementById("theme-button");
+      const printButton = document.getElementById("print-button");
+      const searchInput = document.getElementById("search-input");
+      const searchResults = document.getElementById("search-results");
+      const progress = document.getElementById("reading-progress");
+      const backToTop = document.getElementById("back-to-top");
+      const toast = document.getElementById("toast");
+      const statusDot = document.getElementById("status-dot");
+      const syncStatus = document.getElementById("sync-status");
+
+      const headings = Array.from(manual.querySelectorAll("h2[id], h3[id], h4[id]"));
+      const tocLinks = new Map();
+      let toastTimer = 0;
+      let searchTimer = 0;
+
+      /*
+       * 函数功能：显示一条不会阻塞阅读的短提示。
+       * 输入参数：message 为提示文字。
+       * 返回参数：无。
+       */
+      function showToast(message) {
+        window.clearTimeout(toastTimer);
+        toast.textContent = message;
+        toast.classList.add("is-visible");
+        toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 1800);
+      }
+
+      /*
+       * 函数功能：读取标题用于目录展示的纯文本。
+       * 输入参数：heading 为文章标题元素。
+       * 返回参数：去掉锚点#后的标题文字。
+       */
+      function getHeadingTitle(heading) {
+        return heading.dataset.tocTitle || heading.textContent.replace(/^#/, "").trim();
+      }
+
+      /*
+       * 函数功能：创建一个可定位到正文标题的目录链接。
+       * 输入参数：heading 为目标标题，className 为目录层级样式。
+       * 返回参数：已绑定目标ID的a元素。
+       */
+      function createTocLink(heading, className) {
+        const link = document.createElement("a");
+        link.className = className;
+        link.href = `#${heading.id}`;
+        link.textContent = getHeadingTitle(heading);
+        link.dataset.targetId = heading.id;
+        tocLinks.set(heading.id, link);
+        link.addEventListener("click", () => {
+          if (window.matchMedia("(max-width: 980px)").matches) {
+            body.classList.remove("nav-open");
+          }
+        });
+        return link;
+      }
+
+      /*
+       * 函数功能：按H2分组构建左侧可折叠目录，H3/H4作为组内条目。
+       * 输入参数：无。
+       * 返回参数：无，直接写入#toc。
+       */
+      function buildToc() {
+        let currentDetails = null;
+        let currentChildren = null;
+        let sectionIndex = 0;
+
+        for (const heading of headings) {
+          const level = Number(heading.tagName.slice(1));
+          if (level === 2) {
+            currentDetails = document.createElement("details");
+            currentDetails.className = "toc-section";
+            currentDetails.dataset.sectionId = heading.id;
+            currentDetails.open = sectionIndex < 2;
+
+            const summary = document.createElement("summary");
+            summary.append(createTocLink(heading, "toc-section-link"));
+            currentDetails.append(summary);
+
+            currentChildren = document.createElement("div");
+            currentChildren.className = "toc-children";
+            currentDetails.append(currentChildren);
+            toc.append(currentDetails);
+            sectionIndex += 1;
+            continue;
+          }
+
+          if (currentChildren !== null) {
+            currentChildren.append(createTocLink(heading, `toc-link level-${level}`));
+          }
+        }
+      }
+
+      /*
+       * 函数功能：高亮当前阅读标题，并自动展开和滚动对应目录分组。
+       * 输入参数：headingId 为正文标题ID。
+       * 返回参数：无。
+       */
+      function activateHeading(headingId) {
+        for (const link of tocLinks.values()) {
+          link.classList.remove("is-active");
+        }
+
+        const activeLink = tocLinks.get(headingId);
+        if (!activeLink) {
+          return;
+        }
+
+        activeLink.classList.add("is-active");
+        const details = activeLink.closest("details");
+        if (details) {
+          details.open = true;
+        }
+
+        const tocRect = toc.getBoundingClientRect();
+        const linkRect = activeLink.getBoundingClientRect();
+        if ((linkRect.top < tocRect.top + 28) || (linkRect.bottom > tocRect.bottom - 28)) {
+          activeLink.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      }
+
+      /*
+       * 函数功能：建立正文标题滚动观察，目录随阅读位置高亮。
+       * 输入参数：无。
+       * 返回参数：无。
+       */
+      function observeHeadings() {
+        let currentId = headings[0] ? headings[0].id : "";
+        const observer = new IntersectionObserver(
+          (entries) => {
+            const visible = entries
+              .filter((entry) => entry.isIntersecting)
+              .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top);
+
+            if (visible.length > 0) {
+              currentId = visible[0].target.id;
+              activateHeading(currentId);
+              return;
+            }
+
+            const passed = headings.filter((heading) => heading.getBoundingClientRect().top < 120);
+            if (passed.length > 0) {
+              currentId = passed[passed.length - 1].id;
+              activateHeading(currentId);
+            }
+          },
+          { rootMargin: "-84px 0px -72% 0px", threshold: [0, 1] },
+        );
+
+        for (const heading of headings) {
+          observer.observe(heading);
+        }
+      }
+
+      /*
+       * 函数功能：生成每个标题对应的正文搜索文本和所属H2章节。
+       * 输入参数：无。
+       * 返回参数：全文搜索索引数组。
+       */
+      function buildSearchIndex() {
+        let currentChapter = "";
+
+        return headings.map((heading) => {
+          const level = Number(heading.tagName.slice(1));
+          const title = getHeadingTitle(heading);
+          if (level === 2) {
+            currentChapter = title;
+          }
+
+          const chunks = [];
+          let node = heading.nextElementSibling;
+          while (node) {
+            const nextHeading = node.matches("h1, h2, h3, h4, h5, h6");
+            if (nextHeading && (Number(node.tagName.slice(1)) <= level)) {
+              break;
+            }
+            chunks.push(node.innerText || node.textContent || "");
+            node = node.nextElementSibling;
+          }
+
+          const content = chunks.join(" ").replace(/\s+/g, " ").trim();
+          return {
+            id: heading.id,
+            title,
+            chapter: currentChapter,
+            content,
+            searchable: `${title} ${currentChapter} ${content}`.toLocaleLowerCase("zh-CN"),
+          };
+        });
+      }
+
+      const searchIndex = buildSearchIndex();
+
+      /*
+       * 函数功能：截取搜索词附近的一段正文摘要。
+       * 输入参数：content为正文，query为搜索词。
+       * 返回参数：最长约96字的摘要。
+       */
+      function makeSnippet(content, query) {
+        const normalized = content.toLocaleLowerCase("zh-CN");
+        const index = normalized.indexOf(query);
+        const start = Math.max(0, index < 0 ? 0 : index - 34);
+        const end = Math.min(content.length, start + 96);
+        return `${start > 0 ? "…" : ""}${content.slice(start, end)}${end < content.length ? "…" : ""}`;
+      }
+
+      /*
+       * 函数功能：按标题优先、正文其次的顺序显示全文搜索结果。
+       * 输入参数：queryText 为用户输入。
+       * 返回参数：无。
+       */
+      function renderSearchResults(queryText) {
+        const query = queryText.trim().toLocaleLowerCase("zh-CN");
+        searchResults.replaceChildren();
+
+        if (!query) {
+          searchResults.hidden = true;
+          return;
+        }
+
+        const matches = searchIndex
+          .filter((item) => item.searchable.includes(query))
+          .sort((left, right) => {
+            const leftTitle = left.title.toLocaleLowerCase("zh-CN");
+            const rightTitle = right.title.toLocaleLowerCase("zh-CN");
+            return Number(rightTitle.includes(query)) - Number(leftTitle.includes(query));
+          });
+
+        const summary = document.createElement("div");
+        summary.className = "search-summary";
+        summary.textContent = matches.length > 60
+          ? `找到 ${matches.length} 处，显示前60处`
+          : `找到 ${matches.length} 处`;
+        searchResults.append(summary);
+
+        for (const item of matches.slice(0, 60)) {
+          const button = document.createElement("button");
+          button.className = "search-result";
+          button.type = "button";
+
+          const title = document.createElement("strong");
+          title.textContent = item.title;
+          const snippet = document.createElement("small");
+          snippet.textContent = makeSnippet(item.content || item.chapter, query);
+          button.append(title, snippet);
+
+          button.addEventListener("click", () => {
+            searchResults.hidden = true;
+            searchInput.blur();
+            const target = document.getElementById(item.id);
+            if (target) {
+              history.pushState(null, "", `#${item.id}`);
+              target.scrollIntoView({ block: "start", behavior: "smooth" });
+            }
+            if (window.matchMedia("(max-width: 980px)").matches) {
+              body.classList.remove("nav-open");
+            }
+          });
+          searchResults.append(button);
+        }
+
+        searchResults.hidden = false;
+      }
+
+      /*
+       * 函数功能：加载并渲染Markdown中的Mermaid图；网络不可用时保留源文本。
+       * 输入参数：无。
+       * 返回参数：Promise<void>。
+       */
+      async function renderMermaid() {
+        const cards = Array.from(document.querySelectorAll(".diagram-card"));
+        if (cards.length === 0) {
+          return;
+        }
+
+        try {
+          if (!window.mermaid) {
+            await new Promise((resolve, reject) => {
+              const script = document.createElement("script");
+              script.src = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js";
+              script.onload = resolve;
+              script.onerror = reject;
+              document.head.append(script);
+            });
+          }
+
+          window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            theme: "neutral",
+            fontFamily: "Microsoft YaHei UI, sans-serif",
+          });
+          await window.mermaid.run({ nodes: cards.map((card) => card.querySelector(".mermaid")) });
+          cards.forEach((card) => {
+            card.dataset.diagramState = "ready";
+          });
+        } catch {
+          cards.forEach((card) => {
+            card.dataset.diagramState = "error";
+            const caption = card.querySelector("figcaption");
+            if (caption) {
+              caption.append(" · 图形库未加载，当前显示可读源文本");
+            }
+          });
+        }
+      }
+
+      /*
+       * 函数功能：连接监听服务，Markdown重建后自动刷新当前浏览器页面。
+       * 输入参数：无。
+       * 返回参数：无。
+       */
+      function initLiveReload() {
+        if (!/^https?:$/u.test(location.protocol) || !window.EventSource) {
+          statusDot.classList.remove("is-live");
+          syncStatus.textContent = "静态离线版";
+          syncStatus.title = "运行“打开并自动更新软件说明手册.cmd”可进入实时模式";
+          return;
+        }
+
+        const source = new EventSource("/__manual_events");
+        source.addEventListener("ready", () => {
+          statusDot.classList.add("is-live");
+          syncStatus.textContent = "Markdown 自动同步";
+        });
+        source.addEventListener("manual-updated", () => {
+          syncStatus.textContent = "内容已更新，正在刷新";
+          sessionStorage.setItem(
+            "software-manual-scroll",
+            JSON.stringify({
+              hash: location.hash,
+              y: window.scrollY,
+            }),
+          );
+          window.setTimeout(() => location.reload(), 180);
+        });
+        source.onerror = () => {
+          statusDot.classList.remove("is-live");
+          syncStatus.textContent = "等待监听服务";
+        };
+      }
+
+      /*
+       * 函数功能：恢复实时重载前的阅读位置。
+       * 输入参数：无。
+       * 返回参数：无。
+       */
+      function restoreReadingPosition() {
+        const raw = sessionStorage.getItem("software-manual-scroll");
+        if (!raw) {
+          return;
+        }
+
+        sessionStorage.removeItem("software-manual-scroll");
+        try {
+          const saved = JSON.parse(raw);
+          window.setTimeout(() => {
+            if (saved.hash && document.getElementById(saved.hash.replace(/^#/, ""))) {
+              document.getElementById(saved.hash.replace(/^#/, "")).scrollIntoView({ block: "start" });
+            } else if (Number.isFinite(saved.y)) {
+              window.scrollTo(0, saved.y);
+            }
+          }, 90);
+        } catch {
+          /* 无效会话数据不影响手册正常显示。 */
+        }
+      }
+
+      /*
+       * 函数功能：按滚动位置刷新顶部阅读进度和返回顶部按钮。
+       * 输入参数：无。
+       * 返回参数：无。
+       */
+      function updateScrollUi() {
+        const scrollRange = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+        progress.style.width = `${Math.min(100, (window.scrollY / scrollRange) * 100)}%`;
+        backToTop.classList.toggle("is-visible", window.scrollY > 680);
+      }
+
+      buildToc();
+      observeHeadings();
+      renderMermaid();
+      initLiveReload();
+      restoreReadingPosition();
+      updateScrollUi();
+
+      const savedTheme = localStorage.getItem("software-manual-theme");
+      if (savedTheme === "dark" || savedTheme === "light") {
+        documentElement.dataset.theme = savedTheme;
+      } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        documentElement.dataset.theme = "dark";
+      }
+
+      const savedNavigation = localStorage.getItem("software-manual-nav");
+      if ((savedNavigation === "collapsed") && !window.matchMedia("(max-width: 980px)").matches) {
+        body.classList.add("nav-collapsed");
+      }
+
+      themeButton.addEventListener("click", () => {
+        const nextTheme = documentElement.dataset.theme === "dark" ? "light" : "dark";
+        documentElement.dataset.theme = nextTheme;
+        localStorage.setItem("software-manual-theme", nextTheme);
+      });
+
+      collapseButton.addEventListener("click", () => {
+        body.classList.toggle("nav-collapsed");
+        localStorage.setItem(
+          "software-manual-nav",
+          body.classList.contains("nav-collapsed") ? "collapsed" : "expanded",
+        );
+      });
+
+      menuButton.addEventListener("click", () => body.classList.toggle("nav-open"));
+      navBackdrop.addEventListener("click", () => body.classList.remove("nav-open"));
+      printButton.addEventListener("click", () => window.print());
+      backToTop.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+      window.addEventListener("scroll", updateScrollUi, { passive: true });
+
+      searchInput.addEventListener("input", () => {
+        window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => renderSearchResults(searchInput.value), 90);
+      });
+
+      searchInput.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          searchInput.value = "";
+          searchResults.hidden = true;
+          searchInput.blur();
+        }
+      });
+
+      document.addEventListener("click", (event) => {
+        if (!event.target.closest(".search-panel")) {
+          searchResults.hidden = true;
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          if (window.matchMedia("(max-width: 980px)").matches) {
+            body.classList.add("nav-open");
+          } else {
+            body.classList.remove("nav-collapsed");
+          }
+          window.setTimeout(() => searchInput.focus(), 40);
+        }
+        if (event.key === "Escape") {
+          body.classList.remove("nav-open");
+        }
+      });
+
+      for (const button of document.querySelectorAll(".copy-code")) {
+        button.addEventListener("click", async () => {
+          const code = button.closest(".code-card").querySelector("code").textContent;
+          try {
+            await navigator.clipboard.writeText(code);
+            button.textContent = "已复制";
+            showToast("代码已复制到剪贴板");
+            window.setTimeout(() => {
+              button.textContent = "复制";
+            }, 1400);
+          } catch {
+            showToast("浏览器未授予剪贴板权限");
+          }
+        });
+      }
+
+      for (const anchor of document.querySelectorAll(".heading-anchor")) {
+        anchor.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const url = new URL(`#${anchor.parentElement.id}`, location.href).href;
+          history.pushState(null, "", `#${anchor.parentElement.id}`);
+          try {
+            await navigator.clipboard.writeText(url);
+            showToast("本节链接已复制");
+          } catch {
+            showToast("已定位到本节");
+          }
+        });
+      }
+
+      for (const link of manual.querySelectorAll('a[href^="http://"], a[href^="https://"]')) {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+    })();
+  </script>
+</body>
+</html>

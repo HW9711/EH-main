@@ -63,8 +63,9 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       900U
-#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     200U  /* RFID 在线监测每 200ms 一轮，连续缺失次数达到阈值后约 2 秒确认掉线。 */
-#define HANDLESCAN_RFID_MISS_MAX              10U
+#define HANDLESCAN_RFID_MONITOR_PERIOD_MS     500U  /* RFID 在线监测每 500ms 启动一轮，只有事务明确完成后才结算成功或缺失。 */
+#define HANDLESCAN_RFID_MISS_MAX              6U    /* 连续 6 个已完成事务超时后约 3 秒确认掉线，排队和活动阶段不提前计数。 */
+
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS    (HANDLESCAN_RFID_WAIT_TIMEOUT_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_MONITOR_PERIOD_TICKS  (HANDLESCAN_RFID_MONITOR_PERIOD_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_EPC_SPEED_K_UNIT      1000UL  /* EPC 速度字节按 k rpm 保存，0x8C 表示 140000。 */
@@ -235,7 +236,8 @@ typedef struct
     uint16_t rfid_last_sequence;                             /* 本通道已经消费的最新 RFID 结果序号。 */
     uint16_t rfid_last_presence_sequence;                    /* 本通道最近一次确认标签存在的结果序号。 */
     uint8_t rfid_miss_count;                                 /* 在线监测连续未读到标签的次数，用于确认刀具头离线。 */
-    uint8_t rfid_monitor_pending;                            /* 上一轮在线监测请求是否仍在等待新结果。 */
+    uint8_t rfid_monitor_pending;                            /* 上一轮在线监测请求是否仍在等待明确事务终态。 */
+    uint16_t rfid_monitor_ticket;                            /* 在线监测事务票据，仅匹配本通道对应请求的成功、超时或取消结果。 */
     uint8_t rfid_tool_online;                                /* RFID 刀具头在线边沿状态，只在变化时触发提示。 */
     uint8_t rfid_wait_started;                               /* 本轮 RFID 上线等待是否已经启动，用于保留原来的两轮等待判断。 */
 } HandlescanChannelContext;
@@ -995,8 +997,8 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
 }
 
 /*
- * 函数功能：在线状态下确认可拆刀具头连续读不到时，只清刀具头信息并保留手柄基座在线。
- * 输入参数：channel 为 A/B 通道；message/spec_values 为通道识别和规格缓存；mapped_model/raw_type_* 为 EEPROM 第二页基座信息；last_sequence/last_presence_sequence/miss_count/monitor_pending 为 RFID 在线监测状态；tool_online 为刀具头在线边沿标志；plug_key 为刷新事件键值。
+ * 函数功能：确认 RFID 刀具连续超时后更新离线状态；PXBA/PXBB 锁存参数，公共接头清刀具并蜂鸣一次。
+ * 输入参数：binding 为目标 A/B 通道资源；mapped_model/raw_type_major/raw_type_minor 为基座型号信息。
  * 返回参数：无。
  */
 static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *binding,
@@ -1016,35 +1018,40 @@ static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *bindi
     {
         context->rfid_miss_count = 0U; /* 已离线时只清缺失计数。 */
         context->rfid_monitor_pending = 0U; /* 清监测等待标志。 */
-        return; /* 已经离线时不重复清 MemoryMsg、不重复发插拔事件，也不重复蜂鸣。 */
+        context->rfid_monitor_ticket = 0U; /* 清除已结算票据，避免离线状态重复查询旧事务。 */
+        return; /* 已经离线时不重复清 MemoryMsg、不重复发插拔事件，也不重复累计掉线。 */
     }
 
-    if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3) /* RFID 刀具掉线时只清标签来源；一体式 EEPROM 刀具参数必须保留。 */
+    if ((context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3) &&
+        (mapped_model != PXBA_ONLINES) &&
+        (mapped_model != PXBB_ONLINES)) /* 公共接头掉线仍清 EPC 刀具；PXBA/PXBB 仅记录离线，继续锁存最后一次有效参数。 */
     {
         Handlescan_PrepareRfidBase(binding->message,
-                                                   mapped_model,
-                                                   raw_type_major,
-                                                   raw_type_minor); /* RFID 刀具头离线时保留基座信息，只清刀具字段等待下一次标签。 */
-        if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))
-        {
-            (void)Handlescan_LoadSplitBaseEepromRuntime(binding); /* 仅分体式基座恢复本通道 EEPROM 参数。 */
-        }
+                                   mapped_model,
+                                   raw_type_major,
+                                   raw_type_minor); /* RFID 刀具头离线时保留基座信息，只清刀具字段等待下一次标签。 */
         Handlescan_ClearToolSpecValues(binding->spec_values); /* 清本通道屏幕规格。 */
-        Rfid_ClearChannelResult(binding->channel); /* 清本通道 RFID 结果。 */
+        Rfid_ClearChannelResult(binding->channel); /* 清本通道 RFID 结果并取消未完成事务。 */
         Pubinterface_ClearRfidToolMemory(binding->channel); /* 同步清本通道刀具记忆。 */
         Handlescan_ReloadSpeedStepMessage(binding); /* 重新装回本通道基座 Page6 步进。 */
         //SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
     }
     context->rfid_tool_online = 0U; /* 先切到离线边沿状态，后续不重复提示。 */
-    Rfid_RecordConfirmedDropout(binding->channel); /* 与既有蜂鸣共用同一确认边沿，统计值不会早于实际掉线判定。 */
-    Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头离线确认时单响一次，让使用者知道刀具头已移开。 */
-    if (context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3)
+    Rfid_RecordConfirmedDropout(binding->channel); /* 记录一次经过约 3 秒事务超时确认的真实掉线边沿。 */
+    if (mapped_model == COMMON_SOCKET_ONLINES)
     {
-        context->rfid_last_sequence = 0U; /* 后续任意有效标签都重新消费。 */
-        context->rfid_last_presence_sequence = 0U; /* 清存在序号。 */
+        Handlescan_BeepOnceIfNoAlarm(); /* 公共接头没有 PXB 锁存语义，确认刀具掉线时单响提醒用户。 */
+    }
+    if ((context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3) &&
+        (mapped_model != PXBA_ONLINES) &&
+        (mapped_model != PXBB_ONLINES))
+    {
+        context->rfid_last_sequence = 0U; /* 公共接头已经清刀具缓存，后续任意有效标签都必须重新消费。 */
+        context->rfid_last_presence_sequence = 0U; /* 公共接头清存在序号，保证同一标签重新接入时完整装载。 */
     }
     context->rfid_miss_count = 0U; /* 清缺失次数。 */
     context->rfid_monitor_pending = 0U; /* 清未完成监测标志。 */
+    context->rfid_monitor_ticket = 0U; /* 清除已确认掉线事务票据，下一轮从新请求开始。 */
 }
 
 /*
@@ -1075,6 +1082,7 @@ static bool Handlescan_StartRfidWait(const HandlescanChannelBinding *binding,
     context->rfid_last_presence_sequence = 0U; /* 存在检测从空状态开始。 */
     context->rfid_miss_count = 0U; /* 清掉上一轮在线缺失次数。 */
     context->rfid_monitor_pending = 0U; /* 上线等待独立处理，不继承在线监测请求。 */
+    context->rfid_monitor_ticket = 0U; /* 上线快速等待不复用在线监测票据。 */
     Rfid_ClearChannelResult(binding->channel); /* 清掉本通道旧 RFID 缓存。 */
     if (Rfid_RequestToolRead(binding->channel, rfid_source, fast_mode) == true)
     {
@@ -1086,8 +1094,8 @@ static bool Handlescan_StartRfidWait(const HandlescanChannelBinding *binding,
 }
 
 /*
- * 函数功能：等待 RFID 结果并在成功后发布上线或刷新事件。
- * 输入参数：channel 为 A/B 通道；stage 为状态机；tool_source 为刀具来源；message/spec_values 为通道缓存；mapped_model/raw_type_* 为 EEPROM 第二页基座信息；last_sequence/last_presence_sequence 为该通道已处理 RFID 序号；miss_count/monitor_pending 为在线监测状态；tool_online 为刀具头在线边沿标志；wait_ticks 为等待计数；last_alarm/retry 参数沿用原有失败重试逻辑；plug_key 为插入事件键值。
+ * 函数功能：等待 RFID 上线结果并装载刀具；新标签蜂鸣，公共接头同一标签重新上线也蜂鸣。
+ * 输入参数：binding 为目标 A/B 通道资源；mapped_model/raw_type_major/raw_type_minor 为基座型号信息。
  * 返回参数：true 表示本轮已处理 RFID 等待阶段，调用方应返回。
  */
 static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
@@ -1113,6 +1121,7 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
         context->rfid_wait_ticks = 0U; /* 用户切手动模式后结束 RFID 等待计时。 */
         context->rfid_miss_count = 0U; /* 手动模式不累计 RFID 缺失。 */
         context->rfid_monitor_pending = 0U; /* 手动模式不再等待 RFID 回包。 */
+        context->rfid_monitor_ticket = 0U; /* 手动模式不保留自动监测票据。 */
         context->stage = HANDLESCAN_STAGE_ONLINE; /* 基座仍在线，刀具来源切回手动 EEPROM 参数。 */
         return true; /* 本轮 RFID 等待已被手动模式接管，调用方不要继续处理普通 EEPROM 链路。 */
     }
@@ -1137,9 +1146,13 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
                 context->rfid_last_presence_sequence = result.presence_sequence; /* 在线监测从当前标签存在序号继续。 */
                 context->rfid_miss_count = 0U; /* 已读到标签，连续缺失次数清零。 */
                 context->rfid_monitor_pending = 0U; /* 清掉在线监测等待标志。 */
+                context->rfid_monitor_ticket = 0U; /* 上线等待不继承任何在线监测票据。 */
                 context->rfid_tool_online = 1U; /* 刀具头切到在线边沿状态。 */
                 SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 沿用插入事件链装载本通道记忆。 */
-                Handlescan_BeepOnceIfNoAlarm(); /* RFID 刀具头上线确认时单响一次，同一标签重新插回也给用户插入反馈。 */
+                if ((result.cache_hit == false) || (mapped_model == COMMON_SOCKET_ONLINES))
+                {
+                    Handlescan_BeepOnceIfNoAlarm(); /* 新标签始终单响；公共接头即使重新上线同一标签也按上线边沿单响。 */
+                }
                 Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* 成功识别后释放本通道历史报警。 */
                 context->last_alarm = 0U; /* 清掉最近报警缓存。 */
                 context->stage = HANDLESCAN_STAGE_ONLINE; /* 刀具头识别成功后进入在线保持。 */
@@ -1184,14 +1197,15 @@ static bool Handlescan_IsManualSplitMode(const HandlescanChannelBinding *binding
 }
 
 /*
- * 函数功能：在线空闲状态下低频请求 RFID 监测可拆刀具头变化。
- * 输入参数：channel 为 A/B 通道；tool_source 为刀具来源；monitor_ticks 为低频计数器；miss_count 为连续未读到次数；monitor_pending 表示上一轮监测请求仍未被 presence 序号确认。
+ * 函数功能：在线空闲状态下按票据轮询 RFID；只有请求明确成功或超时后才结算本轮。
+ * 输入参数：binding 为目标 A/B 通道资源，内部包含来源、周期、事务票据和连续超时计数。
  * 返回参数：无。
  */
 static void Handlescan_RequestOnlineRfidMonitor(const HandlescanChannelBinding *binding)
 {
-    HandlescanChannelContext *context = binding->context; /* 在线轮询只修改绑定通道的计数。 */
+    HandlescanChannelContext *context = binding->context; /* 在线轮询只修改绑定通道的计数和票据。 */
     RfidReadSource_t rfid_source = Handlescan_ToRfidSource(context->tool_source); /* 只对 RFID 来源通道做低频监测。 */
+    RfidRequestResult_t request_result; /* 保存当前票据的排队、成功、超时或取消终态。 */
 
     if (rfid_source == RFID_READ_SOURCE_NONE)
     {
@@ -1200,46 +1214,83 @@ static void Handlescan_RequestOnlineRfidMonitor(const HandlescanChannelBinding *
 
     if (Handlescan_IsManualSplitMode(binding) != false)
     {
-        context->rfid_monitor_ticks = 0U;   /* 手动模式不累计在线 RFID 轮询周期。 */
-        context->rfid_monitor_pending = 0U; /* 取消上一轮 RFID 等待状态。 */
-        context->rfid_miss_count = 0U;      /* 不按 RFID 缺失清手动刀具状态。 */
-        return;                /* 手动模式已经关闭 RFID 自动识别，本轮不发送读取命令。 */
+        context->rfid_monitor_ticks = 0U; /* 手动模式不累计在线 RFID 轮询周期。 */
+        context->rfid_monitor_pending = 0U; /* 手动模式不再等待自动识别事务。 */
+        context->rfid_monitor_ticket = 0U; /* 丢弃本地票据引用，业务取消不得累计缺失。 */
+        context->rfid_miss_count = 0U; /* 不按 RFID 缺失清手动刀具状态。 */
+        return; /* 手动模式已经关闭 RFID 自动识别，本轮不发送读取命令。 */
     }
 
     if (WorkMessage.runflag_work == true)
     {
         context->rfid_monitor_ticks = 0U; /* 电机运行中暂停周期读取，停止后重新计时。 */
-        context->rfid_monitor_pending = 0U; /* 不把暂停识别误判为刀具头拔出。 */
+        context->rfid_monitor_pending = 0U; /* 运行门禁取消本地等待，不把暂停识别误判为刀具移开。 */
+        context->rfid_monitor_ticket = 0U; /* 运行期间不查询旧票据，RFID 任务会把活动事务结算为取消。 */
         return; /* 运行中不发送 RFID 命令。 */
     }
 
-    ++context->rfid_monitor_ticks; /* 空闲时累计在线监测周期。 */
-    if (context->rfid_monitor_ticks >= HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)//大于100
+    if (context->rfid_monitor_ticks < 0xFFFFU)
     {
-        context->rfid_monitor_ticks = 0U; /* 到周期后清零，避免连续投递请求。 */
-        if (context->rfid_monitor_pending != 0U)
+        ++context->rfid_monitor_ticks; /* 空闲时持续累计周期，排队期间也不提前结算缺失。 */
+    }
+
+    if (context->rfid_monitor_pending != 0U)
+    {
+        request_result = Rfid_QueryRequestResult(binding->channel,
+                                                 context->rfid_monitor_ticket); /* 只查询本通道本票据，另一通道完成结果不能串入。 */
+        if (request_result == RFID_REQUEST_RESULT_PENDING)
         {
-            Rfid_RecordMonitorCompletion(binding->channel); /* 到下一监测周期仍未确认，结算一次未响应监测。 */
-            context->rfid_monitor_pending = 0U; /* 上一轮请求未被 presence 序号确认，先结束等待。 */
+            return; /* 排队或活动中的请求尚无结论，禁止启动替换请求，也禁止累计缺失。 */
+        }
+
+        context->rfid_monitor_pending = 0U; /* 当前票据已离开等待态，允许后续按周期创建下一事务。 */
+        context->rfid_monitor_ticket = 0U; /* 票据只消费一次，避免下一周期重复结算同一终态。 */
+        if (request_result == RFID_REQUEST_RESULT_SUCCESS)
+        {
+            Rfid_RecordMonitorCompletion(binding->channel); /* 成功事务进入在线监测完成统计。 */
+            context->rfid_miss_count = 0U; /* 完整 EPC 回包证明刀具仍可读，连续超时从零重新开始。 */
+        }
+        else if (request_result == RFID_REQUEST_RESULT_TIMEOUT)
+        {
+            Rfid_RecordMonitorCompletion(binding->channel); /* 明确超时也属于一次完成的在线监测事务。 */
             if (context->rfid_miss_count < 0xFFU)
             {
-                ++context->rfid_miss_count; /* 记录一次在线监测未读到标签。 */
-            }
-            if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX)
-            {
-                return; /* 已达到约 2 秒缺失判定，本轮不再追加新请求，交给清刀具逻辑刷新状态。 */
+                ++context->rfid_miss_count; /* 只有完整事务明确超时，连续缺失才增加一次。 */
             }
         }
-        if (Rfid_RequestToolRead(binding->channel, rfid_source, false) == true)
+        else
         {
-            context->rfid_monitor_pending = 1U; /* 请求已发出，等待 presence 序号确认标签仍在。 */
+            return; /* 取消或过期票据没有射频结论，本轮既不计成功也不计缺失。 */
         }
+
+        if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX)
+        {
+            return; /* 连续6个完成事务超时后约3秒确认掉线，交给清刀具逻辑处理。 */
+        }
+    }
+
+    if (context->rfid_monitor_ticks < HANDLESCAN_RFID_MONITOR_PERIOD_TICKS)
+    {
+        return; /* 未到500ms启动周期时保持当前状态，不重复排队。 */
+    }
+
+    context->rfid_monitor_ticks = 0U; /* 创建新事务前重新计时，排队耗时不作为缺失结论。 */
+    if (Rfid_RequestToolReadTracked(binding->channel,
+                                    rfid_source,
+                                    false,
+                                    &context->rfid_monitor_ticket) == true)
+    {
+        context->rfid_monitor_pending = 1U; /* 请求已排队或合并，必须等待该票据明确完成。 */
+    }
+    else
+    {
+        context->rfid_monitor_ticket = 0U; /* 门禁或队列拒绝没有形成事务，不得在后续周期累计缺失。 */
     }
 }
 
 /*
- * 函数功能：在线空闲状态下消费 RFID 新结果并刷新刀具参数。
- * 输入参数：channel 为 A/B 通道；tool_source 为刀具来源；message/spec_values 为通道缓存；mapped_model/raw_type_* 为基座信息；last_sequence/last_presence_sequence 为已处理序号；miss_count/monitor_pending 为在线监测状态；tool_online 为刀具头在线边沿标志；plug_key 为刷新事件键值。
+ * 函数功能：在线空闲状态下消费 RFID 新结果；PXB仅新标签蜂鸣，公共接头同标签重新上线也蜂鸣。
+ * 输入参数：binding 为目标 A/B 通道资源；mapped_model/raw_type_major/raw_type_minor 为基座型号信息。
  * 返回参数：无。
  */
 static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *binding,
@@ -1249,10 +1300,11 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 {
     HandlescanChannelContext *context = binding->context; /* 在线结果只更新绑定通道的 RFID 状态。 */
     RfidToolResult_t result; /* 保存 RFID 任务最近一次有效结果。 */
+    bool was_tool_offline; /* 记录处理新结果前的在线边沿，用于公共接头同标签重新上线提示。 */
 
     if (Handlescan_ToRfidSource(context->tool_source) == RFID_READ_SOURCE_NONE)
     {
-        return; /* 非 RFID 来源或序号指针无效时不处理。 */
+        return; /* 非 RFID 来源时不处理。 */
     }
 
     if (WorkMessage.runflag_work == true)
@@ -1262,17 +1314,18 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 
     if (Handlescan_IsManualSplitMode(binding) != false)
     {
-        context->rfid_miss_count = 0U;      /* 手动模式不累计 RFID 缺失。 */
+        context->rfid_miss_count = 0U; /* 手动模式不累计 RFID 缺失。 */
         context->rfid_monitor_pending = 0U; /* 手动模式不再等待 RFID 回包。 */
-        return;                /* PXBA/PXBB 已切手动模式，禁止 EPC 晚到回包覆盖手动磨/刨选择。 */
+        context->rfid_monitor_ticket = 0U; /* 手动模式不保留自动监测票据。 */
+        return; /* PXBA/PXBB 已切手动模式，禁止 EPC 晚到回包覆盖手动磨/刨选择。 */
     }
 
-    if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX) /* 连续缺少标签达到阈值后，才把在线 RFID 刀具判为移开。 */
+    if (context->rfid_miss_count >= HANDLESCAN_RFID_MISS_MAX)
     {
         Handlescan_ClearOnlineRfidTool(binding,
                                        mapped_model,
                                        raw_type_major,
-                                       raw_type_minor); /* 连续在线监测未确认标签时清本通道刀具头。 */
+                                       raw_type_minor); /* 连续已完成事务超时达到阈值后处理真实掉线边沿。 */
         return; /* 本轮已处理刀具头缺失状态。 */
     }
 
@@ -1288,18 +1341,22 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 
     if (result.presence_sequence != context->rfid_last_presence_sequence)
     {
-        Rfid_RecordMonitorCompletion(binding->channel); /* 新 presence 序号表示本轮在线监测已经成功确认。 */
-        context->rfid_last_presence_sequence = result.presence_sequence; /* 读到标签就刷新存在序号。 */
-        context->rfid_miss_count = 0U; /* 标签仍在时清连续缺失。 */
-        context->rfid_monitor_pending = 0U; /* 本轮请求已被回包确认。 */
+        context->rfid_last_presence_sequence = result.presence_sequence; /* 读到完整标签就刷新存在序号。 */
+        context->rfid_miss_count = 0U; /* 有效 EPC 已证明刀具存在，连续超时清零。 */
+        if ((result.sequence == context->rfid_last_sequence) &&
+            (context->rfid_tool_online == 0U) &&
+            ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)))
+        {
+            context->rfid_tool_online = 1U; /* PXB同一标签恢复在线但保持静音，参数继续使用原锁存值。 */
+        }
     }
 
     if (result.sequence == context->rfid_last_sequence)
     {
-        return; /* 结果已经处理过，不重复刷新。 */
+        return; /* 结果已经处理过，不重复刷新，也不对在线同标签重复蜂鸣。 */
     }
 
-    /* RFID 数据与当前通道来源不匹配时保持原识别结果，避免把另一通道标签写入本通道。 */
+    was_tool_offline = (context->rfid_tool_online == 0U); /* 在装载新结果前保存公共接头是否处于离线边沿。 */
     if (Handlescan_ApplyRfidToolResult(binding->channel,
                                        binding->message,
                                        binding->spec_values,
@@ -1313,14 +1370,11 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 
     context->rfid_last_sequence = result.sequence; /* 记录已处理序号。 */
     SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 复用插入事件链刷新本通道状态。 */
-    if (context->rfid_tool_online == 0U)
+    context->rfid_tool_online = 1U; /* 完整新结果把刀具切回在线边沿。 */
+    if ((result.cache_hit == false) ||
+        ((mapped_model == COMMON_SOCKET_ONLINES) && (was_tool_offline != false)))
     {
-        context->rfid_tool_online = 1U; /* 刀具头从离线重新变为在线。 */
-        Handlescan_BeepOnceIfNoAlarm(); /* 离线后的重新上线只响一次，后续在线监测同标签不会重复响。 */
-    }
-    else if (result.cache_hit == false)
-    {
-        Handlescan_BeepOnceIfNoAlarm(); /* 已在线时只有新刀具头或 payload 变化才单响，同一标签的在线确认不响。 */
+        Handlescan_BeepOnceIfNoAlarm(); /* PXB仅新标签响；公共接头从离线恢复时同一标签也响。 */
     }
 }
 
@@ -1739,6 +1793,31 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
 }
 
 /*
+ * 函数功能：PXBA/PXBB 重新进入自动识别前，复位指定通道的 RFID 结果游标和在线监测状态。
+ * 输入参数：channel 为 A/B 通道。
+ * 返回参数：无。
+ */
+void Handlescan_PrepareSplitAutoIdentify(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 取得指定通道绑定，确保 A/B 监测状态独立复位。 */
+    HandlescanChannelContext *context; /* 指向待复位通道的扫描状态，不清识别缓存和已装载运行参数。 */
+
+    if (binding == NULL)
+    {
+        return; /* 非 A/B 通道没有合法 RFID 归属，保持当前状态不变。 */
+    }
+
+    context = binding->context; /* 后续只修改目标通道的 RFID 游标和计数。 */
+    context->rfid_last_sequence = 0U; /* 与退出自动模式时清零的 RFID 结果序号对齐，首个新结果不会因旧序号碰撞而被忽略。 */
+    context->rfid_last_presence_sequence = 0U; /* 新一轮自动识别从新的有效回包开始确认标签存在。 */
+    context->rfid_monitor_ticks = 0U; /* 在线监测周期重新计时，避免刚进入自动模式就立即追加请求。 */
+    context->rfid_miss_count = 0U; /* 新一轮自动等待不继承上一次射频缺失次数。 */
+    context->rfid_monitor_pending = 0U; /* 清除旧请求等待标志，后续只按本轮请求结算。 */
+    context->rfid_monitor_ticket = 0U; /* 新一轮自动识别必须创建自己的事务票据。 */
+    context->rfid_tool_online = 0U; /* 自动等待从未确认在线开始，首次有效标签按上线边沿处理。 */
+}
+
+/*
  * 函数功能：不重新访问 EEPROM，仅把当前通道已经缓存的 Page6 步进重新写回识别缓存。
  * 输入参数：channel 为 A/B 通道；message 为目标通道识别缓存。
  * 返回参数：无。
@@ -1876,6 +1955,7 @@ static void Handlescan_ClearChannelState(const HandlescanChannelBinding *binding
     context->rfid_last_presence_sequence = 0U;               /* 清存在序号，避免旧标签状态延续。 */
     context->rfid_miss_count = 0U;                           /* 清在线缺失计数。 */
     context->rfid_monitor_pending = 0U;                      /* 清在线监测等待标志。 */
+    context->rfid_monitor_ticket = 0U;                       /* 清事务票据，防止重新插入后查询旧终态。 */
     context->rfid_tool_online = 0U;                          /* 刀具头边沿状态回到未在线。 */
     Rfid_ClearChannelResult(binding->channel);               /* 同步清本通道 RFID 结果，避免旧序号挡住新上线。 */
 }
@@ -2624,6 +2704,8 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
              */
     context->rfid_monitor_pending =
         0U; /* 清掉在线监测等待标志，防止继承等待阶段的请求状态。 */
+    context->rfid_monitor_ticket =
+        0U; /* 空基座上线不继承快速等待事务票据，后续在线监测重新创建。 */
     context->rfid_tool_online =
         0U; /* 当前没有刀具头，只把基座置在线，刀具头边沿保持离线。 */
     context->stage =

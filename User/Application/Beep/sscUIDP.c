@@ -646,7 +646,7 @@ void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,ui
 
 /*
  * 函数功能：刷新手动刀具选择和自动识别按钮区域。
- * 输入参数：enable_flag 表示手动磨/刨按钮是否显示；PAO_flag 为 true 表示刨刀选中、false 表示磨头选中；auto_identify_flag 为 true 表示当前处于 RFID 自动识别模式；tool_result_pic 为 0x1404 图片编号。
+ * 输入参数：enable_flag 表示手动磨/刨或等待结果区域是否显示；PAO_flag 为 true 表示刨刀选中、false 表示磨头选中；auto_identify_flag 为 true 表示当前处于 RFID 自动识别模式，自动识别按钮必须保持显示；tool_result_pic 为 0x1404 图片编号。
  * 返回参数：无。
  */
 void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,uint8_t tool_result_pic)
@@ -682,9 +682,15 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 	}
 	else
 	{
-		/* 整个识别区域禁用时清除所有图片，输入层必须同步把这些位置视为不可点击。 */
-		LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);//禁用识别区时必须隐藏 0x1407，避免拔掉一体式手柄后旧自动识别标志把按钮重新画出来。
-	
+		if(auto_identify_flag)
+		{
+			LCD_Show_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE,51U);//PXBA/PXBB识别成功后规格区接管显示，仍保留自动识别按钮供用户切回手动模式
+		}
+		else
+		{
+			LCD_Disappear_Picture(UIDP_LCD_VP_AUTO_RECOGNIZE);//非自动识别状态禁用识别区时隐藏0x1407，避免普通手柄继承旧按钮
+		}
+		/* 规格窗口或无识别能力状态下不显示等待结果和手动磨/刨图片，避免与规格数据重叠。 */
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_RESULT);
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BURR);
 		LCD_Disappear_Picture(UIDP_LCD_VP_TOOL_BLADE);

@@ -59,6 +59,9 @@
 #define RFID_QUEUE_LENGTH               4U    /* 队列保存少量屏幕/扫描层触发请求，避免按键抖动丢入口。 */
 #define RFID_FAST_ATTEMPTS              10U   /* 快速识别最多尝试 10 个任务周期，覆盖基座刚上线。 */
 #define RFID_NORMAL_ATTEMPTS            3U    /* 普通周期识别只尝试 3 次，避免空闲监测长期占用 RFID 串口。 */
+#define RFID_NORMAL_HARD_TIMEOUT_TICKS  5U    /* 普通请求最多占用 5 个 100ms 周期，保证半帧等待也有明确终态。 */
+#define RFID_FAST_HARD_TIMEOUT_TICKS    15U   /* 快速识别最多占用 15 个 100ms 周期，覆盖新刀具刚进入射频场的建立时间。 */
+#define RFID_PARTIAL_GRACE_TICKS        1U    /* 收到半帧后额外等待一个任务周期，避免新读命令打断剩余字节。 */
 #define RFID_DEBUG_BEEP_EVERY_UART_RESPONSE 0U /* 临时调试开关：1 表示当前 RFID 串口收到任意模块回包都蜂鸣，定位完成后关闭以避免影响业务调度。 */
 #define RFID_DEBUG_BEEP_EVERY_VALID_READ 0U   /* 有效帧调试蜂鸣关闭，蜂鸣只在缓存确认新刀具信息时触发。 */
 
@@ -67,6 +70,7 @@
 #else
 #define RFID_UART_PACKET_SIZE          UART3_MAX_PACKET_SIZE /* 当前 UART3/UART9 都是 150 字节，保持旧解析缓存容量不变。 */
 #endif
+#define RFID_RX_ACCUM_SIZE             (RFID_UART_PACKET_SIZE * 2U) /* 跨两个 DMA 批次累计接收，允许完整 EPC 帧跨越 100ms 任务边界。 */
 
 typedef struct
 {
@@ -75,6 +79,7 @@ typedef struct
     bool fast_mode;              /* true 使用快速识别尝试次数，false 使用普通监测尝试次数。 */
     RfidReadSource_t source;     /* 本次读取来源，最终协议只允许 EPC。 */
     uint16_t generation;         /* 请求入队时的通道代次，清刀具后旧代次请求会被丢弃。 */
+    uint16_t ticket;             /* 本次逻辑事务票据，供 handlescan 查询明确完成结果。 */
 } RFIDMessage_t;
 
 typedef struct
@@ -98,11 +103,24 @@ static RfidPayloadMemory_t s_payload_memory[2];      /* A/B 通道最近刀具 p
 static uint16_t s_result_sequence[2] = {0U, 0U};    /* A/B 通道成功结果序号，便于扫描层判断新结果。 */
 static uint16_t s_presence_sequence[2] = {0U, 0U};  /* A/B 通道有效读到标签的存在序号，在线监测用它判断刀具头是否仍可读到。 */
 static uint16_t s_request_generation[2] = {0U, 0U}; /* A/B 通道 RFID 请求代次，清刀具时递增以作废旧排队请求。 */
+static uint16_t s_next_ticket[2] = {0U, 0U};        /* A/B 通道独立生成非零事务票据，避免跨通道结果混用。 */
+static uint16_t s_outstanding_ticket[2] = {0U, 0U}; /* A/B 通道当前排队或执行中的逻辑事务票据。 */
+static uint16_t s_completed_ticket[2] = {0U, 0U};   /* A/B 通道最近一次进入终态的事务票据。 */
+static RfidRequestResult_t s_completed_result[2] = {RFID_REQUEST_RESULT_UNKNOWN, RFID_REQUEST_RESULT_UNKNOWN}; /* 保存最近票据的成功、超时或取消终态。 */
+static bool s_outstanding_valid[2] = {false, false}; /* true 表示该通道已有排队或执行事务，新请求必须合并而不能替换。 */
+static bool s_outstanding_fast_mode[2] = {false, false}; /* 记录合并事务是否需要快速识别语义。 */
 static bool s_request_active = false;               /* true 表示任务当前有一次未完成 RFID 请求。 */
 static uint8_t s_request_channel = CHANNEL_NONE;    /* 当前活动请求所属通道。 */
 static RfidReadSource_t s_request_source = RFID_READ_SOURCE_NONE; /* 当前活动请求读取来源，最终协议只允许 EPC。 */
 static uint8_t s_request_attempts_left = 0U;        /* 当前请求剩余发送次数，归零后任务停止本次请求。 */
 static bool s_request_fast_mode = false;            /* true 表示本次请求来自上线/重试快速识别，同标签也要让扫描层重新消费。 */
+static uint16_t s_request_ticket = 0U;               /* 当前活动逻辑事务票据，完成时只结算对应通道的调用方。 */
+static uint8_t s_request_elapsed_ticks = 0U;         /* 当前事务已经占用的 100ms 周期数，用于硬超时兜底。 */
+static uint8_t s_request_hard_timeout_ticks = 0U;    /* 当前事务普通或快速模式对应的最大占用周期。 */
+static uint8_t s_partial_grace_ticks = 0U;           /* 收到不完整数据后暂停补发命令的剩余周期。 */
+static uint8_t s_rx_accumulator[RFID_RX_ACCUM_SIZE]; /* 保存跨任务周期到达的 RFID 分片，直到组成合法完整帧。 */
+static uint16_t s_rx_accum_length = 0U;              /* 当前跨周期接收缓存中的有效字节数。 */
+static bool s_request_saw_rx_data = false;           /* true 表示本事务收到过串口数据，超时时用于区分无字节和非EPC异常。 */
 #if (RFID_LINK_STATS_ENABLE == 1U)
 static RfidLinkStatistics_t s_link_statistics[2];   /* A/B 通道请求应答、在线监测和确认掉线累计值。 */
 static bool s_link_response_pending[2] = {false, false}; /* true 表示该通道最近一条读取命令尚未收到有效回包。 */
@@ -133,6 +151,114 @@ static bool Rfid_ChannelToIndex(uint8_t channel, uint8_t *index)
     }
 
     return false; /* 非 A/B 通道不允许发起或保存 RFID 结果。 */
+}
+
+/*
+ * 函数功能：清空当前逻辑事务的跨周期接收缓存。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Rfid_ResetReceiveAccumulator(void)
+{
+    memset(s_rx_accumulator, 0, sizeof(s_rx_accumulator)); /* 清除旧事务残留字节，防止晚到数据被下一把刀具误用。 */
+    s_rx_accum_length = 0U; /* 新事务从空接收缓存开始拼帧。 */
+    s_partial_grace_ticks = 0U; /* 清除半帧等待状态，下一事务按正常发送节拍启动。 */
+    s_request_saw_rx_data = false; /* 新事务尚未收到任何串口字节。 */
+}
+
+/*
+ * 函数功能：把本周期 DMA 字节追加到逻辑事务缓存，允许一帧跨越多个 100ms 周期。
+ * 输入参数：data 为本周期字节；length 为有效长度。
+ * 返回参数：无。
+ */
+static void Rfid_AppendReceiveData(const uint8_t *data, uint16_t length)
+{
+    uint16_t overflow_length; /* 保存缓存溢出时需要丢弃的最旧字节数。 */
+
+    if ((data == NULL) || (length == 0U))
+    {
+        return; /* 本周期没有新字节时保留既有半帧，等待后续 DMA 数据。 */
+    }
+
+    s_request_saw_rx_data = true; /* 记录事务收到过数据，超时诊断可区分无响应和非EPC异常。 */
+    s_partial_grace_ticks = RFID_PARTIAL_GRACE_TICKS; /* 半帧到达后暂停一次补发，避免新命令打断剩余字节。 */
+    if (length >= (uint16_t)sizeof(s_rx_accumulator))
+    {
+        memcpy(s_rx_accumulator,
+               &data[length - (uint16_t)sizeof(s_rx_accumulator)],
+               sizeof(s_rx_accumulator)); /* 单次数据过长时只保留尾部，帧解析器仍可从其中寻找最后一帧。 */
+        s_rx_accum_length = (uint16_t)sizeof(s_rx_accumulator); /* 标记整个累计缓存均为有效数据。 */
+        return; /* 超长批次已经完整覆盖旧缓存，不再执行普通追加。 */
+    }
+
+    if ((uint16_t)(s_rx_accum_length + length) > (uint16_t)sizeof(s_rx_accumulator))
+    {
+        overflow_length = (uint16_t)(s_rx_accum_length + length - (uint16_t)sizeof(s_rx_accumulator)); /* 计算追加后超出的最旧数据长度。 */
+        memmove(s_rx_accumulator,
+                &s_rx_accumulator[overflow_length],
+                (size_t)(s_rx_accum_length - overflow_length)); /* 仅移走最旧噪声，保留最接近当前时刻的可能帧头。 */
+        s_rx_accum_length = (uint16_t)(s_rx_accum_length - overflow_length); /* 更新移动后保留的有效长度。 */
+    }
+
+    memcpy(&s_rx_accumulator[s_rx_accum_length], data, length); /* 把本周期分片接到上一周期半帧之后。 */
+    s_rx_accum_length = (uint16_t)(s_rx_accum_length + length); /* 更新完整累计长度，供协议解析器一次扫描。 */
+}
+
+/*
+ * 函数功能：把指定通道事务票据写成明确终态。
+ * 输入参数：channel 为 A/B 通道；ticket 为事务票据；result 为成功、超时或取消。
+ * 返回参数：无。
+ */
+static void Rfid_CompleteTicket(uint8_t channel, uint16_t ticket, RfidRequestResult_t result)
+{
+    uint8_t index; /* 保存事务所属通道的数组下标。 */
+
+    if ((ticket == 0U) || (Rfid_ChannelToIndex(channel, &index) == false))
+    {
+        return; /* 无效票据或通道没有可结算对象。 */
+    }
+
+    if ((s_outstanding_valid[index] == false) || (s_outstanding_ticket[index] != ticket))
+    {
+        return; /* 过期事务不得覆盖该通道后续请求的完成结果。 */
+    }
+
+    s_completed_ticket[index] = ticket; /* 保存调用方查询所需的终态票据。 */
+    s_completed_result[index] = result; /* 保存本事务明确成功、超时或取消的结论。 */
+    s_outstanding_valid[index] = false; /* 终态产生后允许该通道提交下一事务。 */
+    s_outstanding_fast_mode[index] = false; /* 清除合并请求的快速识别语义。 */
+}
+
+/*
+ * 函数功能：清理当前活动事务的运行字段和跨周期接收缓存。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Rfid_ResetActiveRequest(void)
+{
+    s_request_active = false; /* 当前硬件事务结束，下一周期才允许出队下一条。 */
+    s_request_channel = CHANNEL_NONE; /* 清除活动通道，晚到回包不再有合法归属。 */
+    s_request_source = RFID_READ_SOURCE_NONE; /* 清除协议来源，防止空闲周期误解析。 */
+    s_request_attempts_left = 0U; /* 清除剩余发送次数。 */
+    s_request_fast_mode = false; /* 清除快速识别语义，下一事务独立决定。 */
+    s_request_ticket = 0U; /* 清除活动票据，避免重复结算。 */
+    s_request_elapsed_ticks = 0U; /* 清除硬超时计时。 */
+    s_request_hard_timeout_ticks = 0U; /* 清除当前事务超时上限。 */
+    Rfid_ResetReceiveAccumulator(); /* 丢弃已完成事务的帧和噪声，不污染下一事务。 */
+}
+
+/*
+ * 函数功能：结算并清理当前活动 RFID 逻辑事务。
+ * 输入参数：result 为本事务成功、超时或取消终态。
+ * 返回参数：无。
+ */
+static void Rfid_CompleteActiveRequest(RfidRequestResult_t result)
+{
+    uint8_t channel = s_request_channel; /* 在清理活动状态前保存事务通道。 */
+    uint16_t ticket = s_request_ticket; /* 在清理活动状态前保存事务票据。 */
+
+    Rfid_ResetActiveRequest(); /* 先释放硬件事务，下一周期可以处理队列中的另一通道。 */
+    Rfid_CompleteTicket(channel, ticket, result); /* 再向 handlescan 发布对应票据的明确终态。 */
 }
 
 /*
@@ -607,63 +733,55 @@ static void Rfid_ReceiveRequestMessage(void)
     RFIDMessage_t msg; /* 临时保存队列中的一次 RFID 请求。 */
     uint8_t index; /* 保存本次请求通道对应的代次数组下标。 */
 
-    if (RFIDMsgQueue == NULL)
+    if ((RFIDMsgQueue == NULL) || (s_request_active != false))
     {
-        return; /* 队列未初始化时不能接收请求。 */
+        return; /* 活动事务完成前不出队下一条，避免新请求替换事务并清空正在到达的新刀具回包。 */
     }
 
     if (Kernel_QueueReceive(RFIDMsgQueue, &msg, 0) != pdTRUE)
     {
-        return; /* 本周期无新请求，继续处理已有活动请求。 */
+        return; /* 本周期无排队请求，保持 RFID 硬件空闲。 */
     }
 
     if (msg.start == false)
     {
-        Rfid_LinkStatsCancelPending(s_request_channel); /* 外部停止属于业务主动取消，不把未完成命令计为射频丢失。 */
-        s_request_active = false; /* 停止请求用于兼容旧 down 接口和运行态暂停。 */
-        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉来源，避免下周期误发命令。 */
-        s_request_channel = CHANNEL_NONE; /* 清掉通道归属，避免旧结果串通道。 */
-        s_request_attempts_left = 0U; /* 清掉剩余尝试次数。 */
-        s_request_fast_mode = false; /* 停止请求后清掉快速识别标志，避免影响下一次普通周期读取。 */
-        return; /* 停止消息处理完毕。 */
+        if (Rfid_ChannelToIndex(msg.channel, &index) != false)
+        {
+            Rfid_CompleteTicket(msg.channel, s_outstanding_ticket[index], RFID_REQUEST_RESULT_CANCELED); /* 空闲期停止消息只取消对应通道排队事务。 */
+        }
+        return; /* 停止消息不得影响另一通道的活动或排队事务。 */
     }
 
     if ((Rfid_IsSourceValid(msg.source) == false) ||
         (Rfid_ChannelToIndex(msg.channel, &index) == false))
     {
-        Rfid_LinkStatsCancelPending(s_request_channel); /* 无效新消息终止旧活动请求时只清等待状态，不制造丢包。 */
-        s_request_active = false; /* 无效请求不进入活动状态，避免当前 RFID 串口发错命令。 */
-        s_request_channel = CHANNEL_NONE; /* 无效通道清零。 */
-        s_request_source = RFID_READ_SOURCE_NONE; /* 无效来源清零。 */
-        s_request_attempts_left = 0U; /* 无效请求不尝试。 */
-        s_request_fast_mode = false; /* 无效请求不能保留快速识别状态。 */
-        return; /* 无效消息处理完毕。 */
+        Rfid_CompleteTicket(msg.channel, msg.ticket, RFID_REQUEST_RESULT_CANCELED); /* 无效请求形成取消终态，调用方不能把它累计为射频缺失。 */
+        return; /* 无效消息不切换硬件通道。 */
     }
 
     if (msg.generation != s_request_generation[index])
     {
-        return; /* 清刀具前排队的旧代次请求直接丢弃，避免旧读命令重新复活刀具信息。 */
+        Rfid_CompleteTicket(msg.channel, msg.ticket, RFID_REQUEST_RESULT_CANCELED); /* 清刀具前排队的旧代次请求只结算取消。 */
+        return; /* 旧代次不能重新启动 RFID 读取。 */
     }
 
     if (Rfid_IsRequestAllowed(msg.channel) == false)
     {
-        Rfid_LinkStatsCancelPending(s_request_channel); /* 当前业务状态拒绝请求时，不把旧请求取消误记为硬件丢包。 */
-        s_request_active = false; /* 当前运行状态或选中通道不允许读取时，取消本次出队请求。 */
-        s_request_channel = CHANNEL_NONE; /* 清掉请求通道，避免后续 RFID 回包被误认为属于旧通道。 */
-        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下周期按旧协议发命令。 */
-        s_request_attempts_left = 0U; /* 禁止请求继续消耗 RFID 发送次数。 */
-        s_request_fast_mode = false; /* 清掉快速识别状态，避免影响下一次合法请求。 */
-        return; /* 非法状态下不切换 R200-K8，也不启动 RFID 读取。 */
+        Rfid_CompleteTicket(msg.channel, msg.ticket, RFID_REQUEST_RESULT_CANCELED); /* 运行或模式门禁拒绝属于业务取消。 */
+        return; /* 非法状态下不切换 R200-K8，也不访问串口。 */
     }
 
-    Rfid_LinkStatsCancelPending(s_request_channel); /* 合法新请求替换旧请求前先取消旧等待，避免跨通道错误结算。 */
-    Rfid_SelectHardwareChannel(msg.channel); /* 出队后按请求通道切 R200-K8，保证后续读命令进入正确手柄通道。 */
-    s_request_channel = msg.channel; /* 保存请求通道，解析成功后写回同通道缓存。 */
-    s_request_source = msg.source; /* 保存本次应读取的来源，当前只允许 EPC。 */
-    s_request_attempts_left = msg.fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* 快速/普通识别使用不同尝试次数。 */
-    s_request_fast_mode = msg.fast_mode; /* 保存本次请求模式，决定同标签回包是否刷新序号。 */
-    Rfid_ClearChannelUartData(s_request_channel); /* 新请求开始前按通道清理串口缓存，防止旧标签回包被重新识别。 */
-    s_request_active = true; /* 标记任务从本周期开始处理本次 RFID 请求。 */
+    Rfid_SelectHardwareChannel(msg.channel); /* 只在事务真正启动时切换目标 RFID 模块。 */
+    s_request_channel = msg.channel; /* 保存活动事务通道，解析成功后只写回同侧缓存。 */
+    s_request_source = msg.source; /* 保存活动事务协议来源。 */
+    s_request_ticket = msg.ticket; /* 保存逻辑事务票据，完成时发布明确结果。 */
+    s_request_fast_mode = (bool)(msg.fast_mode || s_outstanding_fast_mode[index]); /* 同通道合并请求可把普通事务升级为快速识别。 */
+    s_request_attempts_left = s_request_fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* 按最终合并模式设置发送预算。 */
+    s_request_hard_timeout_ticks = s_request_fast_mode ? RFID_FAST_HARD_TIMEOUT_TICKS : RFID_NORMAL_HARD_TIMEOUT_TICKS; /* 设置独立硬超时防止半帧长期占用。 */
+    s_request_elapsed_ticks = 0U; /* 新事务从第一个 100ms 周期开始计时。 */
+    Rfid_ClearChannelUartData(s_request_channel); /* 只在事务起点清一次物理 DMA，活动过程中不再因普通请求清空半帧。 */
+    Rfid_ResetReceiveAccumulator(); /* 新事务使用独立跨周期接收缓存。 */
+    s_request_active = true; /* 标记硬件事务正式启动，完成前下一条请求只能等待。 */
 }
 
 /*
@@ -683,69 +801,80 @@ static void RFIDQueue_Init(void)
  */
 static void SplitType_AutoModeGetData_Task(void)
 {
-    uint16_t rlen;                                      /* 保存本周期从当前 RFID 串口 DMA 取到的字节数。 */
-    uint8_t dat[RFID_UART_PACKET_SIZE] = {0U};          /* 临时接收缓冲，取出后对应通道 DMA 会被串口驱动复位。 */
-    RfidToolResult_t parsed_result;                     /* 保存本周期解析出的标签结果。 */
+    uint16_t rlen; /* 保存本周期从当前 RFID 串口 DMA 取到的字节数。 */
+    uint8_t dat[RFID_UART_PACKET_SIZE] = {0U}; /* 临时接收本周期新字节，随后追加到事务缓存。 */
+    RfidToolResult_t parsed_result; /* 保存跨周期缓存中解析出的完整标签。 */
 
-    Rfid_ReceiveRequestMessage(); /* 先处理新请求，让屏幕键或 handlescan 能立即切换读取来源。 */
-
+    Rfid_ReceiveRequestMessage(); /* 只有硬件空闲时才从队列启动下一事务。 */
     if (s_request_active == false)
     {
-        return; /* 没有活动请求时不占用 RFID 串口。 */
+        return; /* 没有活动事务时不占用 RFID 串口。 */
     }
 
     if (WorkMessage.runflag_work == true)
     {
-        Rfid_LinkStatsCancelPending(s_request_channel); /* 电机启动导致的安全中止不是射频丢包，只取消当前等待。 */
-        s_request_active = false; /* 电机运行中停止当前请求，确保运行态不发送也不解析 RFID。 */
-        s_request_attempts_left = 0U; /* 清空剩余尝试次数，运行结束后由 handlescan 重新请求。 */
-        s_request_fast_mode = false; /* 运行中取消识别时清掉请求模式，防止停止后误刷新序号。 */
+        Rfid_LinkStatsCancelPending(s_request_channel); /* 电机启动属于业务安全取消，不记作射频丢包。 */
+        Rfid_ClearChannelUartData(s_request_channel); /* 丢弃运行前晚到字节，避免停机后误识别。 */
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_CANCELED); /* 向请求方发布取消终态并释放硬件事务。 */
         return; /* 运行态禁止继续访问 RFID 模块。 */
     }
 
     if (Rfid_IsRequestAllowed(s_request_channel) == false)
     {
-        Rfid_LinkStatsCancelPending(s_request_channel); /* 通道选择变化属于业务取消，不计入链路丢失。 */
-        s_request_active = false; /* 通道选择变化后当前请求失效，停止识别以免非选中通道刷新刀具信息。 */
-        Rfid_ClearChannelUartData(s_request_channel); /* 活动请求失效时先清原通道串口，避免晚到回包污染下一次请求。 */
-        s_request_channel = CHANNEL_NONE; /* 清掉活动通道，避免晚到回包写入错误 A/B 缓存。 */
-        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下一周期误按旧来源解析。 */
-        s_request_attempts_left = 0U; /* 禁止继续发送 RFID 命令，等待扫描层按当前通道重新发起请求。 */
-        s_request_fast_mode = false; /* 清掉快速识别标志，避免后续合法请求继承旧状态。 */
-        return; /* 当前选中通道不允许读取时直接退出。 */
+        Rfid_LinkStatsCancelPending(s_request_channel); /* 通道或模式变化属于业务取消，不计链路丢失。 */
+        Rfid_ClearChannelUartData(s_request_channel); /* 清原通道晚到回包，避免污染下一事务。 */
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_CANCELED); /* 完成取消后下一周期才能处理另一通道。 */
+        return; /* 当前状态不允许继续识别。 */
     }
 
-    rlen = Rfid_PeekChannelUartData(s_request_channel, dat); /* 电机未运行时才取 DMA 数据，避免运行态处理新 RFID 结果。 */
-    if (rlen >= RFID_FRAME_MIN_SIZE)
+    if (s_request_elapsed_ticks < 0xFFU)
+    {
+        ++s_request_elapsed_ticks; /* 每个 100ms 周期只累计一次硬超时计数。 */
+    }
+
+    rlen = Rfid_PeekChannelUartData(s_request_channel, dat); /* 取出本周期 DMA 新字节，物理缓冲复位不影响逻辑累计缓存。 */
+    if (rlen > 0U)
     {
 #if (RFID_DEBUG_BEEP_EVERY_UART_RESPONSE == 1U)
-        SendKeyBeepMessage(1U); /* 调试阶段只要收到 RFID 模块回包就蜂鸣，便于区分“模块无响应”和“模块回错误帧”。 */
+        SendKeyBeepMessage(1U); /* 调试开关启用时，任意模块字节到达都蜂鸣。 */
 #endif
-        if (Rfid_ParseReceivedFrame(dat, rlen, s_request_source, &parsed_result) == true)
-        {
-            Rfid_LinkStatsRecordValidResponse(s_request_channel); /* 协议校验通过后结算最近一条读取命令为成功。 */
-            parsed_result.channel = s_request_channel; /* 解析函数只负责协议，通道归属由当前请求补齐。 */
-            (void)Rfid_UpdateParsedCache(&parsed_result); /* RFID 任务只维护标签缓存；是否蜂鸣由 handlescan 在刀具信息真正装载或变化后统一判断，避免同一标签重复回包一直响。 */
-            s_request_active = false; /* 单次请求读到结果后结束，周期读取由 handlescan 下一轮再发起。 */
-            s_request_attempts_left = 0U; /* 清空尝试次数，避免成功后继续发命令。 */
-            s_request_fast_mode = false; /* 成功处理后清掉快速识别标志，下一次请求重新决定行为。 */
-            return; /* 本周期已处理成功结果。 */
-        }
-
-        Rfid_LinkStatsRecordInvalidFrame(s_request_channel); /* 收到数据但没有有效 EPC 帧时单独累计异常接收。 */
+        Rfid_AppendReceiveData(dat, rlen); /* 把短帧或半帧追加到跨周期缓存，不立即判定失败。 */
     }
 
-    if (s_request_attempts_left == 0U)
+    if ((s_rx_accum_length >= RFID_FRAME_MIN_SIZE) &&
+        (Rfid_ParseReceivedFrame(s_rx_accumulator,
+                                 s_rx_accum_length,
+                                 s_request_source,
+                                 &parsed_result) == true))
     {
-        Rfid_LinkStatsRecordLostResponse(s_request_channel); /* 自然耗尽时结算最后一条未响应命令，避免统计少一次。 */
-        s_request_active = false; /* 尝试次数耗尽后结束本次请求，由扫描层决定是否重试或标记丢失。 */
-        s_request_fast_mode = false; /* 超时后清掉请求模式，避免后续普通请求继承快速识别语义。 */
-        return; /* 本次请求超时结束。 */
+        Rfid_LinkStatsRecordValidResponse(s_request_channel); /* 完整合法 EPC 结算最近一条读取命令成功。 */
+        parsed_result.channel = s_request_channel; /* 解析器只管协议，事务补齐 A/B 归属。 */
+        (void)Rfid_UpdateParsedCache(&parsed_result); /* 更新标签缓存；蜂鸣仍由 handlescan 按产品语义决定。 */
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_SUCCESS); /* 发布成功终态，在线监测此后才结算本轮。 */
+        return; /* 成功事务本周期结束。 */
     }
 
-    Rfid_SelectHardwareChannel(s_request_channel); /* 发读命令前再次确认 R200-K8 指向目标通道，避免排队期间通道被切走。 */
-    Rfid_SendReadCommand(s_request_channel, s_request_source); /* 未读到有效帧时发送下一次读命令。 */
-    s_request_attempts_left--; /* 每发送一条读取命令就消耗一次机会，确保普通3次和快速10次请求能够自然结束。 */
+    if ((s_request_elapsed_ticks >= s_request_hard_timeout_ticks) ||
+        ((s_request_attempts_left == 0U) && (s_partial_grace_ticks == 0U)))
+    {
+        Rfid_LinkStatsRecordLostResponse(s_request_channel); /* 超时只结算最后一条未响应读取命令。 */
+        if (s_request_saw_rx_data != false)
+        {
+            Rfid_LinkStatsRecordInvalidFrame(s_request_channel); /* 收到过字节但始终无完整 EPC 时只累计一次异常事务。 */
+        }
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_TIMEOUT); /* 明确超时后 handlescan 才允许累计一次缺失。 */
+        return; /* 超时事务本周期结束。 */
+    }
+
+    if (s_partial_grace_ticks > 0U)
+    {
+        --s_partial_grace_ticks; /* 半帧到达后空出一个周期等待剩余字节。 */
+        return; /* 等待期间不补发新读命令，避免模块应答相互穿插。 */
+    }
+
+    Rfid_SelectHardwareChannel(s_request_channel); /* 每次发命令前确认共享 R200-K8 仍指向目标通道。 */
+    Rfid_SendReadCommand(s_request_channel, s_request_source); /* 在无半帧等待时发送下一次 EPC 读取。 */
+    --s_request_attempts_left; /* 每次真实发送只消耗一次预算，活动事务不会被下一请求重置。 */
 }
 
 /*
@@ -812,64 +941,136 @@ void SscSplitTypeAutoModeGetData_Init(void)
  * 输入参数：channel 为 A/B 通道；source 为 EPC；fast_mode 为 true 时使用快速识别尝试次数。
  * 返回参数：true 表示请求已入队，false 表示队列未初始化或参数无效。
  */
-bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode)
+bool Rfid_RequestToolReadTracked(uint8_t channel,
+                                 RfidReadSource_t source,
+                                 bool fast_mode,
+                                 uint16_t *ticket)
 {
-    RFIDMessage_t msg; /* 保存要送入 RFID 任务队列的请求。 */
-    uint8_t index;     /* 仅用于校验通道是否有效。 */
+    RFIDMessage_t msg; /* 保存要送入 RFID 任务队列的逻辑事务。 */
+    uint8_t index; /* 保存 A/B 通道对应的票据数组下标。 */
+    uint16_t new_ticket; /* 保存本次新分配或合并返回的非零票据。 */
+
+    if (ticket != NULL)
+    {
+        *ticket = 0U; /* 失败路径默认不给调用方留下可查询的旧票据。 */
+    }
 
     if (RFIDMsgQueue == NULL)
     {
-        /* A 通道请求无法入队时立即发布 A 刀具离线，避免界面继续保留旧标签。 */
-        if(channel == CHANNEL_A)
+        if (channel == CHANNEL_A)
         {
-            SendKeyRFIDMessageAdown();
+            SendKeyRFIDMessageAdown(); /* 保留原A侧队列未初始化时的离线兼容行为。 */
         }
-        /* B 通道请求无法入队时只清 B 刀具状态，不能误影响 A 通道。 */
-        else if(channel == CHANNEL_B)
+        else if (channel == CHANNEL_B)
         {
-            SendKeyRFIDMessageBdown();
+            SendKeyRFIDMessageBdown(); /* 保留原B侧队列未初始化时的离线兼容行为。 */
         }
-      
-        return false; /* 队列未初始化时不能接受请求。 */
+        return false; /* 队列未初始化时不能创建逻辑事务。 */
     }
-    /*
-     * RFID 来源已经由 handlescan 按 EEPROM 第二页和协议选择：
-     * 公共接头 COMMON_SOCKET_ONLINES 与 PXBA/PXBB 分体式当前都走 EPC。
-     * 这里不能再用当前 WorkMessage.hand_model 做 PXBA-only 门禁，
-     * 因为公共接头基座刚上线时当前工作通道可能尚未装载到 WorkMessage。
-     */
+
     if ((Rfid_ChannelToIndex(channel, &index) == false) || (Rfid_IsSourceValid(source) == false))
     {
-       /* 无效请求属于 A 通道时发布 A 离线事件，使扫描状态与失败结果一致。 */
-       if(channel == CHANNEL_A)
+        if (channel == CHANNEL_A)
         {
-            SendKeyRFIDMessageAdown();
+            SendKeyRFIDMessageAdown(); /* 无效A侧请求沿用原离线兼容入口。 */
         }
-        /* 无效请求属于 B 通道时发布 B 离线事件，保持两路缓存独立。 */
-        else if(channel == CHANNEL_B)
+        else if (channel == CHANNEL_B)
         {
-            SendKeyRFIDMessageBdown();
+            SendKeyRFIDMessageBdown(); /* 无效B侧请求沿用原离线兼容入口。 */
         }
-        return false; /* 只有有效 A/B 通道和 EPC 来源才能发起读取。 */
+        return false; /* 只允许有效 A/B 通道和 EPC 来源。 */
     }
 
-    if (WorkMessage.runflag_work == true)
+    if ((WorkMessage.runflag_work == true) || (Rfid_IsRequestAllowed(channel) == false))
     {
-        return false; /* 电机运行中禁止新 RFID 请求入队，避免运行参数被新刀具信息覆盖。 */
+        return false; /* 运行或模式门禁期间不创建事务，避免运行参数被新标签覆盖。 */
     }
 
-    if (Rfid_IsRequestAllowed(channel) == false)
+    if (s_outstanding_valid[index] != false)
     {
-        return false; /* 当前运行状态或双手柄选中状态不允许读取，避免非目标通道刷新 RFID 刀具参数。 */
+        if (fast_mode != false)
+        {
+            s_outstanding_fast_mode[index] = true; /* 同通道重复请求只升级识别预算，不重复排队。 */
+            if ((s_request_active != false) && (s_request_channel == channel))
+            {
+                s_request_fast_mode = true; /* 活动普通事务被上线请求合并时同步升级当前语义。 */
+                s_request_attempts_left = RFID_FAST_ATTEMPTS; /* 为刚进入场区的新刀具补足快速读取机会。 */
+                s_request_hard_timeout_ticks = RFID_FAST_HARD_TIMEOUT_TICKS; /* 同步延长硬超时但仍保持明确上限。 */
+            }
+        }
+        if (ticket != NULL)
+        {
+            *ticket = s_outstanding_ticket[index]; /* 返回已有票据，调用方继续等待同一事务终态。 */
+        }
+        return true; /* 同通道排队或活动事务不可被普通启动请求替换。 */
     }
+
+    new_ticket = (uint16_t)(s_next_ticket[index] + 1U); /* 为该通道生成下一个事务票据。 */
+    if (new_ticket == 0U)
+    {
+        new_ticket = 1U; /* 票据回绕时跳过0，0固定表示无有效事务。 */
+    }
+    s_next_ticket[index] = new_ticket; /* 记录该通道最近分配值，A/B互不影响。 */
 
     msg.channel = channel; /* 保存请求通道。 */
-    msg.source = source; /* 保存读取来源，最终协议固定为 EPC。 */
-    msg.start = true; /* true 表示启动一次读取。 */
-    msg.fast_mode = fast_mode; /* 保存快速或普通识别模式。 */
-    msg.generation = s_request_generation[index]; /* 记录入队时的通道代次，清刀具后旧请求会被出队校验丢弃。 */
+    msg.source = source; /* 保存读取来源，当前协议固定为 EPC。 */
+    msg.start = true; /* true 表示启动一次逻辑事务。 */
+    msg.fast_mode = fast_mode; /* 保存普通或快速识别语义。 */
+    msg.generation = s_request_generation[index]; /* 记录入队代次，清刀具后旧消息会被取消。 */
+    msg.ticket = new_ticket; /* 队列消息携带票据，完成结果可以回到原调用方。 */
 
-    return (Kernel_QueueSend(RFIDMsgQueue, &msg, pdMS_TO_TICKS(0)) == pdTRUE); /* 入队成功才表示请求被任务接收。 */
+    s_outstanding_valid[index] = true; /* 入队前占住本通道事务槽，防止并发重复排队。 */
+    s_outstanding_ticket[index] = new_ticket; /* 保存排队或活动事务票据。 */
+    s_outstanding_fast_mode[index] = fast_mode; /* 保存合并时需要继承的快速识别语义。 */
+    if (Kernel_QueueSend(RFIDMsgQueue, &msg, pdMS_TO_TICKS(0)) != pdTRUE)
+    {
+        s_outstanding_valid[index] = false; /* 队列满时回滚事务槽，允许后续周期重试。 */
+        s_outstanding_fast_mode[index] = false; /* 回滚尚未入队的快速语义。 */
+        return false; /* 未入队的请求没有可查询终态。 */
+    }
+
+    if (ticket != NULL)
+    {
+        *ticket = new_ticket; /* 入队成功后向调用方返回唯一事务票据。 */
+    }
+    return true; /* 请求已排队，活动事务结束后按FIFO执行。 */
+}
+
+/*
+ * 函数功能：兼容原有无票据 RFID 刀具读取接口。
+ * 输入参数：channel 为 A/B 通道；source 为 EPC；fast_mode 选择普通或快速识别。
+ * 返回参数：true 表示请求已排队或合并，false 表示当前不能请求。
+ */
+bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode)
+{
+    return Rfid_RequestToolReadTracked(channel, source, fast_mode, NULL); /* 旧调用复用同一不可抢占事务入口。 */
+}
+
+/*
+ * 函数功能：按通道和票据查询 RFID 逻辑事务完成状态。
+ * 输入参数：channel 为 A/B 通道；ticket 为提交时返回的非零票据。
+ * 返回参数：PENDING、SUCCESS、TIMEOUT、CANCELED 或 UNKNOWN。
+ */
+RfidRequestResult_t Rfid_QueryRequestResult(uint8_t channel, uint16_t ticket)
+{
+    uint8_t index; /* 保存查询通道对应的事务数组下标。 */
+
+    if ((ticket == 0U) || (Rfid_ChannelToIndex(channel, &index) == false))
+    {
+        return RFID_REQUEST_RESULT_UNKNOWN; /* 无效通道或0票据不能用于累计缺失。 */
+    }
+
+    if ((s_outstanding_valid[index] != false) && (s_outstanding_ticket[index] == ticket))
+    {
+        return RFID_REQUEST_RESULT_PENDING; /* 排队和活动阶段都必须继续等待，不能提前计缺失。 */
+    }
+
+    if (s_completed_ticket[index] == ticket)
+    {
+        return s_completed_result[index]; /* 返回该票据最近发布的明确终态。 */
+    }
+
+    return RFID_REQUEST_RESULT_UNKNOWN; /* 票据已过期或从未存在时不推断成功或失败。 */
 }
 
 /*
@@ -1091,15 +1292,16 @@ void Rfid_ClearChannelResult(uint8_t channel)
     if ((s_request_active != false) && (s_request_channel == channel))
     {
         Rfid_LinkStatsCancelPending(channel); /* 清刀具属于业务主动复位，不把取消中的命令记为链路丢失。 */
-        s_request_active = false; /* 清刀具时同步取消该通道未完成读取，避免丢失判定后晚到回包复活旧刀具。 */
-        Rfid_ClearChannelUartData(channel); /* 清刀具时按目标通道丢弃晚到回包，防止旧标签重新上报。 */
-        s_request_channel = CHANNEL_NONE; /* 清掉活动请求通道，后续回包没有合法归属。 */
-        s_request_source = RFID_READ_SOURCE_NONE; /* 清掉读取来源，避免下一周期误按旧来源解析。 */
-        s_request_attempts_left = 0U; /* 清掉剩余发送次数，停止本次识别尝试。 */
-        s_request_fast_mode = false; /* 清掉快速识别标志，避免影响后续普通在线监测。 */
+        Rfid_ClearChannelUartData(channel); /* 丢弃活动事务晚到字节，防止旧标签重新上报。 */
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_CANCELED); /* 发布取消终态并完整释放活动事务及累计半帧。 */
+    }
+    else if (s_outstanding_valid[index] != false)
+    {
+        Rfid_CompleteTicket(channel,
+                            s_outstanding_ticket[index],
+                            RFID_REQUEST_RESULT_CANCELED); /* 取消尚未启动的排队事务，调用方不得把它累计为射频缺失。 */
     }
 }
-
 /*
  * 函数功能：把旧接口 rfid_data 转成当前工程统一使用的 EPC 来源。
  * 输入参数：rfid_data 为旧屏/旧业务传入值，保留形参仅兼容旧函数签名。
@@ -1130,6 +1332,7 @@ void SendKeyRFIDMessageAup(uint8_t rfid_data)
 void SendKeyRFIDMessageAdown(void)
 {
     RFIDMessage_t msg; /* 停止消息用于兼容旧接口。 */
+    uint8_t index = 0U; /* A 通道固定使用事务数组第 0 项。 */
 
     if (RFIDMsgQueue == NULL)
     {
@@ -1140,6 +1343,8 @@ void SendKeyRFIDMessageAdown(void)
     msg.source = RFID_READ_SOURCE_NONE; /* 停止消息不需要来源。 */
     msg.start = false; /* false 表示停止当前活动请求。 */
     msg.fast_mode = false; /* 停止消息不使用快速模式。 */
+    msg.generation = s_request_generation[index]; /* 带上当前代次，避免结构体未初始化字节进入队列。 */
+    msg.ticket = s_outstanding_valid[index] ? s_outstanding_ticket[index] : 0U; /* 有待处理事务时记录对应票据，否则明确为无票据。 */
     (void)Kernel_QueueSend(RFIDMsgQueue, &msg, pdMS_TO_TICKS(0)); /* 停止失败也不影响主流程。 */
 }
 
@@ -1161,6 +1366,7 @@ void SendKeyRFIDMessageBup(uint8_t rfid_data)
 void SendKeyRFIDMessageBdown(void)
 {
     RFIDMessage_t msg; /* 停止消息用于兼容旧接口。 */
+    uint8_t index = 1U; /* B 通道固定使用事务数组第 1 项。 */
 
     if (RFIDMsgQueue == NULL)
     {
@@ -1171,6 +1377,8 @@ void SendKeyRFIDMessageBdown(void)
     msg.source = RFID_READ_SOURCE_NONE; /* 停止消息不需要来源。 */
     msg.start = false; /* false 表示停止当前活动请求。 */
     msg.fast_mode = false; /* 停止消息不使用快速模式。 */
+    msg.generation = s_request_generation[index]; /* 带上当前代次，避免结构体未初始化字节进入队列。 */
+    msg.ticket = s_outstanding_valid[index] ? s_outstanding_ticket[index] : 0U; /* 有待处理事务时记录对应票据，否则明确为无票据。 */
     (void)Kernel_QueueSend(RFIDMsgQueue, &msg, pdMS_TO_TICKS(0)); /* 停止失败也不影响主流程。 */
 }
 

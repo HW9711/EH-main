@@ -403,8 +403,26 @@ void AutoIdentifyActive(uint8_t key_value)
 		return;
 	}
 
+	if (Pubinterface_IsPlanerCapabilityTool(WorkMessage.tool_type) != false) /* 自动等待期间继续保留当前手动刨刀能力，避免尚无标签时失去可运行方向。 */
+	{
+		Handle_ApplyManualRuntime(current_channel,
+								  memory,
+								  PLANER,
+								  OSCDIR,
+								  30000U); /* 进入自动等待前重新读取基座 EEPROM；若等待期间启动，刨刀按 EEPROM 倍率、速度和保护参数运行。 */
+	}
+	else
+	{
+		Handle_ApplyManualRuntime(current_channel,
+								  memory,
+								  GRINDH,
+								  ZZDIR,
+								  60000U); /* 当前手动模式不是刨刀时保留磨头能力，等待 RFID 结果前仍使用基座 EEPROM 参数。 */
+	}
+
 	WorkMessage.auto_identify = 1U; /* 从手动模式切到自动模式，当前工作态进入 RFID 自动识别。 */
 	memory->auto_identify = 1U; /* 通道记忆同步保存自动模式，切换通道后仍能按自动识别界面显示。 */
+	Handlescan_PrepareSplitAutoIdentify(current_channel); /* 复位本通道旧 RFID 监测游标，保证反复切换模式后首个标签结果仍能被消费。 */
 	if (current_channel == CHANNEL_A) /* 新一轮 A 自动识别开始前清除 A 的历史图标。 */
 	{
 		Pubinterface_SetLastRfidToolType(CHANNEL_A, 0U); /* 用户主动重新进入自动识别时，从等待状态开始显示 63，不沿用上一次离线图标。 */

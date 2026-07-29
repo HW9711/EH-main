@@ -21,6 +21,15 @@ typedef enum
     RFID_READ_SOURCE_EPC = 1U   /* 公共接头和 PXBA/PXBB 可拆手柄统一读取 EPC 区。 */
 } RfidReadSource_t;
 
+typedef enum
+{
+    RFID_REQUEST_RESULT_UNKNOWN = 0U,  /* 请求票据不存在或已经被后续请求覆盖，调用方不能据此累计缺失。 */
+    RFID_REQUEST_RESULT_PENDING,       /* 请求已经入队或正在执行，handlescan 必须继续等待明确终态。 */
+    RFID_REQUEST_RESULT_SUCCESS,       /* 请求已经收到并解析出完整合法 EPC。 */
+    RFID_REQUEST_RESULT_TIMEOUT,       /* 请求在限定尝试次数和硬超时内没有取得合法 EPC。 */
+    RFID_REQUEST_RESULT_CANCELED       /* 请求因运行、模式、通道或代次变化被业务取消，不属于射频缺失。 */
+} RfidRequestResult_t;
+
 typedef struct
 {
     bool valid;                                      /* true 表示本结构保存了一次校验通过的 RFID 标签结果。 */
@@ -41,13 +50,18 @@ typedef struct
     uint32_t lost_response_count;                    /* 下一条命令发送前仍未收到有效回包的已完成请求总数。 */
     uint32_t monitor_completion_count;               /* handlescan 在线监测已得到成功或未响应结论的累计次数。 */
     uint16_t invalid_frame_count;                    /* 收到数据但没有解析出有效 EPC 帧的异常批次总数，饱和后保持 65535。 */
-    uint16_t confirmed_dropout_count;                /* 按现有缺失时间阈值确认并蜂鸣的 RFID 刀具掉线次数。 */
+    uint16_t confirmed_dropout_count;                /* 按现有缺失时间阈值确认的 RFID 刀具掉线次数，仅用于诊断统计。 */
 } RfidLinkStatistics_t;
 
 void SscSplitTypeAutoModeGetData_Init(void);
 void SscRadioFreq_Init(void);
 
 bool Rfid_RequestToolRead(uint8_t channel, RfidReadSource_t source, bool fast_mode);
+bool Rfid_RequestToolReadTracked(uint8_t channel,
+                                 RfidReadSource_t source,
+                                 bool fast_mode,
+                                 uint16_t *ticket);
+RfidRequestResult_t Rfid_QueryRequestResult(uint8_t channel, uint16_t ticket);
 bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result);
 bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics);
 void Rfid_RecordMonitorCompletion(uint8_t channel);
