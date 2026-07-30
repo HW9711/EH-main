@@ -26,7 +26,7 @@
 #define RFID_TX_POWER_15_DBM_X100       1500U  /* 15dBm，对应模块协议功率值 1500。 */
 
 /* 修改下面这一项即可切换 RFID 地区频段；当前产品配置由该宏唯一决定。 */
-#define RFID_REGION_SELECT              RFID_REGION_US
+#define RFID_REGION_SELECT              RFID_REGION_CHINA_920
 
 /* 修改下面这一项即可切换 RFID 发射功率；默认保持重构前实际使用的 10dBm。 */
 #define RFID_TX_POWER_SELECT            RFID_TX_POWER_10_DBM_X100
@@ -92,6 +92,7 @@ typedef struct
 
 static uint8_t NO_MASK3_WRITE_EPC[7] = {0XBB, 0X00, 0X22, 0X00, 0X00, 0X22, 0X7E}; /* 无掩码读取 EPC 区。 */
 static unsigned char hop_ch[] = {0XBB, 0X00, 0XAD, 0X00, 0X01, 0XFF, 0XAD, 0X7E}; /* 开启跳频，保持现有射频初始化流程。 */
+static uint8_t rfid_stability_command[] = {0xBBU, 0x00U, 0xF0U, 0x00U, 0x04U, 0x03U, 0x06U, 0x02U, 0x80U, 0x7FU, 0x7EU}; /* 厂家稳定性参数指令，用于降低接收噪声影响；A/B模块均须在其它射频配置前执行。 */
 static uint8_t rfid_tx_power_command[] = {0xBBU, 0x00U, 0xB6U, 0x00U, 0x02U, RFID_TX_POWER_HIGH_BYTE, RFID_TX_POWER_LOW_BYTE, RFID_TX_POWER_COMMAND_CHECKSUM, 0x7EU}; /* 根据功率选择宏生成唯一命令，避免未选功率数组产生编译告警。 */
 static uint8_t region_set_command[] = {0xBBU, 0x00U, 0x07U, 0x00U, 0x01U, RFID_REGION_SELECT, RFID_REGION_COMMAND_CHECKSUM, 0x7EU}; /* 根据上方地区配置生成唯一一条有效区域命令，避免未选地区数组产生告警。 */
 
@@ -895,6 +896,8 @@ static void AUTOMODEGETDATATaskFunc(uint32_t event)
  */
 static void Rfid_InitModuleOnChannel(uint8_t channel)
 {
+    Rfid_SendPacketForChannel(channel, rfid_stability_command, (uint16_t)sizeof(rfid_stability_command)); /* 每个物理模块先应用厂家稳定性参数，降低噪声导致的偶发识别掉线。 */
+    Delay_ms(50); /* 等待模块保存并应用稳定性参数，避免后续功率命令与本帧粘连。 */
     Rfid_SendPacketForChannel(channel, rfid_tx_power_command, (uint16_t)sizeof(rfid_tx_power_command)); /* 按通道发送当前选定功率，保证 A/B 模块使用同一配置。 */
     Delay_ms(50); /* 等待 RFID 模块处理功率命令，避免连续命令粘连。 */
 

@@ -224,6 +224,7 @@ typedef struct
     HandlescanDebounce debounce;                             /* 插入和拔出去抖计数，单位都是 10ms 扫描周期。 */
     uint8_t verify_start_wait_ticks;                         /* 插入稳定后、开始 EEPROM 认证前的等待计数。 */
     uint8_t last_alarm;                                     /* 本通道最近一次手柄认证报警码，用于恢复或拔出时清报警。 */
+    volatile uint8_t verify_alarm_close_pending;             /* 最后一项校验报警已清除时置 1，等待插拔任务完成 UI 队列复位后补发关窗。 */
     uint8_t verify_retry_count;                              /* 当前认证连续失败次数，达到上限后进入最终失败保持态。 */
     uint16_t verify_retry_wait_ticks;                        /* 认证失败后的重试等待计数，也用于最终失败态的低频自恢复。 */
     uint8_t info_buf[HANDLESCAN_INFO_SIZE];                  /* EEPROM Page2 手柄身份缓存，保存主型号和子型号。 */
@@ -355,6 +356,29 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
     }
 
     return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
+}
+
+/*
+ * 函数功能：消费指定通道在校验失败手柄拔出后产生的报警关窗请求。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B，用于选择对应扫描上下文。
+ * 返回参数：true 表示需要在无手柄 UI 队列复位后补发关窗；false 表示没有待处理请求。
+ */
+bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 按事件通道读取同一侧扫描上下文，避免 A/B 关窗请求串用。 */
+
+    if (binding == NULL)
+    {
+        return false;                                        /* 非 A/B 通道没有合法扫描状态，不能消费任意一侧请求。 */
+    }
+
+    if (binding->context->verify_alarm_close_pending == 0U)
+    {
+        return false;                                        /* 本通道没有被队列复位影响的校验报警关窗请求。 */
+    }
+
+    binding->context->verify_alarm_close_pending = 0U;       /* 请求只允许消费一次，避免后续普通拔出重复关闭其它报警图。 */
+    return true;                                             /* 通知插拔任务在全部清屏动作完成后重新发送关闭命令。 */
 }
 
 /* 运行中另一路手柄校验失败时，屏幕提示只保持 3 秒，不写 WorkMessage，避免影响当前工作通道。 */
@@ -2458,6 +2482,7 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
       binding->context; /* 所有拔出计数只写本通道上下文。 */
   uint32_t *spec_values =
       binding->spec_values; /* 离线时只清本通道规格显示缓存。 */
+  uint8_t verify_alarm_was_active = 0U; /* 记录清除前是否存在持续校验报警，用于判断是否需要跨任务补发关窗。 */
 
   if (is_inserted == 0U) {
     context->debounce.in_debounce_ticks =
@@ -2493,9 +2518,17 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
 
       context->debounce.out_debounce_ticks =
           0U; /* 拔出去抖完成后，清掉计数器。 */
+      verify_alarm_was_active =
+          (uint8_t)((Handlescan_IsHandleVerifyAlarm(context->last_alarm) != 0U) &&
+                    (WorkMessage.alarm_flag == true) &&
+                    (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) != 0U)); /* 只有本次拔出前确有持续校验报警，才允许建立关窗交接。 */
       Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* A
                                                                               通道坏手柄拔出后，释放本通道手柄型号错误报警。
                                                                             */
+      if ((verify_alarm_was_active != 0U) && (WorkMessage.alarm_flag == false))
+      {
+        context->verify_alarm_close_pending = 1U; /* 最后一项校验报警已清零；插拔任务必须在可能的 xQueueReset 之后再关闭 90 号图。 */
+      }
       context->stage = HANDLESCAN_STAGE_IDLE; /* 本通道状态机回到空闲态。 */
       context->last_alarm = 0U; /* 清掉本通道最近一次报警缓存。 */
       context->tool_source =

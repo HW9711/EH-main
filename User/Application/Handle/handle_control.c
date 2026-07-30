@@ -521,6 +521,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于防止自动切到另一通道。 */
 	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
 	uint8_t close_idle_touch = 0U;			   /* 记录当前手柄是否在本机触控待运行态拔出，清屏完成后再关闭触控窗，避免关闭消息被队列复位清掉。 */
+	uint8_t close_verify_alarm = 0U;		   /* 记录扫描任务已清除的校验报警，待无手柄 UI 队列复位后补发关闭90号图。 */
 
 	switch (key_value)
 	{
@@ -561,6 +562,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		break;
 
 	case SCREENKey_UNPLUG_A: // 拔出A
+		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_A); /* 在任何 UI 清屏前接收 A 通道关窗请求，后续统一放到队列复位之后执行。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_A); /* 先记录拔出前 A 是否为当前选中通道。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
 									 (WorkMessage.runflag_work == false) &&
@@ -603,6 +605,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		break;
 
 	case SCREENKey_UNPLUG_B: // 拔出B
+		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_B); /* B 通道独立消费自己的关窗请求，防止 A/B 同时异常时误清仍有效报警。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_B); /* 先记录拔出前 B 是否为当前选中通道。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
 									 (WorkMessage.runflag_work == false) &&
@@ -651,6 +654,11 @@ void PlugORunPLUGActive(uint8_t key_value)
 	if (close_idle_touch != 0U)
 	{
 		ControlTypeActive(SCREENKey_TouchEXIT); /* 原有插拔清屏和 UI 队列复位完成后再复用触控退出链，确保 70 号工作窗关闭、触控状态清零并释放屏幕控制权。 */
+	}
+
+	if ((close_verify_alarm != 0U) && (WorkMessage.alarm_flag == false))
+	{
+		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 在 xQueueReset 之后重新投递关窗命令，确保屏幕90号图与已清零的报警状态一致。 */
 	}
 }
 
