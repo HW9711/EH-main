@@ -7,6 +7,46 @@
 #include "sscRFID.h"
 #include "sscUIDP.h"
 
+static volatile uint32_t s_handle_identity_generation_a = 0U; /* A 每次真实上线或离线递增，跨周期任务据此识别目标已变化。 */
+static volatile uint32_t s_handle_identity_generation_b = 0U; /* B 使用独立代数，A/B 插拔不会互相终止对方的数据任务。 */
+
+/*
+ * 函数功能：记录指定通道发生一次有效上线或离线边沿。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+static void Handle_AdvanceIdentityGeneration(uint8_t channel)
+{
+	if (channel == CHANNEL_A) /* A 状态变化只更新 A 代数，避免 B 请求被无关插拔打断。 */
+	{
+		++s_handle_identity_generation_a; /* 32 位自然递增值用于比较快照，溢出不改变相邻事件必然不相等的判断。 */
+	}
+	else if (channel == CHANNEL_B) /* B 状态变化使用独立计数。 */
+	{
+		++s_handle_identity_generation_b; /* B 上下线后让已经锁定旧 B 身份的任务在下一次预检时中止。 */
+	}
+}
+
+/*
+ * 函数功能：读取指定通道最近一次有效插拔后的身份代数。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：返回对应通道的 32 位身份代数；无效通道返回 0。
+ */
+uint32_t Handle_GetIdentityGeneration(uint8_t channel)
+{
+	if (channel == CHANNEL_A) /* Cortex-M4 对齐的 32 位读取为单次访问，可安全取得 A 快照。 */
+	{
+		return s_handle_identity_generation_a; /* 返回 A 当前代数，不访问 EEPROM，也不延长通信任务临界区。 */
+	}
+
+	if (channel == CHANNEL_B) /* B 请求必须读取 B 独立代数。 */
+	{
+		return s_handle_identity_generation_b; /* 返回 B 当前代数，供导航任务与启动快照比较。 */
+	}
+
+	return 0U; /* 非 A/B 通道不存在有效身份，调用方还需结合在线状态拒绝操作。 */
+}
+
 /*
  * 函数功能：关闭 PXBA/PXBB 当前通道的 RFID 自动识别运行状态。
  * 输入参数：channel 为当前工作通道；memory 指向该通道记忆。
@@ -527,6 +567,10 @@ void PlugORunPLUGActive(uint8_t key_value)
 	{
 	case SCREENKey_PLUG_A: // 插入A
 		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 先保存 A 原在线态，只有离线到在线这一跳才允许装载 Page4 默认流量。 */
+		if (channel_was_online == 0U) /* 重复识别刷新不代表换柄，只有首次上线才改变身份代数。 */
+		{
+			Handle_AdvanceIdentityGeneration(CHANNEL_A); /* 在发布 A 在线状态前作废所有仍锁定旧 A 身份的跨周期任务。 */
+		}
 		WorkMessage.Channel_Aonline = true;					   /* A 通道校验通过后才置在线，后续心跳和显示都读取这个标志。 */
 		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* A 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_A);		   /* 扫描结果只先进入 MemoryMsgA，运行中不会直接覆盖 WorkMessage。 */
@@ -545,6 +589,10 @@ void PlugORunPLUGActive(uint8_t key_value)
 
 	case SCREENKey_PLUG_B: // 插入B
 		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 先保存 B 原在线态，防止 RFID/识别重复刷新覆盖用户手动调节的泵流量。 */
+		if (channel_was_online == 0U) /* B 只有离线到在线才代表新的物理身份已经生效。 */
+		{
+			Handle_AdvanceIdentityGeneration(CHANNEL_B); /* 先递增 B 代数，再发布新 B 在线状态。 */
+		}
 		WorkMessage.Channel_Bonline = true;					   /* B 通道校验通过后才置在线，坏手柄不会进入在线态。 */
 		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* B 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_B);		   /* 扫描结果只先进入 MemoryMsgB，避免运行中插入 B 抢占 A。 */
@@ -564,11 +612,16 @@ void PlugORunPLUGActive(uint8_t key_value)
 	case SCREENKey_UNPLUG_A: // 拔出A
 		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_A); /* 在任何 UI 清屏前接收 A 通道关窗请求，后续统一放到队列复位之后执行。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_A); /* 先记录拔出前 A 是否为当前选中通道。 */
+		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 保存拔出前在线态，重复离线事件不能反复改变身份代数。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
 									 (WorkMessage.runflag_work == false) &&
 									 (WorkMessage.touchactive_work == TOUCHWORK) &&
 									 (WorkMessage.drivetype_work == TOUCHWORK) &&
 									 (WorkMessage.hmiactive_work == 0U)); /* 只关闭本机触控待运行窗；运行中掉线继续走停机、报警和松手确认链，外控也不受影响。 */
+		if (channel_was_online != 0U) /* 只有真实在线 A 被拔出时才作废其身份快照。 */
+		{
+			Handle_AdvanceIdentityGeneration(CHANNEL_A); /* 在清在线状态前递增，下一页预检会终止原 A 请求。 */
+		}
 		WorkMessage.Channel_Aonline = false;					   /* A 拔出后立刻离线，心跳会报告 A 不可用。 */
 		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 A 才需要决定回落 B 或清空当前通道。 */
@@ -607,11 +660,16 @@ void PlugORunPLUGActive(uint8_t key_value)
 	case SCREENKey_UNPLUG_B: // 拔出B
 		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_B); /* B 通道独立消费自己的关窗请求，防止 A/B 同时异常时误清仍有效报警。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_B); /* 先记录拔出前 B 是否为当前选中通道。 */
+		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 保存 B 拔出前在线态，过滤重复离线消息。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
 									 (WorkMessage.runflag_work == false) &&
 									 (WorkMessage.touchactive_work == TOUCHWORK) &&
 									 (WorkMessage.drivetype_work == TOUCHWORK) &&
 									 (WorkMessage.hmiactive_work == 0U)); /* B 通道使用与 A 相同的触控待运行判定，防止 A/B 插拔行为不一致。 */
+		if (channel_was_online != 0U) /* B 确实在线时才记录一次身份变化。 */
+		{
+			Handle_AdvanceIdentityGeneration(CHANNEL_B); /* 作废仍引用旧 B 手柄的导航批量任务。 */
+		}
 		WorkMessage.Channel_Bonline = false;					   /* B 拔出后立刻离线，心跳会报告 B 不可用。 */
 		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 B 才需要决定回落 A 或清空当前通道。 */
