@@ -8,6 +8,7 @@
 #include "bsp_uart.h"
 #include "eeprom.h"
 #include "handle_control.h"
+#include "handlescan.h"
 #include "kernel_scheduler.h"
 #include "mainboard_software_version.h"
 #include "Pubinterface.h"
@@ -131,6 +132,7 @@ typedef struct
     uint8_t channel;                                 /* 本次请求锁定的逻辑通道，1 为 A，2 为 B。 */
     uint16_t request_id;                             /* V2 请求号，所有逐页响应均原样回显；旧协议固定为 0。 */
     uint8_t use_i2c3;                                /* 目标通道映射后的物理 EEPROM 总线，0 为 I2C2，1 为 I2C3。 */
+    uint32_t navigation_generation;                  /* 请求开始时的扫描导航代次，记录短于离线消抖时间的插拔变化。 */
     uint32_t identity_generation;                    /* 请求开始时的手柄身份代数，用 RAM 比较发现跨页插拔或换柄。 */
     uint8_t serial_number[AT24CS32_SN_SIZE];         /* 请求开始时读取的 EEPROM 唯一序列号，用于识别中途换柄。 */
 } ExternalCommNavTarget_t;
@@ -145,6 +147,7 @@ typedef struct
     uint8_t nav_protocol_version;                    /* 导航批量任务协议版本；业务批量读保持为 0。 */
     uint8_t nav_channel;                             /* 导航批量任务锁定的逻辑 A/B 通道。 */
     uint16_t nav_request_id;                         /* 导航 V2 批量请求号，用于关联每页响应和最终 ACK。 */
+    uint32_t nav_navigation_generation;              /* 批量开始时锁定的扫描导航代次，任一页期间短暂插拔都会终止整批。 */
     uint32_t nav_identity_generation;                /* 批量开始时锁定的身份代数，逐页读前只做无阻塞 RAM 预检。 */
     uint8_t nav_serial_number[AT24CS32_SN_SIZE];     /* 导航批量开始时锁定的 EEPROM 序列号，整批结束时统一复核。 */
     uint16_t page_elapsed_ms;                        /* 距离上一次逐页处理的累计时间，用于限制批量上传速率。 */
@@ -579,6 +582,12 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
         *reason = EXTERNAL_COMM_REASON_NO_CHANNEL; /* V2 显式通道必须已经完成手柄校验并在线。 */
         return 0U;
     }
+    if (Handlescan_IsNavigationReady(target->channel) == false)
+    {
+        *reason = EXTERNAL_COMM_REASON_BUSY; /* 在线标志尚未清除但扫描层正在重识别时，要求外部设备稍后重试。 */
+        return 0U;
+    }
+
 
     if (ExternalComm_NavChannelBusIsI2C3(target->channel, &target->use_i2c3) == 0U)
     {
@@ -587,9 +596,21 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
     }
 
     target->identity_generation = Handle_GetIdentityGeneration(target->channel); /* 读取一次 RAM 代数，后续跨页预检不再反复访问 SN 区。 */
+    target->navigation_generation = Handlescan_GetNavigationGeneration(target->channel); /* 在首次访问 SN 前锁定扫描代次，覆盖短于 500ms 的快速插拔。 */
     if (ExternalComm_ReadNavSerialNumber(target->use_i2c3, target->serial_number) == 0U)
     {
-        *reason = EXTERNAL_COMM_REASON_DEVICE_FAIL; /* 无法读取唯一序列号时不能建立可靠的数据归属。 */
+        *reason = ((Handlescan_IsNavigationReady(target->channel) == false) ||
+                   (Handlescan_GetNavigationGeneration(target->channel) != target->navigation_generation)) ?
+                  EXTERNAL_COMM_REASON_TARGET_CHANGED :
+                  EXTERNAL_COMM_REASON_DEVICE_FAIL; /* SN 访问期间发生插拔时报告目标变化；稳定目标的硬件失败仍报告设备失败。 */
+        return 0U;
+    }
+
+    if ((Handlescan_IsNavigationReady(target->channel) == false) ||
+        (Handlescan_GetNavigationGeneration(target->channel) != target->navigation_generation) ||
+        (Handle_GetIdentityGeneration(target->channel) != target->identity_generation))
+    {
+        *reason = EXTERNAL_COMM_REASON_TARGET_CHANGED; /* 捕获 SN 期间目标发生变化时丢弃结果，禁止建立旧通道与新数据的错误关联。 */
         return 0U;
     }
 
@@ -597,7 +618,7 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
 }
 
 /*
- * 函数功能：通过在线状态、物理总线和身份代数快速确认导航目标未发生跨周期变化。
+ * 函数功能：通过在线状态、扫描代次、物理总线和身份代数快速确认导航目标未发生跨周期变化。
  * 输入参数：target 为请求开始时捕获的导航目标快照。
  * 返回参数：RAM 快照仍一致返回 1，离线、换柄或映射变化返回 0。
  */
@@ -605,7 +626,8 @@ static uint8_t ExternalComm_IsNavTargetRamStable(const ExternalCommNavTarget_t *
 {
     uint8_t current_use_i2c3; /* 保存当前板级映射得到的物理总线。 */
 
-    if ((target == NULL) || (ExternalComm_IsNavChannelOnline(target->channel) == 0U))
+    if ((target == NULL) || (ExternalComm_IsNavChannelOnline(target->channel) == 0U) ||
+        (Handlescan_IsNavigationReady(target->channel) == false))
     {
         return 0U; /* 目标指针非法或通道已经离线时立即判定失效。 */
     }
@@ -620,8 +642,13 @@ static uint8_t ExternalComm_IsNavTargetRamStable(const ExternalCommNavTarget_t *
     {
         return 0U; /* 插拔事件层代数已经变化，说明当前在线对象不再是请求开始时的手柄。 */
     }
+    if (Handlescan_GetNavigationGeneration(target->channel) != target->navigation_generation)
+    {
+        return 0U; /* 扫描层记录到短暂拔出时立即失效，即使 500ms 离线事件尚未更新 WorkMessage。 */
+    }
 
-    return 1U; /* 三项 RAM 状态完全一致，可继续访问锁定的物理总线。 */
+
+    return 1U; /* 在线、扫描代次、总线映射和身份代数完全一致，可继续访问锁定的物理总线。 */
 }
 
 /*
@@ -2410,6 +2437,7 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
     memcpy(s_eeprom_batch.nav_serial_number,
            target.serial_number,
            AT24CS32_SN_SIZE);
+    s_eeprom_batch.nav_navigation_generation = target.navigation_generation; /* 保存扫描导航代次，使短暂插拔也能中断后续页面。 */
     /* 批量写结束页之后的 30 字节是每个导航页共用的数据模板。 */
     if (operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV)
     {
@@ -2517,6 +2545,7 @@ static uint8_t ExternalComm_LoadNavBatchTarget(ExternalCommNavTarget_t *target,
     memcpy(target->serial_number,
            s_eeprom_batch.nav_serial_number,
            AT24CS32_SN_SIZE); /* 恢复任务启动时的 EEPROM 唯一序列号。 */
+    target->navigation_generation = s_eeprom_batch.nav_navigation_generation; /* 恢复批量开始时扫描代次，逐页检查快速插拔。 */
     return 1U; /* 已重建可用于逐页前后复核和回包关联的目标快照。 */
 }
 

@@ -221,6 +221,7 @@ typedef struct
 typedef struct
 {
     HandlescanStage stage;                                  /* 当前扫描阶段，静态零值对应空闲态。 */
+    volatile uint32_t navigation_generation;                /* 导航访问代次；每次检测到已上线手柄拔出候选时递增，使跨任务读取立即失效。 */
     HandlescanDebounce debounce;                             /* 插入和拔出去抖计数，单位都是 10ms 扫描周期。 */
     uint8_t verify_start_wait_ticks;                         /* 插入稳定后、开始 EEPROM 认证前的等待计数。 */
     uint8_t last_alarm;                                     /* 本通道最近一次手柄认证报警码，用于恢复或拔出时清报警。 */
@@ -357,6 +358,40 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
 
     return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
 }
+/*
+ * 函数功能：判断指定通道的手柄 EEPROM 是否已经完成本轮识别，可供外部通信读取导航页。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：扫描状态已稳定上线返回 true；重识别、拔出消抖、离线或非法通道返回 false。
+ */
+bool Handlescan_IsNavigationReady(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 只读取指定逻辑通道的扫描上下文，避免 A/B 状态串用。 */
+
+    if (binding == NULL)
+    {
+        return false; /* 非 A/B 通道没有实体 EEPROM，不能对外声明导航数据已就绪。 */
+    }
+
+    return (binding->context->stage == HANDLESCAN_STAGE_ONLINE); /* 只有整轮 EEPROM 认证和业务页装载完成后才允许外部导航访问。 */
+}
+
+/*
+ * 函数功能：读取指定通道当前的导航访问代次，用于识别一次读取期间发生的短暂插拔。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：返回本通道单调递增的导航代次；非法通道返回 0。
+ */
+uint32_t Handlescan_GetNavigationGeneration(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 按逻辑通道取得独立代次，不能借当前选中通道推断。 */
+
+    if (binding == NULL)
+    {
+        return 0U; /* 非 A/B 通道没有合法扫描代次，返回初始值并由调用方判定目标无效。 */
+    }
+
+    return binding->context->navigation_generation; /* 只读 32 位代次，不触发 EEPROM 或 UI 操作，不增加通信任务阻塞时间。 */
+}
+
 
 /*
  * 函数功能：消费指定通道在校验失败手柄拔出后产生的报警关窗请求。
@@ -2483,6 +2518,9 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
   uint32_t *spec_values =
       binding->spec_values; /* 离线时只清本通道规格显示缓存。 */
   uint8_t verify_alarm_was_active = 0U; /* 记录清除前是否存在持续校验报警，用于判断是否需要跨任务补发关窗。 */
+  uint8_t work_online =
+      (binding->channel == CHANNEL_A) ? (uint8_t)WorkMessage.Channel_Aonline :
+                                       (uint8_t)WorkMessage.Channel_Bonline; /* 记录事件层是否仍保留旧在线态，覆盖快速插回认证期间再次拔出的情况。 */
 
   if (is_inserted == 0U) {
     context->debounce.in_debounce_ticks =
@@ -2501,10 +2539,12 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
      */
     if ((context->stage == HANDLESCAN_STAGE_ONLINE) || /* 已上线、正在拔出去抖或认证失败保持态都要完成稳定拔出流程。 */
         (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
-        (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL)) {
+        (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL) ||
+        (work_online != 0U)) {
       if (context->stage != HANDLESCAN_STAGE_DEBOUNCE_OUT) {
         context->debounce.out_debounce_ticks =
             0U; /* 首次进入拔出去抖时，先把拔出去抖计数清零。 */
+        ++context->navigation_generation; /* 首次发现已上线目标拔出时立即作废在途导航请求，不等待 500ms 离线事件。 */
         context->stage =
             HANDLESCAN_STAGE_DEBOUNCE_OUT; /* 状态机切到“拔出去抖”阶段。 */
       }
@@ -2576,9 +2616,21 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
         spec_values); /* 插入未完成时也清空本通道刀具规格缓存。 */
     return true;      /* 当前只是插入取消，不做 UI 和报文更新。 */
   }
+  if (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) {
+    context->debounce.out_debounce_ticks =
+        0U; /* 短接在 500ms 拔出确认前恢复时，旧拔出去抖计数不能继续沿用。 */
+    context->debounce.in_debounce_ticks =
+        0U; /* 重新插入必须重新累计 50ms 稳定时间，不能直接恢复旧在线状态。 */
+    context->verify_start_wait_ticks =
+        0U; /* 新目标重新执行认证前等待，避免 EEPROM 尚未稳定就读取导航首页。 */
+    Handlescan_ResetVerifyRetry(context); /* 重新识别使用新的认证重试周期，不能继承拔出前的失败次数。 */
+    context->stage =
+        HANDLESCAN_STAGE_DEBOUNCE_IN; /* 保留界面在线标志，但扫描层回到完整插入认证流程。 */
+  }
 
   return false; /* 短接仍成立时交给插入和认证阶段继续处理。 */
 }
+
 
 /*
  * 函数功能：处理插入消抖、认证等待、快速重试和 EEPROM CRC 认证。
