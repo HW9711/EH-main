@@ -267,7 +267,7 @@ void MOTORRUN(void)
     static uint8_t huci=0;
     static uint32_t last_display_speed=MOTOR_DRIVE_DISPLAY_SPEED_INVALID; /* 记录脚踏运行时上一次发给屏幕的实时速度，避免每 50ms 无变化也刷屏。 */
     uint8_t display_value[10]={0};
-    uint8_t effective_dir_work=0U; /* 保存真正下发给驱动板的方向，RFID机械刀具和EMBD只在输出层转换，不改屏幕和通道记忆。 */
+    uint8_t effective_dir_work=0U; /* 保存真正下发给驱动板的方向，RFID机械刀具、DHYTM和EMBD只在输出层转换，不改屏幕和通道记忆。 */
     uint8_t physical_channel=BoardProfile_MapHandlePhysicalChannel(WorkMessage.channel_work); /* 仅把当前逻辑手柄通道换算成物理电机通道。 */
     uint32_t motor_source_speed=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕/EEPROM 当前设定速度就是电机运行目标速度。 */
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
@@ -320,8 +320,12 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type); /* 仅RFID基座按原始刀具型号转换实际方向，屏幕显示方向保持不变。 */
-        if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
+        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type); /* RFID机械刀具先按原始型号转换方向，EEPROM手柄继续使用屏幕方向。 */
+        if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM屏幕固定显示反转，但内部反旋机械结构要求电机始终正转。 */
+        {
+            effective_dir_work=ZZDIR; /* 只覆盖本次驱动帧方向，不回写屏幕和通道记忆，确保界面仍固定显示反转。 */
+        }
+        else if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
         {
             if(effective_dir_work==ZZDIR) /* 屏幕/记忆认为正转时，EMBD 实际需要向驱动板发送反转。 */
             {

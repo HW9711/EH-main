@@ -116,6 +116,8 @@ static uint8_t MapHandleToUiType(uint8_t handle_model)
 		return 6U; /* 克氏针预留类复用图标类别 6。 */
 	case COMMON_SOCKET_ONLINES:
 		return COMMON_SOCKET_ONLINES; /* 公共接头沿用 UIDP 专用占位图标。 */
+	case DHYTM_ONLINES:
+		return 4U; /* DHYTM复用一体磨手柄图片：A为109/110，B为139/140；不改变其独立EEPROM和非RFID业务属性。 */
 	default:
 		return handle_model; /* 未知型号保持原值，方便后续新增 UI 资源时直接扩展。 */
 	}
@@ -230,7 +232,8 @@ bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type)
                                 (hand_model == TMBB_ONLINES) || /* TMBB只服从本手柄EEPROM Page4默认方向。 */
                                 (hand_model == EMBA_ONLINES) || /* EMBA只服从本手柄EEPROM Page4默认方向。 */
                                 (hand_model == EMBB_ONLINES) || /* EMBB只服从本手柄EEPROM Page4默认方向。 */
-                                (hand_model == JMB_ONLINES));   /* JMB只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == JMB_ONLINES) ||  /* JMB只服从本手柄EEPROM Page4默认方向。 */
+                                (hand_model == DHYTM_ONLINES)); /* DHYTM固定显示Page4反转方向，屏幕、实体键和外控均不得换向。 */
     bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
                              (hand_model == PXBB_ONLINES) ||
                              (hand_model == COMMON_SOCKET_ONLINES)); /* 只有EPC基座才按raw_tool_type解释0x03~0x05。 */

@@ -27,6 +27,7 @@
 #define COMMON_SOCKET_ONLINES 19U//公共接头预留，没有手柄实体键，仅用于识别和屏幕显示
 #define EMBD_ONLINES         20U//EMBD 6万增速手柄，用于 EEPROM 识别和普通电动手柄 UI 显示
 #define EMBC_ONLINES         21U//EMBC 新增普通电动手柄，用于 EEPROM 识别和通用手柄 UI 显示
+#define DHYTM_ONLINES        22U//DHYTM 反旋增速手柄，屏幕固定反转、驱动实际正转，使用无刷无霍尔电机
 
 
 #define CHANNEL_A 1U

@@ -303,7 +303,8 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
     {0x6B, 0x0C, KXZ_II_ONLINES, "KXZ_II"},               /* 空心钻二型预留，沿用当前扫描状态机。无刷，单向 */
     {0x6B, 0x0D, COMMON_SOCKET_ONLINES, "COMMON_SOCKET"}, /* 公共接头没有实体键，只作为在线类型和 UI 占位。无刷，单向 */
     {0x6B, 0x0E, EMBD_ONLINES, "EMBD"},                   /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。无刷，单向 */
-    {0x6B, 0x0F, EMBC_ONLINES, "EMBC"}                    /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。无刷，单向 */
+    {0x6B, 0x0F, EMBC_ONLINES, "EMBC"},                   /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。无刷，单向 */
+    {0x6B, 0x10, DHYTM_ONLINES, "DHYTM"}                  /* DHYTM 使用独立 EEPROM 参数，不读取 RFID；屏幕固定反转且电机实际正转。 */
 };
 
 /*
@@ -775,8 +776,8 @@ static void Handlescan_UpdateToolRatioMessage(ChannelrecognizeMessage_t *message
 
 /*
  * 函数功能：把查表后的型号值转换成业务刀具能力。
- * 输入参数：raw_tool_type为Page3刀具型号或仍保留的一体式PXY/MXYTM16手柄型号。
- * 返回参数：PLANER/GRINDH或原值；PXYTP归一为PLANER，PXYTM/MXYTM16归一为GRINDH。
+ * 输入参数：raw_tool_type为Page3刀具型号或仍保留的一体式PXY/MXYTM16/DHYTM手柄型号。
+ * 返回参数：PLANER/GRINDH或原值；PXYTP归一为PLANER，PXYTM/MXYTM16/DHYTM归一为GRINDH。
  */
 static uint8_t Handlescan_MapToolType(uint8_t raw_tool_type)
 {
@@ -786,9 +787,10 @@ static uint8_t Handlescan_MapToolType(uint8_t raw_tool_type)
     }
 
     if ((raw_tool_type == PX_YIM_ONLINES) ||
-        (raw_tool_type == MX_YIM16_ONLINES))
+        (raw_tool_type == MX_YIM16_ONLINES) ||
+        (raw_tool_type == DHYTM_ONLINES))
     {
-        return GRINDH; /* PXYTM和MXYTM16按磨削能力处理，MXYTP/MXYTM现行型号不再从EEPROM手柄表进入。 */
+        return GRINDH; /* PXYTM、MXYTM16和DHYTM按磨削能力处理；DHYTM的反旋机械方向由驱动输出层单独转换。 */
     }
 
     return raw_tool_type; /* 其它EEPROM刀具保持原值，避免扩大本次RFID协议适配范围。 */
@@ -796,14 +798,15 @@ static uint8_t Handlescan_MapToolType(uint8_t raw_tool_type)
 /*
  * 函数功能：判断 EEPROM 第二页识别出的手柄型号是否自带刀具能力。
  * 输入参数：mapped_model 为手柄表映射后的系统内部型号。
- * 返回参数：true表示PXYTM/PXYTP/JMB/MXYTM16由手柄型号直接给出刀具能力；false表示仍需按Page3或RFID读取。
+ * 返回参数：true表示PXYTM/PXYTP/JMB/MXYTM16/DHYTM由手柄型号直接给出刀具能力；false表示仍需按Page3或RFID读取。
  */
 static bool Handlescan_IsSelfTypedHandleModel(uint8_t mapped_model)
 {
     return ((mapped_model == PX_YIM_ONLINES) ||     /* PXYTM是一体式有刷磨削手柄，刀具能力仍由Page2型号给出。 */
             (mapped_model == PX_YIP_ONLINES) ||     /* PXYTP是一体式有刷刨削手柄，继续沿用EEPROM手柄识别。 */
             (mapped_model == JMB_ONLINES) ||        /* JMB是独立手柄型号，不能再挂在刀具Page3表中。 */
-            (mapped_model == MX_YIM16_ONLINES));    /* MXYTM16保持现有独立手柄型号；MXYTP/MXYTM已改由RFID EPC识别。 */
+            (mapped_model == MX_YIM16_ONLINES) ||   /* MXYTM16保持现有独立手柄型号；MXYTP/MXYTM已改由RFID EPC识别。 */
+            (mapped_model == DHYTM_ONLINES));       /* DHYTM由Page2型号直接确定磨削能力，Page3只提供2.00倍增速参数。 */
 }
 /*
  * 函数功能：判断一体式手柄是否需要从手柄自身 EEPROM Page3 显示刀具规格。
@@ -2274,7 +2277,7 @@ static void Handlescan_UpdateRecognizeMessage(ChannelrecognizeMessage_t *message
 }
 
 /*
- * 函数功能：把自带刀具能力的一体式手柄型号写入通道识别缓存。
+ * 函数功能：把自带刀具能力的EEPROM手柄型号写入通道识别缓存。
  * 输入参数：message 目标通道识别缓存；mapped_model 为手柄表映射后的型号；raw_type_major/raw_type_minor 为 Page2 原始手柄类型字节。
  * 返回参数：无。
  */
@@ -2290,7 +2293,7 @@ static void Handlescan_UpdateSelfTypedResult(ChannelrecognizeMessage_t *message,
                                       mapped_model,
                                       0U,
                                       0U,
-                                      0U); /* 这类 0x7C 型号自身就是手柄和刀具能力来源，规格字段没有 Page3 来源时保持 0。 */
+                                      0U); /* 这类型号自身就是手柄和刀具能力来源；DHYTM虽使用6B 10，也无需依赖Page3工具编码。 */
 }
 
 /*
@@ -2518,9 +2521,6 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
   uint32_t *spec_values =
       binding->spec_values; /* 离线时只清本通道规格显示缓存。 */
   uint8_t verify_alarm_was_active = 0U; /* 记录清除前是否存在持续校验报警，用于判断是否需要跨任务补发关窗。 */
-  uint8_t work_online =
-      (binding->channel == CHANNEL_A) ? (uint8_t)WorkMessage.Channel_Aonline :
-                                       (uint8_t)WorkMessage.Channel_Bonline; /* 记录事件层是否仍保留旧在线态，覆盖快速插回认证期间再次拔出的情况。 */
 
   if (is_inserted == 0U) {
     context->debounce.in_debounce_ticks =
@@ -2540,7 +2540,9 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
     if ((context->stage == HANDLESCAN_STAGE_ONLINE) || /* 已上线、正在拔出去抖或认证失败保持态都要完成稳定拔出流程。 */
         (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
         (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL) ||
-        (work_online != 0U)) {
+        ((context->rfid_wait_started != 0U) &&
+         ((context->stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL) ||
+          (context->stage == HANDLESCAN_STAGE_RETRY_WAIT)))) { /* RFID 基座已提前发布上线时，等待首包或内部重试期间拔出也必须发送离线事件；不读取异步 WorkMessage，避免 IDLE 重复进入拔出流程。 */
       if (context->stage != HANDLESCAN_STAGE_DEBOUNCE_OUT) {
         context->debounce.out_debounce_ticks =
             0U; /* 首次进入拔出去抖时，先把拔出去抖计数清零。 */
@@ -2823,7 +2825,10 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
         PLUGunPLUG,
         binding->plug_key); /* 先上报 RFID
                                基座在线，刀具头数据到达后再二次刷新通道记忆。 */
-    SendKeyBeepMessage(1);
+    if (context->verify_retry_count == 0U)
+    {
+      SendKeyBeepMessage(1U); /* 仅物理基座首次发起 RFID 读取时提示一次；第二轮内部容错重试保持静音，避免空基座重复蜂鸣。 */
+    }
   }
   return true; /* RFID 结果回来前先保持基座在线，刀具区由上位机显示等待 RFID。
                 */
@@ -2875,7 +2880,7 @@ static bool Handlescan_ProcessIntegratedHandle(
 
   Handlescan_UpdateSelfTypedResult(
       message, mapped_model, raw_type_major,
-      raw_type_minor); /* 0x7C 一体式型号直接写入本通道手柄和刀具能力字段。 */
+      raw_type_minor); /* 自带刀具能力型号直接写入本通道手柄和刀具能力字段，DHYTM同样走该安全路径。 */
   read_status = Handlescan_ReadEepromBytes(
       binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf,
       HANDLESCAN_TOOL_INFO_SIZE); /* 一体式手柄仍读取本通道 Page3
