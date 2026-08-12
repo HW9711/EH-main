@@ -36,9 +36,12 @@ kernel_task_t MOTORUARTTaskHandle;
 
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
-static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录非脚踏驱动报警的最少显示起点，脚踏过载不使用该时间退出。 */
-static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=0 后置位，脚踏松开时必须同时满足该条件才能解除报警。 */
-static volatile uint8_t s_motor_uart_overload_wait_foot_release = 0U; /* 过载发生时由脚踏控制手柄则置位，驱动任务不得按固定时间自动清报警。 */
+static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录非脚踏驱动报警的最少显示起点，脚踏来源故障不使用该时间退出。 */
+static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=0 后置位，脚踏来源报警必须同时满足该条件才能解除。 */
+static volatile uint8_t s_motor_uart_wait_foot_release = 0U; /* 任意驱动故障首次发生于脚踏运行时置位，禁止按固定时间自动清报警。 */
+static volatile uint8_t s_motor_uart_foot_release_observed = 0U; /* 记录本次脚踏来源故障是否已观察到松脚、掉线或实时数据失效。 */
+static MotorUartFeedbackSnapshot_t s_motor_uart_feedback_snapshot; /* 保存最近一份CRC正确驱动回包的一致性速度、电流和错误码。 */
+static volatile uint32_t s_motor_uart_feedback_version = 0U; /* 偶数表示快照稳定，奇数表示UART1接收任务正在更新。 */
 
 /*
  * 函数功能：设置驱动报警，并把逻辑报警码和屏幕图片覆盖值分别投递给各自消费者。
@@ -181,36 +184,36 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 		return; /* 同一个驱动故障已上报过，本帧不重复投递蜂鸣/上位机报警。 */
 	}
 
-	/* 过流/堵转第一次接管报警时快照控制来源；只有脚踏来源要求“松脚后清除”。 */
-	if ((alarm_value == MOTOR_UART_ALARM_OVERLOAD) &&
-	    (s_motor_uart_alarm_owned != MOTOR_UART_ALARM_OVERLOAD))
+	/* 整个连续驱动故障生命周期只在第一帧快照控制来源，后续Err变化不能因脚踏运行位已被停机逻辑清除而丢失来源。 */
+	if (s_motor_uart_alarm_owned == 0U)
 	{
-		s_motor_uart_overload_wait_foot_release =
-			(ControlSignalMessage.jtL_control_flag || ControlSignalMessage.jtR_control_flag) ? 1U : 0U; /* 故障帧到达时脚踏运行标志仍有效，可准确记录本次报警来源。 */
-	}
-	else if (alarm_value != MOTOR_UART_ALARM_OVERLOAD)
-	{
-		s_motor_uart_overload_wait_foot_release = 0U; /* 非过载故障保持原有自动清除规则，不占用脚踏释放条件。 */
+		s_motor_uart_wait_foot_release =
+			(ControlSignalMessage.jtL_control_flag || ControlSignalMessage.jtR_control_flag) ? 1U : 0U; /* 故障首帧仍保留脚踏运行标志，可准确区分脚踏与其它控制来源。 */
+		s_motor_uart_foot_release_observed = 0U; /* 新的驱动故障生命周期必须重新等待本次脚踏真实释放，不能沿用上一次结果。 */
 	}
 
 	s_motor_uart_last_driver_error = driver_error; /* 记录真实驱动 Err，便于下一帧判断是否发生了故障变化。 */
 	s_motor_uart_alarm_owned = alarm_value;        /* 记录本模块拥有的主控报警码，后续驱动恢复正常时才允许自动清除。 */
-	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 非脚踏驱动报警沿用最少显示时间；脚踏过载只用松脚和恢复条件。 */
+	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 非脚踏驱动报警沿用最少显示时间；脚踏来源故障只用松脚和恢复条件。 */
 	MotorUart_SetAlarm(alarm_value, picture_value); /* 同步安全报警状态，并按宏选择公用或内部调试图片。 */
 }
 
 /*
- * 函数功能：按报警来源处理驱动故障退出；脚踏过载等待松脚，其它驱动报警沿用最少显示时间。
- * 输入参数：skip_hold_time 非 0 表示脚踏已经松开，直接解除；为 0 时保留普通故障最少显示时间。
+ * 函数功能：按报警来源处理驱动故障退出；脚踏来源等待松脚和Err=0，其它来源沿用最少显示时间。
+ * 输入参数：skip_hold_time 非 0 表示已满足脚踏双条件，可跳过普通故障显示计时；为 0 时按状态自行判断。
  * 返回参数：无；退出条件未满足时继续保持报警、蜂鸣和弹窗。
  */
 static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
 {
-	/* 脚踏运行期间产生的过流/堵转只能由脚踏松开入口清除，驱动恢复帧本身永远不关闭报警。 */
-	if ((s_motor_uart_alarm_owned == MOTOR_UART_ALARM_OVERLOAD) &&
-	    (s_motor_uart_overload_wait_foot_release != 0U))
+	/* 任意驱动故障若发生于脚踏运行，必须同时观察到松脚和Err=0，两个条件到达顺序不影响最终退出。 */
+	if (s_motor_uart_wait_foot_release != 0U)
 	{
-		return; /* 即使 Err 已恢复也保持报警，等待脚踏任务确认当前物理位置已经松开。 */
+		if ((s_motor_uart_foot_release_observed == 0U) ||
+		    (s_motor_uart_driver_recovered == 0U))
+		{
+			return; /* 任一条件未满足都继续保持弹窗和蜂鸣，不能按普通3秒规则提前退出。 */
+		}
+		skip_hold_time = 1U; /* 脚踏双条件已满足，立即退出报警，不再额外等待普通来源的3秒最少显示时间。 */
 	}
 
 	if ((s_motor_uart_alarm_owned != 0U) && /* 只清除本模块持有且当前仍显示的驱动报警，不能误清其它报警。 */
@@ -220,7 +223,7 @@ static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
 		if ((skip_hold_time == 0U) &&
 		    ((uint32_t)(HAL_GetTick() - s_motor_uart_alarm_start_tick) < ALARM_DRV_MS))
 		{
-			return; /* 非脚踏过载及其它驱动报警继续保持原 3 秒提示规则，避免弹窗闪一下。 */
+			return; /* 非脚踏来源的驱动报警继续保持原3秒提示规则，避免弹窗闪一下。 */
 		}
 
 		WorkAlarm_Clear();                 /* 满足当前报警退出条件后释放本模块写入的报警码。 */
@@ -232,28 +235,40 @@ static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
 	s_motor_uart_last_driver_error = 0U;  /* 驱动恢复正常后清掉上一次真实 Err，下一次新故障可以重新上报。 */
 	s_motor_uart_alarm_start_tick = 0U;   /* 本次保持周期结束或报警归属已转移，清掉旧 tick 防止下次沿用。 */
 	s_motor_uart_driver_recovered = 0U;   /* 本次报警生命周期结束，下一次故障必须重新等待 Err=0。 */
-	s_motor_uart_overload_wait_foot_release = 0U; /* 清除脚踏过载等待状态，允许下一次故障重新识别来源。 */
+	s_motor_uart_wait_foot_release = 0U;  /* 清除脚踏来源等待状态，下一次故障重新快照控制来源。 */
+	s_motor_uart_foot_release_observed = 0U; /* 清除本次释放结果，避免下一次脚踏故障跳过松脚确认。 */
 }
 
 /*
- * 函数功能：通知电机反馈模块，过载/堵转发生后的脚踏已经真实松开。
+ * 函数功能：查询当前是否有脚踏来源的驱动故障仍在等待脚踏释放。
  * 输入参数：无。
- * 返回参数：无；驱动已恢复时立即清除脚踏过载报警，否则等待后续 Err=0 再清除。
+ * 返回参数：true表示脚踏任务必须继续检测释放；false表示不是脚踏来源或释放已经记录。
  */
-void MotorUart_ReleaseFootOverload(void)
+bool MotorUart_IsFootDriverAlarmWaitingRelease(void)
 {
-	if (s_motor_uart_overload_wait_foot_release == 0U)
+	return ((s_motor_uart_wait_foot_release != 0U) &&
+	        (s_motor_uart_foot_release_observed == 0U)); /* 只在尚未观察到释放时要求脚踏任务继续执行AD判断。 */
+}
+
+/*
+ * 函数功能：通知电机反馈模块，脚踏来源驱动故障已经观察到松脚、掉线或实时数据失效。
+ * 输入参数：无。
+ * 返回参数：无；驱动已恢复时立即清除报警，否则保存释放结果并等待后续Err=0。
+ */
+void MotorUart_ReleaseFootDriverAlarm(void)
+{
+	if (s_motor_uart_wait_foot_release == 0U)
 	{
-		return; /* 当前报警不是脚踏运行触发的过流/堵转，不能改变其它驱动报警生命周期。 */
+		return; /* 当前驱动故障不是脚踏来源，不能改变手控、触控或外控报警的定时生命周期。 */
 	}
 
+	s_motor_uart_foot_release_observed = 1U; /* 先保存释放结果，覆盖“先松脚后Err=0”和脚踏通信丢失两种时序。 */
 	if (s_motor_uart_driver_recovered == 0U)
 	{
-		return; /* 当前脚踏虽已松开，但驱动仍未回报 Err=0，继续保持报警直到故障真实恢复。 */
+		return; /* 驱动故障仍存在时继续保持弹窗和蜂鸣，后续Err=0帧会再次进入统一清除入口。 */
 	}
 
-	s_motor_uart_overload_wait_foot_release = 0U; /* 当前物理脚踏已经松开且驱动已恢复，允许统一清除入口结束报警。 */
-	MotorUart_ClearDriverAlarmIfOwned(1U); /* 两个条件在当前周期同时成立，跳过普通故障计时并立即关闭报警、蜂鸣和弹窗。 */
+	MotorUart_ClearDriverAlarmIfOwned(1U); /* 脚踏释放和Err=0两个条件均已满足，立即关闭报警、蜂鸣和弹窗。 */
 }
 
 /*
@@ -270,6 +285,71 @@ static void MotorUart_StopAllWork(void)
 	ControlSignalMessage.jtL_control_flag = false; /* 清除左脚踏运行来源，要求用户松开后重新踩下。 */
 	ControlSignalMessage.jtR_control_flag = false; /* 清除右脚踏运行来源，保持双脚踏停机状态一致。 */
 	
+}
+
+/*
+ * 函数功能：把一份CRC正确的12字节驱动回包原子更新为遥测反馈快照。
+ * 输入参数：frame指向已经复制并通过CRC校验的驱动回包。
+ * 返回参数：无。
+ */
+static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
+{
+	uint16_t speed_field; /* 驱动回包byte4~5保存“实际rpm/10”字段。 */
+
+	if (frame == NULL)
+	{
+		return; /* 空指针不能形成有效反馈，保留上一份一致性快照。 */
+	}
+
+	speed_field = (uint16_t)(((uint16_t)frame[4] << 8U) | frame[5]); /* 先按驱动大端字段还原16位速度。 */
+	++s_motor_uart_feedback_version; /* 发布奇数版本，外部通信任务不得在字段写入中复制。 */
+	__DMB(); /* 保证写入中标志先于快照字段可见。 */
+	s_motor_uart_feedback_snapshot.sequence = (uint16_t)(s_motor_uart_feedback_snapshot.sequence + 1U); /* 每份CRC正确回包递增，16位自然回绕。 */
+	s_motor_uart_feedback_snapshot.feedback_tick_ms = HAL_GetTick(); /* 记录本帧CRC确认完成时的主控单调毫秒时钟。 */
+	s_motor_uart_feedback_snapshot.speed_rpm = (uint32_t)speed_field * 10U; /* 把驱动私有“rpm/10”换算成上位机统一使用的rpm。 */
+	s_motor_uart_feedback_snapshot.current_x100 = (uint16_t)(((uint16_t)frame[8] << 8U) | frame[9]); /* 电流保留0.01A单位，避免浮点参与固件组包。 */
+	s_motor_uart_feedback_snapshot.raw_error = frame[7]; /* 保留驱动原始Err，不能用主控报警码替代诊断依据。 */
+	s_motor_uart_feedback_snapshot.valid = 1U; /* 所有字段写完后标记已有有效反馈。 */
+	__DMB(); /* 保证字段先于最终偶数版本发布。 */
+	++s_motor_uart_feedback_version; /* 写入完成，读取方可以复制整份快照。 */
+}
+
+/*
+ * 函数功能：复制最近一次CRC正确驱动回包形成的一致性快照。
+ * 输入参数：snapshot指向调用方提供的快照缓存。
+ * 返回参数：快照有效且复制成功返回1，否则返回0。
+ */
+uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
+{
+	uint8_t attempt; /* 瞬时并发最多重试三次，避免3ms接收任务异常时阻塞UART2通信任务。 */
+
+	if (snapshot == NULL)
+	{
+		return 0U; /* 调用方未提供目标缓存时拒绝复制。 */
+	}
+
+	for (attempt = 0U; attempt < 3U; ++attempt)
+	{
+		uint32_t version_before = s_motor_uart_feedback_version; /* 复制前版本必须为稳定偶数。 */
+		uint32_t version_after; /* 字段复制后复核版本，防止速度、电流、Err来自不同回包。 */
+
+		if ((version_before & 1U) != 0U)
+		{
+			continue; /* UART1接收任务正在写入时立即重试。 */
+		}
+
+		__DMB(); /* 先完成版本判断，再读取共享字段。 */
+		*snapshot = s_motor_uart_feedback_snapshot; /* 后续UART2组包只读取调用方私有副本。 */
+		__DMB(); /* 字段复制结束后再读取最终版本。 */
+		version_after = s_motor_uart_feedback_version;
+		if ((version_before == version_after) && ((version_after & 1U) == 0U))
+		{
+			return (snapshot->valid != 0U) ? 1U : 0U; /* 版本稳定时返回快照有效位。 */
+		}
+	}
+
+	memset(snapshot, 0, sizeof(*snapshot)); /* 多次并发冲突时返回全零无效值，避免上传混合快照。 */
+	return 0U;
 }
 
 //============================================================================
@@ -304,12 +384,13 @@ void BrushlessMotorUartData_ReceiveData(void)
 			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
 			{
 				Common_CopyData(&dat[i], dat1, 12);    //截取10个数据
+				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC正确后先形成速度、电流、Err同源快照，供50ms遥测一致读取。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是 App.FB.Prot.AllCur * 100，单位 0.01A，只上传给上位机显示。 */
 					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */
 					if (dat1[7] == MOTOR_UART_DRIVER_ERR_NONE)
 					{
-						s_motor_uart_driver_recovered = 1U; /* 本帧确认驱动故障已经消失；脚踏过载仍需等待松脚条件。 */
+						s_motor_uart_driver_recovered = 1U; /* 本帧确认驱动故障已经消失；脚踏来源故障仍需等待松脚条件。 */
 						/* 只在“上一帧故障、本帧恢复”的边沿再次全停，防止旧运行请求随故障解除自动恢复输出。 */
 						if(clean_huic==1){
 							clean_huic=0;

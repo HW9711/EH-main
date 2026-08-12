@@ -11,6 +11,7 @@
 #include "handlescan.h"
 #include "kernel_scheduler.h"
 #include "mainboard_software_version.h"
+#include "motoruartdata.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
 #include "sscDRIVE.h"
@@ -32,6 +33,20 @@
 #define EXTERNAL_COMM_FRAME_HEAD_SIZE    4U      /* 外部通信帧头固定 4 字节：D7 CA F8 F1。 */
 #define EXTERNAL_COMM_FRAME_LENGTH_OFFSET 5U     /* Length_H 在帧内偏移 5，Length_L 在偏移 6。 */
 #define EXTERNAL_COMM_RX_FIFO_MAX_STEPS  32U     /* 单个 10ms 周期最多处理 32 次 FIFO 状态，避免异常噪声长期占用任务。 */
+#define EXTERNAL_COMM_CONFIRM_REQUIRED_FRAMES 3U /* 首次连接必须收到三份内容一致的申请/登录帧，单帧干扰不能建立会话。 */
+#define EXTERNAL_COMM_CONFIRM_WINDOW_MS      300U /* 三帧确认总窗口为300ms，配合上位机50ms间隔通常100～150ms完成。 */
+#define EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN 8U /* 正式协议使用8字节授权区比对；简易协议使用0字节固定身份。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_PERIOD_MS 50U /* 订阅后每50ms上传一份电机命令/反馈快照，不改变原100ms心跳。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_CODE 0x10U /* 0x03/0x01下的信息码0x10固定表示34字节电机遥测。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN 34U /* 电机遥测载荷固定34字节，所有多字节字段均为大端。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_AREA 0x01U /* 下行订阅和上行电机遥测均使用区域码0x01。 */
+#define EXTERNAL_COMM_MOTOR_FEEDBACK_VALID_TIMEOUT_MS 250U /* 超过250ms未收到CRC正确驱动回包时清反馈有效标志。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_DISABLE 0U /* 订阅载荷0表示关闭50ms遥测。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE 1U /* 订阅载荷1表示开启50ms遥测。 */
+#define EXTERNAL_COMM_MOTOR_FLAG_FEEDBACK_VALID 0x01U /* 遥测flags bit0：驱动反馈快照仍在有效时间窗内。 */
+#define EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER 0x02U /* 遥测flags bit1：当前控制权属于外控。 */
+#define EXTERNAL_COMM_MOTOR_FLAG_HANDLE_ONLINE 0x04U /* 遥测flags bit2：当前选中手柄在线。 */
+#define EXTERNAL_COMM_MOTOR_FLAG_ALARM_ACTIVE 0x08U /* 遥测flags bit3：主控存在持续报警。 */
 
 #define EXTERNAL_COMM_STATUS_ONLINE         0x01U   /* 心跳状态值：设备在线。 */
 #define EXTERNAL_COMM_STATUS_OFFLINE        0xFFU   /* 心跳状态值：设备掉线、未选中或无效。 */
@@ -126,6 +141,24 @@ typedef enum
     EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV            /* 正在把同一模板逐页写入导航区。 */
 } ExternalCommEepromBatchOperation_t;
 
+/* 正式协议完整帧通过CRC后，接收层按连接状态决定是否分发和刷新在线计时。 */
+typedef enum
+{
+    EXTERNAL_COMM_FORMAL_FRAME_IGNORE = 0U,       /* 静默消费本帧，不执行业务也不刷新在线状态。 */
+    EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY,     /* 只执行安全动作或失败应答，不刷新在线状态。 */
+    EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK  /* 执行业务并刷新已确认正式协议会话。 */
+} ExternalCommFormalFrameAction_t;
+
+/* 三帧连接确认状态只保存首次申请所需的最小信息，不参与已连接后的业务命令解析。 */
+typedef struct
+{
+    ExternalCommProtocolSource_t source;                         /* 当前正在累计的协议来源。 */
+    uint8_t frame_count;                                         /* 已收到的连续一致申请/登录帧数量。 */
+    uint16_t elapsed_ms;                                         /* 从第一帧开始累计的确认窗口时间。 */
+    uint16_t identity_len;                                       /* 当前一致性标识长度，正式协议固定8，简易协议固定0。 */
+    uint8_t identity[EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN];     /* 正式协议8字节授权区副本，用于拒绝内容变化的三帧。 */
+} ExternalCommConfirmState_t;
+
 typedef struct
 {
     uint8_t protocol_version;                        /* 0 表示兼容旧协议，2 表示显式目标导航协议 V2。 */
@@ -156,10 +189,15 @@ typedef struct
 
 static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄，由调度器保存任务状态。 */
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
+static uint16_t s_motor_telemetry_elapsed_ms = 0U;   /* 50ms电机遥测累计时间，未订阅时保持0。 */
+static uint16_t s_motor_telemetry_sequence = 0U;     /* 每份遥测递增一次的16位序号，新订阅从0重新开始。 */
+static uint8_t s_motor_telemetry_enabled = 0U;       /* 只有正式外控会话显式订阅后置1，退出或通信超时自动清零。 */
 static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外控期间每收到一帧合法下行命令都会清零。 */
 static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
 static uint16_t s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 非外控在线图标计时，合法帧刷新后超时熄灭。 */
 static uint8_t s_external_comm_display_online = 0U;  /* 小电脑图标在线锁存，避免未收到合法外部帧时误显示在线。 */
+static ExternalCommProtocolSource_t s_confirmed_protocol_source = EXTERNAL_COMM_PROTOCOL_SOURCE_NONE; /* 已完成三帧确认的唯一协议来源。 */
+static ExternalCommConfirmState_t s_protocol_confirm; /* 首次连接三帧确认状态，由正式协议和简易协议共用。 */
 static volatile uint8_t s_local_exit_requested = 0U; /* 屏幕任务只置退出请求，外部通信任务负责释放状态和串口回包，避免共用发送缓存并发。 */
 static uint8_t s_local_exit_guard = 0U;              /* 屏幕退出后的旧申请帧拦截标志，1 表示暂不允许上位机重新取得控制权。 */
 static uint16_t s_local_exit_quiet_ms = 0U;          /* 退出后申请帧静默时间；旧保活每次到达都会清零，静默满 1s 后允许重新申请。 */
@@ -198,6 +236,19 @@ static void ExternalComm_WriteBE16(uint8_t *data, uint16_t value)
     data[0] = (uint8_t)(value >> 8);
     /* 低字节后写，只保留 value 的低 8 位。 */
     data[1] = (uint8_t)(value & 0xFFU);
+}
+
+/*
+ * 函数功能：把32位运行时刻或rpm按高字节在前写入协议载荷。
+ * 输入参数：data指向至少4字节输出空间；value为待写入32位值。
+ * 返回参数：无。
+ */
+static void ExternalComm_WriteBE32(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)(value >> 24U); /* byte0写最高8位，保持与协议表偏移一致。 */
+    data[1] = (uint8_t)(value >> 16U); /* byte1写次高8位。 */
+    data[2] = (uint8_t)(value >> 8U);  /* byte2写次低8位。 */
+    data[3] = (uint8_t)(value & 0xFFU); /* byte3写最低8位。 */
 }
 
 /*
@@ -276,12 +327,126 @@ static void ExternalComm_SendExitAck(void)
 }
 
 /*
+ * 函数功能：清除尚未完成的三帧连接候选，不改变已经确认的协议会话来源。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ResetProtocolCandidate(void)
+{
+    memset(&s_protocol_confirm, 0, sizeof(s_protocol_confirm)); /* 整体清零来源、计数、窗口和授权副本，下一帧重新作为第一帧。 */
+}
+
+/*
+ * 函数功能：清除已确认协议来源及未完成候选，用于主动退出或10秒断线后重新执行完整三帧握手。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ResetProtocolSession(void)
+{
+    s_confirmed_protocol_source = EXTERNAL_COMM_PROTOCOL_SOURCE_NONE; /* 释放正式/简易协议来源锁，允许下一次重新选择协议。 */
+    s_motor_telemetry_enabled = 0U; /* 协议会话结束时立即停掉50ms主动上传，断线后不再占用RS485总线。 */
+    s_motor_telemetry_elapsed_ms = 0U; /* 清除未完成周期，新会话必须重新订阅并从完整50ms开始。 */
+    s_motor_telemetry_sequence = 0U; /* 新订阅序号重新从1开始，便于上位机识别会话边界。 */
+    ExternalComm_ResetProtocolCandidate(); /* 同步清掉历史一帧或两帧，禁止跨会话补成第三帧。 */
+}
+
+/*
+ * 函数功能：累计同一协议来源的首次连接帧，只有300ms内连续三份一致内容才确认该协议会话。
+ * 输入参数：source为正式或简易协议来源；identity指向一致性标识；identity_len为标识长度，最大8字节。
+ * 返回参数：会话已经确认且来源一致时返回1；仍在累计、来源冲突或参数非法时返回0。
+ */
+uint8_t ExternalComm_TryConfirmProtocol(ExternalCommProtocolSource_t source,
+                                        const uint8_t *identity,
+                                        uint16_t identity_len)
+{
+    uint8_t same_candidate; /* 记录本帧是否与当前候选的协议来源、长度和内容完全一致。 */
+
+    if (((source != EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL) &&
+         (source != EXTERNAL_COMM_PROTOCOL_SOURCE_SIMPLE)) ||
+        (identity_len > EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN) ||
+        ((identity_len > 0U) && (identity == NULL)))
+    {
+        return 0U; /* 来源、长度或指针非法时不改变现有状态，避免内部异常调用破坏已确认会话。 */
+    }
+
+    if (s_local_exit_guard != 0U)
+    {
+        s_local_exit_quiet_ms = 0U; /* 退出保护期仍收到申请，说明上位机尚未停止旧保活，重新累计1秒静默。 */
+        ExternalComm_ResetProtocolSession(); /* 保护期内任何申请都不能沿用退出前来源或候选重新连接。 */
+        return 0U; /* 屏幕主动退出优先级高于协议握手，等待上位机真正停止发送后再开放申请。 */
+    }
+
+    if (s_confirmed_protocol_source != EXTERNAL_COMM_PROTOCOL_SOURCE_NONE)
+    {
+        return (s_confirmed_protocol_source == source) ? 1U : 0U; /* 已确认后只允许同一协议续命，另一协议不能交叉取得会话。 */
+    }
+
+    same_candidate = ((s_protocol_confirm.frame_count > 0U) &&
+                      (s_protocol_confirm.source == source) &&
+                      (s_protocol_confirm.identity_len == identity_len) &&
+                      (s_protocol_confirm.elapsed_ms < EXTERNAL_COMM_CONFIRM_WINDOW_MS)) ? 1U : 0U; /* 先校验来源、长度和时间窗口。 */
+
+    if ((same_candidate != 0U) && (identity_len > 0U) &&
+        (memcmp(s_protocol_confirm.identity, identity, identity_len) != 0))
+    {
+        same_candidate = 0U; /* 正式协议8字节授权区发生变化时必须按一组新申请重新计数。 */
+    }
+
+    if (same_candidate == 0U)
+    {
+        ExternalComm_ResetProtocolCandidate(); /* 来源、内容或窗口不一致时丢弃旧候选，当前帧重新作为第一帧。 */
+        s_protocol_confirm.source = source; /* 锁定当前候选来源，防止正式与简易帧拼成三次确认。 */
+        s_protocol_confirm.frame_count = 1U; /* 当前合法申请成为本轮第一帧，尚不能点亮图标或取得控制权。 */
+        s_protocol_confirm.identity_len = identity_len; /* 保存标识长度，后续两帧必须完全一致。 */
+        if (identity_len > 0U)
+        {
+            memcpy(s_protocol_confirm.identity, identity, identity_len); /* 复制正式协议授权区，避免后续接收缓存被覆盖。 */
+        }
+        return 0U; /* 第一帧只建立候选，不执行业务申请。 */
+    }
+
+    ++s_protocol_confirm.frame_count; /* 第二或第三份一致帧到达，推进确认计数。 */
+    if (s_protocol_confirm.frame_count < EXTERNAL_COMM_CONFIRM_REQUIRED_FRAMES)
+    {
+        return 0U; /* 第二帧仍保持静默，等待第三帧完成快速确认。 */
+    }
+
+    s_confirmed_protocol_source = source; /* 第三帧确认后锁定本次会话协议来源，另一协议直到退出或超时都不能续命。 */
+    ExternalComm_ResetProtocolCandidate(); /* 已完成确认，清除临时候选但保留已确认来源。 */
+    return 1U; /* 调用方现在可以刷新图标并执行原控制权申请入口。 */
+}
+
+/*
+ * 函数功能：按10ms任务周期维护首次连接确认窗口，超时后清除未满三帧的候选。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ServiceProtocolConfirmation(void)
+{
+    if (s_protocol_confirm.frame_count == 0U)
+    {
+        return; /* 当前没有待确认候选时不累计时间，避免无外控线时产生无意义状态变化。 */
+    }
+
+    if (s_protocol_confirm.elapsed_ms < EXTERNAL_COMM_CONFIRM_WINDOW_MS)
+    {
+        s_protocol_confirm.elapsed_ms = (uint16_t)(s_protocol_confirm.elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个外控任务周期累计10ms。 */
+    }
+
+    if (s_protocol_confirm.elapsed_ms >= EXTERNAL_COMM_CONFIRM_WINDOW_MS)
+    {
+        ExternalComm_ResetProtocolCandidate(); /* 300ms内未收齐三帧时失效，迟到帧必须重新从第一帧开始。 */
+    }
+}
+
+/*
  * 函数功能：隐藏屏幕外部通信图标并清除在线显示锁存，防止旧申请帧让图标退出后再次闪回。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void ExternalComm_HideLinkIcon(void)
 {
+    ExternalComm_ResetProtocolSession(); /* 图标主动隐藏同时释放协议来源和历史候选，下一次必须重新完成三帧确认。 */
     s_external_comm_display_online = 0U; /* 本次主动退出后撤销在线图标锁存，后续必须由新的合法连接重新点亮。 */
     s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 计时钉到离线值，空闲刷新不能重新显示旧图标。 */
     Pubinterface_RefreshExternalCommDisplay(false, false); /* 立即隐藏 39/40 小电脑图标，让屏幕与已释放的控制权一致。 */
@@ -298,6 +463,165 @@ static void ExternalComm_SendFailAck(uint8_t ack_code, uint8_t value_code, uint8
     info[1] = reason;
     /* 失败也统一走 0xDD 应答帧。 */
     ExternalComm_SendAck(ack_code, info, sizeof(info));
+}
+
+/*
+ * 函数功能：关闭50ms电机遥测并清除本次订阅的周期和序号状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_DisableMotorTelemetry(void)
+{
+    s_motor_telemetry_enabled = 0U; /* 先关闭发送门禁，后续任务周期不再构造电机遥测。 */
+    s_motor_telemetry_elapsed_ms = 0U; /* 丢弃尚未达到50ms的剩余周期。 */
+    s_motor_telemetry_sequence = 0U; /* 下次显式订阅从序号1重新开始，帮助上位机区分会话。 */
+}
+
+/*
+ * 函数功能：处理0x0D/0x01电机遥测订阅命令，载荷0关闭、1开启。
+ * 输入参数：frame指向已通过正式协议CRC和三帧会话门禁的下行帧。
+ * 返回参数：无；执行结果通过原0xDD ACK返回。
+ */
+static void ExternalComm_ApplyMotorTelemetrySubscription(const ExternalCommFrame_t *frame)
+{
+    uint8_t ack_info[2]; /* 成功ACK回显0x0D和最终订阅状态，便于上位机确认。 */
+    uint8_t requested_state; /* 保存InforArea[0]中的0/1订阅值。 */
+
+    if ((frame == NULL) ||
+        (frame->area_code != EXTERNAL_COMM_MOTOR_TELEMETRY_AREA) ||
+        (frame->info_len != 1U) ||
+        (frame->info_area[0] > EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE))
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                 EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE,
+                                 EXTERNAL_COMM_REASON_BAD_LENGTH); /* 区域、长度或0/1值异常时不改变当前订阅。 */
+        return;
+    }
+
+    requested_state = frame->info_area[0]; /* 只在完整参数校验后读取订阅状态。 */
+    if ((requested_state == EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE) &&
+        (ControlArbitration_IsExternalActive() == false))
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                 EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE,
+                                 EXTERNAL_COMM_REASON_BUSY); /* 开启遥测必须已取得外控所有权，防止只读连接长期占用50ms总线。 */
+        return;
+    }
+
+    if (requested_state == EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE)
+    {
+        s_motor_telemetry_enabled = 1U; /* 正式外控会话确认后开放50ms主动上传。 */
+        s_motor_telemetry_elapsed_ms = 0U; /* 从订阅成功时刻开始计算第一个完整周期。 */
+        s_motor_telemetry_sequence = 0U; /* 新订阅第一份上传序号固定从1开始。 */
+    }
+    else
+    {
+        ExternalComm_DisableMotorTelemetry(); /* 上位机主动退订立即停发，不等待退出外控。 */
+    }
+
+    ack_info[0] = EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE; /* 回显命令功能码，和其它控制ACK区分。 */
+    ack_info[1] = requested_state; /* 回显最终0/1状态，上位机收到后更新订阅指示。 */
+    ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, ack_info, sizeof(ack_info)); /* 复用现有控制成功ACK封装。 */
+}
+
+/*
+ * 函数功能：按固定34字节大端布局上传一份电机命令、驱动反馈和安全状态快照。
+ * 输入参数：无，函数从电机发送任务和UART1接收任务复制一致性快照。
+ * 返回参数：无。
+ */
+static void ExternalComm_SendMotorTelemetry(void)
+{
+    uint8_t info[EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN]; /* 固定34字节载荷，未取得的快照字段保持0。 */
+    MotorDriveCommandSnapshot_t command_snapshot; /* 最近一次不同UART1周期命令的私有副本。 */
+    MotorUartFeedbackSnapshot_t feedback_snapshot; /* 最近一次CRC正确驱动回包的私有副本。 */
+    uint32_t sample_tick = HAL_GetTick(); /* 本次主控采样时刻，供上位机和本机单调时钟对齐。 */
+    uint8_t command_valid; /* 命令任务是否已经形成至少一份有效快照。 */
+    uint8_t feedback_valid; /* 驱动反馈是否存在且未超过250ms有效时间窗。 */
+    uint8_t flags = 0U; /* bit0反馈有效、bit1外控所有权、bit2手柄在线、bit3报警。 */
+
+    memset(info, 0, sizeof(info)); /* 未上电形成的命令/反馈字段固定上传0，禁止泄漏栈数据。 */
+    memset(&command_snapshot, 0, sizeof(command_snapshot)); /* 复制失败时保持明确全零命令。 */
+    memset(&feedback_snapshot, 0, sizeof(feedback_snapshot)); /* 复制失败时保持明确全零反馈。 */
+    command_valid = MotorDrive_CopyCommandSnapshot(&command_snapshot); /* 复制期间使用版本复核，字段不会跨两个UART1命令。 */
+    feedback_valid = MotorUart_CopyFeedbackSnapshot(&feedback_snapshot); /* CRC接收任务以同样方式提供一致回包。 */
+    if ((feedback_valid != 0U) &&
+        ((uint32_t)(sample_tick - feedback_snapshot.feedback_tick_ms) > EXTERNAL_COMM_MOTOR_FEEDBACK_VALID_TIMEOUT_MS))
+    {
+        feedback_valid = 0U; /* 回包快照过旧时保留最后数值用于诊断，但清除有效标志。 */
+    }
+
+    s_motor_telemetry_sequence = (uint16_t)(s_motor_telemetry_sequence + 1U); /* 每份实际上传递增，16位自然回绕。 */
+    ExternalComm_WriteBE16(&info[0], s_motor_telemetry_sequence); /* offset0~1：遥测序号。 */
+    ExternalComm_WriteBE32(&info[2], sample_tick); /* offset2~5：主控本次采样时刻ms。 */
+    if (command_valid != 0U)
+    {
+        ExternalComm_WriteBE16(&info[6], command_snapshot.sequence); /* offset6~7：不同电机命令序号。 */
+        ExternalComm_WriteBE32(&info[8], command_snapshot.sent_tick_ms); /* offset8~11：实际UART1命令时刻。 */
+        info[18] = command_snapshot.channel; /* offset18：命令形成时的逻辑通道。 */
+        info[19] = command_snapshot.run_state; /* offset19：0停机、1运行。 */
+        info[20] = command_snapshot.direction; /* offset20：实际驱动控制模式。 */
+        info[21] = command_snapshot.motor_type; /* offset21：实际驱动电机类型。 */
+        ExternalComm_WriteBE32(&info[22], command_snapshot.command_speed_rpm); /* offset22~25：量化后实际下发rpm，停机为0。 */
+    }
+    if (feedback_snapshot.valid != 0U)
+    {
+        ExternalComm_WriteBE16(&info[12], feedback_snapshot.sequence); /* offset12~13：CRC正确反馈序号。 */
+        ExternalComm_WriteBE32(&info[14], feedback_snapshot.feedback_tick_ms); /* offset14~17：有效回包时刻。 */
+        ExternalComm_WriteBE32(&info[26], feedback_snapshot.speed_rpm); /* offset26~29：驱动反馈实际rpm。 */
+        ExternalComm_WriteBE16(&info[30], feedback_snapshot.current_x100); /* offset30~31：工作电流×100。 */
+        info[32] = feedback_snapshot.raw_error; /* offset32：未经主控映射的驱动原始Err。 */
+    }
+
+    if (feedback_valid != 0U)
+    {
+        flags |= EXTERNAL_COMM_MOTOR_FLAG_FEEDBACK_VALID; /* 只有近期CRC正确回包才声明反馈有效。 */
+    }
+    if (ControlArbitration_IsExternalActive())
+    {
+        flags |= EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER; /* 订阅运行期通常置位，所有权异常丢失时上位机立即停止试验。 */
+    }
+    if (((WorkMessage.channel_work == CHANNEL_A) && (WorkMessage.Channel_Aonline == true)) ||
+        ((WorkMessage.channel_work == CHANNEL_B) && (WorkMessage.Channel_Bonline == true)))
+    {
+        flags |= EXTERNAL_COMM_MOTOR_FLAG_HANDLE_ONLINE; /* 只判断当前选中通道，另一通道在线不能替代试验手柄。 */
+    }
+    if (WorkMessage.alarm_flag == true)
+    {
+        flags |= EXTERNAL_COMM_MOTOR_FLAG_ALARM_ACTIVE; /* 任一持续报警都通知上位机终止自动序列。 */
+    }
+    info[33] = flags; /* offset33：四个安全和有效性标志，其余位保持0。 */
+
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_HOST_RUNNING,
+                           EXTERNAL_COMM_MOTOR_TELEMETRY_AREA,
+                           EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_CODE,
+                           info,
+                           sizeof(info)); /* 继续沿用D7 CA F8 F1封装和高字节CRC，不增加第二种UART2帧格式。 */
+}
+
+/*
+ * 函数功能：维护订阅式50ms电机遥测，外控所有权丢失时自动关闭。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ServiceMotorTelemetry(void)
+{
+    if (s_motor_telemetry_enabled == 0U)
+    {
+        return; /* 未订阅时不累计、不组包、不增加UART2总线负载。 */
+    }
+
+    if (ControlArbitration_IsExternalActive() == false)
+    {
+        ExternalComm_DisableMotorTelemetry(); /* 外控所有权因退出或其它路径释放后立即停发。 */
+        return;
+    }
+
+    s_motor_telemetry_elapsed_ms = (uint16_t)(s_motor_telemetry_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 10ms任务周期累计。 */
+    if (s_motor_telemetry_elapsed_ms >= EXTERNAL_COMM_MOTOR_TELEMETRY_PERIOD_MS)
+    {
+        s_motor_telemetry_elapsed_ms = 0U; /* 本次到期后重新累计下一个50ms周期。 */
+        ExternalComm_SendMotorTelemetry(); /* 使用完整私有快照构造一份34字节上传。 */
+    }
 }
 
 static void ExternalComm_SendAlarmInfoIfChanged(void)
@@ -1526,6 +1850,7 @@ static void ExternalComm_ClearHandleLostAlarm(void)
 
 static void ExternalComm_ApplyHostExit(void)
 {
+    ExternalComm_ResetProtocolSession(); /* 主动退出立即释放协议来源和未完成候选，后续登录必须重新完成三帧确认。 */
     /* 退出外控时先清除外部通信层自己的 A 泵锁存请求，避免后续刷新又把泵拉起。 */
     ExternalComm_ClearPumpRequests();
     /* 释放公共仲裁锁，并停止外控遗留的电机、脚踏标志和 A/B 泵输出。 */
@@ -1556,6 +1881,7 @@ static void ExternalComm_ServiceLocalExit(void)
         s_local_exit_requested = 0U; /* 当前请求已由通信任务接管，避免下个 10ms 周期重复退出和回包。 */
         s_local_exit_guard = 1U; /* 先封锁新的申请帧，再释放 owner，堵住旧保活立即重新申请的时间窗口。 */
         s_local_exit_quiet_ms = 0U; /* 从本次真实退出时刻开始等待申请帧静默。 */
+        ExternalComm_DisableMotorTelemetry(); /* 屏幕退出外控时立即停止50ms上传，不能继续占用已经离开的上位机链路。 */
         ExternalComm_ClearPumpRequests(); /* 清除外控层保存的 A/B 泵请求，防止退出后刷新重新拉起泵。 */
         ControlArbitration_ReleaseExternalControl(); /* 停止外控电机和泵输出，并释放公共控制权。 */
         ExternalComm_ClearHandleLostAlarm(); /* 屏幕主动退出也作为手柄掉线报警的确认入口。 */
@@ -1634,6 +1960,7 @@ static void ExternalComm_RefreshIdleLinkDisplay(void)
     /* 非外控状态下长时间没有合法外部帧，认为链路已断开并熄灭小电脑图标。 */
     if (s_external_comm_display_elapsed_ms >= EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
     {
+        ExternalComm_ResetProtocolSession(); /* 白色在线图标超时表示物理会话已断开，下一次必须重新完成三帧确认。 */
         s_external_comm_display_online = 0U;
         Pubinterface_RefreshExternalCommDisplay(false, false);
     }
@@ -1646,6 +1973,7 @@ static void ExternalComm_RefreshIdleLinkDisplay(void)
  */
 static void ExternalComm_StopOutputForLinkSilent(void)
 {
+    ExternalComm_DisableMotorTelemetry(); /* 2秒无合法下行帧视为通信失效，先停50ms主动遥测并等待重新订阅。 */
     /* 短超时只处理安全输出，不改变 WorkMessage.hmiactive_work，避免上位机外控状态被误释放。 */
     WorkMessage.runflag_work = false;
     /* 清零当前电机实际输出速度，驱动任务下一周期会按停止状态下发。 */
@@ -1683,6 +2011,7 @@ static void ExternalComm_StopOutputForLinkSilent(void)
 
 static void ExternalComm_HandleLinkReleaseTimeout(void)
 {
+    ExternalComm_ResetProtocolSession(); /* 10秒长超时释放外控时同步释放协议来源，禁止旧保活直接恢复会话。 */
     /* 长超时确认上位机或 RS485 已长时间离线，先清外部通信层自己的泵运行请求。 */
     ExternalComm_ClearPumpRequests();
     /* 释放外控仲裁锁，并由公共释放函数统一停止电机、A/B 泵和外控显示标志。 */
@@ -2891,6 +3220,10 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
         case EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH:
             /* 批量写请求只登记范围和模板，任务随后按 30ms 节拍写入并确认一页。 */
             ExternalComm_StartNavBatch(frame, EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV);
+            break;
+        case EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE:
+            /* 显式开启或关闭50ms电机遥测，原100ms心跳不受订阅状态影响。 */
+            ExternalComm_ApplyMotorTelemetrySubscription(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
             /* 读取主控板 AT24C32 Page1 软件版本记录。 */
@@ -4313,6 +4646,126 @@ static uint8_t ExternalComm_IsEepromCommand(uint8_t fun_code)
 }
 
 /*
+ * 函数功能：判断正式协议功能码是否属于当前主控明确支持的下行命令集合。
+ * 输入参数：fun_code为已经通过完整帧CRC校验的功能码。
+ * 返回参数：已知功能码返回1，未知功能码返回0。
+ */
+static uint8_t ExternalComm_IsKnownDownlinkFunction(uint8_t fun_code)
+{
+    switch (fun_code)
+    {
+        case EXTERNAL_COMM_DOWN_APPLY_CONTROL:
+        case EXTERNAL_COMM_DOWN_SET_VALUE:
+        case EXTERNAL_COMM_DOWN_SWITCH_VALUE:
+        case EXTERNAL_COMM_DOWN_CONTROL_CMD:
+        case EXTERNAL_COMM_DOWN_READ_PAGE:
+        case EXTERNAL_COMM_DOWN_READ_ALL:
+        case EXTERNAL_COMM_DOWN_WRITE_PAGE:
+        case EXTERNAL_COMM_DOWN_READ_NAV_PAGE:
+        case EXTERNAL_COMM_DOWN_READ_NAV_BATCH:
+        case EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE:
+        case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
+        case EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH:
+        case EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE:
+        case EXTERNAL_COMM_DOWN_HOST_EXIT:
+        case EXTERNAL_COMM_DOWN_PERMISSION:
+            return 1U; /* 以上功能码均存在明确分发分支，可以在已确认正式会话内执行。 */
+        default:
+            return 0U; /* 未定义功能不能作为链路保活依据，避免完整伪帧延长在线状态。 */
+    }
+}
+
+/*
+ * 函数功能：校验正式协议首次外控申请是否符合三帧确认所需的固定字段和8字节身份内容。
+ * 输入参数：frame指向已经通过帧头、长度、帧尾和CRC校验的完整正式协议帧。
+ * 返回参数：满足固定下行申请格式返回1，否则返回0。
+ */
+static uint8_t ExternalComm_IsFormalApplyCandidate(const ExternalCommFrame_t *frame)
+{
+    if (frame == NULL)
+    {
+        return 0U; /* 空帧不能参与连接确认。 */
+    }
+
+    return ((frame->tran_code == EXTERNAL_COMM_TRAN_DOWNLOAD) &&
+            (frame->fun_code == EXTERNAL_COMM_DOWN_APPLY_CONTROL) &&
+            (frame->area_code == EXTERNAL_COMM_AREA_NONE) &&
+            (frame->info_code == EXTERNAL_COMM_INFO_NONE) &&
+            (frame->info_len == EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN)) ? 1U : 0U; /* 三帧必须具有完全相同的申请字段和8字节授权区。 */
+}
+
+/*
+ * 函数功能：判断正式协议帧是否为未连接状态也允许执行的全局急停。
+ * 输入参数：frame指向已经通过完整协议校验的正式帧。
+ * 返回参数：严格匹配0x04/0xFF且无载荷的下行急停返回1，否则返回0。
+ */
+static uint8_t ExternalComm_IsFormalEmergencyStop(const ExternalCommFrame_t *frame)
+{
+    if (frame == NULL)
+    {
+        return 0U; /* 空帧没有安全动作含义。 */
+    }
+
+    return ((frame->tran_code == EXTERNAL_COMM_TRAN_DOWNLOAD) &&
+            (frame->fun_code == EXTERNAL_COMM_DOWN_CONTROL_CMD) &&
+            (frame->area_code == 0xFFU) &&
+            (frame->info_code == EXTERNAL_COMM_INFO_NONE) &&
+            (frame->info_len == 0U)) ? 1U : 0U; /* 未确认急停只允许纯停止帧，不能夹带参数。 */
+}
+
+/*
+ * 函数功能：在业务分发前根据帧方向、三帧确认、协议来源和急停例外决定正式帧处理方式。
+ * 输入参数：frame指向已经通过帧头、长度、帧尾和CRC校验的正式协议帧。
+ * 返回参数：返回忽略、只分发或分发并刷新链路三种动作。
+ */
+static ExternalCommFormalFrameAction_t ExternalComm_ClassifyFormalFrame(const ExternalCommFrame_t *frame)
+{
+    if ((frame == NULL) ||
+        (frame->tran_code != EXTERNAL_COMM_TRAN_DOWNLOAD) ||
+        (frame->info_code != EXTERNAL_COMM_INFO_NONE))
+    {
+        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 上传心跳回灌及信息码异常帧均不能点亮图标或进入业务分发。 */
+    }
+
+    if (ExternalComm_IsFormalEmergencyStop(frame) != 0U)
+    {
+        if (s_confirmed_protocol_source == EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL)
+        {
+            return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 正式会话内急停既执行停止也作为合法下行活动刷新保活。 */
+        }
+        return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY; /* 未确认或简易会话下仍执行安全停止，但绝不建立正式连接。 */
+    }
+
+    if (ExternalComm_IsFormalApplyCandidate(frame) != 0U)
+    {
+        if (s_local_exit_guard != 0U)
+        {
+            return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY; /* 屏幕退出保护期复用原退出ACK逻辑，但不能重新点亮图标。 */
+        }
+
+        if (ExternalComm_TryConfirmProtocol(EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL,
+                                            frame->info_area,
+                                            frame->info_len) != 0U)
+        {
+            return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 第三帧或已确认同源保活可以进入原申请及控制权仲裁。 */
+        }
+        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 第一、第二帧保持静默，不回ACK、不显示图标、不取得owner。 */
+    }
+
+    if (s_confirmed_protocol_source != EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL)
+    {
+        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 未确认或简易协议会话期间，非急停正式命令全部静默拒绝。 */
+    }
+
+    if (ExternalComm_IsKnownDownlinkFunction(frame->fun_code) != 0U)
+    {
+        return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 已确认正式会话的已知下行命令执行并刷新2秒/10秒看门狗。 */
+    }
+
+    return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY; /* 未知功能仍返回原失败ACK，但不能借此刷新在线状态。 */
+}
+
+/*
  * 函数功能：从共用 UART2 FIFO 中选择最早的旧协议或简易协议候选帧并处理一步。
  * 输入参数：无，直接访问本任务私有 FIFO。
  * 返回参数：消费或跳过数据返回 1；半帧、无数据或 EEPROM 命令需要留到下一周期时返回 0。
@@ -4339,6 +4792,8 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     ExternalCommParseResult_t parse_result;
     /* is_eeprom_command 标记当前合法帧是否需要占用本周期唯一 EEPROM 命令额度。 */
     uint8_t is_eeprom_command;
+    /* frame_action 保存严格连接门禁对当前正式帧给出的处理方式。 */
+    ExternalCommFormalFrameAction_t frame_action;
 
     /* FIFO 尚未初始化时没有可处理数据。 */
     if (s_rx_fifo.ready == 0U)
@@ -4453,7 +4908,14 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     parse_result = ExternalCommProtocol_Parse(s_frame_buf, frame_len, &frame);
     if (parse_result == EXTERNAL_COMM_PARSE_OK)
     {
-        is_eeprom_command = ExternalComm_IsEepromCommand(frame.fun_code); /* 只对已通过 CRC 的完整帧执行 EEPROM 限流。 */
+        frame_action = ExternalComm_ClassifyFormalFrame(&frame); /* CRC通过后再校验方向、三帧会话来源和未连接急停例外。 */
+        if (frame_action == EXTERNAL_COMM_FORMAL_FRAME_IGNORE)
+        {
+            (void)ExternalComm_RxFifoSkip(frame_len); /* 上传回灌、未满三帧和未确认业务帧均完整消费，避免同一帧反复参与确认。 */
+            return 1U; /* 静默忽略本帧，不点图标、不回ACK、不占用EEPROM额度。 */
+        }
+
+        is_eeprom_command = ExternalComm_IsEepromCommand(frame.fun_code); /* 只对经过连接门禁且准备分发的EEPROM帧执行限流。 */
         if ((is_eeprom_command != 0U) &&
             (s_eeprom_command_processed_this_cycle != 0U))
         {
@@ -4465,8 +4927,10 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
             s_eeprom_command_processed_this_cycle = 1U; /* 在分发前锁定本周期额度，失败应答同样不得紧接第二次 EEPROM 操作。 */
         }
 
-        /* 合法下行帧到达说明 RS485 链路仍存在，先喂外控保活计时。 */
-        ExternalComm_NotifyLink();
+        if (frame_action == EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK)
+        {
+            ExternalComm_NotifyLink(); /* 只有三帧确认后的同源已知下行命令才刷新图标和2秒/10秒链路计时。 */
+        }
         /* 消费当前完整帧，后续循环会继续处理同一 FIFO 里的下一帧。 */
         (void)ExternalComm_RxFifoSkip(frame_len);
         /* 按 FunCode 分发下行命令，业务层仍然只看到一帧完整协议数据。 */
@@ -4525,6 +4989,9 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 优先处理屏幕退出请求，确保本周期收到的旧申请帧只能被退出保护拦截。 */
     ExternalComm_ServiceLocalExit();
 
+    /* 在读取本周期新帧前推进三帧确认窗口，超过300ms的历史一帧或两帧先失效。 */
+    ExternalComm_ServiceProtocolConfirmation();
+
     /* 新任务周期开始时释放 EEPROM 命令额度，本周期最多允许分发一个相关下行帧。 */
     s_eeprom_command_processed_this_cycle = 0U;
 
@@ -4547,6 +5014,9 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
     ExternalComm_SendAlarmInfoIfChanged();
 
+    /* 显式订阅后独立按50ms上传电机命令/反馈快照；未订阅时该服务不构造任何帧。 */
+    ExternalComm_ServiceMotorTelemetry();
+
     /* 累加心跳计时，任务周期由 EXTERNAL_COMM_TASK_PERIOD_MS 定义。 */
     s_heartbeat_elapsed_ms = (uint16_t)(s_heartbeat_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
     /* 到达心跳周期后主动上传 0xAA 心跳帧。 */
@@ -4562,6 +5032,8 @@ static void ExternalCommTaskFunc(uint32_t event)
 
 void ExternalComm_Init(void)
 {
+    /* 上电初始化显式清除协议来源和候选，保证正式/简易协议都必须从第一帧开始确认。 */
+    ExternalComm_ResetProtocolSession();
     /* 初始化外控 RX FIFO，保证任务第一次运行前已经准备好接收粘包/半包数据。 */
     ExternalComm_RxFifoInit();
     /* 创建 UART2 外部通信任务。 */

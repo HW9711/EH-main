@@ -3,6 +3,20 @@
 #ifndef __MOTORUARTDATA_H
 #define __MOTORUARTDATA_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
+/* 驱动反馈快照只在完整12字节回包通过CRC后更新，避免遥测字段来自不同回包。 */
+typedef struct
+{
+	uint32_t feedback_tick_ms; /* HAL毫秒时钟：最近一次有效驱动回包形成快照的时刻。 */
+	uint32_t speed_rpm;        /* 驱动 byte4~5 的“转速/10”字段换算成实际 rpm。 */
+	uint16_t sequence;         /* 每份CRC正确回包递增一次，自然回绕。 */
+	uint16_t current_x100;     /* 驱动 byte8~9 实时工作电流，单位0.01A。 */
+	uint8_t raw_error;         /* 驱动 byte7 原始错误码，不经过主控报警映射。 */
+	uint8_t valid;             /* 已收到至少一份CRC正确回包时置1。 */
+} MotorUartFeedbackSnapshot_t;
+
 /*
  * 电机驱动细分报警图片开关：
  * 0U：生产模式只显示 84/86/87 公用报警图，未配置公用图的驱动错误不弹出误导图片。
@@ -19,11 +33,25 @@
 void MotorUartData_Init(void);
 
 /*
- * 函数功能：通知电机反馈模块，过载/堵转发生后的脚踏已经真实松开。
- * 输入参数：无。
- * 返回参数：无；驱动已恢复时立即清除脚踏过载报警，否则等待后续 Err=0 再清除。
+ * 函数功能：复制最近一次CRC正确驱动回包形成的一致性快照。
+ * 输入参数：snapshot 指向调用方提供的快照缓存。
+ * 返回参数：快照有效且复制成功返回1，否则返回0。
  */
-void MotorUart_ReleaseFootOverload(void);
+uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot);
+
+/*
+ * 函数功能：查询当前是否有脚踏来源的驱动故障仍在等待脚踏释放。
+ * 输入参数：无。
+ * 返回参数：true表示脚踏任务必须继续检测释放；false表示不是脚踏来源或释放已经记录。
+ */
+bool MotorUart_IsFootDriverAlarmWaitingRelease(void);
+
+/*
+ * 函数功能：通知电机反馈模块，脚踏来源驱动故障已经观察到松脚、掉线或实时数据失效。
+ * 输入参数：无。
+ * 返回参数：无；驱动已恢复时立即清除报警，否则保存释放结果并等待后续Err=0。
+ */
+void MotorUart_ReleaseFootDriverAlarm(void);
 
 #endif  //__MOTORUARTDATA_H
 

@@ -61,7 +61,7 @@ static void ExtSimple_Login(void)
 {
     uint8_t auth_code[EXT_SIMPLE_AUTH_SIZE] = {0U}; /* 该载荷只在主控内部适配，不出现在简易协议线上。 */
 
-    ExternalComm_NotifyLink(); /* 合法登录帧先刷新链路在线状态，与原协议申请帧保持一致。 */
+    ExternalComm_NotifyLink(); /* 第三份登录帧确认简易会话后才点亮图标并刷新2秒/10秒链路保护。 */
     ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_LOGIN,
                            0xFFU,
                            auth_code,
@@ -224,7 +224,12 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
 
     if (fun_code == EXT_SIMPLE_FUN_LOGIN)
     {
-        ExtSimple_Login(); /* 0x01 允许在会话内重复发送，兼作简易协议登录保活。 */
+        if (ExternalComm_TryConfirmProtocol(EXTERNAL_COMM_PROTOCOL_SOURCE_SIMPLE,
+                                            NULL,
+                                            0U) != 0U)
+        {
+            ExtSimple_Login(); /* 第三份登录帧或已确认同源保活才允许刷新链路并申请外控owner。 */
+        }
         return 1U;
     }
 

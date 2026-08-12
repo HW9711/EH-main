@@ -30,6 +30,7 @@
 #include <string.h>
 #include "board.h"
 #include "uart4.h"
+#include "common.h"
 #include "Pubinterface.h"
 #include "sscKEYBH.h"
 #include "sscUIDP.h"
@@ -46,6 +47,11 @@
 #define FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS 3U
 #define FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS 10U
 #define FOOT_PEDAL_SPEED_HIGH_MARGIN 30U /* 双脚踏当前通道运行段预留的高位死区，沿用旧公式 HValue-MValue-30 的行程范围。 */
+#define FOOT_SINGLE_FRAME_LENGTH 10U /* 单踏板实时值、Flash读回和脚踏实体按键帧均为10字节，最后2字节为CRC。 */
+#define FOOT_TWO_STAGE_FRAME_LENGTH 18U /* 双段踏板周期帧为18字节，包含实时AD、三点定标值和CRC。 */
+#define FOOT_DOUBLE_FRAME_LENGTH 24U /* 双脚踏周期帧为24字节，包含左右实时AD、两组三点定标值和CRC。 */
+#define FOOT_RUNTIME_TIMEOUT_TICKS 25U /* UART4解析任务每10ms执行一次，连续250ms无有效实时帧先安全停止脚踏输出。 */
+#define FOOT_OFFLINE_TIMEOUT_TICKS 100U /* 连续约1秒无有效实时帧后再发布脚踏掉线，保持原界面防抖时间。 */
 
 static uint8_t get_jtHvalue[10]={0XFE,0XEF,0XB6,0XC1,0XB8,0Xdf,0x3e,0x84};//读高值
 
@@ -59,7 +65,7 @@ static uint8_t s_double_pedal_release_before_run_channel = CHANNEL_NONE;
 static uint8_t s_double_left_gently_pump_channel = CHANNEL_NONE; /* 记录左脚踏轻踩实际启动的泵，松脚时不能再按泵类型重新猜测。 */
 static uint8_t s_double_right_gently_pump_channel = CHANNEL_NONE; /* 记录右脚踏轻踩实际启动的泵，A/B 都是注水泵时确保停止 B。 */
 static bool s_common_socket_missing_wait_release = false; /* 公共接头缺刀具触发后等待脚踏真实释放，防止同一次长踩反复弹 80。 */
-static bool s_motor_overload_wait_release = false; /* 驱动过载发生在脚踏运行期间时锁住本次踩踏，报警恢复后仍必须松脚再启动。 */
+static volatile bool s_foot_runtime_frame_valid = false; /* 只有完整且CRC正确的实时帧才能置位，失效时行为任务禁止沿用旧高AD。 */
 
 
 
@@ -194,20 +200,33 @@ static uint32_t Foot_BuildTravelMotorSpeed(uint16_t ad_value,uint16_t low_adc,ui
 
 
 
-/**
- * @brief 发送脚踏板消息到队列
- * @param msgType 消息类型
- * @param adValue AD值
- * @param keyStatus 按键状态
+/*
+ * 函数功能：把脚踏上线或掉线消息可靠投递到行为队列，并只对已经成功入队的相同消息去重。
+ * 输入参数：msg 为本次连接状态、脚踏类型和定标参数快照。
+ * 返回参数：true 表示消息已经成功排队或与最近一次成功消息相同；false 表示队列不可用或本次发送失败。
  */
-static void Foot_SendMessage(FootMessage_t msg)
+static bool Foot_SendMessage(FootMessage_t msg)
 {
-    //初始化一个静态FootMessage_t bj_msg结构体，并且判断bj_msg和msg的值是否相等，如果相等返回，如果不相等msg赋值给bj_msg
-    static FootMessage_t bj_msg;
-    if(FootMsgQueue == NULL) return; /* 脚踏队列尚未创建时不能投递解析结果，直接返回避免访问空句柄。 */
-    if(memcmp(&bj_msg, &msg, sizeof(FootMessage_t)) == 0) return;
-       memcpy(&bj_msg, &msg, sizeof(FootMessage_t));
-    (void)Kernel_QueueSend(FootMsgQueue, &msg, 0);
+    static FootMessage_t last_queued_msg; /* 保存最近一次已经成功进入队列的消息，失败消息不能成为去重基准。 */
+    static bool last_queued_valid = false; /* 上电后尚无成功消息时不比较全零静态缓存，避免误判首次消息。 */
+
+    if(FootMsgQueue == NULL)
+    {
+        return false; /* 脚踏队列尚未创建时不能投递连接状态，调用方必须保留重试条件。 */
+    }
+    if((last_queued_valid != false) &&
+       (memcmp(&last_queued_msg, &msg, sizeof(FootMessage_t)) == 0))
+    {
+        return true; /* 完全相同的消息已经成功排队，不重复占用深度为5的连接队列。 */
+    }
+    if(Kernel_QueueSend(FootMsgQueue, &msg, 0) != pdPASS)
+    {
+        return false; /* 队列临时已满时不更新缓存，下一次解析周期仍允许重试同一消息。 */
+    }
+
+    memcpy(&last_queued_msg, &msg, sizeof(FootMessage_t)); /* 只有发送成功后才记住本次连接快照。 */
+    last_queued_valid = true; /* 标记去重基准已经有效，后续相同消息可以安全过滤。 */
+    return true;
 }
 
 /**
@@ -332,6 +351,32 @@ static void Foot_ClearRunRequestAfterGateFail(void)
 }
 
 /*
+ * 函数功能：实时脚踏帧超时后保持脚踏来源安全停机，防止25ms行为任务继续使用旧高AD重复置运行位。
+ * 输入参数：无，函数读取当前控制所有权和脚踏运行标志，只处理脚踏来源。
+ * 返回参数：无。
+ */
+static void Foot_StopRunOnRealtimeTimeout(void)
+{
+    bool foot_output_active; /* 记录当前电机或轻踩泵是否确实由脚踏来源占用，避免误停其它控制方式。 */
+
+    s_foot_runtime_frame_valid = false; /* 超时后先关闭实时数据有效门禁，只有下一帧完整CRC数据才能恢复。 */
+    MotorUart_ReleaseFootDriverAlarm(); /* 连续无可信脚踏数据等价于控制源已释放，记录该条件并继续等待驱动Err=0。 */
+    foot_output_active = ControlArbitration_IsOwner(CONTROL_OWNER_FOOT) ||
+                         ((WorkMessage.drivetype_work == JTWORK) &&
+                          (ControlSignalMessage.jtL_control_flag ||
+                           ControlSignalMessage.jtR_control_flag ||
+                           ControlSignalMessage.jtL_gentlypump_flag ||
+                           ControlSignalMessage.jtR_gentlypump_flag)); /* 仅脚踏owner或脚控模式的脚踏标志允许触发本次安全停机。 */
+    if(foot_output_active == false)
+    {
+        return; /* 手控、触控或外控正在运行时，脚踏通信异常不能清除其它来源的运行请求。 */
+    }
+
+    Pubinterface_SetHandleInjectionPumpRun(false); /* 脚踏电机失去可信实时输入时同步关闭手柄联动注水泵。 */
+    Foot_ClearRunRequestAfterGateFail(); /* 清电机速度、运行位、左右脚踏标志和轻踩泵，下一驱动周期发送停止帧。 */
+}
+
+/*
  * 函数功能：公共接头缺 EPC 刀具头报警后锁住当前脚踏触发，要求操作者松脚后才能再次启动报警。
  * 输入参数：无。
  * 返回参数：无。
@@ -369,6 +414,7 @@ static void Foot_ClearSocketLatchOnRelease(void)
         return;                                      /* 当前没有缺刀具等待松脚锁存时不改状态，避免影响其它门禁失败。 */
     }
 
+    Pubinterface_ReleaseFootCommonSocketToolMissingAlarm(); /* 脚踏真实松开后关闭本次持续80号弹窗和蜂鸣，不能等待固定2秒退出。 */
     s_common_socket_missing_wait_release=false;      /* 操作者已经松开脚踏，下一次重新踩下才允许重新触发 80 报警。 */
 }
 
@@ -653,20 +699,16 @@ static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
 }
 
 /*
- * 函数功能：驱动过载后阻止保持踩下的脚踏自动重新启动手柄和联动泵。
+ * 函数功能：任意脚踏来源驱动故障后阻止保持踩下自动重启，并检测松脚条件。
  * 输入参数：msg 为最近一次有效脚踏连接和定标消息。
  * 返回参数：当前必须保持停机返回 true；允许继续正常脚踏处理返回 false。
  */
-static bool Foot_BlockOverloadRun(const FootMessage_t *msg)
+static bool Foot_BlockDriverAlarmRun(const FootMessage_t *msg)
 {
     bool is_released = false; /* 保存当前脚踏是否已真实回到释放区，双脚踏必须左右均释放。 */
-    if (WorkAlarm_Is(WORK_ALARM_MOTOR_OVERLOAD) || WorkAlarm_Is(WORK_ALARM_MOTOR_OVERLOAD_ALT))
+    if (MotorUart_IsFootDriverAlarmWaitingRelease() == false)
     {
-        s_motor_overload_wait_release = true; /* 过载报警出现时锁住本次踩踏，即使报警弹窗随后自动关闭也不能直接恢复运行。 */
-    }
-    if (s_motor_overload_wait_release == false)
-    {
-        return false; /* 本次脚踏没有经历过载报警，保持原有启动流程。 */
+        return false; /* 当前没有脚踏来源驱动故障等待松脚，保持原有脚踏启动流程。 */
     }
     if ((msg == NULL) || (msg->connect_flag == false))
     {
@@ -692,11 +734,10 @@ static bool Foot_BlockOverloadRun(const FootMessage_t *msg)
     }
     if (is_released)
     {
-        MotorUart_ReleaseFootOverload(); /* 通知驱动报警模块脚踏已释放；只有驱动 Err 同时恢复后才真正清除过载弹窗和蜂鸣。 */
-        s_motor_overload_wait_release = false; /* 真实松脚后解除锁存，下一次新的踩下动作才允许重新启动。 */
+        MotorUart_ReleaseFootDriverAlarm(); /* 保存脚踏释放结果；只有驱动Err同时恢复后才关闭弹窗和蜂鸣。 */
         return false;
     }
-    Foot_ClearRunRequestAfterGateFail(); /* 长踩期间持续撤销电机、脚踏来源和联动泵请求，防止报警恢复后下一周期自动运行。 */
+    Foot_ClearRunRequestAfterGateFail(); /* 长踩期间持续撤销电机、脚踏来源和联动泵请求，防止任意驱动报警恢复后自动运行。 */
     return true;
 }
 static void Foot_RequireDoublePedalRelease(uint8_t channel)
@@ -756,6 +797,7 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
 
     if(msg->connect_flag==false)
     {
+        MotorUart_ReleaseFootDriverAlarm(); /* 脚踏掉线等价于物理释放，修复过载或其它驱动故障永久等待松脚的边界。 */
         if( WorkMessage.drivetype_work==JTWORK)//如果，前面用的是脚踏使能，现在跳出脚踏自动轮训到什么控制
         {
             if(ControlSignalMessage.jtL_control_flag||ControlSignalMessage.jtR_control_flag)//如果当前正是脚踏控制电机过程中
@@ -769,7 +811,7 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
                  }
 
             }
-            if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)//或者空心转
+            if(Pubinterface_IsHandleControlReservedModel(WorkMessage.hand_model))//只允许真实具备手柄按键能力的型号在脚踏掉线后回到手控，PXBB必须保持非手控状态
             {
                  ControlSignalMessage.handle_enable_flag=true;//控制信号，手控使能开启
                  WorkMessage.drivetype_work=HANDLEWORK;//工作标志手控
@@ -953,7 +995,7 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
            /* 单踏板按“手柄运行才联动注水泵”处理，先不预启动泵，避免 owner 获取失败时泵单独转。 */
             if(WorkMessage.speed_set_work==0U)WorkMessage.speed_set_work=Pubinterface_GetCurrentDefaultMotorSpeed();//当前手柄还未装载速度时，使用 Page4 默认速度替代旧固定 60000
             /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
-            if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+            if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
             {
                 Foot_LatchSocketMissing(); /* 本次脚踏已经触发公共接头缺刀具报警，后续长踩必须等松脚再触发。 */
                 Foot_ClearRunRequestAfterGateFail(); /* 公共接头缺刀具头时只报警 80，并保证脚踏不会留下运行状态。 */
@@ -1122,7 +1164,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
          //手柄运行
            if(WorkMessage.speed_set_work==0U)WorkMessage.speed_set_work=Pubinterface_GetCurrentDefaultMotorSpeed();//当前手柄还未装载速度时，使用 Page4 默认速度替代旧固定 60000
         /* 脚踏真正启动电机前占用脚踏控制权，当前来源结束前其它方式不能接管。 */
-        if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+        if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
         {
             Foot_LatchSocketMissing(); /* 双段脚踏电机段已触发公共接头缺刀具报警，保持踩下时不再重复弹 80。 */
             Foot_ClearRunRequestAfterGateFail(); /* 双段脚踏进入电机段前发现公共接头无刀具，停泵并清运行请求。 */
@@ -1225,7 +1267,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                 if(WorkMessage.channel_work==CHANNEL_A)
                 {
                     /* 双踏板左侧触发当前通道启动前先占用脚踏控制权。 */
-                    if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+                    if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
                     {
                         Foot_LatchSocketMissing(); /* 左脚踏当前通道已触发缺刀具报警，长踩期间不再重复弹窗。 */
                         Foot_ClearRunRequestAfterGateFail(); /* 左脚踏当前通道启动前发现缺刀具，停泵并保持电机停机。 */
@@ -1270,7 +1312,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                         }
                         else
                         {
-                            if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+                            if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
                             {
                                 Foot_LatchSocketMissing(); /* 左脚踏跨通道已触发缺刀具报警，必须松脚后才允许再次触发。 */
                                 Foot_ClearRunRequestAfterGateFail(); /* 左脚踏跨通道直接运行前发现公共接头无刀具，立即撤销脚踏请求。 */
@@ -1291,12 +1333,12 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
             else
             {
                   WorkMessage.switchhandle_counts=0;
-                if(ControlSignalMessage.jtR_control_flag)
+                if(ControlSignalMessage.jtL_control_flag)
                 {
                      WorkMessage.runflag_work=false;
                     WorkMessage.speed_work=0;
                     //如果泵以注水泵运行-泵停止
-                    ControlSignalMessage.jtR_control_flag=false;
+                    ControlSignalMessage.jtL_control_flag=false; /* 左踏板退回轻踩区时只清左侧电机来源，不能误清右侧。 */
 
                     if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_OVERLOAD||WorkMessage.alarm_value==WORK_ALARM_HANDLE_NOT_CONNECTED)//过载或者手柄未连接的情况，清除报警
                     {
@@ -1391,7 +1433,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
             if(WorkMessage.channel_work==CHANNEL_B)
             {
                /* 双踏板右侧触发当前通道启动前先占用脚踏控制权。 */
-               if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+               if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
                {
                    Foot_LatchSocketMissing(); /* 右脚踏当前通道已触发缺刀具报警，等待松脚后才能再报警。 */
                    Foot_ClearRunRequestAfterGateFail(); /* 右脚踏当前通道启动前发现缺刀具，报警后不保留运行边沿。 */
@@ -1437,7 +1479,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                         }
                         else
                         {
-                            if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)
+                            if(Pubinterface_CheckCommonSocketToolReadyForFootRun() == false)
                             {
                                 Foot_LatchSocketMissing(); /* 右脚踏跨通道已触发缺刀具报警，长踩期间不再重复请求启动。 */
                                 Foot_ClearRunRequestAfterGateFail(); /* 右脚踏跨通道直接运行前发现公共接头无刀具，立即撤销脚踏请求。 */
@@ -1460,12 +1502,12 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
         else
         {
              WorkMessage.switchhandle_countss=0;
-            if(ControlSignalMessage.jtL_control_flag)
+            if(ControlSignalMessage.jtR_control_flag)
             {
                  WorkMessage.runflag_work=false;
                 WorkMessage.speed_work=0;
                 //如果泵以注水泵运行-泵停止
-                ControlSignalMessage.jtL_control_flag=false;
+                ControlSignalMessage.jtR_control_flag=false; /* 右踏板退回轻踩区时只清右侧电机来源，保持左右状态对称。 */
 
                 if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_OVERLOAD||WorkMessage.alarm_value==WORK_ALARM_HANDLE_NOT_CONNECTED)//过载或者手柄未连接的情况，清除报警
                 {
@@ -1554,9 +1596,15 @@ void FootControlTask(uint32_t event)
         Foot_HandleConnectionUpdate(&msg); /* 只有收到新消息时才处理上线或掉线边沿。 */
     }
 
-    if (Foot_BlockOverloadRun(&msg))
+    if(s_foot_runtime_frame_valid == false)
     {
-        return; /* 过载后的持续踩踏已由锁存统一停机并释放脚踏 owner，不能再进入任一种脚踏启动分支。 */
+        Foot_StopRunOnRealtimeTimeout(); /* 没有可信实时AD时持续保持脚踏输出为停止，防止旧高值在下一周期重新起机。 */
+        return; /* 等待新的完整CRC实时帧恢复门禁，本周期不得进入任何脚踏比例控制。 */
+    }
+
+    if (Foot_BlockDriverAlarmRun(&msg))
+    {
+        return; /* 驱动故障后的持续踩踏已由统一门禁停机，不能再进入任一种脚踏启动分支。 */
     }
     if (msg.connect_flag == true) /* 脚踏在线时才按踏板类型处理动作；离线消息只更新连接状态。 */
     {
@@ -1608,30 +1656,98 @@ static FootParserState_t s_foot_parser_state = {0U};
  */
 static void Foot_HandleMissingUartFrame(void)
 {
+    FootMessage_t disconnect_msg; /* 掉线消息使用局部副本，入队失败时不能提前污染全局在线快照。 */
+
     if ((s_foot_parser_state.connected == 0U) &&
         (WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR) == false))
     {
         return; /* 从未上线且没有定标报警时不累计掉线，避免空串口周期产生无意义状态变化。 */
     }
 
-    ++s_foot_parser_state.silent_ticks; /* 每 10ms 无完整帧累计一次，保持原 100 次确认阈值。 */
-    if (s_foot_parser_state.silent_ticks <= 100U)
+    if(s_foot_parser_state.silent_ticks <= FOOT_OFFLINE_TIMEOUT_TICKS)
+    {
+        ++s_foot_parser_state.silent_ticks; /* 无有效实时帧每10ms累计一次，到101后饱和并持续重试掉线队列。 */
+    }
+    if((s_foot_parser_state.silent_ticks >= FOOT_RUNTIME_TIMEOUT_TICKS) &&
+       (s_foot_runtime_frame_valid != false))
+    {
+        Foot_StopRunOnRealtimeTimeout(); /* 连续250ms没有可信实时AD时先停电机和联动泵，不等待1秒UI掉线。 */
+    }
+    if (s_foot_parser_state.silent_ticks <= FOOT_OFFLINE_TIMEOUT_TICKS)
     {
         return; /* 尚未超过掉线阈值时保留当前脚踏状态。 */
     }
 
-    s_foot_parser_state.silent_ticks = 0U; /* 掉线已经确认，清零计数供下次上线使用。 */
     if (s_foot_parser_state.connected != 0U)
     {
-        footmessage.connect_flag = false; /* 行为任务收到该消息后停止脚踏控制并释放控制权。 */
-        Foot_SendMessage(footmessage); /* 保持原队列通知顺序，先发布掉线再发提示蜂鸣。 */
+        disconnect_msg = footmessage; /* 保留最近一次脚踏类型和定标值，只在候选消息中改连接状态。 */
+        disconnect_msg.connect_flag = false; /* 行为任务收到该消息后停止脚踏控制并释放控制权。 */
+        if(Foot_SendMessage(disconnect_msg) == false)
+        {
+            return; /* 队列暂满时保持connected和101计数，下个10ms周期继续发送同一掉线消息。 */
+        }
+        footmessage.connect_flag = false; /* 掉线消息成功入队后才更新全局连接快照，避免发送失败后无法恢复。 */
         SendKeyBeepMessage(1U); /* 脚踏真实掉线时保留一次按键蜂鸣提示。 */
     }
 
+    s_foot_parser_state.silent_ticks = 0U; /* 掉线消息已成功发布或当前仅处理定标报警，清零供下次上线使用。 */
     s_foot_parser_state.connected = 0U; /* 回到未连接状态，下次插入必须重新校验定标值。 */
     s_foot_parser_state.single_low_ready = 0U; /* 清除单踏板低值读取阶段。 */
     s_foot_parser_state.single_high_requested = 0U; /* 清除单踏板高值读取阶段。 */
     Foot_ClearFootValueErrorAlarm(); /* 错误值脚踏拔出后清除 83 号报警。 */
+}
+
+/*
+ * 函数功能：根据脚踏协议头和类型字段确定一帧完整数据的固定长度。
+ * 输入参数：frame 指向FE EF帧头；remaining 为当前DMA快照从帧头开始的剩余字节数。
+ * 返回参数：返回10、18或24字节；字段不足或协议不支持时返回0。
+ */
+static uint16_t Foot_GetFrameLength(const uint8_t *frame, uint16_t remaining)
+{
+    if((frame == NULL) || (remaining < 6U))
+    {
+        return 0U; /* 读取命令和类型字段前先保证最小长度，防止噪声尾部越界。 */
+    }
+    if(((frame[2] == 0xB6U) && (frame[3] == 0xC1U)) ||
+       ((frame[2] == 0xD0U) && (frame[3] == 0xB4U)))
+    {
+        return FOOT_SINGLE_FRAME_LENGTH; /* 单踏板实时值及Flash读回均使用10字节完整CRC帧。 */
+    }
+    if((frame[2] != 0xBBU) || (frame[3] != 0xAAU))
+    {
+        return 0U; /* 非当前脚踏协议的FE EF数据不能续期在线状态。 */
+    }
+    if((frame[4] == 0xDDU) && (frame[5] == 0x01U))
+    {
+        return FOOT_TWO_STAGE_FRAME_LENGTH; /* 双段周期帧固定携带一组三点定标值。 */
+    }
+    if((frame[4] == 0xDDU) && (frame[5] == 0x02U))
+    {
+        return FOOT_DOUBLE_FRAME_LENGTH; /* 双脚踏周期帧固定携带左右两组三点定标值。 */
+    }
+    if(frame[4] == 0xCCU)
+    {
+        return FOOT_SINGLE_FRAME_LENGTH; /* 脚踏实体按键帧保持10字节，但不作为实时AD保活。 */
+    }
+    return 0U; /* 未定义功能码继续向后寻找下一组合法帧头。 */
+}
+
+/*
+ * 函数功能：校验脚踏完整帧尾部的CRC16/MODBUS，阻止坏帧更新实时AD和在线计数。
+ * 输入参数：frame 指向完整帧；frame_length 为包含末尾2字节CRC的总长度。
+ * 返回参数：true 表示CRC正确；false 表示指针、长度或CRC不正确。
+ */
+static bool Foot_IsFrameCrcValid(uint8_t *frame, uint16_t frame_length)
+{
+    uint16_t received_crc; /* 保存脚踏板按高字节在前发送的CRC值。 */
+
+    if((frame == NULL) || (frame_length < 2U))
+    {
+        return false; /* 无法同时容纳数据和CRC时禁止进入任何业务解析。 */
+    }
+    received_crc = ((uint16_t)frame[frame_length - 2U] << 8) |
+                   frame[frame_length - 1U]; /* 组合脚踏板尾部CRC高低字节。 */
+    return (Common_Crc16(frame, (uint16_t)(frame_length - 2U)) == received_crc); /* 只接受与脚踏板同一算法计算出的完整帧。 */
 }
 
 /*
@@ -1684,11 +1800,18 @@ static bool Foot_ParseSinglePedalFrame(const uint8_t *frame, uint16_t remaining)
         }
 
         Foot_ClearFootValueErrorAlarm(); /* 新定标值有效时清除历史 83 号报警。 */
-        s_foot_parser_state.connected = 1U; /* 单踏板完成定标后进入在线状态。 */
         footmessage.connect_flag = true;
         footmessage.pedalType = 1U; /* 行为任务按单踏板比例运行流程处理。 */
-        Foot_SendMessage(footmessage); /* 保持原顺序，先发布上线消息再蜂鸣。 */
-        SendKeyBeepMessage(1U);
+        if(Foot_SendMessage(footmessage) != false)
+        {
+            s_foot_parser_state.connected = 1U; /* 上线消息成功排队后才进入在线态，行为任务不会遗漏脚踏类型和定标值。 */
+            SendKeyBeepMessage(1U); /* 脚踏真实上线且行为队列已接收后提示一次。 */
+        }
+        else
+        {
+            s_foot_parser_state.single_low_ready = 0U; /* 队列满时重新发起低/高值读取，让后续周期可以重试上线消息。 */
+            s_foot_parser_state.single_high_requested = 0U; /* 解除高值已请求状态，避免单踏板卡在未上线但不再请求的阶段。 */
+        }
     }
 
     return false;
@@ -1761,9 +1884,11 @@ static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
         Foot_ClearFootValueErrorAlarm(); /* 三点定标恢复有效后释放报警。 */
         footmessage.connect_flag = true;
         footmessage.pedalType = 2U; /* 行为任务按轻踩泵、深踩电机流程处理。 */
-        Foot_SendMessage(footmessage);
-        SendKeyBeepMessage(1U);
-        s_foot_parser_state.connected = 1U;
+        if(Foot_SendMessage(footmessage) != false)
+        {
+            SendKeyBeepMessage(1U); /* 双段上线消息成功排队后才提示，避免队列失败产生伪上线蜂鸣。 */
+            s_foot_parser_state.connected = 1U; /* 保持未上线时每帧都可重试同一连接消息。 */
+        }
         return false;
     }
 
@@ -1801,9 +1926,11 @@ static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
         Foot_ClearFootValueErrorAlarm(); /* 左右定标均有效后释放历史报警。 */
         footmessage.connect_flag = true;
         footmessage.pedalType = 3U; /* 行为任务按双脚踏左右独立流程处理。 */
-        Foot_SendMessage(footmessage);
-        s_foot_parser_state.connected = 1U;
-        SendKeyBeepMessage(1U);
+        if(Foot_SendMessage(footmessage) != false)
+        {
+            s_foot_parser_state.connected = 1U; /* 双脚踏连接状态只有在行为队列收到完整定标快照后才生效。 */
+            SendKeyBeepMessage(1U); /* 成功上线后保留一次连接提示。 */
+        }
         return false;
     }
 
@@ -1823,9 +1950,7 @@ static bool Foot_ParseMultiPedalFrame(const uint8_t *frame, uint16_t remaining)
  */
 static bool Foot_ParseUartFrame(const uint8_t *frame, uint16_t remaining)
 {
-    s_foot_parser_state.silent_ticks = 0U; /* 任一合法 FE EF 帧头到达都重置掉线计数，保持原在线判定。 */
-
-    /* 至少收到 8 字节且命令头匹配 B6 C1 或 D0 B4 时，才按单踏板协议读取后续字段。 */
+    /* 调用方已经完成固定长度和CRC校验；此处只按命令头分派业务字段，不能单独续期在线状态。 */
     if ((remaining >= 8U) &&
         (((frame[2] == 0xB6U) && (frame[3] == 0xC1U)) ||
          ((frame[2] == 0xD0U) && (frame[3] == 0xB4U))))
@@ -1849,29 +1974,67 @@ static bool Foot_ParseUartFrame(const uint8_t *frame, uint16_t remaining)
  */
 void Foot_ParseDataS(uint32_t event)
 {
-    uint16_t offset; /* 当前候选帧头在 DMA 数据中的偏移。 */
+    uint16_t offset = 0U; /* 当前候选帧头在 DMA 数据中的偏移。 */
     uint16_t received_len; /* 本周期从 UART4 DMA 取得的字节数。 */
+    uint16_t frame_length; /* 当前协议头对应的完整帧长度，只允许10、18或24。 */
+    bool realtime_frame_valid = false; /* 本周期至少有一帧完整CRC实时AD时置位，用于复位失效安全计时。 */
+    bool stop_scan = false; /* 保留原解析函数的提前结束语义，但结束前仍要统一维护实时帧状态。 */
     uint8_t data[255] = {0U}; /* UART4 单周期接收缓存，容量保持原 255 字节。 */
 
     (void)event;
     received_len = Uart4_DMARecvDataPeek(data); /* 读取并消费本周期 UART4 DMA 数据。 */
-    if (received_len < 10U)
-    {
-        Foot_HandleMissingUartFrame(); /* 不足最短帧时只处理掉线计时。 */
-        return;
-    }
-
-    for (offset = 0U; (uint16_t)(offset + 10U) <= received_len; ++offset)
+    while((uint16_t)(offset + 1U) < received_len)
     {
         if ((data[offset] != 0xFEU) || (data[offset + 1U] != 0xEFU))
         {
+            ++offset; /* 当前字节不是帧头时只前移一字节，允许从噪声后恢复。 */
             continue; /* 跳过噪声字节，继续寻找下一个 FE EF 帧头。 */
         }
 
-        if (Foot_ParseUartFrame(&data[offset], (uint16_t)(received_len - offset)) != false)
+        frame_length = Foot_GetFrameLength(&data[offset], (uint16_t)(received_len - offset)); /* 按已识别协议选择完整帧长度。 */
+        if(frame_length == 0U)
         {
-            return; /* 无效定标或原有提前退出分支要求结束本周期。 */
+            ++offset; /* 未支持的FE EF组合不能阻塞同一DMA快照中的后续合法帧。 */
+            continue;
         }
+        if((uint16_t)(received_len - offset) < frame_length)
+        {
+            break; /* DMA尾部只有半帧时不读取字段；本周期按无有效实时帧推进安全计时。 */
+        }
+        if(Foot_IsFrameCrcValid(&data[offset], frame_length) == false)
+        {
+            ++offset; /* CRC错误只丢弃当前候选帧头，继续搜索同一快照中的下一帧。 */
+            continue;
+        }
+
+        if(((data[offset + 2U] == 0xB6U) &&
+            (data[offset + 3U] == 0xC1U) &&
+            (data[offset + 4U] == 0x01U) &&
+            (data[offset + 5U] == 0x01U)) ||
+           ((data[offset + 2U] == 0xBBU) &&
+            (data[offset + 3U] == 0xAAU) &&
+            (data[offset + 4U] == 0xDDU) &&
+            ((data[offset + 5U] == 0x01U) || (data[offset + 5U] == 0x02U))))
+        {
+            realtime_frame_valid = true; /* 只有三类实时AD帧可以证明当前踩踏值可信，读回值和按键帧不能续期。 */
+        }
+
+        stop_scan = Foot_ParseUartFrame(&data[offset], frame_length); /* 完整且CRC正确后才允许更新AD、定标值或按键事件。 */
+        offset = (uint16_t)(offset + frame_length); /* 已消费一帧时直接跨过完整长度，避免把帧内数据误识别为新帧头。 */
+        if(stop_scan != false)
+        {
+            break; /* 无效定标或原有提前退出分支结束本次扫描，但仍执行下方实时保活维护。 */
+        }
+    }
+
+    if(realtime_frame_valid != false)
+    {
+        s_foot_parser_state.silent_ticks = 0U; /* 完整CRC实时帧到达后重新开始250ms安全和1秒掉线计时。 */
+        s_foot_runtime_frame_valid = true; /* 行为任务下一周期可以使用本帧刚更新的实时AD。 */
+    }
+    else
+    {
+        Foot_HandleMissingUartFrame(); /* 空数据、噪声、截断、CRC错误或只有按键/读回帧都按无实时帧累计。 */
     }
 }
 

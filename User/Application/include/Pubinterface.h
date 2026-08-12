@@ -437,6 +437,8 @@ bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新�
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
 bool Pubinterface_IsCommonSocketToolReady(void);
 bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 手柄电机启动前检查公共接头 EPC 刀具头，缺失时负责报警并拒绝运行。 */
+bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 脚踏启动前检查公共接头刀具，缺失时持续报警到松脚。 */
+void Pubinterface_ReleaseFootCommonSocketToolMissingAlarm(void); /* 脚踏松开或掉线后关闭缺RFID持续弹窗和蜂鸣。 */
 void Pubinterface_StopTouchKeepAliveRun(void);
 void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void); /* 触控运行中拔手柄后，用户松开运行按钮时退出触控来源并清报警。 */
 void Pubinterface_LoadChannelMemory(uint8_t channel);

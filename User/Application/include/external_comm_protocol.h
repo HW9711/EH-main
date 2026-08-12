@@ -26,6 +26,9 @@ extern "C" {
 #define EXTERNAL_COMM_FUNC_ACK             0xDDU  /* 上传命令执行结果应答。 */
 #define EXTERNAL_COMM_FUNC_HOST_CONTROL    0xEEU  /* 预留：上传主机控制内容。 */
 
+/* 下行 0x0D 只控制50ms电机遥测订阅，不改变原100ms心跳和电机控制周期。 */
+#define EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE 0x0DU
+
 #define EXTERNAL_COMM_AREA_NONE            0xFFU  /* 无区域码时填充 0xFF。 */
 #define EXTERNAL_COMM_INFO_NONE            0xFFU  /* 无信息码时填充 0xFF。 */
 

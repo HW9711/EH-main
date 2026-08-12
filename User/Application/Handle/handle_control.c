@@ -361,7 +361,7 @@ void PlanerGridH(uint8_t key_value)
 								  memory,
 								  PLANER,
 								  OSCDIR,
-								  30000U); /* 手动刨刀默认往复，倍率/速度边界从手柄 EEPROM 装载，EEPROM 缺失时才用旧 30000 兜底。 */
+								  0U); /* 手动刨刀速度必须来自Page3专用扩展，配置无效时保持0并禁止电机启动。 */
 		tool_changed = true; /* 刨刀键已更新当前通道记忆，后续需要立即重绘刀具、方向、频率和开口定位。 */
 		// 刨头
 		break;
@@ -438,7 +438,7 @@ void AutoIdentifyActive(uint8_t key_value)
 								  memory,
 								  PLANER,
 								  OSCDIR,
-								  30000U); /* 自动识别关闭后默认回手动刨刀，并用手柄 EEPROM 恢复倍率和速度边界。 */
+								  0U); /* 自动识别关闭后必须从EEPROM专用字段恢复刨刀速度，不在主控提供固定兜底。 */
 		Pubinterface_RefreshSelectedChannelDisplay(current_channel); /* 手动模式立即刷新刨刀选中、自动识别关闭、规格窗口隐藏。 */
 		return;
 	}
@@ -449,7 +449,7 @@ void AutoIdentifyActive(uint8_t key_value)
 								  memory,
 								  PLANER,
 								  OSCDIR,
-								  30000U); /* 进入自动等待前重新读取基座 EEPROM；若等待期间启动，刨刀按 EEPROM 倍率、速度和保护参数运行。 */
+								  0U); /* 进入自动等待前重新读取专用字段；无有效配置时速度为0，不能沿用通用30000rpm。 */
 	}
 	else
 	{

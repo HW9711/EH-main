@@ -88,10 +88,11 @@ kernel_task_t HANDLESCANTaskHandle;
  * EEPROM 中刀具信息区定义。
  * 第三页起始地址为 0x0040，刀具规格继续沿用大端 16 位和 0.1 精度。
  * Page3[8]/[9] 保留整数倍率，Page3[11..14] 为 GR02 标记，Page3[15]/[16] 保存两位小数。
+ * Page3[17..29] 保存 PX01 手动刨刀速度扩展，因此主控必须读取完整 30 字节业务区。
  * 没有 GR02 标记的历史 EEPROM 只读取整数倍率，保证旧数据继续按原倍率运行。
  */
 #define HANDLESCAN_TOOL_INFO_ADDR             0x0040U
-#define HANDLESCAN_TOOL_INFO_SIZE             17U  /* 新格式需要读取到 Page3[16] 增速比百分位，仍不跨越 Page3 数据区。 */
+#define HANDLESCAN_TOOL_INFO_SIZE             AT24CS32_PAGE_DATA_SIZE /* 读取Page3完整30字节业务区，确保PX01及三个24位速度字段进入本通道缓存。 */
 #define HANDLESCAN_TOOL_MAJOR_OFFSET          0U
 #define HANDLESCAN_TOOL_MINOR_OFFSET          1U
 #define HANDLESCAN_TOOL_DIAMETER_OFFSET       2U
@@ -130,6 +131,15 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_INITIAL_REV_ALARM_OFFSET   12U
 #define HANDLESCAN_INITIAL_OSC_ALARM_OFFSET   14U
 #define HANDLESCAN_INITIAL_CURRENT_THRESHOLD_OFFSET 21U /* Page4[21..22] 保存驱动过流保护阈值，单位 0.01A；0 表示驱动板使用自身默认保护值。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET 17U /* Page3[17..20] 保存ASCII“PX01”，明确标识PX手动刨刀24位速度扩展。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_DEFAULT_OFFSET 21U /* Page3[21..23] 小端保存手动刨刀默认转速，单位rpm。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MIN_OFFSET 24U /* Page3[24..26] 小端保存手动刨刀最小转速，单位rpm。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MAX_OFFSET 27U /* Page3[27..29] 小端保存手动刨刀最大转速，单位rpm。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MARK_0 0x50U /* 扩展标记第1字节ASCII“P”。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MARK_1 0x58U /* 扩展标记第2字节ASCII“X”。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MARK_2 0x30U /* 扩展标记第3字节ASCII“0”。 */
+#define HANDLESCAN_PX_PLANER_PROFILE_MARK_3 0x31U /* 扩展标记第4字节ASCII“1”，后续格式升级必须更换版本。 */
+#define HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM 500U /* RFID协议专门约定普通刨刀最低速度字节0x00表示500rpm。 */
 #define HANDLESCAN_INITIAL_FLOW_MIN           1U
 #define HANDLESCAN_INITIAL_FLOW_MAX           70U
 #define HANDLESCAN_INITIAL_FLOW_DEFAULT       30U
@@ -229,7 +239,7 @@ typedef struct
     uint8_t verify_retry_count;                              /* 当前认证连续失败次数，达到上限后进入最终失败保持态。 */
     uint16_t verify_retry_wait_ticks;                        /* 认证失败后的重试等待计数，也用于最终失败态的低频自恢复。 */
     uint8_t info_buf[HANDLESCAN_INFO_SIZE];                  /* EEPROM Page2 手柄身份缓存，保存主型号和子型号。 */
-    uint8_t tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE];        /* EEPROM Page3 刀具参数缓存，A/B 不得交叉复用。 */
+    uint8_t tool_info_buf[HANDLESCAN_TOOL_INFO_SIZE];        /* EEPROM Page3完整业务区缓存，A/B不得交叉复用，且不能截断PX01速度扩展。 */
     uint8_t initial_info_buf[AT24CS32_PAGE_SIZE];            /* EEPROM Page4 初始参数缓存，保存速度、流量和保护阈值。 */
     uint8_t speed_step_buf[AT24CS32_PAGE_SIZE];              /* EEPROM Page6 调速步进缓存，供屏幕加减速继续使用。 */
     HandlescanToolSource tool_source;                        /* 当前刀具信息来源，静态零值对应 EEPROM Page3。 */
@@ -922,7 +932,16 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     length = payload[2]; /* EPC byte2：刀具长度。 */
     angle = payload[3]; /* EPC byte3：弯曲角度。 */
     max_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，协议按 k rpm 保存，进入工程前转换成实际速度值。 */
-    min_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，自动识别模式下调速下限必须来自刀具标签。 */
+    if (((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) &&
+        (tool_model == RFID_TOOL_MODEL_PLANER) &&
+        (payload[7] == 0U))
+    {
+        min_speed = HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM; /* PX普通RFID刨刀用0x00专门表示500rpm，解决原k rpm字段无法表达0.5k rpm的问题。 */
+    }
+    else
+    {
+        min_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[7]); /* 其它基座、刀具或非零编码继续保持原k rpm换算，不能全局改变0x00语义。 */
+    }
     default_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[8]); /* EPC byte8：上电默认速度，屏幕显示和实际运行都以该值为初始值。 */
     default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
     direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
@@ -1556,6 +1575,19 @@ static uint16_t Handlescan_ReadUint16LE(const uint8_t *buffer, uint32_t offset)
 }
 
 /*
+ * 函数功能：按小端格式读取EEPROM业务页中的24位实际转速。
+ * 输入参数：buffer指向已通过页校验的30字节业务区；offset表示字段起始偏移。
+ * 返回参数：解析后的24位无符号转速，使用uint32_t承载以保留完整范围。
+ */
+static uint32_t Handlescan_ReadUint24LE(const uint8_t *buffer, uint32_t offset)
+{
+    uint32_t value = (uint32_t)buffer[offset]; /* 最低字节直接放入bit0~7，保持与Page4既有速度字段的小端语义一致。 */
+    value |= ((uint32_t)buffer[offset + 1U] << 8); /* 中间字节放入bit8~15，不能按Page3传统大端刀具字段解析。 */
+    value |= ((uint32_t)buffer[offset + 2U] << 16); /* 最高字节放入bit16~23，使配置可覆盖超过65535rpm的未来范围。 */
+    return value; /* 返回完整转速供手动刨刀默认值及上下限共同使用。 */
+}
+
+/*
  * 函数功能：按 Page4 扩展格式读取 24 位最大速度。
  * 输入参数：buffer 指向已通过页校验的 Page4 缓存。
  * 返回参数：最大速度，单位为实际 rpm。
@@ -1699,6 +1731,62 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 }
 
 /*
+ * 函数功能：为PXBA/PXBB手动刨刀装载Page3的24位速度扩展；格式缺失或数值异常时清零速度并禁止启动。
+ * 输入参数：message为目标通道识别缓存；tool_info_buf为Page3业务区；pages_valid表示Page3/Page4已完整读取。
+ * 返回参数：true表示专用速度配置有效；false表示配置不可用且速度字段已清零。
+ */
+static bool Handlescan_ApplyPxManualPlanerSpeedProfile(ChannelrecognizeMessage_t *message,
+                                                       const uint8_t *tool_info_buf,
+                                                       bool pages_valid)
+{
+    uint32_t default_speed = 0U; /* 默认保持不可运行，只有完整合法的EEPROM扩展才能赋予实际速度。 */
+    uint32_t min_speed = 0U; /* 不在主控固化产品下限，后续范围完全由EEPROM配置。 */
+    uint32_t max_speed = 0U; /* 不在主控固化产品上限，便于以后只改EEPROM扩展速度范围。 */
+    bool profile_valid = false; /* 标记及三项速度全部通过校验后才允许手动刨刀运行。 */
+
+    if (message == NULL)
+    {
+        return false; /* 目标缓存无效时不能写任意通道，也不能宣称配置有效。 */
+    }
+
+    if ((pages_valid != false) &&
+        (tool_info_buf != NULL) &&
+        (tool_info_buf[HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET] == HANDLESCAN_PX_PLANER_PROFILE_MARK_0) &&
+        (tool_info_buf[HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET + 1U] == HANDLESCAN_PX_PLANER_PROFILE_MARK_1) &&
+        (tool_info_buf[HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET + 2U] == HANDLESCAN_PX_PLANER_PROFILE_MARK_2) &&
+        (tool_info_buf[HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET + 3U] == HANDLESCAN_PX_PLANER_PROFILE_MARK_3))
+    {
+        uint32_t configured_default = Handlescan_ReadUint24LE(tool_info_buf, HANDLESCAN_PX_PLANER_PROFILE_DEFAULT_OFFSET); /* 读取Page3[21..23]手动刨刀默认转速。 */
+        uint32_t configured_min = Handlescan_ReadUint24LE(tool_info_buf, HANDLESCAN_PX_PLANER_PROFILE_MIN_OFFSET); /* 读取Page3[24..26]手动刨刀最小转速。 */
+        uint32_t configured_max = Handlescan_ReadUint24LE(tool_info_buf, HANDLESCAN_PX_PLANER_PROFILE_MAX_OFFSET); /* 读取Page3[27..29]手动刨刀最大转速。 */
+
+        if ((configured_min != 0U) &&
+            (configured_min <= configured_default) &&
+            (configured_default <= configured_max))
+        {
+            default_speed = configured_default; /* 三项关系完整合法时才采用EEPROM默认值。 */
+            min_speed = configured_min; /* 手动刨刀下限完全来自EEPROM，不在主控写死产品范围。 */
+            max_speed = configured_max; /* 手动刨刀上限完全来自EEPROM，后续扩展只需重写配置。 */
+            profile_valid = true; /* 标记、非零值和顺序均合法，允许本次手动刨刀装载。 */
+        }
+    }
+
+    message->speed_min = min_speed; /* 通用边界同步为手动刨刀范围，屏幕和外控调速使用同一限制。 */
+    message->speed_max = max_speed; /* 通用最大速度来自手动刨刀EEPROM扩展。 */
+    message->speed_zzmin = min_speed; /* 手动刨刀切到正转时也必须遵守EEPROM范围。 */
+    message->speed_zzmax = max_speed; /* 正转上限同步手动刨刀上限。 */
+    message->speed_fzmin = min_speed; /* 手动刨刀切到反转时也必须遵守刨刀范围。 */
+    message->speed_fzmax = max_speed; /* 反转上限同步手动刨刀上限。 */
+    message->speed_oscmin = min_speed; /* 往复调速下限使用专用配置。 */
+    message->speed_oscmax = max_speed; /* 往复调速上限使用专用配置。 */
+    message->speed_zzdefault = default_speed; /* 三个方向共用同一手动刨刀默认速度，避免切方向恢复通用30000rpm。 */
+    message->speed_fzdefault = default_speed; /* 反转默认值保持在专用刨刀范围内。 */
+    message->speed_oscdefault = default_speed; /* 手动刨刀默认往复速度只接受EEPROM配置；无效时保持0并形成停机帧。 */
+
+    return profile_valid; /* 调用方可据此判断本次Page3扩展是否完整可用。 */
+}
+
+/*
  * 函数功能：从 Page6 速度调节区读取指定偏移的 16 位步进。
  * 输入参数：speed_step_buf 为 Page6 整页缓存；speed_offset 为字段偏移；fallback_step 为字段无效时的兜底步进。
  * 返回参数：可直接写入 ChannelrecognizeMessage 的 16 位步进值。
@@ -1798,7 +1886,7 @@ static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding
     context = binding->context;                              /* 后续读写只使用本通道缓存。 */
     message = binding->message;                              /* 后续参数只写本通道识别结果。 */
     AT24CS32_ClearLastDebugInfo();                            /* 读取 Page3 前清调试缓存，现场排查时可直接看到本次失败页。 */
-    tool_read_status = Handlescan_ReadEepromBytes(binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从绑定通道读取 Page3 倍率。 */
+    tool_read_status = Handlescan_ReadEepromBytes(binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从绑定通道读取Page3完整业务区，倍率和PX01速度扩展必须一次读全。 */
     AT24CS32_ClearLastDebugInfo();                            /* Page3 读取结束后切换到 Page4 调试上下文。 */
     initial_read_status = Handlescan_ReadEepromPage(binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX, context->initial_info_buf); /* 从绑定通道读取 Page4 运行参数。 */
     Handlescan_UpdateToolRatioMessage(message, (tool_read_status != 0U) ? context->tool_info_buf : NULL); /* Page3 失败时按 1 倍保护。 */
@@ -1849,6 +1937,15 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
     message->length = 0U;                                     /* 手动模式不显示 RFID 长度，防止沿用上一把刀具。 */
     message->draw = 0U;                                       /* 手动模式不显示 RFID 角度，避免旧规格残留。 */
     eeprom_loaded = Handlescan_LoadSplitBaseEepromRuntime(binding); /* 恢复本通道手柄 EEPROM Page3/Page4。 */
+    if (manual_tool_type == PLANER)
+    {
+        if (Handlescan_ApplyPxManualPlanerSpeedProfile(message,
+                                                       binding->context->tool_info_buf,
+                                                       eeprom_loaded) == false)
+        {
+            eeprom_loaded = false; /* 手动刨刀专用字段缺失时保持0速度并报告恢复失败，绝不使用通用Page4或主控固定值。 */
+        }
+    }
     Handlescan_LoadPage6SpeedStep(binding);                   /* Page6 步进也跟随本通道手柄 EEPROM。 */
 
     return eeprom_loaded;                                     /* 返回恢复结果，调用方当前不阻断手动切换，只作为诊断依据。 */

@@ -15,6 +15,8 @@
 #include "sscUIDP.h"
 #include "sscRFID.h"
 
+#include <string.h>
+
 #define motor_frem_length  11
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 驱动私有协议第 2 字节允许 0~100，超过上限时必须钳位，避免异常频率触发驱动保护。 */
 #define MOTOR_DRIVE_RATIO_X100_UNIT 100U /* 当前倍率只使用 x100 单位，100 表示 1.00 倍直联。 */
@@ -43,6 +45,10 @@ typedef struct {
 }
 RunInformMessage_t;
 static RunInformMessage_t msg;
+static MotorDriveCommandSnapshot_t s_motor_drive_command_snapshot; /* 保存最近一次实际改变并送入UART1的周期电机命令。 */
+static uint8_t s_motor_drive_last_command[motor_frem_length]; /* 保存上一份11字节周期命令，用于排除每50ms重复保活帧。 */
+static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚无历史命令，首份启动或停止帧必须形成快照。 */
+static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示快照稳定，奇数表示写入中，供跨任务一致性复制。 */
 
 static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
 {
@@ -108,11 +114,16 @@ static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t displ
     return display_direction; /* 普通刨磨刀具和MXYTM的屏幕方向就是实际电机方向。 */
 }
 
-static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model)
+/*
+ * 函数功能：按PX分体式手柄的实际电机方向选择无刷有霍尔或无霍尔运行方式。
+ * 输入参数：hand_model 为当前基座型号；actual_direction 为机械刀具方向换算后的实际电机方向。
+ * 返回参数：0x01表示无刷无霍尔，0x02表示无刷有霍尔。
+ */
+static uint8_t MotorDrive_BuildBrushlessRunType(uint8_t hand_model, uint8_t actual_direction)
 {
     if ((hand_model == PXBB_ONLINES) || (hand_model == PXBA_ONLINES))
     {
-        return 0x02U; /* PXBA/PXBB 是带霍尔往复手柄，驱动闭环方式固定走方波霍尔。 */
+        return (actual_direction == OSCDIR) ? 0x02U : 0x01U; /* 只有电机真实执行电气往复才使用霍尔；正反单向及MXYTP机械往复均使用无霍尔。 */
     }
 
     return 0x01U; /* 其他手柄默认按无霍尔方式下发，保持旧工程的兼容行为。 */
@@ -244,17 +255,105 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 }
 
 
-void MotorStops(void)
+/*
+ * 函数功能：在周期电机命令内容发生变化时，记录真实UART1命令序号、时刻和关键字段。
+ * 输入参数：command为即将发送的11字节驱动帧；logical_channel为逻辑通道；run_state为启停态；command_speed_rpm为实际指令转速。
+ * 返回参数：无；与上一份周期命令完全一致时不更新序号和时刻。
+ */
+static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
+                                             uint8_t logical_channel,
+                                             uint8_t run_state,
+                                             uint32_t command_speed_rpm)
 {
+    if (command == NULL)
+    {
+        return; /* 内部调用参数异常时不改变历史快照，避免遥测出现半更新字段。 */
+    }
+
+    if ((s_motor_drive_last_command_valid != 0U) &&
+        (memcmp(s_motor_drive_last_command, command, motor_frem_length) == 0))
+    {
+        return; /* 50ms周期重复发送相同帧只维持驱动通信，不制造新的阶跃起点。 */
+    }
+
+    ++s_motor_drive_snapshot_version; /* 先把版本改成奇数，外部通信任务会等待本次写入结束。 */
+    __DMB(); /* 保证版本奇数先于后续快照字段对另一个任务可见。 */
+    memcpy(s_motor_drive_last_command, command, motor_frem_length); /* 保存完整实际帧，方向、电机类型或电流变化也会触发新序号。 */
+    s_motor_drive_last_command_valid = 1U; /* 首份命令记录完成后开放后续逐字节判重。 */
+    s_motor_drive_command_snapshot.sequence = (uint16_t)(s_motor_drive_command_snapshot.sequence + 1U); /* 不同命令序号按16位自然回绕。 */
+    s_motor_drive_command_snapshot.sent_tick_ms = HAL_GetTick(); /* 在调用UART1发送前记录主控单调毫秒时钟，作为阶跃真实起点。 */
+    s_motor_drive_command_snapshot.command_speed_rpm = command_speed_rpm; /* 保存已经过主控机械倍率和驱动协议量化后的电机指令rpm。 */
+    s_motor_drive_command_snapshot.channel = logical_channel; /* 保存形成本帧时的逻辑通道，避免仅凭物理电机类型反推A/B。 */
+    s_motor_drive_command_snapshot.run_state = run_state; /* 启动帧写1，周期停止帧写0。 */
+    s_motor_drive_command_snapshot.direction = command[1]; /* 直接保存实际帧byte1，包含机械方向换算后的控制模式。 */
+    s_motor_drive_command_snapshot.motor_type = command[3]; /* 直接保存实际帧byte3，反映板级A/B映射和有刷/无刷类型。 */
+    s_motor_drive_command_snapshot.valid = 1U; /* 所有字段写完后标记本快照可用于遥测。 */
+    __DMB(); /* 保证所有字段完成后才发布最终偶数版本。 */
+    ++s_motor_drive_snapshot_version; /* 写入结束恢复偶数版本，读取方可一次性复制整份快照。 */
+}
+
+/*
+ * 函数功能：复制最近一次实际改变并送入UART1的电机命令一致性快照。
+ * 输入参数：snapshot指向调用方提供的快照缓存。
+ * 返回参数：快照有效且复制成功返回1，否则返回0。
+ */
+uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot)
+{
+    uint8_t attempt; /* 限制瞬时并发时的重试次数，避免通信任务在异常状态下长期占用CPU。 */
+
+    if (snapshot == NULL)
+    {
+        return 0U; /* 调用方未提供缓存时不能复制。 */
+    }
+
+    for (attempt = 0U; attempt < 3U; ++attempt)
+    {
+        uint32_t version_before = s_motor_drive_snapshot_version; /* 复制前读取版本，奇数表示驱动任务仍在写。 */
+        uint32_t version_after; /* 复制后再次读取版本，只有前后一致才表示字段属于同一命令。 */
+
+        if ((version_before & 1U) != 0U)
+        {
+            continue; /* 写入窗口通常只有数个指令周期，下一次循环直接重试。 */
+        }
+
+        __DMB(); /* 版本检查完成后再读取快照字段。 */
+        *snapshot = s_motor_drive_command_snapshot; /* 结构体一次复制到调用方私有缓存，后续组包不再读取共享状态。 */
+        __DMB(); /* 字段复制结束后再复核版本。 */
+        version_after = s_motor_drive_snapshot_version;
+        if ((version_before == version_after) && ((version_after & 1U) == 0U))
+        {
+            return (snapshot->valid != 0U) ? 1U : 0U; /* 稳定版本下返回快照自身有效标志。 */
+        }
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot)); /* 三次均撞上写入时返回明确无效快照，禁止上传混合字段。 */
+    return 0U;
+}
+
+/*
+ * 函数功能：发送周期电机停止帧，并在停止命令相对上一帧发生变化时建立阶跃快照。
+ * 输入参数：无，逻辑通道从WorkMessage读取。
+ * 返回参数：无。
+ */
+static void MotorStops(void)
+{
+ MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U); /* 停机速度固定为0，记录后再实际送入UART1。 */
  Uart1_SendPacket(motor_stopcode, motor_frem_length);
 }
-void MotorStart()
+
+/*
+ * 函数功能：按已组装的msg发送周期电机启动帧，并在命令变化时建立阶跃快照。
+ * 输入参数：command_speed_rpm为写入驱动帧byte4~5后对应的实际电机指令rpm。
+ * 返回参数：无。
+ */
+static void MotorStart(uint32_t command_speed_rpm)
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
       ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
     // uint8_t motor_startcode[motor_frem_length]={0xAA ,0x03 ,0x28 ,0x03\
     //      ,0x01 ,0x90 ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};    
+    MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm); /* 以实际UART1帧为判重依据，按钮点击时刻不参与阶跃计时。 */
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
 /*
@@ -358,7 +457,7 @@ void MOTORRUN(void)
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x01; /* 原物理A无刷电机使用协议类型0x01；逻辑状态不随物理交换改变。 */
-                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型由手柄型号换算，保留各型号原有驱动方式。 */
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model, effective_dir_work); /* PX分体式按实际电机方向选择有/无霍尔，机械方向换算必须先于此处。 */
                 
             }
             else{
@@ -371,7 +470,7 @@ void MOTORRUN(void)
             if(MotorDrive_IsBrushedTool(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.raw_tool_type) == 0U)
             {
                 msg.motor_type=0x02; /* 原物理B无刷电机使用协议类型0x02；逻辑状态仍归原A/B业务通道。 */
-                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model); /* 无刷运行类型仍按手柄型号换算，通道选择只影响物理驱动路。 */
+                msg.run_type=MotorDrive_BuildBrushlessRunType(WorkMessage.hand_model, effective_dir_work); /* B物理路使用同一实际方向规则，避免A/B通道运行方式不一致。 */
             }
             else 
             { msg.motor_type=0x04; /* 原物理B有刷电机固定使用协议类型0x04。 */
@@ -383,7 +482,7 @@ void MOTORRUN(void)
       msg.speed_l=(command_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256; /* 保护电流来自手柄 EEPROM Page4[21..22]，单位 0.01A；0 表示驱动板使用内部默认保护。 */
       msg.pro_current_l=WorkMessage.current_work%256;//电流
-      MotorStart();
+      MotorStart((uint32_t)command_speed_value * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM); /* 快照速度使用驱动16位字段可真实表达的量化后rpm。 */
     }
     else
     {

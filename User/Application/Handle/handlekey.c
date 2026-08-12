@@ -116,7 +116,6 @@ static void HandleRunKey_ServiceFootAlarm(void)
 static bool HandleRunKey_IsSupportedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||   /* 空心钻A型手柄保持原有按一次启动、再按一次停止。 */
-			(hand_model == PXBB_ONLINES) ||   /* 空心钻B型手柄保持原有按一次启动、再按一次停止。 */
 			(hand_model == LGZ_I_ONLINES));   /* LGZI 单按键颅骨钻允许实体键控制电机，但停止由松开沿触发。 */
 }
 
