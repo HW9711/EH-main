@@ -1790,6 +1790,7 @@ static void ServiceUnplugAlarm(void)
 	}
 	s_running_handle_unplug_transient_alarm_value = 0U; /* 临时报警生命周期结束，允许下一次手控掉线重新显示。 */
 	s_running_handle_unplug_transient_alarm_tick = 0U; /* 清时间戳，避免下次比较时使用旧 tick。 */
+	Handle_SelectRemainingOnlineAfterUnplug(); /* 手控掉线提示已经结束，自动装载唯一剩余通道但保持电机停止。 */
 }
 
 /*
@@ -1802,6 +1803,10 @@ void Pubinterface_ServiceTransientAlarms(void)
 	ServiceCommonSocketToolAlarm(); /* 维护公共接头缺刀具弹窗的保持和退出时机。 */
 	ServicePressureAlarm(); /* 维护泵压力堵塞弹窗的保持和退出时机。 */
 	ServiceUnplugAlarm(); /* 维护运行中拔手柄弹窗的保持和退出时机。 */
+	if (s_running_handle_unplug_transient_alarm_value == 0U)
+	{
+		Handle_SelectRemainingOnlineAfterUnplug(); /* 手控3秒提示结束后或其它来源报警清除后，周期重试待恢复通道，避免一次检查失败后永久丢失。 */
+	}
 }
 
 /*
@@ -1841,6 +1846,7 @@ void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void)
 	WorkMessage.touchactive_work = 0U; /* 用户已经松开运行按钮，触控来源结束，不再占用本机控制模式。 */
 	WorkMessage.drivetype_work = ControlArbitration_GetLocalDriveTypeAfterExit(); /* 退出触控后按脚踏优先、手控次之恢复本机可用控制方式。 */
 	(void)Pubinterface_ClearHandleNotConnectedAlarm(); /* 控制源已退出，运行中拔手柄报警生命周期结束，关闭蜂鸣和报警弹窗。 */
+	Handle_SelectRemainingOnlineAfterUnplug(); /* 触控已真实松开且报警已清，自动恢复唯一剩余通道但不启动电机。 */
 	SendUIDSMessage(UI_TOUCH_ID, false, data); /* 同步隐藏触控运行弹窗，避免报警关闭后仍显示触控工作区。 */
 	ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_SCREEN); /* 电机已停稳时释放屏幕 owner，允许后续脚踏、手控或触控重新进入。 */
 	Pubinterface_RefreshControlModeDisplay(); /* 报警和触控来源都已退出，立即刷新三种控制方式高亮状态。 */

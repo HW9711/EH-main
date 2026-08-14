@@ -2,6 +2,7 @@
 
 #include "Pubinterface.h"
 #include "handlescan.h"
+#include "motoruartdata.h"
 #include "sscBEEP.h"
 #include "sscDRIVE.h"
 #include "sscRFID.h"
@@ -9,6 +10,7 @@
 
 static volatile uint32_t s_handle_identity_generation_a = 0U; /* A 每次真实上线或离线递增，跨周期任务据此识别目标已变化。 */
 static volatile uint32_t s_handle_identity_generation_b = 0U; /* B 使用独立代数，A/B 插拔不会互相终止对方的数据任务。 */
+static uint8_t s_running_unplug_recovery_channel = CHANNEL_NONE; /* 记录运行中拔出当前手柄后待恢复的另一通道，条件未满足时由周期服务继续等待。 */
 
 /*
  * 函数功能：记录指定通道发生一次有效上线或离线边沿。
@@ -521,13 +523,91 @@ void HandleSwitchActive(uint8_t key_value) // 2026,4,19
 		Pubinterface_LoadChannelMemory(CHANNEL_A); /* 用户确认切到 A 后，把 A 通道记忆装载为当前工作快照。 */
 		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* 按 A 通道工作快照刷新控制模式、刀具、方向、频率和速度显示。 */
 		Pubinterface_RefreshOnlineHandleDisplay(); /* 切换完成后刷新 A/B 手柄高亮，确保只有 A 被点亮。 */
+		s_running_unplug_recovery_channel = CHANNEL_NONE; /* 用户已明确选中 A，取消尚未执行的掉线自动恢复请求，防止周期任务覆盖用户选择。 */
 	}
 	else if ((target_channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == true)) /* 只有目标 B 仍在线时才能装载 B 参数。 */
 	{
 		Pubinterface_LoadChannelMemory(CHANNEL_B); /* 用户确认切到 B 后，把 B 通道记忆装载为当前工作快照。 */
 		Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* 按 B 通道工作快照刷新控制模式、刀具、方向、频率和速度显示。 */
 		Pubinterface_RefreshOnlineHandleDisplay(); /* 切换完成后刷新 A/B 手柄高亮，确保只有 B 被点亮。 */
+		s_running_unplug_recovery_channel = CHANNEL_NONE; /* 用户已明确选中 B，取消尚未执行的掉线自动恢复请求。 */
 	}
+}
+
+/*
+ * 函数功能：记录运行中拔出当前手柄后需要自动恢复的另一在线通道。
+ * 输入参数：channel 为待恢复的 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：无。
+ */
+void Handle_RequestRemainingOnlineAfterUnplug(uint8_t channel)
+{
+	if (((channel == CHANNEL_A) && (WorkMessage.Channel_Aonline == true)) ||
+		((channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == true)))
+	{
+		s_running_unplug_recovery_channel = channel; /* 只锁存当前确实在线的另一通道，避免以后新插入手柄被误当作本次掉线恢复目标。 */
+	}
+	else
+	{
+		s_running_unplug_recovery_channel = CHANNEL_NONE; /* 拔出时没有另一在线通道，本次不创建自动恢复请求。 */
+	}
+}
+
+/*
+ * 函数功能：运行中当前手柄拔出并完成控制源退出后，优先恢复锁存目标；锁存丢失时按唯一在线通道自愈。
+ * 输入参数：无，函数读取待恢复目标、当前运行、报警、通道选择和 A/B 在线状态。
+ * 返回参数：无。
+ */
+void Handle_SelectRemainingOnlineAfterUnplug(void)
+{
+	uint8_t target_channel = s_running_unplug_recovery_channel; /* 读取拔柄时锁存的另一通道，避免恢复时根据后来变化的在线状态重新猜测。 */
+
+	if (target_channel == CHANNEL_NONE)
+	{
+		if (WorkMessage.channel_work != CHANNEL_NONE)
+		{
+			return; /* 已经存在当前通道时不做自愈，避免周期服务覆盖用户或其它业务完成的选择。 */
+		}
+		if ((WorkMessage.Channel_Aonline == true) && (WorkMessage.Channel_Bonline == false))
+		{
+			target_channel = CHANNEL_A; /* 锁存请求因任务时序未建立时，A 是唯一在线通道，报警退出后允许恢复 A。 */
+		}
+		else if ((WorkMessage.Channel_Bonline == true) && (WorkMessage.Channel_Aonline == false))
+		{
+			target_channel = CHANNEL_B; /* 锁存请求缺失且只有 B 在线时恢复 B，解决松脚后白色图标但参数未装载的问题。 */
+		}
+		else
+		{
+			return; /* 没有在线手柄或 A/B 同时在线时不能猜测目标，保持停止并等待用户明确选择。 */
+		}
+	}
+
+	if ((WorkMessage.runflag_work != false) ||
+		(WorkMessage.alarm_flag != false))
+	{
+		return; /* 电机未停或报警未退出时保留待恢复请求，由周期服务稍后再次检查。 */
+	}
+
+	if (WorkMessage.channel_work != CHANNEL_NONE)
+	{
+		s_running_unplug_recovery_channel = CHANNEL_NONE; /* 用户或其它安全路径已经完成选择，取消自动恢复，禁止覆盖现有通道。 */
+		return;
+	}
+
+	if (((target_channel == CHANNEL_A) && (WorkMessage.Channel_Aonline == false)) ||
+		((target_channel == CHANNEL_B) && (WorkMessage.Channel_Bonline == false)))
+	{
+		return; /* 目标暂时不在线时保留原锁存，周期服务等待扫描状态稳定，避免一次瞬时离线永久丢失恢复请求。 */
+	}
+
+	HandleSwitchActive((target_channel == CHANNEL_A) ? SCREENKey_HANDLE_A : SCREENKey_HANDLE_B); /* 复用现有切换入口装载 EEPROM/RFID 参数并刷新手柄高亮和运行参数区。 */
+	if (WorkMessage.channel_work != target_channel)
+	{
+		return; /* 极端状态变化导致切换入口拒绝时保留请求，下一周期继续检查。 */
+	}
+	Pubinterface_ApplyChannelDefaultInjectionFlow(target_channel); /* 当前通道已经恢复，注水泵停止态设定值同步切到该手柄 Page4 默认流量。 */
+	WorkMessage.runflag_work = false; /* 自动恢复只选择通道，绝不把剩余手柄直接启动。 */
+	WorkMessage.speed_work = 0U; /* 清除装载参数时带入的实际输出速度，保留 speed_set_work 供用户下一次主动启动。 */
+	s_running_unplug_recovery_channel = CHANNEL_NONE; /* 恢复成功后消费本次请求，后续周期不得重复切换或重复刷新。 */
 }
 
 /*
@@ -546,6 +626,7 @@ static void Handle_ClearSelection(void)
 	WorkMessage.speed_set_work = 0U;			   /* 无手柄时清掉设定速度，防止速度栏在异步刷新后恢复旧值。 */
 	WorkMessage.speed_work = 0U;				   /* 无手柄时实际目标速度必须为 0，保持显示和驱动停止状态一致。 */
 	WorkMessage.channel_work = CHANNEL_NONE;		   /* 最后一个手柄离线后没有选中通道，后续屏幕触控和方向按键都不能落到 A/B。 */
+	s_running_unplug_recovery_channel = CHANNEL_NONE; /* A/B 都离线后不存在可恢复目标，取消运行掉线自动切换请求。 */
 	UIDP_ForceNoHandleDisplay();				   /* 先清 UIDP 旧队列并直写无手柄控件，防止旧方向和自动识别消息晚到覆盖拔出状态。 */
 	Pubinterface_ClearSelectedChannelDisplay();	   /* 立即关闭方向、刀具识别、刀具规格、速度和频率区，清除屏幕旧控件残留。 */
 	Pubinterface_ApplyInjectionPumpDefaultFlow(0U); /* 无选中手柄时注水泵默认值回到程序默认 30，显示值和下一次运行目标保持一致。 */
@@ -558,7 +639,8 @@ static void Handle_ClearSelection(void)
  */
 void PlugORunPLUGActive(uint8_t key_value)
 {
-	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于防止自动切到另一通道。 */
+	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于区分停机报警和剩余通道恢复流程。 */
+	uint8_t current_channel_run_interrupted = 0U; /* 记录当前手柄拔出前是否正在运行，包含驱动87先到并提前清除运行标志的时序。 */
 	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
 	uint8_t close_idle_touch = 0U;			   /* 记录当前手柄是否在本机触控待运行态拔出，清屏完成后再关闭触控窗，避免关闭消息被队列复位清掉。 */
 	uint8_t close_verify_alarm = 0U;		   /* 记录扫描任务已清除的校验报警，待无手柄 UI 队列复位后补发关闭90号图。 */
@@ -612,9 +694,12 @@ void PlugORunPLUGActive(uint8_t key_value)
 	case SCREENKey_UNPLUG_A: // 拔出A
 		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_A); /* 在任何 UI 清屏前接收 A 通道关窗请求，后续统一放到队列复位之后执行。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_A); /* 先记录拔出前 A 是否为当前选中通道。 */
+		current_channel_run_interrupted = (uint8_t)((current_channel_unplugged != 0U) &&
+													 ((WorkMessage.runflag_work != false) ||
+													  MotorUart_DidDriverAlarmStartDuringRun())); /* 驱动次生报警可能在500ms去抖期间先清运行位，必须保留原运行掉线语义。 */
 		channel_was_online = (uint8_t)WorkMessage.Channel_Aonline; /* 保存拔出前在线态，重复离线事件不能反复改变身份代数。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
-									 (WorkMessage.runflag_work == false) &&
+									 (current_channel_run_interrupted == 0U) &&
 									 (WorkMessage.touchactive_work == TOUCHWORK) &&
 									 (WorkMessage.drivetype_work == TOUCHWORK) &&
 									 (WorkMessage.hmiactive_work == 0U)); /* 只关闭本机触控待运行窗；运行中掉线继续走停机、报警和松手确认链，外控也不受影响。 */
@@ -626,7 +711,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 A 才需要决定回落 B 或清空当前通道。 */
 		{
-			if ((WorkMessage.runflag_work == false) && /* 停机、无报警且 B 在线时允许安全回落到 B。 */
+			if ((current_channel_run_interrupted == 0U) && /* 确认不是运行掉线、无报警且 B 在线时才允许直接回落。 */
 				(WorkMessage.alarm_flag == false) &&
 				(WorkMessage.Channel_Bonline == true))
 			{
@@ -636,14 +721,15 @@ void PlugORunPLUGActive(uint8_t key_value)
 			}
 			else
 			{
-				if (WorkMessage.runflag_work == true) /* 当前 A 在运行中被拔出时必须先执行安全停机和报警。 */
+				if (current_channel_run_interrupted != 0U) /* 当前 A 运行掉线或驱动87先到时都必须切换为80号掉线报警。 */
 				{
+					Handle_RequestRemainingOnlineAfterUnplug(CHANNEL_B); /* A 运行掉线时锁存仍在线的 B，报警退出后由周期服务自动选择。 */
 					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 A 手柄时，立即停电机、停联动注水泵并锁存报警。 */
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
-				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 B，等待用户手动确认。 */
+				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前 A 拔出先清空选择，待控制源退出后再由锁存请求安全恢复 B。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
 				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，显示值和下次实际运行目标保持一致。 */
 			}
@@ -653,16 +739,19 @@ void PlugORunPLUGActive(uint8_t key_value)
 			Handle_ClearSelection(); /* 最后一个手柄拔出时强制进入无手柄状态，避免方向按钮和自动识别按钮残留。 */
 		}
 		Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false); /* A 通道拔出后立即暗灭 A 手柄区域。 */
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 B 仍在线，只显示 B 在线但不因 A 拔出自动高亮 B。 */
+		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 B 仍在线，报警期间先显示在线未选中，控制源退出后再自动高亮 B。 */
 		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
 		break;
 
 	case SCREENKey_UNPLUG_B: // 拔出B
 		close_verify_alarm = (uint8_t)Handlescan_TakeVerifyAlarmCloseRequest(CHANNEL_B); /* B 通道独立消费自己的关窗请求，防止 A/B 同时异常时误清仍有效报警。 */
 		current_channel_unplugged = (uint8_t)(WorkMessage.channel_work == CHANNEL_B); /* 先记录拔出前 B 是否为当前选中通道。 */
+		current_channel_run_interrupted = (uint8_t)((current_channel_unplugged != 0U) &&
+													 ((WorkMessage.runflag_work != false) ||
+													  MotorUart_DidDriverAlarmStartDuringRun())); /* B 通道同样接管驱动报警先到的竞态，确保物理拔柄统一显示80。 */
 		channel_was_online = (uint8_t)WorkMessage.Channel_Bonline; /* 保存 B 拔出前在线态，过滤重复离线消息。 */
 		close_idle_touch = (uint8_t)((current_channel_unplugged != 0U) &&
-									 (WorkMessage.runflag_work == false) &&
+									 (current_channel_run_interrupted == 0U) &&
 									 (WorkMessage.touchactive_work == TOUCHWORK) &&
 									 (WorkMessage.drivetype_work == TOUCHWORK) &&
 									 (WorkMessage.hmiactive_work == 0U)); /* B 通道使用与 A 相同的触控待运行判定，防止 A/B 插拔行为不一致。 */
@@ -674,7 +763,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 B 才需要决定回落 A 或清空当前通道。 */
 		{
-			if ((WorkMessage.runflag_work == false) && /* 停机、无报警且 A 在线时允许安全回落到 A。 */
+			if ((current_channel_run_interrupted == 0U) && /* 确认不是运行掉线、无报警且 A 在线时才允许直接回落。 */
 				(WorkMessage.alarm_flag == false) &&
 				(WorkMessage.Channel_Aonline == true))
 			{
@@ -684,14 +773,15 @@ void PlugORunPLUGActive(uint8_t key_value)
 			}
 			else
 			{
-				if (WorkMessage.runflag_work == true) /* 当前 B 在运行中被拔出时必须先执行安全停机和报警。 */
+				if (current_channel_run_interrupted != 0U) /* 当前 B 运行掉线或驱动87先到时都必须切换为80号掉线报警。 */
 				{
+					Handle_RequestRemainingOnlineAfterUnplug(CHANNEL_A); /* B 运行掉线时锁存仍在线的 A，报警退出后由周期服务自动选择。 */
 					Pubinterface_StopRunningHandleOnUnplug();  /* 运行中拔掉当前 B 手柄时，立即停电机、停联动注水泵并锁存报警。 */
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
-				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前通道拔出仍不自动切到 A，等待用户手动确认。 */
+				WorkMessage.channel_work = CHANNEL_NONE;		   /* 工作中当前 B 拔出先清空选择，待控制源退出后再由锁存请求安全恢复 A。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
 				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，避免拔掉最后手柄后残留 65。 */
 			}
@@ -701,7 +791,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 			Handle_ClearSelection(); /* 最后一个手柄拔出时强制清空当前通道，补齐 current_channel_unplugged 为 0 时的清屏路径。 */
 		}
 		Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false); /* B 通道拔出后立即暗灭 B 手柄区域。 */
-		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 A 仍在线，只显示 A 在线但不因 B 拔出自动高亮 A。 */
+		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 A 仍在线，报警期间先显示在线未选中，控制源退出后再自动高亮 A。 */
 		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
 		break;
 

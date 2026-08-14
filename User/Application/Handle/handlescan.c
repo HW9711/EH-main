@@ -369,6 +369,23 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
 
     return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
 }
+
+/*
+ * 函数功能：读取指定逻辑通道当前的手柄短接检测脚，供驱动报警显示前区分真实故障和物理拔柄过程。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。
+ * 返回参数：低电平表示手柄仍物理插入时返回 true；高电平、非法通道返回 false。
+ */
+bool Handlescan_IsChannelPhysicallyInserted(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 复用扫描状态机的同一套逻辑通道与GPIO绑定，避免报警模块重复硬件映射。 */
+
+    if (binding == NULL)
+    {
+        return false; /* 非 A/B 通道没有实体短接检测脚，不能据此显示驱动报警图片。 */
+    }
+
+    return (Bsp_GpioRead(binding->short_gpio, binding->short_pin) == GPIO_PIN_RESET); /* 与10ms扫描任务保持同一极性：低电平为插入，高电平为拔出候选。 */
+}
 /*
  * 函数功能：判断指定通道的手柄 EEPROM 是否已经完成本轮识别，可供外部通信读取导航页。
  * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B。

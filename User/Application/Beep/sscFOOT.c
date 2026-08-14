@@ -555,20 +555,7 @@ static void Foot_ClearHandleOrOverloadAlarm(void)
            WorkAlarm_Clear();                 /* 清掉统一报警状态，让后续控制方式可以重新响应。 */
           SendAlarmMessage(WORK_ALARM_NONE); /* 释放脚踏或拔掉脚踏时同步停止报警蜂鸣。 */
           SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 同步关闭屏幕报警弹窗，避免“手柄未连接/过载”残留。 */
-            if(WorkMessage.Channel_Aonline)
-            {
-              //  WorkMessage.channel_work = CHANNEL_A;
-               //拔掉B手柄
-              //  SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_A); 
-                HandleSwitchActive(SCREENKey_HANDLE_A);
-            }
-            else if(WorkMessage.Channel_Bonline)
-            {
-               // WorkMessage.channel_work = CHANNEL_B;
-                //拔掉A手柄
-               //  SendKeyBehMessage(PLUGunPLUG, SCREENKey_PLUG_B); 
-                 HandleSwitchActive(SCREENKey_HANDLE_B);
-            }
+          Handle_SelectRemainingOnlineAfterUnplug(); /* 脚踏真实松开并清除掉线报警后，统一恢复唯一剩余通道且保持电机停止。 */
     }
     // if(WorkAlarm_Is(WORK_ALARM_MOTOR_OVERLOAD))
     // {

@@ -2,6 +2,7 @@
 
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
+#include "common.h"
 #include "lcd.h"
 #include "pump.h"
 #include "pump_pressure_control.h"
@@ -261,7 +262,7 @@ static void PumpBehavior_ServiceDrainage(pumpMessage_t *message,
 }
 
 /*
- * 函数功能：按本通道原协议规则组装并发送 6 字节泵驱动帧。
+ * 函数功能：按严格 CRC16 协议组装并发送 6 字节泵驱动帧。
  * 输入参数：binding 为本通道固定配置；uart_data 为驱动速度；business_direction 为该泵原业务方向值。
  * 返回参数：无。
  */
@@ -269,7 +270,13 @@ static void PumpBehavior_SendFrame(const PumpBehaviorBinding_t *binding,
                                    uint16_t uart_data,
                                    uint8_t business_direction)
 {
-    uint8_t frame[6] = {0xAAU, 0U, 0U, 0U, 0xBBU, 0xAAU}; /* 帧头、方向、速度高低字节、帧尾保持原格式。 */
+    uint8_t frame[6] = {0xAAU, 0U, 0U, 0U, 0U, 0U}; /* 固定布局为帧头、方向、速度高低字节、CRC低高字节。 */
+    uint16_t crc; /* CRC16/MODBUS 只覆盖前 4 字节，结果按低字节在前发送。 */
+
+    if (uart_data > PUMP_DRIVER_COMMAND_SPEED_MAX)
+    {
+        uart_data = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 主控发送前再次限幅，防止未来新增路径绕过业务换算上限。 */
+    }
 
     if (binding->invert_protocol_direction != 0U)
     {
@@ -281,8 +288,11 @@ static void PumpBehavior_SendFrame(const PumpBehaviorBinding_t *binding,
     }
     frame[2] = (uint8_t)((uart_data >> 8) & 0xFFU); /* 速度高字节继续先发送。 */
     frame[3] = (uint8_t)(uart_data & 0xFFU);        /* 速度低字节紧随高字节。 */
+    crc = Common_Crc16(frame, 4U);                  /* 对帧头、方向和速度字段计算 Modbus CRC16。 */
+    frame[4] = (uint8_t)(crc & 0x00FFU);            /* 驱动协议第 5 字节固定发送 CRC 低字节。 */
+    frame[5] = (uint8_t)((crc >> 8U) & 0x00FFU);    /* 驱动协议第 6 字节固定发送 CRC 高字节。 */
 
-    binding->send_packet(frame, 6U); /* 每个任务周期仍发送一次完整控制帧，不改变重复发送时序。 */
+    binding->send_packet(frame, 6U); /* 每个 25ms 周期发送一帧 CRC 命令，用于续租驱动端 100ms 通信授权。 */
 }
 
 /*

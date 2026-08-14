@@ -23,6 +23,12 @@
 #define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
+/*
+ * PUMP_DRIVER_COMMAND_SPEED_MAX 是主控与步进驱动共同执行的协议速度安全上限。
+ * 当前最大合法值来自抽吸泵 15 档乘 42，结果为 630；超过该值说明换算或通信数据异常。
+ */
+#define PUMP_DRIVER_COMMAND_SPEED_MAX 630U
+
 /* PUMP_BEHAVIOR_TASK_PERIOD_MS 表示 A/B 泵行为任务统一调度周期，排空计时按该周期换算真实毫秒。 */
 #define PUMP_BEHAVIOR_TASK_PERIOD_MS 25U
 /* PUMP_TIMING_DRAINAGE_DURATION_MS 表示注水泵屏幕排空总时长，10000ms 对应现场要求的 10 秒。 */

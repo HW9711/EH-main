@@ -405,6 +405,8 @@ void ChannelMessageInit(void);
 void WorkMessageInit(void);
 void ChannelMemoryMessageInit(void);
 void HandleSwitchActive(uint8_t key_value);
+void Handle_RequestRemainingOnlineAfterUnplug(uint8_t channel); /* 锁存运行中拔柄后待恢复的另一在线通道。 */
+void Handle_SelectRemainingOnlineAfterUnplug(void); /* 运行中拔出当前手柄并完成控制源退出后，自动选择唯一剩余的在线通道。 */
 void SpeedActive(uint8_t key_value);
 void DirActive(uint8_t key_value);
 void FreqActive(uint8_t key_value);

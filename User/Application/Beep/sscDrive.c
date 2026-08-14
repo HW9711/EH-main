@@ -11,6 +11,7 @@
 #include "kernel_scheduler.h"
 #include "lcd.h"
 #include "uart1.h"
+#include "motoruartdata.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
 #include "sscRFID.h"
@@ -372,6 +373,10 @@ void MOTORRUN(void)
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    if(MotorUart_IsDriverParameterTransactionActive()!=0U)
+    {
+        return; /* 内部调参事务占用UART1时暂停周期0xAA帧，防止维护响应与运行反馈交叉；事务结束后自动恢复。 */
+    }
     /* 脚踏控制使用实时行程速度；其它控制方式继续使用屏幕或 EEPROM 设定速度。 */
     if(WorkMessage.drivetype_work==JTWORK)
     {

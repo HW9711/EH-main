@@ -6,6 +6,7 @@
 #include "at24cs32.h"
 #include "board_profile.h"
 #include "bsp_uart.h"
+#include "common.h"
 #include "eeprom.h"
 #include "handle_control.h"
 #include "handlescan.h"
@@ -47,6 +48,38 @@
 #define EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER 0x02U /* 遥测flags bit1：当前控制权属于外控。 */
 #define EXTERNAL_COMM_MOTOR_FLAG_HANDLE_ONLINE 0x04U /* 遥测flags bit2：当前选中手柄在线。 */
 #define EXTERNAL_COMM_MOTOR_FLAG_ALARM_ACTIVE 0x08U /* 遥测flags bit3：主控存在持续报警。 */
+
+#define EXTERNAL_COMM_DRIVER_PARAMETER_FUNCTION 0xE0U /* 内部调参版独占功能码；公开上位机没有该入口。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_AREA 0x01U /* 驱动参数区固定使用AreaCode 0x01。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_VERSION 0x01U /* 三工程首版参数语义协议版本。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_REQUEST_LEN 16U /* 版本、请求号、操作、Bank、索引、数值和8字节内部口令。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_RESPONSE_PREFIX_LEN 8U /* 响应固定前缀后可追加最多30个16位参数。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_KEY_OFFSET 8U /* 8字节内部口令从请求载荷偏移8开始。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_MODBUS_LEN 8U /* 主控到驱动的维护请求固定为8字节Modbus帧。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS 0xFDU /* 驱动维护地址与正常地址1/2完全隔离。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_READ_MAX 30U /* 单次读取最多30个参数，保证驱动响应不超过65字节。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHLESS_COUNT 67U /* 无刷第一版只开放当前明确使用的0~66。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHED_COUNT 62U /* 有刷第一版只开放当前明确使用的0~61。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_VALUE_MAX 32767U /* 沿用驱动既有16位有符号参数上限，拒绝高位回绕。 */
+
+#define EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ 0x01U /* 批量读取一个Bank中的连续参数。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_OP_WRITE 0x02U /* 单写RAM参数，保护参数立即重载。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_OP_SAVE 0x03U /* 把指定Bank当前RAM参数保存到驱动Flash。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_OP_DEFAULT 0x04U /* 指定Bank立即恢复编译默认值并擦除Flash页。 */
+
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BLDC_1 0x10U /* 无刷通道1参数Bank。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BLDC_2 0x11U /* 无刷通道2参数Bank。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BRUSHED_1 0x12U /* 有刷通道1参数Bank。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BRUSHED_2 0x13U /* 有刷通道2参数Bank。 */
+
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_OK 0x00U /* 驱动已完成本次读写。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_FRAME 0x01U /* 外层载荷长度、区域或版本不正确。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DENIED 0x02U /* 内部口令不匹配或没有外控所有权。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_NOT_IDLE 0x03U /* 电机、反馈转速或任一泵尚未停止。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT 0x04U /* 操作、Bank、索引、数量或数值越界。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BUSY 0x05U /* 前一笔UART1维护事务尚未结束。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_TIMEOUT 0x06U /* 驱动在300ms内没有返回合法帧。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DRIVER_REJECTED 0x07U /* 驱动返回Modbus异常或响应字段不匹配。 */
 
 #define EXTERNAL_COMM_STATUS_ONLINE         0x01U   /* 心跳状态值：设备在线。 */
 #define EXTERNAL_COMM_STATUS_OFFLINE        0xFFU   /* 心跳状态值：设备掉线、未选中或无效。 */
@@ -187,6 +220,17 @@ typedef struct
     uint8_t page_data[AT24CS32_PAGE_DATA_SIZE];      /* 批量写共用的 30 字节导航模板；批量读不使用。 */
 } ExternalCommEepromBatchState_t;
 
+typedef struct
+{
+    uint8_t active;                                  /* 1表示已有一笔外层请求等待UART1结果。 */
+    uint16_t request_id;                             /* 原样回显给内部上位机，用于关联当前UI动作。 */
+    uint8_t operation;                               /* 保存读、写、保存或恢复默认操作。 */
+    uint8_t bank;                                    /* 保存四个参数Bank之一。 */
+    uint8_t index;                                   /* 读写起始索引。 */
+    uint8_t count;                                   /* 读取参数数量；其它操作为0。 */
+    uint8_t modbus_request[EXTERNAL_COMM_DRIVER_PARAMETER_MODBUS_LEN]; /* 保存原始请求，06响应必须逐字节回显。 */
+} ExternalCommDriverParameterRequest_t;
+
 static kernel_task_t ExternalCommTaskHandle;         /* 外部通信任务句柄，由调度器保存任务状态。 */
 static uint16_t s_heartbeat_elapsed_ms = 0U;         /* 心跳累计时间，每次任务运行增加 10ms。 */
 static uint16_t s_motor_telemetry_elapsed_ms = 0U;   /* 50ms电机遥测累计时间，未订阅时保持0。 */
@@ -217,7 +261,9 @@ static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用�
 static uint8_t s_response_suppressed = 0U;          /* 简易协议静默复用原分发时临时禁止发送旧协议 ACK/上传帧。 */
 static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 字节含最后 2 字节页校验。 */
 static ExternalCommEepromBatchState_t s_eeprom_batch; /* EEPROM 批量读写状态，外控任务累计到 30ms 后处理一页。 */
+static ExternalCommDriverParameterRequest_t s_driver_parameter_request; /* UART2语义请求到UART1维护响应的一对一事务状态。 */
 static uint8_t s_eeprom_command_processed_this_cycle = 0U; /* 每个 10ms 周期只允许分发一条 EEPROM 命令，防止粘包连续阻塞业务任务。 */
+static const uint8_t s_driver_parameter_key[8] = {'E', 'H', 'D', 'R', 'V', '2', '6', '0'}; /* 仅内部调参版持有的操作口令；它是维护门禁而不是加密机制。 */
 static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
 
 static void ExternalComm_RefreshIdleLinkDisplay(void); /* 非外控状态下维护小电脑在线图标超时。 */
@@ -283,6 +329,310 @@ static void ExternalComm_SendFrame(uint8_t fun_code,
         /* 组帧成功才占用 UART2 发送，避免发送半成品帧。 */
         Uart2_SendPacket(s_tx_buf, tx_len);
     }
+}
+
+/*
+ * 函数功能：把内部调参请求结果封装成0xE0上行帧，回显请求号和参数语义字段。
+ * 输入参数：request_id为请求号；status为结果；operation、bank、index为原请求字段；data为大端参数数据；count为16位参数数量。
+ * 返回参数：无。
+ */
+static void ExternalComm_SendDriverParameterResponse(uint16_t request_id,
+                                                     uint8_t status,
+                                                     uint8_t operation,
+                                                     uint8_t bank,
+                                                     uint8_t index,
+                                                     const uint8_t *data,
+                                                     uint8_t count)
+{
+    uint8_t info[EXTERNAL_COMM_DRIVER_PARAMETER_RESPONSE_PREFIX_LEN + (EXTERNAL_COMM_DRIVER_PARAMETER_READ_MAX * 2U)]; /* 固定前缀后最多携带30个参数。 */
+    uint16_t data_len = (uint16_t)count * 2U; /* 每个驱动参数按大端16位上传。 */
+
+    if ((count > EXTERNAL_COMM_DRIVER_PARAMETER_READ_MAX) || ((data_len > 0U) && (data == NULL)))
+    {
+        status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DRIVER_REJECTED; /* 本地封装异常统一降级为驱动响应不匹配。 */
+        count = 0U; /* 异常响应不再附带不可信数据。 */
+        data_len = 0U;
+    }
+
+    info[0] = EXTERNAL_COMM_DRIVER_PARAMETER_VERSION; /* offset0固定回显协议版本。 */
+    ExternalComm_WriteBE16(&info[1], request_id); /* offset1~2回显请求号。 */
+    info[3] = status; /* offset3返回主控或驱动事务状态。 */
+    info[4] = operation; /* offset4回显操作类型。 */
+    info[5] = bank; /* offset5回显参数Bank。 */
+    info[6] = index; /* offset6回显读写起始索引。 */
+    info[7] = count; /* offset7表示后续16位参数数量。 */
+    if (data_len > 0U)
+    {
+        memcpy(&info[EXTERNAL_COMM_DRIVER_PARAMETER_RESPONSE_PREFIX_LEN], data, data_len); /* 原始Modbus数据已经是大端，无需再次换序。 */
+    }
+
+    ExternalComm_SendFrame(EXTERNAL_COMM_DRIVER_PARAMETER_FUNCTION,
+                           EXTERNAL_COMM_DRIVER_PARAMETER_AREA,
+                           EXTERNAL_COMM_INFO_NONE,
+                           info,
+                           (uint16_t)(EXTERNAL_COMM_DRIVER_PARAMETER_RESPONSE_PREFIX_LEN + data_len)); /* 继续使用现有D7 CA F8 F1和CRC封装。 */
+}
+
+/*
+ * 函数功能：查询参数Bank的对外有效参数数量。
+ * 输入参数：bank为0x10~0x13；parameter_count接收对应有效数量。
+ * 返回参数：Bank有效返回1；未知Bank返回0。
+ */
+static uint8_t ExternalComm_GetDriverParameterBankCount(uint8_t bank, uint8_t *parameter_count)
+{
+    if (parameter_count == NULL)
+    {
+        return 0U; /* 输出指针为空时不能返回有效Bank信息。 */
+    }
+
+    if ((bank == EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BLDC_1) ||
+        (bank == EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BLDC_2))
+    {
+        *parameter_count = EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHLESS_COUNT; /* 无刷只开放0~66，隐藏遗留扩展索引。 */
+        return 1U;
+    }
+
+    if ((bank == EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BRUSHED_1) ||
+        (bank == EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BRUSHED_2))
+    {
+        *parameter_count = EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHED_COUNT; /* 有刷只开放0~61。 */
+        return 1U;
+    }
+
+    return 0U; /* 未知Bank不能转成任意驱动寄存器。 */
+}
+
+/*
+ * 函数功能：处理内部上位机的一笔驱动参数语义请求，并生成固定0xFD Modbus维护帧。
+ * 输入参数：frame为已通过外层帧头、长度、帧尾、CRC和正式会话校验的0xE0下行帧。
+ * 返回参数：无；参数错误立即上行状态，合法请求等待UART1异步响应。
+ */
+static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
+{
+    uint16_t request_id = 0U; /* 载荷不足时使用0，避免读取越界。 */
+    uint8_t operation = 0U; /* 保存请求操作并用于错误响应回显。 */
+    uint8_t bank = 0U; /* 保存请求Bank并用于错误响应回显。 */
+    uint8_t index = 0U; /* 保存请求索引并用于错误响应回显。 */
+    uint16_t value_or_count; /* 读取时表示数量，写入时表示16位原始值。 */
+    uint8_t parameter_count; /* 保存当前Bank允许访问的参数数量。 */
+    uint8_t request[EXTERNAL_COMM_DRIVER_PARAMETER_MODBUS_LEN]; /* 主控只生成固定8字节维护请求。 */
+    uint16_t crc; /* 驱动Modbus CRC按低字节在前写入请求末尾。 */
+
+    if (frame == NULL)
+    {
+        return; /* 调度器不会传空帧，防御性返回避免构造无来源响应。 */
+    }
+
+    if (frame->info_len >= 3U)
+    {
+        request_id = ExternalComm_ReadBE16(&frame->info_area[1]); /* 长度允许时先提取请求号，错误响应也能被UI关联。 */
+    }
+    if (frame->info_len >= 6U)
+    {
+        operation = frame->info_area[3]; /* 提取操作用于错误响应回显。 */
+        bank = frame->info_area[4]; /* 提取Bank用于错误响应回显。 */
+        index = frame->info_area[5]; /* 提取索引用于错误响应回显。 */
+    }
+
+    if ((frame->area_code != EXTERNAL_COMM_DRIVER_PARAMETER_AREA) ||
+        (frame->info_len != EXTERNAL_COMM_DRIVER_PARAMETER_REQUEST_LEN) ||
+        (frame->info_area[0] != EXTERNAL_COMM_DRIVER_PARAMETER_VERSION))
+    {
+        ExternalComm_SendDriverParameterResponse(request_id,
+                                                 EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_FRAME,
+                                                 operation,
+                                                 bank,
+                                                 index,
+                                                 NULL,
+                                                 0U); /* 区域、固定长度或版本不匹配时不触碰UART1。 */
+        return;
+    }
+
+    if ((memcmp(&frame->info_area[EXTERNAL_COMM_DRIVER_PARAMETER_KEY_OFFSET],
+                s_driver_parameter_key,
+                sizeof(s_driver_parameter_key)) != 0) ||
+        (ControlArbitration_IsExternalActive() == false))
+    {
+        ExternalComm_SendDriverParameterResponse(request_id,
+                                                 EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DENIED,
+                                                 operation,
+                                                 bank,
+                                                 index,
+                                                 NULL,
+                                                 0U); /* 内部口令和外控所有权必须同时成立，公开上位机不能偶然进入调参。 */
+        return;
+    }
+
+    if ((ExternalComm_IsEepromRuntimeIdle() == 0U) || (WorkMessage.driver_speed_feedback != 0U))
+    {
+        ExternalComm_SendDriverParameterResponse(request_id,
+                                                 EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_NOT_IDLE,
+                                                 operation,
+                                                 bank,
+                                                 index,
+                                                 NULL,
+                                                 0U); /* 命令已停但转子未停稳时仍拒绝调参，避免重载保护和PI状态。 */
+        return;
+    }
+
+    if ((s_driver_parameter_request.active != 0U) ||
+        (MotorUart_IsDriverParameterTransactionActive() != 0U))
+    {
+        ExternalComm_SendDriverParameterResponse(request_id,
+                                                 EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BUSY,
+                                                 operation,
+                                                 bank,
+                                                 index,
+                                                 NULL,
+                                                 0U); /* UART1只允许一笔维护事务，新的UI动作必须等待前一笔结束。 */
+        return;
+    }
+
+    if (ExternalComm_GetDriverParameterBankCount(bank, &parameter_count) == 0U)
+    {
+        ExternalComm_SendDriverParameterResponse(request_id,
+                                                 EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT,
+                                                 operation,
+                                                 bank,
+                                                 index,
+                                                 NULL,
+                                                 0U); /* 只允许四个明确Bank，禁止任意寄存器透传。 */
+        return;
+    }
+
+    value_or_count = ExternalComm_ReadBE16(&frame->info_area[6]); /* 语义字段始终按大端16位解析。 */
+    request[0] = EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS; /* 固定维护地址0xFD。 */
+    if (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ)
+    {
+        if ((value_or_count == 0U) ||
+            (value_or_count > EXTERNAL_COMM_DRIVER_PARAMETER_READ_MAX) ||
+            ((uint16_t)index + value_or_count > parameter_count))
+        {
+            ExternalComm_SendDriverParameterResponse(request_id, EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT,
+                                                     operation, bank, index, NULL, 0U); /* 读数量和末索引必须落在当前Bank有效范围。 */
+            return;
+        }
+        request[1] = 0x03U; /* Modbus 03批量读。 */
+        request[2] = bank; /* 寄存器高字节直接承载Bank。 */
+        request[3] = index; /* 寄存器低字节承载起始索引。 */
+        request[4] = 0U; /* 读取数量高字节固定为0。 */
+        request[5] = (uint8_t)value_or_count; /* 读取数量最多30，可安全写入低字节。 */
+    }
+    else if (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_WRITE)
+    {
+        if ((index == 0U) || (index >= parameter_count) ||
+            (value_or_count > EXTERNAL_COMM_DRIVER_PARAMETER_VALUE_MAX))
+        {
+            ExternalComm_SendDriverParameterResponse(request_id, EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT,
+                                                     operation, bank, index, NULL, 0U); /* 地址索引0只读，且拒绝0x8000以上回绕值。 */
+            return;
+        }
+        request[1] = 0x06U; /* Modbus 06单参数写RAM。 */
+        request[2] = bank; /* 寄存器高字节承载Bank。 */
+        request[3] = index; /* 寄存器低字节承载参数索引。 */
+        ExternalComm_WriteBE16(&request[4], value_or_count); /* 参数原始值按Modbus大端写入。 */
+    }
+    else if ((operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_SAVE) ||
+             (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_DEFAULT))
+    {
+        if ((index != 0U) || (value_or_count != 0U))
+        {
+            ExternalComm_SendDriverParameterResponse(request_id, EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT,
+                                                     operation, bank, index, NULL, 0U); /* 保存和默认命令保留字段必须为0，避免误把写参数当成Flash动作。 */
+            return;
+        }
+        request[1] = 0x06U; /* Flash维护命令仍使用06功能。 */
+        request[2] = 0x7FU; /* 0x7F00固定表示参数Bank维护命令。 */
+        request[3] = 0x00U;
+        request[4] = bank; /* value高字节指定要维护的Bank。 */
+        request[5] = (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_SAVE) ? 0x01U : 0x02U; /* 01保存，02恢复编译默认。 */
+    }
+    else
+    {
+        ExternalComm_SendDriverParameterResponse(request_id, EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT,
+                                                 operation, bank, index, NULL, 0U); /* 未定义操作不能生成驱动请求。 */
+        return;
+    }
+
+    crc = Common_Crc16(request, 6U); /* 对请求前6字节计算Modbus CRC。 */
+    request[6] = (uint8_t)(crc & 0xFFU); /* CRC低字节先发。 */
+    request[7] = (uint8_t)(crc >> 8U); /* CRC高字节后发。 */
+
+    s_driver_parameter_request.active = 1U; /* 发送前锁住外层请求，避免任务切换后并发覆盖元数据。 */
+    s_driver_parameter_request.request_id = request_id; /* 保存请求号用于异步响应。 */
+    s_driver_parameter_request.operation = operation; /* 保存操作用于校验驱动响应。 */
+    s_driver_parameter_request.bank = bank; /* 保存Bank用于上行回显。 */
+    s_driver_parameter_request.index = index; /* 保存索引用于上行回显。 */
+    s_driver_parameter_request.count = (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ) ? (uint8_t)value_or_count : 0U; /* 只为读取保存数量。 */
+    memcpy(s_driver_parameter_request.modbus_request, request, sizeof(request)); /* 保存06回显校验所需的原始请求。 */
+    if (MotorUart_StartDriverParameterRequest(request, sizeof(request)) == 0U)
+    {
+        s_driver_parameter_request.active = 0U; /* UART1未能启动时立即释放外层状态。 */
+        ExternalComm_SendDriverParameterResponse(request_id, EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BUSY,
+                                                 operation, bank, index, NULL, 0U); /* 把底层占用映射为明确忙状态。 */
+    }
+}
+
+/*
+ * 函数功能：轮询UART1维护事务结果，校验驱动响应字段后上传给内部调参上位机。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ServiceDriverParameter(void)
+{
+    uint8_t response[MOTOR_UART_DRIVER_PARAMETER_MAX_FRAME_SIZE]; /* 接收驱动原始Modbus响应。 */
+    uint8_t response_len = 0U; /* 接收原始响应实际长度。 */
+    MotorUartDriverParameterResult_t result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 接收UART1链路结果。 */
+    uint8_t status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DRIVER_REJECTED; /* 未通过完整校验前默认拒绝。 */
+    const uint8_t *data = NULL; /* 03成功时指向响应参数区。 */
+    uint8_t count = 0U; /* 03成功时回传请求数量。 */
+
+    if (s_driver_parameter_request.active == 0U)
+    {
+        return; /* 没有外层请求时不轮询、不占用任务栈外的状态。 */
+    }
+
+    if (MotorUart_PollDriverParameterResponse(response, &response_len, &result) == 0U)
+    {
+        return; /* 驱动仍在300ms窗口内等待，本周期不发送中间ACK。 */
+    }
+
+    if (result == MOTOR_UART_DRIVER_PARAMETER_RESULT_TIMEOUT)
+    {
+        status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_TIMEOUT; /* 明确告诉UI是链路超时而非参数非法。 */
+    }
+    else if ((response_len >= 2U) && (response[0] == EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS) &&
+             ((response[1] == 0x83U) || (response[1] == 0x86U)))
+    {
+        status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DRIVER_REJECTED; /* 驱动Modbus异常响应映射为驱动拒绝。 */
+    }
+    else if (s_driver_parameter_request.operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ)
+    {
+        uint16_t expected_len = (uint16_t)s_driver_parameter_request.count * 2U + 5U; /* 03响应固定长度。 */
+        if ((response_len == expected_len) &&
+            (response[0] == EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS) &&
+            (response[1] == 0x03U) &&
+            (response[2] == (uint8_t)(s_driver_parameter_request.count * 2U)))
+        {
+            status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_OK; /* 地址、功能码、长度与请求全部一致才算成功。 */
+            data = &response[3]; /* 参数区本身是大端16位，可直接装入外层响应。 */
+            count = s_driver_parameter_request.count; /* 上层按请求数量生成表格。 */
+        }
+    }
+    else if ((response_len == EXTERNAL_COMM_DRIVER_PARAMETER_MODBUS_LEN) &&
+             (memcmp(response, s_driver_parameter_request.modbus_request, 6U) == 0))
+    {
+        status = EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_OK; /* 06成功必须回显请求前6字节，CRC已在UART1层验证。 */
+    }
+
+    ExternalComm_SendDriverParameterResponse(s_driver_parameter_request.request_id,
+                                             status,
+                                             s_driver_parameter_request.operation,
+                                             s_driver_parameter_request.bank,
+                                             s_driver_parameter_request.index,
+                                             data,
+                                             count); /* 每笔外层请求只产生一份最终响应。 */
+    memset(&s_driver_parameter_request, 0, sizeof(s_driver_parameter_request)); /* 完成后清理元数据，允许下一笔事务。 */
 }
 
 /*
@@ -1845,6 +2195,7 @@ static void ExternalComm_ClearHandleLostAlarm(void)
         WorkAlarm_Clear();                 /* 上位机已经下发停止或退出，视为确认本次运行手柄掉线故障。 */
         SendAlarmMessage(WORK_ALARM_NONE); /* 报警状态清零后同步关闭蜂鸣，避免上位机停止后主机仍持续报警。 */
         SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 同步关闭屏幕报警弹窗，保证屏幕显示状态和实际报警状态一致。 */
+        Handle_SelectRemainingOnlineAfterUnplug(); /* 外控停止或退出已确认掉线故障，自动恢复唯一剩余通道但不产生运行输出。 */
     }
 }
 
@@ -2137,7 +2488,12 @@ void ExternalComm_ClearHandleInjectionPumpFollow(void)
 {
     s_uart5_inject_pump_follow_run_request = 0U; /* 手柄已掉线，外控手柄启动带来的注水冷却请求必须立即失效，防止后续刷新重新拉起 A 泵。 */
     ExternalComm_RefreshUart5PumpRunState();     /* 重新合并 A 泵独立请求和手柄跟随请求，只保留上位机明确独立启动的泵输出。 */
-    ExternalComm_RefreshRunDisplay(); /* 外控运行标志被撤销后，同步小电脑图标，避免继续显示手柄外控运行。 */
+    /* 本地脚踏、触控或手控运行中拔出手柄也会经过本函数，只有存在真实外控会话时才能刷新小电脑图标。 */
+    if ((ControlArbitration_IsExternalActive() != false) ||
+        (s_external_comm_display_online != 0U))
+    {
+        ExternalComm_RefreshRunDisplay(); /* 外控仍在线时把运行态由 40 更新为 39；纯本地掉线不再误显示 39 号图标。 */
+    }
 }
 
 /*
@@ -3224,6 +3580,10 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
         case EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE:
             /* 显式开启或关闭50ms电机遥测，原100ms心跳不受订阅状态影响。 */
             ExternalComm_ApplyMotorTelemetrySubscription(frame);
+            break;
+        case EXTERNAL_COMM_DRIVER_PARAMETER_FUNCTION:
+            /* 内部调参请求先做口令、停机和参数白名单校验，再异步占用UART1。 */
+            ExternalComm_ApplyDriverParameter(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
             /* 读取主控板 AT24C32 Page1 软件版本记录。 */
@@ -4667,6 +5027,7 @@ static uint8_t ExternalComm_IsKnownDownlinkFunction(uint8_t fun_code)
         case EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION:
         case EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH:
         case EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE:
+        case EXTERNAL_COMM_DRIVER_PARAMETER_FUNCTION:
         case EXTERNAL_COMM_DOWN_HOST_EXIT:
         case EXTERNAL_COMM_DOWN_PERMISSION:
             return 1U; /* 以上功能码均存在明确分发分支，可以在已确认正式会话内执行。 */
@@ -4997,6 +5358,9 @@ static void ExternalCommTaskFunc(uint32_t event)
 
     /* 每 10ms 检查一次 UART2 是否收到完整空闲包。 */
     ExternalComm_ProcessReceive();
+
+    /* 轮询驱动参数维护事务最终结果；无事务时立即返回，不增加UART2负载。 */
+    ExternalComm_ServiceDriverParameter();
 
     /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
     ExternalComm_CheckLinkWatchdog();

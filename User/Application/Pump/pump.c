@@ -146,6 +146,10 @@ void Pump_SetSpeed_B(uint32_t s)
 {
 	/* 旧 B 泵直接输出入口也套压力保护，防止屏幕/参数路径绕过 sscPUMPB 的闭环。 */
 	s = PumpLegacy_ApplyLimit(&pumpMessageB, PumpLegacy_PressureB(), s);
+	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
+	{
+		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */
+	}
 	//ssc  加上标志位
 	/* 实际输出非零时把 B 泵速度区域显示为黄色，向操作者说明驱动正在转动。 */
 	if(s)
@@ -158,6 +162,7 @@ void Pump_SetSpeed_B(uint32_t s)
 	}
 		
 		uint8_t dat[6] = {0xAA, 0x00, 0x00, 0x00, 0x00, 0x00};
+		uint16_t crc; /* 旧直连入口也必须生成与周期任务相同的 CRC16 控制帧。 */
 		dat[0] = 0xAA;
 		#ifdef water_uptake
 		dat[1] = 0x01;
@@ -166,8 +171,9 @@ void Pump_SetSpeed_B(uint32_t s)
 		#endif
 		dat[2] = ((s & 0xFF00) >> 8);//0x03;
 		dat[3] = (s & 0x00FF);//0xE8;
-		dat[4] = 0xBB;
-		dat[5] = 0xAA;
+		crc = Common_Crc16(dat, 4U);          /* CRC 覆盖帧头、方向和速度高低字节。 */
+		dat[4] = (uint8_t)(crc & 0x00FFU);    /* 第 5 字节发送 CRC 低字节。 */
+		dat[5] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 第 6 字节发送 CRC 高字节。 */
 		//PumpDebugPoint((s > 0U) ? 301U : 302U, (uint16_t)s, dat[3]);
 
 #if (PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE == 1U)
@@ -203,6 +209,10 @@ void Pump_SetSpeed_A(uint32_t s)
  static	uint8_t repeat_data;
 	/* 旧 A 泵直接输出入口也套压力保护，防止手柄/报警停泵路径绕过 sscPUMPA 的闭环。 */
 	s = PumpLegacy_ApplyLimit(&pumpMessageA, PumpLegacy_PressureA(), s);
+	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
+	{
+		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */
+	}
 	//ssc  加上标志位
 	
 	/* 非零转速只在数值变化时发送，减少重复控制帧；零速每次都允许发送，确保停泵命令不会被去重。 */
@@ -217,13 +227,15 @@ void Pump_SetSpeed_A(uint32_t s)
 			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffff);
 		}
 	uint8_t dat[6] = {0xAA, 0x00, 0x00, 0x00, 0x00, 0x00};
+	uint16_t crc; /* 旧直连入口也必须生成与周期任务相同的 CRC16 控制帧。 */
 	
 	dat[0] = 0xAA;
 	dat[1] = 0x01;
 	dat[2] = ((s & 0xFF00) >> 8);//0x03;
 	dat[3] = (s & 0x00FF);//0xE8;
-	dat[4] = 0xBB;
-	dat[5] = 0xAA;
+	crc = Common_Crc16(dat, 4U);          /* CRC 覆盖帧头、方向和速度高低字节。 */
+	dat[4] = (uint8_t)(crc & 0x00FFU);    /* 第 5 字节发送 CRC 低字节。 */
+	dat[5] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 第 6 字节发送 CRC 高字节。 */
 
 #if (PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE == 1U)
 	/* 当前整机逻辑 A 泵对应原 B 泵物理出口，旧直连入口也必须跟随互换到 UART7。 */
