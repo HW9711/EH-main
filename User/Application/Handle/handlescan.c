@@ -2846,8 +2846,7 @@ Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
 }
 
 /*
- * 函数功能：Page2 确认是 RFID
- * 基座后，启动刀具头读取或按超时规则上线空基座。
+ * 函数功能：Page2 确认是 RFID 基座后，另一通道运行时按 EEPROM 直接上线基座；空闲时启动刀具头读取或按超时规则上线空基座。
  * 输入参数：binding
  * 为固定通道资源；mapped_model 和 raw_type_* 为已确认的基座型号。
  *
@@ -2864,6 +2863,47 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
       binding->message; /* 空基座或刀具上线结果只写本通道识别缓存。 */
   uint32_t *spec_values =
       binding->spec_values; /* 等待刀具头期间清本通道旧规格。 */
+
+  if ((WorkMessage.runflag_work != false) &&
+      ((WorkMessage.channel_work == CHANNEL_A) ||
+       (WorkMessage.channel_work == CHANNEL_B)) &&
+      (binding->channel != WorkMessage.channel_work)) {
+    Handlescan_ClearToolSpecValues(
+        spec_values); /* 另一通道运行时只按 EEPROM 发布基座身份，先清掉本通道旧 RFID 刀具规格。 */
+    Rfid_ClearChannelResult(
+        binding->channel); /* 作废本通道旧标签和排队事务，运行期间不发起新的 RFID 读取。 */
+    Handlescan_PrepareRfidBase(
+        message, mapped_model, raw_type_major,
+        raw_type_minor); /* 使用 Page2 已确认的公共接头/PX 型号建立本通道基座上线缓存。 */
+    if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) {
+      (void)Handlescan_LoadSplitBaseEepromRuntime(
+          binding); /* PXBA/PXBB 继续从自身 EEPROM 装载 Page3/Page4，行为与运行中插入 TM 一致。 */
+    }
+    Handlescan_LoadPage6SpeedStep(
+        binding); /* 从新插入手柄 EEPROM 装载本通道调速步进，不修改正在运行通道的 WorkMessage。 */
+    SendKeyBehMessage(
+        PLUGunPLUG,
+        binding->plug_key); /* 发布本通道上线事件；运行门禁只保存 MemoryMsg 并刷新未选中图标，不切换当前通道。 */
+    Handlescan_ClearChannelAlarm(
+        binding->channel,
+        context->last_alarm); /* EEPROM 身份已经确认成功，释放本通道此前遗留的手柄校验报警。 */
+    Handlescan_ResetVerifyRetry(
+        context); /* 基座已按 EEPROM 正常上线，清掉本通道认证和 RFID 快速重试计数。 */
+    context->last_alarm = 0U; /* 清掉本通道历史报警，避免在线保持阶段继续携带旧失败状态。 */
+    context->rfid_wait_ticks = 0U; /* 本次没有启动 RFID 等待，等待计数必须保持为零。 */
+    context->rfid_monitor_ticks = 0U; /* 运行期间暂停在线 RFID 监测，停机后由原周期重新计时。 */
+    context->rfid_last_sequence = 0U; /* 当前仅确认 EEPROM 基座，没有可消费的 RFID 刀具结果。 */
+    context->rfid_last_presence_sequence = 0U; /* 清空标签存在序号，后续选中该通道时重新确认刀具。 */
+    context->rfid_miss_count = 0U; /* 未执行射频事务不能累计刀具缺失次数。 */
+    context->rfid_monitor_pending = 0U; /* 运行期间没有监测事务，禁止保留虚假的等待状态。 */
+    context->rfid_monitor_ticket = 0U; /* 没有 RFID 请求时票据必须清零，避免停机后查询旧事务。 */
+    context->rfid_tool_online = 0U; /* 只把手柄基座置为在线，刀具头仍保持未识别状态。 */
+    context->rfid_wait_started = 0U; /* 本轮没有进入 RFID 上线等待，后续正常选中时仍可启动原识别流程。 */
+    context->stage =
+        HANDLESCAN_STAGE_ONLINE; /* 进入在线保持态，防止运行期间重复读 EEPROM 或重复发送上线图标。 */
+    Handlescan_BeepOnceIfNoAlarm(); /* EEPROM 手柄身份上线成功后单响，提示语义与 TM 插入一致。 */
+    return true; /* 本轮已完成基座上线，运行期间不继续访问 RFID 硬件。 */
+  }
 
   if ((context->rfid_wait_started != 0U) &&
       (context->verify_retry_count >= HANDLESCAN_RFID_VERIFY_RETRY_MAX)) {

@@ -28,6 +28,7 @@
 #define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
 #define MOTOR_DRIVE_DISPLAY_SPEED_INVALID 0xFFFFFFFFUL /* 速度显示缓存的无效值，用于强制下一次运行刷新屏幕速度。 */
 #define MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM 100U /* 脚踏实时速度只按 100rpm 整数档刷新屏幕，实际电机速度仍保留完整精度。 */
+#define MOTOR_TOOL_POSITION_GUARD_MS 150U /* 单次开口定位约需完成准备、拖动和保持三个阶段，期间禁止50ms停机保活帧提前取消驱动模式。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
@@ -50,6 +51,8 @@ static MotorDriveCommandSnapshot_t s_motor_drive_command_snapshot; /* 保存最�
 static uint8_t s_motor_drive_last_command[motor_frem_length]; /* 保存上一份11字节周期命令，用于排除每50ms重复保活帧。 */
 static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚无历史命令，首份启动或停止帧必须形成快照。 */
 static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示快照稳定，奇数表示写入中，供跨任务一致性复制。 */
+static volatile uint8_t s_tool_position_guard_active = 0U; /* 1表示驱动正在消费单次开口定位帧，周期任务暂不发送空闲停机保活帧。 */
+static volatile uint32_t s_tool_position_guard_until_ms = 0U; /* 保存定位保护截止时刻，配合有符号差值兼容HAL毫秒计数回绕。 */
 
 static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
 {
@@ -252,7 +255,9 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
  cmd[3]=(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A)?BOARD_PROFILE_HANDLE_CHANNEL_A:BOARD_PROFILE_HANDLE_CHANNEL_B; /* 驱动帧第3字节选择原物理A或B电机通道。 */
  direction==true?(cmd[1]=4):(cmd[1]=5); /* 定位方向沿用原协议4/5，不受通道交换影响。 */
  cmd[5]=angel; /* 定位角度继续写入协议第5字节，保持原单位和范围。 */
- Uart1_SendPacket(cmd,motor_frem_length); /* 通过UART1把完整定位帧发给电机驱动板。 */
+ s_tool_position_guard_until_ms=HAL_GetTick()+MOTOR_TOOL_POSITION_GUARD_MS; /* 从本次点击开始保留足够时间，使驱动完成准备、单步拖动和末端保持。 */
+ s_tool_position_guard_active=1U; /* 先发布保护状态再发送定位帧，避免任务切换时停机保活帧插到定位帧之后。 */
+ Uart1_SendPacket(cmd,motor_frem_length); /* 保护窗口已经建立，再通过UART1发送完整定位帧。 */
 }
 
 
@@ -376,6 +381,18 @@ void MOTORRUN(void)
     if(MotorUart_IsDriverParameterTransactionActive()!=0U)
     {
         return; /* 内部调参事务占用UART1时暂停周期0xAA帧，防止维护响应与运行反馈交叉；事务结束后自动恢复。 */
+    }
+    if(s_tool_position_guard_active!=0U)
+    {
+        if((WorkMessage.runflag_work!=false)||(WorkMessage.alarm_flag!=false)||
+           ((int32_t)(s_tool_position_guard_until_ms-HAL_GetTick())<=0))
+        {
+            s_tool_position_guard_active=0U; /* 真正启动、报警停机或保护到期时解除门禁，本周期继续执行正常驱动命令。 */
+        }
+        else
+        {
+            return; /* 仅在设备仍处于安全停止态时跳过空闲停机保活帧，防止第一下定位命令被提前覆盖。 */
+        }
     }
     /* 脚踏控制使用实时行程速度；其它控制方式继续使用屏幕或 EEPROM 设定速度。 */
     if(WorkMessage.drivetype_work==JTWORK)
