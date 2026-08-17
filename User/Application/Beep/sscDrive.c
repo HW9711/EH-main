@@ -15,6 +15,7 @@
 #include "Pubinterface.h"
 #include "sscUIDP.h"
 #include "sscRFID.h"
+#include "sscFOOT.h"
 
 #include <string.h>
 
@@ -31,7 +32,7 @@
 #define MOTOR_TOOL_POSITION_GUARD_MS 150U /* 单次开口定位约需完成准备、拖动和保持三个阶段，期间禁止50ms停机保活帧提前取消驱动模式。 */
 
 kernel_task_t MOTORRUNTaskHandle;
-static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0xBB ,0xAA};
+static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00};
 
 typedef struct {
   
@@ -62,6 +63,25 @@ static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
     }
 
     return (uint8_t)freq_work; /* 参考驱动接收端会再执行 `R_DATA[2] * 2`，主控这里保持原始命令值，不再提前翻倍。 */
+}
+
+/*
+ * 函数功能：为 11 字节手柄驱动控制帧生成真实 CRC16，替代历史 BB AA 固定尾码。
+ * 输入参数：command 指向待发送的完整控制帧，前 9 字节必须已经组装完成。
+ * 返回参数：无；空指针时保持静默，禁止访问无效命令缓存。
+ */
+static void MotorDrive_UpdateCommandCrc(uint8_t *command)
+{
+    uint16_t crc; /* 保存前 9 字节的 CRC16/MODBUS 结果，驱动端按低字节在前校验。 */
+
+    if (command == NULL)
+    {
+        return; /* 内部命令缓存无效时不得写 CRC 字段，调用方也不会发送该帧。 */
+    }
+
+    crc = Common_Crc16(command, (uint16_t)(motor_frem_length - 2U)); /* CRC 覆盖地址、模式、通道、速度和保护电流。 */
+    command[motor_frem_length - 2U] = (uint8_t)(crc & 0x00FFU); /* 协议第 10 字节发送 CRC 低字节。 */
+    command[motor_frem_length - 1U] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 协议第 11 字节发送 CRC 高字节。 */
 }
 
 /*
@@ -249,12 +269,13 @@ static uint32_t MotorDrive_QuantizeFootDisplaySpeed(uint32_t actual_speed)
  */
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 {
- uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0xBB ,0xAA };
+ uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0x00 ,0x00 };
  uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(channel_number); /* 定位命令只交换物理电机路，调用方仍传逻辑A/B。 */
 
  cmd[3]=(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A)?BOARD_PROFILE_HANDLE_CHANNEL_A:BOARD_PROFILE_HANDLE_CHANNEL_B; /* 驱动帧第3字节选择原物理A或B电机通道。 */
  direction==true?(cmd[1]=4):(cmd[1]=5); /* 定位方向沿用原协议4/5，不受通道交换影响。 */
  cmd[5]=angel; /* 定位角度继续写入协议第5字节，保持原单位和范围。 */
+ MotorDrive_UpdateCommandCrc(cmd); /* 定位命令也必须携带真实 CRC，否则升级后的手柄驱动会按无效帧拒绝。 */
  s_tool_position_guard_until_ms=HAL_GetTick()+MOTOR_TOOL_POSITION_GUARD_MS; /* 从本次点击开始保留足够时间，使驱动完成准备、单步拖动和末端保持。 */
  s_tool_position_guard_active=1U; /* 先发布保护状态再发送定位帧，避免任务切换时停机保活帧插到定位帧之后。 */
  Uart1_SendPacket(cmd,motor_frem_length); /* 保护窗口已经建立，再通过UART1发送完整定位帧。 */
@@ -343,6 +364,7 @@ uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot)
  */
 static void MotorStops(void)
 {
+ MotorDrive_UpdateCommandCrc(motor_stopcode); /* 每次停机发送前重新生成 CRC，确保量产驱动只接受完整可信的零速帧。 */
  MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U); /* 停机速度固定为0，记录后再实际送入UART1。 */
  Uart1_SendPacket(motor_stopcode, motor_frem_length);
 }
@@ -356,9 +378,10 @@ static void MotorStart(uint32_t command_speed_rpm)
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
-      ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0xBB ,0xAA};
+      ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0x00 ,0x00};
     // uint8_t motor_startcode[motor_frem_length]={0xAA ,0x03 ,0x28 ,0x03\
     //      ,0x01 ,0x90 ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};    
+    MotorDrive_UpdateCommandCrc(motor_startcode); /* 启动帧只在全部业务字段确定后计算 CRC，避免速度或电流更新使校验失效。 */
     MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm); /* 以实际UART1帧为判重依据，按钮点击时刻不参与阶跃计时。 */
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
@@ -378,9 +401,22 @@ void MOTORRUN(void)
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    if((WorkMessage.drivetype_work==JTWORK) && (Foot_IsMotorStopLatched()!=0U))
+    {
+        WorkMessage.runflag_work=false; /* 脚踏松开或失效锁存优先覆盖普通运行标志，防止其它业务分支把旧 RUN 重新写回。 */
+        WorkMessage.speed_work=0U; /* 同步清除脚踏实时目标速度，停机周期不得继续沿用上一帧高 AD 对应的转速。 */
+    }
     if(MotorUart_IsDriverParameterTransactionActive()!=0U)
     {
-        return; /* 内部调参事务占用UART1时暂停周期0xAA帧，防止维护响应与运行反馈交叉；事务结束后自动恢复。 */
+        if((WorkMessage.runflag_work==false) &&
+           ((s_motor_drive_command_snapshot.valid==0U) || (s_motor_drive_command_snapshot.run_state!=0U)))
+        {
+            MotorUart_AbortDriverParameterTransaction(); /* 只有上一份真实UART1命令仍是RUN时，新的停机请求才抢占维护等待。 */
+        }
+        else
+        {
+            return; /* 电机早已收到STOP时允许静止调参；运行请求则继续等待事务结束，禁止控制帧与维护响应交叉。 */
+        }
     }
     if(s_tool_position_guard_active!=0U)
     {

@@ -7,6 +7,27 @@
 #include "common.h"
 #include "board.h"
 
+#define MOTOR_CONTROL_FRAME_DATA_LENGTH 9U /* 手柄驱动控制帧前 9 字节为业务数据，末 2 字节保存 CRC16。 */
+
+/*
+ * 函数功能：为旧电机控制接口生成真实 CRC16，确保紧急停止帧不会被严格校验的手柄驱动拒绝。
+ * 输入参数：frame 指向至少 11 字节的控制帧缓存。
+ * 返回参数：无；空指针时不访问缓存。
+ */
+static void Motor_UpdateControlFrameCrc(uint8_t *frame)
+{
+	uint16_t crc; /* 保存地址至保护电流字段的 CRC16/MODBUS 结果。 */
+
+	if (frame == NULL)
+	{
+		return; /* 防御无效内部调用，避免写入未知地址。 */
+	}
+
+	crc = Common_Crc16(frame, MOTOR_CONTROL_FRAME_DATA_LENGTH); /* 与手柄驱动端 CRC_Calc 的覆盖范围保持一致。 */
+	frame[9] = (uint8_t)(crc & 0x00FFU); /* 驱动协议先发送 CRC 低字节。 */
+	frame[10] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 驱动协议后发送 CRC 高字节。 */
+}
+
 //============================================================================
 // 有刷电机控制（Brushed motor control）
 //============================================================================
@@ -133,7 +154,7 @@ void BrushedMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint16_t Spe
  */
 void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t Mode1)  
 {
-	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0xbb, 0xaa};
+	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
 	//uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0};
 //	if ((MotorNum > 5) || (Mode > 6) || (Freq > 100))
 //		return ;
@@ -149,19 +170,23 @@ void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t M
 //	dat[9] =  (MotorCRC & 0x00FF);
 //	dat[10] = ((MotorCRC & 0xFF00) >> 8);
 	
+	Motor_UpdateControlFrameCrc(dat); /* 第一帧按正转、无霍尔字段生成对应 CRC。 */
 	/* 先发送正转、无霍尔停止帧，覆盖当前驱动若处于无霍尔正转的情况。 */
 	Uart1_SendPacket(dat, 11);
 	dat[6]=0x02;
+	Motor_UpdateControlFrameCrc(dat); /* 闭环类型切换到有霍尔后必须重算 CRC，不能沿用上一帧校验值。 */
 	/* 两帧之间保留 5ms，给驱动板完整接收和处理上一帧的时间。 */
 	Delay_ms(5);
 	/* 再发送正转、有霍尔停止帧，不能依赖主控保存的闭环类型。 */
 	Uart1_SendPacket(dat, 11);
 	Delay_ms(5);
 	dat[1] = 0x02;
+	Motor_UpdateControlFrameCrc(dat); /* 方向切换到反转后重算 CRC，保证第三帧仍可被驱动接受。 */
 		/* 切到反转模式并发送有霍尔停止帧，覆盖驱动当前处于反转的情况。 */
 		Uart1_SendPacket(dat, 11);
 		Delay_ms(5);
 			dat[6]=0x01;
+				Motor_UpdateControlFrameCrc(dat); /* 最后一帧恢复无霍尔字段后再次重算 CRC。 */
 				/* 最后发送反转、无霍尔停止帧，使四种运行组合都收到明确停止命令。 */
 				Uart1_SendPacket(dat, 11);
 	

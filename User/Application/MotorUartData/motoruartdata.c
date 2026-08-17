@@ -33,6 +33,7 @@ kernel_task_t MOTORUARTTaskHandle;
 #define MOTOR_UART_DRIVER_PARAMETER_ADDRESS 0xFDU /* 内部维护协议使用固定地址，避免与原1/2地址和0xAA运行帧混淆。 */
 #define MOTOR_UART_DRIVER_PARAMETER_REQUEST_LEN 8U /* 主控只下发固定8字节的03读、06写维护请求。 */
 #define MOTOR_UART_DRIVER_PARAMETER_TIMEOUT_MS 300U /* 单笔维护事务最多占用UART1 300ms，超时后恢复周期运行帧。 */
+#define MOTOR_UART_DRIVER_PARAMETER_READY_TIMEOUT_MS 300U /* 结果形成后最多再保留300ms，防止上层未取结果而永久挡住正常通信。 */
 #define MOTOR_UART_TASK_PERIOD_MS 3U /* 本任务固定3ms调度，用于累计维护响应超时。 */
 #define MOTOR_UART_DRIVER_PICTURE_DELAY_MS 50U /* 驱动图片延后50ms确认物理短接脚，避免拔柄时87先于80闪现；报警状态和蜂鸣不延迟。 */
 
@@ -63,9 +64,24 @@ typedef enum
 
 static volatile MotorUartDriverParameterState_t s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 串行化UART1维护事务，任何时刻只允许一笔。 */
 static volatile uint16_t s_driver_parameter_elapsed_ms = 0U; /* 从维护请求发出后累计的等待时间。 */
+static volatile uint16_t s_driver_parameter_ready_elapsed_ms = 0U; /* READY结果待取期间累计时间，超时后自动释放UART1。 */
 static uint8_t s_driver_parameter_response[MOTOR_UART_DRIVER_PARAMETER_MAX_FRAME_SIZE]; /* 保存CRC正确的驱动原始响应。 */
 static uint8_t s_driver_parameter_response_len = 0U; /* 保存维护响应实际字节数。 */
 static MotorUartDriverParameterResult_t s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 保存待上层取走的链路结果。 */
+
+/*
+ * 函数功能：清空驱动参数事务的内部状态并释放 UART1 周期控制链路。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void MotorUart_ResetDriverParameterTransaction(void)
+{
+	s_driver_parameter_elapsed_ms = 0U; /* 清除请求等待计时，下一笔事务重新累计。 */
+	s_driver_parameter_ready_elapsed_ms = 0U; /* 清除结果保留计时，避免继承上一笔 READY 时间。 */
+	s_driver_parameter_response_len = 0U; /* 丢弃已消费、过期或被停机抢占的响应长度。 */
+	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 释放后不再向上层暴露旧事务结果。 */
+	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 最后发布空闲状态，使50ms任务恢复手柄控制帧。 */
+}
 
 /*
  * 函数功能：立即设置驱动报警和蜂鸣，并把屏幕图片保存为50ms后的待确认项。
@@ -447,17 +463,26 @@ uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
  */
 static void MotorUart_ServiceDriverParameterTimeout(void)
 {
-	if (s_driver_parameter_state != MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING)
+	if (s_driver_parameter_state == MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING)
 	{
-		return; /* 只有请求已经发出且尚未收到响应时才累计超时。 */
+		s_driver_parameter_elapsed_ms = (uint16_t)(s_driver_parameter_elapsed_ms + MOTOR_UART_TASK_PERIOD_MS); /* 每次任务增加固定3ms，保持与调度周期一致。 */
+		if (s_driver_parameter_elapsed_ms >= MOTOR_UART_DRIVER_PARAMETER_TIMEOUT_MS)
+		{
+			s_driver_parameter_response_len = 0U; /* 超时没有合法原始回包，长度必须清零。 */
+			s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_TIMEOUT; /* 通知外部通信任务区分超时和驱动拒绝。 */
+			s_driver_parameter_ready_elapsed_ms = 0U; /* 从超时结果形成时刻开始计算 READY 保留时间。 */
+			s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 短暂保留超时结果，等待上层取走。 */
+		}
+		return; /* WAITING 本周期已经处理完成，不能再按 READY 重复累计。 */
 	}
 
-	s_driver_parameter_elapsed_ms = (uint16_t)(s_driver_parameter_elapsed_ms + MOTOR_UART_TASK_PERIOD_MS); /* 每次任务增加固定3ms，保持与调度周期一致。 */
-	if (s_driver_parameter_elapsed_ms >= MOTOR_UART_DRIVER_PARAMETER_TIMEOUT_MS)
+	if (s_driver_parameter_state == MOTOR_UART_DRIVER_PARAMETER_STATE_READY)
 	{
-		s_driver_parameter_response_len = 0U; /* 超时没有合法原始回包，长度必须清零。 */
-		s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_TIMEOUT; /* 通知外部通信任务区分超时和驱动拒绝。 */
-		s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 锁住UART1周期帧，直到上层取走超时结果。 */
+		s_driver_parameter_ready_elapsed_ms = (uint16_t)(s_driver_parameter_ready_elapsed_ms + MOTOR_UART_TASK_PERIOD_MS); /* 结果待取时独立累计保留期限。 */
+		if (s_driver_parameter_ready_elapsed_ms >= MOTOR_UART_DRIVER_PARAMETER_READY_TIMEOUT_MS)
+		{
+			MotorUart_ResetDriverParameterTransaction(); /* 上层长期未取结果时自动回到空闲，禁止维护状态永久阻塞手柄控制。 */
+		}
 	}
 }
 
@@ -524,6 +549,7 @@ static uint8_t MotorUart_TryCaptureDriverParameterResponse(const uint8_t *data, 
 		memcpy(s_driver_parameter_response, &data[offset], frame_len); /* CRC通过后一次性保存完整原始响应。 */
 		s_driver_parameter_response_len = (uint8_t)frame_len; /* 最大65字节，可以安全收窄到uint8_t。 */
 		s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_OK; /* 标记链路已经得到合法响应。 */
+		s_driver_parameter_ready_elapsed_ms = 0U; /* 从合法响应形成时刻重新计算上层取结果期限。 */
 		s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 等待外部通信任务取走，期间继续暂停0xAA周期帧。 */
 		return 1U;
 	}
@@ -545,6 +571,7 @@ uint8_t MotorUart_StartDriverParameterRequest(const uint8_t *request, uint8_t re
 	}
 
 	s_driver_parameter_elapsed_ms = 0U; /* 新事务从发送时刻重新累计300ms超时。 */
+	s_driver_parameter_ready_elapsed_ms = 0U; /* 新事务尚未形成结果，清除上一笔 READY 保留时间。 */
 	s_driver_parameter_response_len = 0U; /* 清除上一笔响应长度，避免超时后误用旧数据。 */
 	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 清除上一笔链路结果。 */
 	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING; /* 发送前先占用，避免50ms任务插入0xAA帧。 */
@@ -574,11 +601,27 @@ uint8_t MotorUart_PollDriverParameterResponse(uint8_t *response,
 		memcpy(response, s_driver_parameter_response, s_driver_parameter_response_len); /* 只在确有回包时复制原始帧。 */
 	}
 
-	s_driver_parameter_elapsed_ms = 0U; /* 结果已取走，清除超时累计。 */
-	s_driver_parameter_response_len = 0U; /* 清除已消费响应长度，避免重复读取。 */
-	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 清除已消费结果。 */
-	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 释放UART1，50ms任务下一周期恢复0xAA控制帧。 */
+	MotorUart_ResetDriverParameterTransaction(); /* 结果复制完成后统一清理状态，50ms任务下一周期恢复手柄控制帧。 */
 	return 1U;
+}
+
+/*
+ * 函数功能：让安全停机抢占尚在等待的驱动参数事务，并向外层保留一次超时结果。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void MotorUart_AbortDriverParameterTransaction(void)
+{
+	if (s_driver_parameter_state != MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING)
+	{
+		return; /* 空闲或结果已形成时不改写状态，避免重复停机刷新 READY 期限。 */
+	}
+
+	s_driver_parameter_elapsed_ms = 0U; /* 停机已抢占本次等待，清除尚未到期的请求计时。 */
+	s_driver_parameter_ready_elapsed_ms = 0U; /* 从抢占时刻开始给外层保留一次明确结果。 */
+	s_driver_parameter_response_len = 0U; /* 被抢占事务没有可交付的驱动响应。 */
+	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_TIMEOUT; /* 复用现有超时状态通知上层本次维护未完成。 */
+	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 结束等待占用；手柄停止帧不再受该状态阻挡。 */
 }
 
 /*

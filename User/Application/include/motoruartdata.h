@@ -94,6 +94,13 @@ uint8_t MotorUart_PollDriverParameterResponse(uint8_t *response,
  */
 uint8_t MotorUart_IsDriverParameterTransactionActive(void);
 
+/*
+ * 函数功能：安全停机时抢占尚在等待的驱动参数事务，使零速控制帧可以立即发送。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void MotorUart_AbortDriverParameterTransaction(void);
+
 #endif  //__MOTORUARTDATA_H
 
 

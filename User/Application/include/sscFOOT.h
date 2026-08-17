@@ -130,6 +130,13 @@ FootParsedData_t* Foot_GetParsedData(void);
  */
 void Foot_ClearKeyStatus(void);
 
+/*
+ * 函数功能：查询脚踏手柄电机是否处于独立停止锁存状态。
+ * 输入参数：无。
+ * 返回参数：锁存有效返回1，当前踩踏周期已经授权运行返回0。
+ */
+uint8_t Foot_IsMotorStopLatched(void);
+
 /**
  * @brief 脚踏板任务初始化
  */

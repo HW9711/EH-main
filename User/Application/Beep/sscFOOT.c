@@ -52,6 +52,9 @@
 #define FOOT_DOUBLE_FRAME_LENGTH 24U /* 双脚踏周期帧为24字节，包含左右实时AD、两组三点定标值和CRC。 */
 #define FOOT_RUNTIME_TIMEOUT_TICKS 25U /* UART4解析任务每10ms执行一次，连续250ms无有效实时帧先安全停止脚踏输出。 */
 #define FOOT_OFFLINE_TIMEOUT_TICKS 100U /* 连续约1秒无有效实时帧后再发布脚踏掉线，保持原界面防抖时间。 */
+#define FOOT_MOTOR_SOURCE_NONE 0U /* 当前没有踏板持有手柄电机运行授权。 */
+#define FOOT_MOTOR_SOURCE_LEFT 1U /* 单踏板、双段踏板或双脚踏左侧持有运行授权。 */
+#define FOOT_MOTOR_SOURCE_RIGHT 2U /* 双脚踏右侧持有运行授权。 */
 
 static uint8_t get_jtHvalue[10]={0XFE,0XEF,0XB6,0XC1,0XB8,0Xdf,0x3e,0x84};//读高值
 
@@ -66,6 +69,104 @@ static uint8_t s_double_left_gently_pump_channel = CHANNEL_NONE; /* 记录左脚
 static uint8_t s_double_right_gently_pump_channel = CHANNEL_NONE; /* 记录右脚踏轻踩实际启动的泵，A/B 都是注水泵时确保停止 B。 */
 static bool s_common_socket_missing_wait_release = false; /* 公共接头缺刀具触发后等待脚踏真实释放，防止同一次长踩反复弹 80。 */
 static volatile bool s_foot_runtime_frame_valid = false; /* 只有完整且CRC正确的实时帧才能置位，失效时行为任务禁止沿用旧高AD。 */
+static volatile bool s_foot_motor_stop_latched = true; /* 上电默认禁止脚踏起机，必须先观察到真实松脚再允许新的踩下周期。 */
+static bool s_foot_motor_release_ready = false; /* 记录停机锁存后是否已经观察到松脚，只有该条件成立才能清锁存。 */
+static uint8_t s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 记录真正启动电机的踏板侧，未踩的另一侧释放不能误停当前运行。 */
+
+/*
+ * 函数功能：锁住脚踏手柄电机停机，并要求后续先观察到真实松脚才能再次起机。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_LatchMotorStopUntilRelease(void)
+{
+    s_foot_motor_stop_latched = true; /* 先发布停机锁存，50ms手柄命令任务下一周期必须改发零速帧。 */
+    s_foot_motor_release_ready = false; /* 通信失效或门禁失败不能把持续踩踏当成新的启动沿。 */
+    s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 停机锁存生效后撤销旧踏板所有权，恢复必须重新授权。 */
+}
+
+/*
+ * 函数功能：记录脚踏当前已经回到非电机运行区，并维持手柄电机停机锁存。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_MarkMotorReleased(void)
+{
+    s_foot_motor_stop_latched = true; /* 原始行程回落时立即锁住停机，不等待普通运行标志的后续去抖。 */
+    s_foot_motor_release_ready = true; /* 本次松脚已经满足重新武装条件，下一次有效深踩才可起机。 */
+    s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 松脚结束当前电机踏板所有权，下一次踩下重新登记来源。 */
+}
+
+/*
+ * 函数功能：脚踏回到非电机运行区时立即停止脚踏来源的手柄电机，同时保留原泵释放去抖流程。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Foot_StopMotorAtReleaseBoundary(void)
+{
+    Foot_MarkMotorReleased(); /* 任何踏板类型一旦退出电机运行区，就先锁住停止并记录本次真实释放。 */
+    if((WorkMessage.drivetype_work==JTWORK) || ControlArbitration_IsOwner(CONTROL_OWNER_FOOT))
+    {
+        WorkMessage.runflag_work=false; /* 只撤销脚踏来源的运行请求，不能因脚踏处于低位误停手控、触控或外控。 */
+        WorkMessage.speed_work=0U;      /* 同步清除脚踏实际目标速度，确保50ms驱动任务下一周期发送零速帧。 */
+    }
+}
+
+/*
+ * 函数功能：双脚踏某一侧退出电机区时，仅在该侧确实持有运行授权时锁存停止，避免未踩侧误停另一侧。
+ * 输入参数：source 为 FOOT_MOTOR_SOURCE_LEFT 或 FOOT_MOTOR_SOURCE_RIGHT。
+ * 返回参数：无。
+ */
+static void Foot_StopDoubleMotorAtReleaseBoundary(uint8_t source)
+{
+    if(s_foot_motor_active_source != source)
+    {
+        return; /* 当前运行由另一侧持有或本来已停机，本侧释放不能改写全局手柄运行状态。 */
+    }
+
+    Foot_LatchMotorStopUntilRelease(); /* 活动侧退出电机区后先保持停止，双侧都退出电机区才允许重新武装。 */
+    if((WorkMessage.drivetype_work==JTWORK) || ControlArbitration_IsOwner(CONTROL_OWNER_FOOT))
+    {
+        WorkMessage.runflag_work=false; /* 只撤销实际活动踏板产生的电机请求，保证50ms任务发送STOP。 */
+        WorkMessage.speed_work=0U;      /* 清实际目标速度，另一侧若要运行必须先完成双侧释放再重新踩下。 */
+    }
+}
+
+/*
+ * 函数功能：在脚踏准备写入运行标志前验证“先松开、后重新踩下”的完整动作周期。
+ * 输入参数：无。
+ * 返回参数：true表示允许本次及本次持续踩踏运行；false表示仍须保持停机。
+ */
+static bool Foot_TryAuthorizeMotorRun(uint8_t source)
+{
+    if((source != FOOT_MOTOR_SOURCE_LEFT) && (source != FOOT_MOTOR_SOURCE_RIGHT))
+    {
+        return false; /* 未定义踏板来源不能取得手柄运行授权。 */
+    }
+    if(s_foot_motor_stop_latched == false)
+    {
+        return (s_foot_motor_active_source == source); /* 同一次持续踩踏只允许原授权侧更新速度，另一侧不能无释放切换。 */
+    }
+    if(s_foot_motor_release_ready == false)
+    {
+        return false; /* 上电、通信失效或门禁失败后尚未松脚，禁止旧高AD直接恢复运行。 */
+    }
+
+    s_foot_motor_release_ready = false; /* 消耗本次松脚授权，下一轮起机必须再次经历真实释放。 */
+    s_foot_motor_stop_latched = false; /* 最后解除锁存，使手柄驱动任务可以接受本次新的运行请求。 */
+    s_foot_motor_active_source = source; /* 保存实际启动侧，双脚踏未活动一侧的释放分支不得误停本侧。 */
+    return true;
+}
+
+/*
+ * 函数功能：查询脚踏手柄电机是否处于独立停机锁存状态。
+ * 输入参数：无。
+ * 返回参数：锁存有效返回1；当前踩踏周期已经授权运行返回0。
+ */
+uint8_t Foot_IsMotorStopLatched(void)
+{
+    return (s_foot_motor_stop_latched != false) ? 1U : 0U; /* 只向电机发送任务发布单字节快照，不暴露内部重启条件。 */
+}
 
 
 
@@ -334,6 +435,7 @@ static void Foot_StopPumpBInjection(void)
  */
 static void Foot_ClearRunRequestAfterGateFail(void)
 {
+    Foot_LatchMotorStopUntilRelease();              /* 门禁失败发生在踩踏期间，必须先松脚再允许下一次手柄起机。 */
     WorkMessage.runflag_work=false;                 /* 门禁失败时禁止驱动任务继续看到运行命令，公共接头缺刀具不能下发启动帧。 */
     WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免屏幕或驱动继续沿用本周期脚踏比例速度。 */
     ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行标志，避免 gate 失败后释放分支误认为左脚已经启动。 */
@@ -360,6 +462,7 @@ static void Foot_StopRunOnRealtimeTimeout(void)
     bool foot_output_active; /* 记录当前电机或轻踩泵是否确实由脚踏来源占用，避免误停其它控制方式。 */
 
     s_foot_runtime_frame_valid = false; /* 超时后先关闭实时数据有效门禁，只有下一帧完整CRC数据才能恢复。 */
+    Foot_LatchMotorStopUntilRelease(); /* 实时AD失效后即使恢复为旧高值也不能自动起机，必须先收到真实松脚。 */
     MotorUart_ReleaseFootDriverAlarm(); /* 连续无可信脚踏数据等价于控制源已释放，记录该条件并继续等待驱动Err=0。 */
     foot_output_active = ControlArbitration_IsOwner(CONTROL_OWNER_FOOT) ||
                          ((WorkMessage.drivetype_work == JTWORK) &&
@@ -664,6 +767,7 @@ static bool Foot_BlockRunIfPressureStopLatched(void)
         return false; /* 没有压力停机锁存时，脚踏可以按普通启动沿继续运行。 */
     }
 
+    Foot_LatchMotorStopUntilRelease();              /* 压力保护发生时锁住本次持续踩踏，等待真实松脚后再允许起机。 */
     WorkMessage.runflag_work=false;                 /* 压力保护后脚踏仍踩住时，继续强制手柄运行命令为停止。 */
     WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免驱动任务看到旧速度重新输出。 */
     ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行来源，必须等左脚释放后重新踩下才允许再置位。 */
@@ -784,6 +888,7 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
 
     if(msg->connect_flag==false)
     {
+        Foot_LatchMotorStopUntilRelease(); /* 脚踏掉线后禁止重连旧高AD直接起机，必须先收到一帧真实松脚位置。 */
         MotorUart_ReleaseFootDriverAlarm(); /* 脚踏掉线等价于物理释放，修复过载或其它驱动故障永久等待松脚的边界。 */
         if( WorkMessage.drivetype_work==JTWORK)//如果，前面用的是脚踏使能，现在跳出脚踏自动轮训到什么控制
         {
@@ -994,12 +1099,18 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
                 return FOOT_CONTROL_FLOW_RETURN_TASK;
             }
 
+            if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_LEFT) == false)
+            {
+                Foot_ClearRunRequestAfterGateFail(); /* 上电或异常恢复后脚踏尚未真实松开，本次高AD不能直接恢复手柄运行。 */
+                return FOOT_CONTROL_FLOW_RETURN_TASK;
+            }
             WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(jt_adcvalue,msg->LValue_Left,msg->HValue_Left,0U); /* 单踏板按低值到高值线性映射，输出限制在 EEPROM 最小速度到设定速度之间。 */
             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
             Pubinterface_SetHandleInjectionPumpRun(true); /* 电机确认进入运行态后再按泵类型和当前通道启动 A/B 注水冷却泵，保证冷却泵只跟随手柄运行。 */
         }
         else
         {
+            Foot_StopMotorAtReleaseBoundary(); /* 单踏板首次回到低阈值就立即停手柄；下面75ms去抖只继续保护泵输出不抖动。 */
             if(ControlSignalMessage.jtL_control_flag)
             {
                 /* 单踏板踩住时 AD 可能短暂跌回阈值以下，先去抖，避免 A 泵被一个采样毛刺立刻停掉。 */
@@ -1112,6 +1223,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
     }
     else
     {
+         Foot_StopMotorAtReleaseBoundary(); /* 双段踏板完全退出轻踩区时再次确认手柄停止，并允许下一次重新踩下。 */
          if(ControlSignalMessage.jtL_control_flag)
             {
 
@@ -1163,12 +1275,18 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
             return FOOT_CONTROL_FLOW_RETURN_TASK;
         }
         ControlSignalMessage.jtL_control_flag=true;
+        if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_LEFT) == false)
+        {
+            Foot_ClearRunRequestAfterGateFail(); /* 双段脚踏在异常恢复后仍深踩时保持停机，必须先回到松脚区。 */
+            return FOOT_CONTROL_FLOW_RETURN_TASK;
+        }
         WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,0U); /* 双段脚踏电机段从中值开始算比例，不再从 0rpm 起步。 */
         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
         Pubinterface_SetHandleInjectionPumpRun(true); /* 脚踏二段启动电机后统一经过联动接口，压力锁存时会立即拒绝连续踩踏重新起机。 */
     }
     else
     {
+         Foot_StopMotorAtReleaseBoundary(); /* 双段踏板退回中点以下即退出电机段，不能等待轻踩泵释放才停止手柄。 */
          if(ControlSignalMessage.jtL_control_flag)
             {
                  if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_OVERLOAD||WorkMessage.alarm_value==WORK_ALARM_HANDLE_NOT_CONNECTED)//过载或者手柄未连接的情况，清除报警
@@ -1271,6 +1389,11 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                         return FOOT_CONTROL_FLOW_RETURN_TASK;
                     }
                     ControlSignalMessage.jtL_control_flag=true;
+                    if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_LEFT) == false)
+                    {
+                        Foot_ClearRunRequestAfterGateFail(); /* 左踏板异常恢复后仍处于运行段时保持停机，禁止旧行程直接重启。 */
+                        return FOOT_CONTROL_FLOW_RETURN_TASK;
+                    }
                     WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏左侧当前通道保留高位死区，并限制最大不超过设定速度。 */
                     WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                     Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧启动 A 通道后进入冷却联动和压力锁存门禁，堵管后保持踩踏不能重启手柄。 */
@@ -1311,6 +1434,11 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK;
                             }
                             ControlSignalMessage.jtL_control_flag=true;
+                            if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_LEFT) == false)
+                            {
+                                Foot_ClearRunRequestAfterGateFail(); /* 左踏板跨通道前仍需满足先松后踩，不能由旧高AD完成切换起机。 */
+                                return FOOT_CONTROL_FLOW_RETURN_TASK;
+                            }
                             WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,0U); /* 双脚踏左侧跨通道运行同样按 EEPROM 最小速度起步。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板左侧跨通道启动后同样走压力锁存门禁，避免旧分支绕过停手柄保护。 */
@@ -1319,6 +1447,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
             }
             else
             {
+                Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_LEFT); /* 只有左侧实际持有电机授权时，退回轻踩区才锁存STOP。 */
                   WorkMessage.switchhandle_counts=0;
                 if(ControlSignalMessage.jtL_control_flag)
                 {
@@ -1337,6 +1466,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
         else
         {
 
+            Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_LEFT); /* 左侧完全松开只停止左侧实际启动的电机请求，不能误停右侧。 */
              WorkMessage.switchhandle_counts=0;
             Foot_DoublePedalMarkReleased(CHANNEL_A);
             if(ControlSignalMessage.jtL_control_flag)
@@ -1437,6 +1567,11 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                    return FOOT_CONTROL_FLOW_RETURN_TASK;
                }
                ControlSignalMessage.jtR_control_flag=true;
+                if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_RIGHT) == false)
+                {
+                    Foot_ClearRunRequestAfterGateFail(); /* 右踏板异常恢复后仍处于运行段时保持停机，禁止旧行程直接重启。 */
+                    return FOOT_CONTROL_FLOW_RETURN_TASK;
+                }
                 WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏右侧当前通道保留高位死区，并限制最大不超过设定速度。 */
                  WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                 Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧启动 B 通道后统一刷新冷却泵跟随，并让压力堵塞锁存能够清回 runflag。 */
@@ -1478,6 +1613,11 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK;
                             }
                             ControlSignalMessage.jtR_control_flag=true;
+                            if(Foot_TryAuthorizeMotorRun(FOOT_MOTOR_SOURCE_RIGHT) == false)
+                            {
+                                Foot_ClearRunRequestAfterGateFail(); /* 右踏板跨通道前仍需满足先松后踩，不能由旧高AD完成切换起机。 */
+                                return FOOT_CONTROL_FLOW_RETURN_TASK;
+                            }
                             WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,0U); /* 双脚踏右侧跨通道运行同样按 EEPROM 最小速度起步。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Pubinterface_SetHandleInjectionPumpRun(true); /* 双踏板右侧跨通道启动后不能绕过联动接口，否则压力停机后脚踏保持会重新置运行。 */
@@ -1488,6 +1628,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
         }
         else
         {
+            Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_RIGHT); /* 只有右侧实际持有电机授权时，退回轻踩区才锁存STOP。 */
              WorkMessage.switchhandle_countss=0;
             if(ControlSignalMessage.jtR_control_flag)
             {
@@ -1505,6 +1646,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
     }
     else
     {
+        Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_RIGHT); /* 右侧完全松开只停止右侧实际启动的电机请求，不能误停左侧。 */
         WorkMessage.switchhandle_countss=0;
         Foot_DoublePedalMarkReleased(CHANNEL_B);
         if(ControlSignalMessage.jtR_control_flag)
@@ -1547,6 +1689,12 @@ static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
     if (msg == NULL)
     {
         return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 无双踏板参数时保持停机并结束本周期。 */
+    }
+
+    if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left) &&
+       Foot_IsPedalReleased(jtd_adcvalue_r, msg->MValue_Right))
+    {
+        Foot_StopMotorAtReleaseBoundary(); /* 双侧都退出各自电机区后才完成全局重新武装，轻踩泵区仍可作为安全释放区。 */
     }
 
     flow = Foot_ProcessDoublePedalLeft(msg); /* 原大函数固定先处理左踏板。 */
