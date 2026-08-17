@@ -421,7 +421,7 @@ bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value);
 bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model); /* 判断当前手柄型号是否允许作为手柄实体键控制入口。 */
 void Pubinterface_ServiceTransientAlarms(void); /* 周期维护公共接头、压力堵塞和运行中拔手柄三类限时弹窗。 */
 void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool enable_flag, bool light_flag); /* 刷新单个手柄图标。 */
-void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按 A/B 在线和当前通道刷新手柄图标。 */
+void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按 A/B 在线和当前通道发送完整手柄图标快照，离线通道也明确置为未连接。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断刀具是否具备刨刀能力。 */
 bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type); /* 判断EEPROM手柄或RFID刀具方向是否锁定，锁定后不得由本机或外控切换。 */

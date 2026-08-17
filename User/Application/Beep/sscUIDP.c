@@ -31,6 +31,10 @@ static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免
 #define UIDP_STARTUP_REPLAY_TOTAL_TICKS 300U
 /* 每 200ms 尝试补刷一次，避免每个 10ms 周期都重复发送整页 UI。 */
 #define UIDP_STARTUP_REPLAY_PERIOD_TICKS 20U
+/* 手柄拔出业务状态落地后补发两次 A/B 权威连接快照，覆盖屏幕串口或显示队列的低概率单帧丢失。 */
+#define UIDP_HANDLE_REPLAY_COUNT 2U
+/* 显示任务周期为 10ms，6 个周期对应 60ms；两次补发约发生在拔出后的 60ms 和 120ms。 */
+#define UIDP_HANDLE_REPLAY_PERIOD_TICKS 6U
 /* 泵档位正常运行态固定使用每档渐隐组的第 0 帧，取消动画后续如需播放再传入 1~4 帧。 */
 #define UIDP_PUMP_GEAR_RUN_FRAME 0U
 /* 每个显示任务周期最多连续处理 12 条 UI 消息，压缩上电主运行页控件逐个加载的可见时间。 */
@@ -41,6 +45,8 @@ static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免
 #define UIDP_PUMP_GEAR_COUNT 11U
 static uint16_t s_uidp_startup_replay_ticks = 0U; /* 开机状态补刷剩余调度次数，倒计时结束后不再重发。 */
 static uint16_t s_uidp_startup_replay_period = 0U; /* 补刷间隔计数，确保 UI 队列有时间处理上一批消息。 */
+static volatile uint8_t s_uidp_handle_replay_remaining = 0U; /* 拔出后尚未发送的 A/B 连接快照次数，由插拔业务任务启动、显示任务消费。 */
+static volatile uint8_t s_uidp_handle_replay_period = 0U; /* 拔出连接快照的 10ms 周期倒计时，避免连续消息紧挨发送。 */
 
 /* B 泵档位资源：249 为 0 档；250~254 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
 static const uint16_t s_uidp_pump_b_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
@@ -247,6 +253,17 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 		s_uidp_last_msg = msg;//只在投递成功后更新去重缓存，避免队列满时吞掉下一次有效刷新。
 		s_uidp_last_valid = 1U;//标记去重缓存已建立，后续重复 UI 消息才允许被过滤。
 	}
+}
+
+/*
+ * 函数功能：启动一次手柄拔出后的短时显示补发，在不重置 UI 队列的前提下重新发送两次 A/B 完整连接快照。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void UIDP_RequestHandleDisplayReplay(void)
+{
+	s_uidp_handle_replay_remaining = UIDP_HANDLE_REPLAY_COUNT; /* 每次真实拔出都重新装载两次补发额度，覆盖最新 A/B 业务在线状态。 */
+	s_uidp_handle_replay_period = UIDP_HANDLE_REPLAY_PERIOD_TICKS; /* 首次补发延迟约 60ms，先让本次掉线、报警和参数清屏消息完成发送。 */
 }
 
 /*
@@ -978,6 +995,11 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 		LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,36U);//触控退出或外控释放时回到暗态，不再写旧弹窗 VP
 	}
 }
+/*
+ * 函数功能：周期消费屏幕刷新队列，并维护开机补刷及手柄拔出后的短时连接快照补发。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void UIDISPLAYBehavior()
 {
 	if(UIDPMsgQueue != NULL)
@@ -1081,6 +1103,22 @@ void UIDISPLAYBehavior()
 		{
 			s_uidp_startup_replay_period = UIDP_STARTUP_REPLAY_PERIOD_TICKS; /* 本次补刷后等待 200ms，再给 RFID 后续结果一次刷新机会。 */
 			Pubinterface_RefreshRuntimeDisplaySnapshot(); /* 按当前全局状态重发 A/B 在线图标和当前通道参数区，不修改控制状态。 */
+		}
+	}
+
+	if (s_uidp_handle_replay_remaining > 0U)
+	{
+		if (s_uidp_handle_replay_period > 0U)
+		{
+			--s_uidp_handle_replay_period; /* 补发间隔未到时只递减计数，不挤占当前屏幕消息队列。 */
+		}
+		if ((s_uidp_handle_replay_period == 0U) &&
+			(UIDPMsgQueue != NULL) &&
+			(uxQueueMessagesWaiting(UIDPMsgQueue) == 0U))
+		{
+			--s_uidp_handle_replay_remaining; /* 队列已空时消费一次补发额度，确保本轮快照不会夹在旧消息中间。 */
+			s_uidp_handle_replay_period = UIDP_HANDLE_REPLAY_PERIOD_TICKS; /* 下一份快照再等待约 60ms，降低显示串口瞬时连续发送压力。 */
+			Pubinterface_RefreshOnlineHandleDisplay(); /* 只读取当前 A/B 在线态和选中态，不重复触发插拔业务、报警或蜂鸣。 */
 		}
 	}
 }

@@ -233,6 +233,7 @@ typedef struct
     HandlescanStage stage;                                  /* 当前扫描阶段，静态零值对应空闲态。 */
     volatile uint32_t navigation_generation;                /* 导航访问代次；每次检测到已上线手柄拔出候选时递增，使跨任务读取立即失效。 */
     HandlescanDebounce debounce;                             /* 插入和拔出去抖计数，单位都是 10ms 扫描周期。 */
+    uint8_t offline_event_required;                          /* 已发布过本通道上线事件后置 1；只有离线事件成功入队才清零，防止短接毛刺或队列满造成永久假在线。 */
     uint8_t verify_start_wait_ticks;                         /* 插入稳定后、开始 EEPROM 认证前的等待计数。 */
     uint8_t last_alarm;                                     /* 本通道最近一次手柄认证报警码，用于恢复或拔出时清报警。 */
     volatile uint8_t verify_alarm_close_pending;             /* 最后一项校验报警已清除时置 1，等待插拔任务完成 UI 队列复位后补发关窗。 */
@@ -1246,7 +1247,8 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
                 context->rfid_monitor_pending = 0U; /* 清掉在线监测等待标志。 */
                 context->rfid_monitor_ticket = 0U; /* 上线等待不继承任何在线监测票据。 */
                 context->rfid_tool_online = 1U; /* 刀具头切到在线边沿状态。 */
-                SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 沿用插入事件链装载本通道记忆。 */
+                context->offline_event_required = 1U; /* RFID 刀具结果将触发通道上线刷新，后续物理拔出必须与之配对发布离线事件。 */
+                (void)SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 沿用插入事件链装载本通道记忆；上线刷新失败不允许取消后续离线兜底。 */
                 if ((result.cache_hit == false) || (mapped_model == COMMON_SOCKET_ONLINES))
                 {
                     Handlescan_BeepOnceIfNoAlarm(); /* 新标签始终单响；公共接头即使重新上线同一标签也按上线边沿单响。 */
@@ -1467,7 +1469,8 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
     }
 
     context->rfid_last_sequence = result.sequence; /* 记录已处理序号。 */
-    SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 复用插入事件链刷新本通道状态。 */
+    context->offline_event_required = 1U; /* RFID 在线监测已经请求刷新业务在线态，物理拔出时必须完成对应离线通知。 */
+    (void)SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 复用插入事件链刷新本通道状态；实际拔出由扫描锁存保证最终送达。 */
     context->rfid_tool_online = 1U; /* 完整新结果把刀具切回在线边沿。 */
     if ((result.cache_hit == false) ||
         ((mapped_model == COMMON_SOCKET_ONLINES) && (was_tool_offline != false)))
@@ -2651,7 +2654,8 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
      * * 需要切到拔出去抖阶段，并在稳定后输出离线报文。
 
      */
-    if ((context->stage == HANDLESCAN_STAGE_ONLINE) || /* 已上线、正在拔出去抖或认证失败保持态都要完成稳定拔出流程。 */
+    if ((context->offline_event_required != 0U) || /* 只要本通道曾请求过上线，阶段即使被一次插入毛刺改写，也必须继续完成配对离线事件。 */
+        (context->stage == HANDLESCAN_STAGE_ONLINE) || /* 已上线、正在拔出去抖或认证失败保持态都要完成稳定拔出流程。 */
         (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
         (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL) ||
         ((context->rfid_wait_started != 0U) &&
@@ -2672,8 +2676,16 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
         return true;               /* 本轮不做其他动作，等待下一个扫描周期。 */
       }
 
+      if (SendKeyBehMessage(PLUGunPLUG, binding->unplug_key) == false)
+      {
+        context->stage = HANDLESCAN_STAGE_DEBOUNCE_OUT; /* 离线事件尚未进入队列时保持拔出态，禁止静默回到 IDLE 后永久保留旧在线图标。 */
+        context->debounce.out_debounce_ticks = HANDLESCAN_REMOVE_DEBOUNCE_TICKS; /* 计数保持饱和，下一次 10ms 扫描只重试入队，不重新等待 500ms。 */
+        return true; /* 本轮不清业务缓存、不蜂鸣，等待队列具备空间后再一次性完成正式离线收尾。 */
+      }
+
+      context->offline_event_required = 0U; /* 离线事件已可靠进入队列，本通道此前上线状态已经获得配对的离线通知。 */
       context->debounce.out_debounce_ticks =
-          0U; /* 拔出去抖完成后，清掉计数器。 */
+          0U; /* 拔出去抖完成且离线事件入队后，清掉计数器。 */
       verify_alarm_was_active =
           (uint8_t)((Handlescan_IsHandleVerifyAlarm(context->last_alarm) != 0U) &&
                     (WorkMessage.alarm_flag == true) &&
@@ -2698,9 +2710,6 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
           spec_values); /* 同步清空本通道刀具规格缓存，避免 UI 残留旧值。 */
       context->rfid_wait_started = 0; /* 本通道基座拔出后结束本轮 RFID
                                          等待，下次插入必须从第一轮重新开始。 */
-      SendKeyBehMessage(
-          PLUGunPLUG,
-          binding->unplug_key); /* 通知按键行为模块：本通道手柄已拔出。 */
       Handlescan_DebugTrace(
           binding->channel, HANDLESCAN_DBG_STEP_REMOVE_PASS,
           HANDLESCAN_REMOVE_DEBOUNCE_TICKS); /* 输出“拔出去抖通过”报文。 */
@@ -2881,7 +2890,8 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
     }
     Handlescan_LoadPage6SpeedStep(
         binding); /* 从新插入手柄 EEPROM 装载本通道调速步进，不修改正在运行通道的 WorkMessage。 */
-    SendKeyBehMessage(
+    context->offline_event_required = 1U; /* 运行期间识别到另一通道基座后已经请求显示在线，后续拔出不得静默回到空闲态。 */
+    (void)SendKeyBehMessage(
         PLUGunPLUG,
         binding->plug_key); /* 发布本通道上线事件；运行门禁只保存 MemoryMsg 并刷新未选中图标，不切换当前通道。 */
     Handlescan_ClearChannelAlarm(
@@ -2924,7 +2934,8 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
     Handlescan_LoadPage6SpeedStep(
         binding); /* 重新装入本通道基座 Page6 步进，后续 RFID 刀具上线继续继承。
                    */
-    SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 刷新 A
+    context->offline_event_required = 1U; /* RFID 等待结束后基座已请求上线，物理拔出必须继续走完整离线防抖。 */
+    (void)SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 刷新 A
                                                          通道基座在线状态，让屏幕关闭规格区并显示等待
                                                          RFID 刀具头。 */
     Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* RFID
@@ -2975,7 +2986,8 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
     }
     Handlescan_LoadPage6SpeedStep(
         binding); /* 可拆式基座先装入本通道 Page6 步进。 */
-    SendKeyBehMessage(
+    context->offline_event_required = 1U; /* RFID 基座初始上线事件发布前锁存配对离线责任，跨等待阶段保持有效。 */
+    (void)SendKeyBehMessage(
         PLUGunPLUG,
         binding->plug_key); /* 先上报 RFID
                                基座在线，刀具头数据到达后再二次刷新通道记忆。 */
@@ -2989,12 +3001,9 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
 }
 
 /*
- * 函数功能：读取一体式手柄的 Page3/Page4/Page6 参数，并发布本通道上线事件。
-
- * * 输入参数：binding 为固定通道资源；handle_type_cfg
- * 和型号参数来自已通过认证的 Page2。
- * 返回参数：始终返回
- * true，表示一体式手柄本轮已处理完毕或已进入重试。
+ * 函数功能：读取一体式手柄的 Page3/Page4/Page6 参数；PXYTM/PXYTP 取得完整刀具规格后再发布本通道上线事件。
+ * 输入参数：binding 为固定通道资源；handle_type_cfg 和型号参数来自已通过认证的 Page2。
+ * 返回参数：始终返回 true，表示一体式手柄本轮已完成上线处理或已进入重试。
  */
 static bool Handlescan_ProcessIntegratedHandle(
     const HandlescanChannelBinding *binding,
@@ -3009,6 +3018,8 @@ static bool Handlescan_ProcessIntegratedHandle(
   uint32_t *spec_values =
       binding->spec_values;     /* 一体式刀具规格只刷新本通道。 */
   uint8_t read_status;          /* 保存 Page3 或 Page4 读取结果。 */
+  bool integrated_spec_handle =
+      Handlescan_IsIntegratedSpecHandle(mapped_model); /* PXYTM/PXYTP 必须取得 Page3 规格，确保上线后立即具备屏幕显示数据。 */
   uint16_t tool_diameter_tenth; /* Page3 刀具直径，单位 0.1。 */
   uint16_t tool_length_tenth;   /* Page3 刀具长度，单位 0.1。 */
   uint16_t tool_angle_tenth;    /* Page3 刀具角度，单位 0.1。 */
@@ -3038,7 +3049,20 @@ static bool Handlescan_ProcessIntegratedHandle(
   read_status = Handlescan_ReadEepromBytes(
       binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf,
       HANDLESCAN_TOOL_INFO_SIZE); /* 一体式手柄仍读取本通道 Page3
-                                     规格和倍率字段，失败不影响上线。 */
+                                     规格和倍率字段。 */
+  if ((read_status == 0U) && (integrated_spec_handle != false)) {
+    Handlescan_ClearToolSpecValues(
+        spec_values); /* PXYTM/PXYTP 本轮没有读到完整规格时清掉旧缓存，禁止旧刀具参数误上屏。 */
+    Handlescan_DebugTrace(
+        binding->channel, HANDLESCAN_DBG_STEP_INFO_FAIL,
+        read_status); /* 输出本通道 PXYTM/PXYTP Page3 规格读取失败报文。 */
+    Handlescan_DebugTraceI2cDetail(
+        binding->channel); /* 输出本轮 Page3 失败对应的底层 I2C 细节，便于区分线路和页数据问题。 */
+    Handlescan_EnterRetryOrFail(
+        binding->channel, context,
+        0U); /* PXYTM/PXYTP 的规格属于上线必需数据，沿用普通 EEPROM 手柄重试机制重新读取。 */
+    return true; /* 规格读取成功前不发布上线事件，避免手柄在线后规格窗口永久为空。 */
+  }
   Handlescan_UpdateToolRatioMessage(
       message, (read_status != 0U)
                    ? context->tool_info_buf
@@ -3051,8 +3075,7 @@ static bool Handlescan_ProcessIntegratedHandle(
                                   默认速度、频率、方向、注水流量和蜂鸣阈值。 */
   Handlescan_LoadPage6SpeedStep(
       binding); /* 一体式手柄读取本通道 Page6 调速步进。 */
-  if ((read_status != 0U) &&
-      (Handlescan_IsIntegratedSpecHandle(mapped_model) != false)) {
+  if ((read_status != 0U) && (integrated_spec_handle != false)) {
     tool_diameter_tenth = Handlescan_ReadUint16BE(
         context->tool_info_buf,
         HANDLESCAN_TOOL_DIAMETER_OFFSET); /* 本通道一体式手柄 Page3[2..3]
@@ -3067,6 +3090,10 @@ static bool Handlescan_ProcessIntegratedHandle(
         HANDLESCAN_TOOL_ANGLE_OFFSET); /* 本通道一体式手柄 Page3[6..7]
                                           保存刀具角度，屏幕规格区直接显示角度值。
                                         */
+    Handlescan_UpdateRecognizeMessage(
+        message, mapped_model, raw_type_major, raw_type_minor, mapped_model,
+        tool_diameter_tenth, tool_length_tenth,
+        tool_angle_tenth); /* PXYTM/PXYTP 将长、径、角同步进本通道识别缓存，使识别结果和规格窗口使用同一份 EEPROM 数据。 */
     Handlescan_UpdateToolSpecValues(
         spec_values, tool_diameter_tenth, tool_length_tenth, tool_angle_tenth,
         Handlescan_MapToolType(
@@ -3074,12 +3101,12 @@ static bool Handlescan_ProcessIntegratedHandle(
                                Page3，不再清掉直径、长度、角度显示缓存。 */
   } else {
     Handlescan_ClearToolSpecValues(
-        spec_values); /* 非四类一体式或 Page3 读取失败时清空 A
-                         规格缓存，避免继续显示上一次手柄的直径、长度、角度。 */
+        spec_values); /* 不需要显示规格的其它一体式手柄清空本通道缓存，避免继续显示上一支手柄的数据。 */
   }
   memory->auto_identify =
       0U; /* 一体式手柄不使用 RFID 自动识别，先清通道记忆中的旧自动识别模式。 */
-  SendKeyBehMessage(
+  context->offline_event_required = 1U; /* 一体式手柄准备发布上线事件，后续拔出必须成功投递一次离线事件才能清锁存。 */
+  (void)SendKeyBehMessage(
       PLUGunPLUG, binding->plug_key); /* 通知插拔事件链：A
                                          通道按手柄型号上线并装载到通道记忆。 */
   Handlescan_ClearChannelAlarm(
@@ -3098,7 +3125,7 @@ static bool Handlescan_ProcessIntegratedHandle(
   Handlescan_BeepOnceIfNoAlarm();    /* A
                                         通道认证并上线成功后，给使用者一个确认单响。
                                       */
-  return true; /* 自带刀具能力手柄本轮流程结束，不再读取 Page3 刀具页。 */
+  return true; /* 自带刀具能力手柄本轮流程结束，PXYTM/PXYTP 已同步完成 Page3 刀具规格。 */
 }
 
 /*
@@ -3227,7 +3254,8 @@ static bool Handlescan_ProcessEepromHandle(
     WorkMessage.auto_identify =
         0U; /* A 通道保留原顺序：先清工作态自动识别，再发送上线事件。 */
   }
-  SendKeyBehMessage(
+  context->offline_event_required = 1U; /* 普通 EEPROM 手柄准备发布上线事件，后续物理拔出必须与该在线状态配对。 */
+  (void)SendKeyBehMessage(
       PLUGunPLUG,
       binding->plug_key); /* 沿用原插入事件链装载通道记忆和工作态。 */
   if (binding->channel == CHANNEL_B) {

@@ -139,6 +139,11 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 	SendUIDSMessage(UI_HANDLE_ID, enable_flag, display_value);
 }
 
+/*
+ * 函数功能：按当前 A/B 业务在线状态向屏幕发送一份完整手柄连接快照，在线通道显示型号，离线通道明确显示未连接。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void Pubinterface_RefreshOnlineHandleDisplay(void)
 {
 	/* A 通道在线时刷新 A 手柄图标，并按当前工作通道决定是否高亮。 */
@@ -149,6 +154,10 @@ void Pubinterface_RefreshOnlineHandleDisplay(void)
 									   true,
 									   (WorkMessage.channel_work == CHANNEL_A));
 	}
+	else
+	{
+		Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false); /* A 已离线时也必须明确发送未连接图，避免偶发 UI 消息丢失后继续保留旧手柄图标。 */
+	}
 
 	/* B 通道在线时刷新 B 手柄图标，并按当前工作通道决定是否高亮。 */
 	if (WorkMessage.Channel_Bonline)
@@ -157,6 +166,10 @@ void Pubinterface_RefreshOnlineHandleDisplay(void)
 									   MemoryMsgB.hand_model,
 									   true,
 									   (WorkMessage.channel_work == CHANNEL_B));
+	}
+	else
+	{
+		Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false); /* B 已离线时同步发送未连接图，使本函数成为 A/B 图标的完整权威快照。 */
 	}
 }
 

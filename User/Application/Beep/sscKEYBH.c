@@ -20,7 +20,12 @@ static void KeyBehivQueue_Init(void)
 {
     KeyBehivQueue = Kernel_QueueCreate(20, sizeof(KeyBehMessage_t), "KeyBehivQueue");
 }
-void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
+/*
+ * 函数功能：向统一按键行为队列投递一条控制事件，并把实际入队结果返回给调用方。
+ * 输入参数：control_type 为事件来源类型；control_key 为该来源下的具体按键或插拔事件值。
+ * 返回参数：true 表示事件已经成功进入队列；false 表示队列尚未创建或等待期内仍无法入队。
+ */
+bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
 	// static uint8_t control_types=0;
 	// static uint8_t control_keys=0;
@@ -31,7 +36,7 @@ void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	// 	control_types=control_type;
 	// 	control_keys=control_key;
 	// }
-	if(KeyBehivQueue == NULL) return; /* 按键队列尚未创建时不能投递事件，直接返回避免访问空句柄。 */
+	if(KeyBehivQueue == NULL) return false; /* 按键队列尚未创建时不能投递事件，返回失败让关键状态事件保留并在下个扫描周期重试。 */
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
@@ -39,7 +44,7 @@ void SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	{
 		wait_ticks = KEYBEH_PLUG_EVENT_WAIT_TICKS; /* 插拔/RFID 刷新必须尽量入队，否则 MemoryMsg 和心跳会停在旧状态。 */
 	}
-	(void)Kernel_QueueSend(KeyBehivQueue, &msg, wait_ticks);
+	return (Kernel_QueueSend(KeyBehivQueue, &msg, wait_ticks) == pdPASS); /* 把真实入队结果交回扫描状态机，防止关键拔出事件因队列满而静默丢失。 */
 }
 void JTKeyBehavior(uint8_t key_value)
 {

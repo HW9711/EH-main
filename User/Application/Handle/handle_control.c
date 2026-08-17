@@ -741,6 +741,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		Pubinterface_SendHandleDisplay(CHANNEL_A, 0U, false, false); /* A 通道拔出后立即暗灭 A 手柄区域。 */
 		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 B 仍在线，报警期间先显示在线未选中，控制源退出后再自动高亮 B。 */
 		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
+		UIDP_RequestHandleDisplayReplay(); /* A 离线业务状态已经落地，安排约 60ms/120ms 两次 A/B 图标快照补发，覆盖偶发屏幕单帧丢失。 */
 		break;
 
 	case SCREENKey_UNPLUG_B: // 拔出B
@@ -793,6 +794,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 		Pubinterface_SendHandleDisplay(CHANNEL_B, 0U, false, false); /* B 通道拔出后立即暗灭 B 手柄区域。 */
 		Pubinterface_RefreshOnlineHandleDisplay();			   /* 若 A 仍在线，报警期间先显示在线未选中，控制源退出后再自动高亮 A。 */
 		Pubinterface_RefreshHandleUnplugAlarmDisplay();		   /* 无手柄清屏可能复位 UI 队列，拔出事件收尾时补发仍有效的掉线报警弹窗。 */
+		UIDP_RequestHandleDisplayReplay(); /* B 离线业务状态已经落地，同步安排两次只读显示补发，不重复停机、报警或蜂鸣动作。 */
 		break;
 
 	default:
