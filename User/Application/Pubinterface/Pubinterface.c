@@ -1185,6 +1185,26 @@ static void SendPumpButton(uint8_t button_area_id, const pumpMessage_t *pump_mes
 }
 
 /*
+ * 函数功能：只刷新 A 泵启停/排空按钮，不重画启动沿尚未更新的实际流量和档位环。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Pubinterface_RefreshPumpAButtonDisplay(void)
+{
+	SendPumpButton(UI_PUMPABUTTON_ID, &pumpMessageA); /* 启动沿先同步 A 按钮，档位环等待泵任务发布真实 speed_output 后再刷新。 */
+}
+
+/*
+ * 函数功能：只刷新 B 泵启停/排空按钮，不重画启动沿尚未更新的实际流量和档位环。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Pubinterface_RefreshPumpBButtonDisplay(void)
+{
+	SendPumpButton(UI_PUMPBBUTTON_ID, &pumpMessageB); /* 启动沿先同步 B 按钮，避免旧 speed_output 为 0 时短暂显示 249 号图。 */
+}
+
+/*
  * 函数功能：把泵运行状态同步到屏幕泵区域和泵启停按钮。
  * 输入参数：pump_area_id 为泵数值区域，button_area_id 为启停按钮区域，pump_message 为当前泵状态。
  * 返回参数：无。

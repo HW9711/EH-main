@@ -451,6 +451,8 @@ uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message); /* �
 uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message); /* 取得泵显示速度：运行态显示闭环后的实际输出，停止态保留设定速度。 */
 void Pubinterface_UpdatePumpAOutputSpeed(uint16_t output_speed); /* A 泵任务发布压力闭环后的实际输出速度，并在变化时刷新左侧泵显示。 */
 void Pubinterface_UpdatePumpBOutputSpeed(uint16_t output_speed); /* B 泵任务发布压力闭环后的实际输出速度，并在变化时刷新右侧泵显示。 */
+void Pubinterface_RefreshPumpAButtonDisplay(void); /* A 泵启动沿只刷新按钮，档位环等待真实 speed_output，避免闪现 349 号零档图。 */
+void Pubinterface_RefreshPumpBButtonDisplay(void); /* B 泵启动沿只刷新按钮，档位环等待真实 speed_output，避免闪现 249 号零档图。 */
 void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void);

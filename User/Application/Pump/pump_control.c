@@ -358,7 +358,14 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 			}
 		}
 
-		Pubinterface_RefreshPumpADisplay(); /* A 泵启停后立即刷新；只有屏幕排空或脚踏轻踩来源高亮注水泵按钮。 */
+		if (pumpMessageA.run_flag != false)
+		{
+			Pubinterface_RefreshPumpAButtonDisplay(); /* A 启动沿只刷新按钮，避免泵任务尚未发布实际速度时把 349 号零档图写入屏幕。 */
+		}
+		else
+		{
+			Pubinterface_RefreshPumpADisplay(); /* A 停止沿继续完整刷新，立即恢复设定流量、停止按钮和档位环。 */
+		}
 		break;
 	case JTKey_right_long:
 	case SCREENKey_BPUMP_control:
@@ -409,7 +416,14 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 			}
 		}
 
-		Pubinterface_RefreshPumpBDisplay(); /* B 泵启停后立即刷新；只有屏幕排空或脚踏轻踩来源高亮注水泵按钮。 */
+		if (pumpMessageB.run_flag != false)
+		{
+			Pubinterface_RefreshPumpBButtonDisplay(); /* B 启动沿只刷新按钮，避免泵任务尚未发布实际速度时把 249 号零档图写入屏幕。 */
+		}
+		else
+		{
+			Pubinterface_RefreshPumpBDisplay(); /* B 停止沿继续完整刷新，保持数值、按钮和档位环同步回到停止态。 */
+		}
 		break;
 	default:
 		break; /* 非启停键不修改运行、排空或控制权状态。 */
