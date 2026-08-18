@@ -38,6 +38,11 @@ void Error_Handler(void);
 /*============================================================================
  * GPIO初始化实现
  *============================================================================*/
+/*
+ * 函数功能：初始化主控业务 GPIO，将外部 RS485 默认置为接收，并让A/B手柄复用脚默认进入普通按键输入模式。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void Board_GPIOConfiguration(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -87,11 +92,19 @@ void Board_GPIOConfiguration(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(BOARD_ONEWIRE_II_PORT, &GPIO_InitStruct);
 
-    /* 手柄数据输入 - 上拉输入 */
-    GPIO_InitStruct.Pin = BOARD_M_D1_PIN | BOARD_M_D2_PIN | BOARD_M_D3_PIN;
+    /* 历史手柄数据输入仅保留 PD2/PD3；V4.0 已将原 PD4 改作外部 RS485 方向控制。 */
+    GPIO_InitStruct.Pin = BOARD_M_D1_PIN | BOARD_M_D2_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(BOARD_M_D1_PORT, &GPIO_InitStruct);
+
+    /* 先锁存低电平再切换为输出，避免 GPIO 模式切换瞬间误使能 RS485 发送器。 */
+    HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_RESET);
+    GPIO_InitStruct.Pin = BOARD_UART2_RS485_DIR_PIN;       /* PD4 同时连接 CA-IS3092W 的 DE 和 /RE。 */
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;            /* 推挽输出保证收发方向电平明确，不依赖外部上拉。 */
+    GPIO_InitStruct.Pull = GPIO_NOPULL;                    /* 板载 R222 已提供偏置，MCU 运行期直接驱动方向脚。 */
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;           /* 方向切换频率低，低速沿可减少无必要的高频干扰。 */
+    HAL_GPIO_Init(BOARD_UART2_RS485_DIR_PORT, &GPIO_InitStruct);
 
     /* 手柄按键输入 - 上拉输入 */
     GPIO_InitStruct.Pin = BOARD_H_MD1_PIN | BOARD_H_MD2_PIN;
@@ -104,7 +117,7 @@ void Board_GPIOConfiguration(void)
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(BOARD_H_MD3_PORT, &GPIO_InitStruct);
 
-    /* A/B手柄实体运行键输入 - 上拉输入，按下时PE12/PE13被拉低，由手柄按键任务轮询控制启停 */
+    /* A/B手柄复用脚默认作为上拉输入；普通手柄分别把PE2/PE0拉低表示按键按下。 */
     GPIO_InitStruct.Pin = BOARD_RES_HANDLE_RUN_KEY_A_PIN | BOARD_RES_HANDLE_RUN_KEY_B_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;

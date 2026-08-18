@@ -16,6 +16,7 @@
 #include "sscUIDP.h"
 #include "sscRFID.h"
 #include "sscFOOT.h"
+#include "delay.h"
 
 #include <string.h>
 
@@ -30,6 +31,7 @@
 #define MOTOR_DRIVE_DISPLAY_SPEED_INVALID 0xFFFFFFFFUL /* 速度显示缓存的无效值，用于强制下一次运行刷新屏幕速度。 */
 #define MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM 100U /* 脚踏实时速度只按 100rpm 整数档刷新屏幕，实际电机速度仍保留完整精度。 */
 #define MOTOR_TOOL_POSITION_GUARD_MS 150U /* 单次开口定位约需完成准备、拖动和保持三个阶段，期间禁止50ms停机保活帧提前取消驱动模式。 */
+#define MOTOR_DRIVE_ZERO_REARM_GAP_MS 5U /* 新启动沿先发送同通道零速帧，并保留驱动串口分帧间隔后再发送非零目标。 */
 
 kernel_task_t MOTORRUNTaskHandle;
 static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00};
@@ -379,10 +381,22 @@ static void MotorStart(uint32_t command_speed_rpm)
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
       ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0x00 ,0x00};
-    // uint8_t motor_startcode[motor_frem_length]={0xAA ,0x03 ,0x28 ,0x03\
-    //      ,0x01 ,0x90 ,0x03 ,0x00 ,0x2D ,0xBB ,0xAA};    
+    uint8_t motor_rearmcode[motor_frem_length]; /* 新启动沿使用与目标帧相同的通道、模式和保护参数，只把速度清零解除驱动重装锁存。 */
+    bool zero_rearm_required = ((s_motor_drive_command_snapshot.valid == 0U) ||
+                                (s_motor_drive_command_snapshot.run_state == 0U)); /* 仅从未发送或停止态进入运行时重装，运行中的速度更新不能插入零速。 */ 
     MotorDrive_UpdateCommandCrc(motor_startcode); /* 启动帧只在全部业务字段确定后计算 CRC，避免速度或电流更新使校验失效。 */
+    if (zero_rearm_required)
+    {
+        memcpy(motor_rearmcode, motor_startcode, sizeof(motor_rearmcode)); /* 复制本次目标帧，保证零速重装作用于即将启动的真实物理通道。 */
+        motor_rearmcode[4] = 0U; /* 驱动协议 byte4 为速度高字节，清零后明确表示本帧不得产生运动。 */
+        motor_rearmcode[5] = 0U; /* 驱动协议 byte5 为速度低字节，与高字节共同形成安全零速命令。 */
+        MotorDrive_UpdateCommandCrc(motor_rearmcode); /* 速度字段改变后必须重新计算 CRC，否则驱动会拒绝本次重装帧。 */
+        MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U); /* 先记录并发送真实零速命令，使遥测与 UART1 实际顺序一致。 */
+        Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先让驱动解除上电或通信超时后的零速重装锁存。 */
+        Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
+    }
     MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm); /* 以实际UART1帧为判重依据，按钮点击时刻不参与阶跃计时。 */
+    
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
 /*

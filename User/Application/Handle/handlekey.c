@@ -15,31 +15,21 @@
 #include "sscUIDP.h"
 
 /*
- * 文件功能：每 30ms 轮询 A/B 手柄实体运行键，并按手柄型号执行翻转启停或按住运行。
+ * 文件功能：每 30ms 按手柄型号切换 A/B 按键脚的GPIO/串口模式，并处理普通手柄实体运行键。
  * 运行入口：Userparser_Init() 调用 HandleKeyScan_Init()，任务回调只进入 HANDLEKEYTaskFunc()。
  * 关键顺序：先维护 82 号限时提示，再检查控制权，最后严格按 A 后 B 顺序处理实体键。
  * 安全约束：启动必须依次通过公共接头刀具门禁、控制权申请，再写运行状态并联动注水泵。
  */
 kernel_task_t HANDLEKEYTaskHandle;
 
-/* 保留两路历史按键中断翻转状态；现行 30ms 实体键任务直接读取 GPIO，不使用该数组。 */
-static bool sHandleKEYValue[2] = { false };
-
 /*
- * 函数功能：先把 GPIO 外部中断交给软串口边沿处理，再兼容记录两路历史手柄按键翻转状态。
+ * 函数功能：把 GPIO 外部中断交给压力软串口边沿处理。
  * 输入参数：GPIO_Pin 为本次触发中断的 GPIO 引脚编号。
  * 返回参数：无。
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	SimUart_HandleExti(GPIO_Pin); /* 压力软串口依赖 GPIO 边沿收数，任何手柄键整理都不能跳过该转发。 */
-
-	switch (GPIO_Pin)
-	{
-		case BOARD_RES_HANDLE_KEY1_PIN : sHandleKEYValue[1] = (sHandleKEYValue[1] ? false : true); break; /* 兼容保留 B 路历史中断状态翻转，不参与当前轮询启停。 */
-		case BOARD_RES_HANDLE_KEY0_PIN : sHandleKEYValue[0] = (sHandleKEYValue[0] ? false : true); break; /* 兼容保留 A 路历史中断状态翻转，不参与当前轮询启停。 */
-		default : break; /* 其它 GPIO 中断只完成软串口边沿处理，不改手柄历史状态。 */
-	}
 }
 
 #define HANDLE_KEY_DEBOUNCE_COUNT 2U /* 30ms任务连续2次确认电平，约60ms去抖，避免触点抖动误启停。 */
@@ -54,8 +44,17 @@ typedef struct
 	bool release_event;		/* 稳定松开沿事件，LGZI 按住运行模式依靠它在松手时立即停机。 */
 } HandleRunKeyDebounce_t;
 
+typedef enum
+{
+	HANDLE_RUN_KEY_PIN_MODE_UNKNOWN = 0U, /* 上电后尚未由任务确认复用状态，首次扫描必须主动配置。 */
+	HANDLE_RUN_KEY_PIN_MODE_GPIO,         /* 普通手柄模式：引脚上拉输入，低电平表示按钮按下。 */
+	HANDLE_RUN_KEY_PIN_MODE_UART          /* KSZ模式：引脚切换为对应UART接收复用，不再读取GPIO电平。 */
+} HandleRunKeyPinMode_t;
+
 static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false, false}; /* A通道实体键去抖状态。 */
 static HandleRunKeyDebounce_t s_handle_run_key_b_filter = {0U, 0U, false, false, false}; /* B通道实体键去抖状态。 */
+static HandleRunKeyPinMode_t s_handle_run_key_a_pin_mode = HANDLE_RUN_KEY_PIN_MODE_UNKNOWN; /* A通道PE2当前复用状态。 */
+static HandleRunKeyPinMode_t s_handle_run_key_b_pin_mode = HANDLE_RUN_KEY_PIN_MODE_UNKNOWN; /* B通道PE0当前复用状态。 */
 static uint8_t s_handle_run_key_owner_channel = CHANNEL_NONE;			   /* 当前由实体键启动的通道，防止另一通道松开误停。 */
 static uint8_t s_handle_foot_selected_timed_alarm_active = 0U; /* 记录 82 号错模式弹窗是否由手柄键模块显示，防止到期误清其它报警。 */
 static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号错模式弹窗开始时间，按 ALARM_MODE_MS（当前 2000ms）自动清除。 */
@@ -145,6 +144,116 @@ static uint8_t HandleRunKey_GetChannelModel(uint8_t channel)
 		return MemoryMsgB.hand_model; /* B实体键的控制策略必须跟随B通道识别出的真实手柄型号。 */
 	}
 	return 0U; /* 无效通道不具备手柄型号，后续判断会按不支持处理。 */
+}
+
+/*
+ * 函数功能：判断手柄是否带内部MCU并要求使用硬件串口接收按钮数据。
+ * 输入参数：hand_model 为当前通道已经识别出的手柄型号。
+ * 返回参数：true 表示KSZ_I/KSZ_II串口手柄，false 表示普通GPIO按钮手柄。
+ */
+static bool HandleRunKey_IsUartModel(uint8_t hand_model)
+{
+	return ((hand_model == KSZ_I_ONLINES) ||
+			(hand_model == KSZ_II_ONLINES)); /* 仅两类KSZ手柄切换串口，离线值和其它型号全部保持普通GPIO模式。 */
+}
+
+/*
+ * 函数功能：清空单通道GPIO按钮去抖状态，防止复用切换前的电平被带入新模式。
+ * 输入参数：filter 为待复位通道的按钮去抖对象。
+ * 返回参数：无。
+ */
+static void HandleRunKey_ResetDebounce(HandleRunKeyDebounce_t *filter)
+{
+	filter->low_count = 0U;         /* 清除低电平累计，切回GPIO后必须重新连续确认按下。 */
+	filter->high_count = 0U;        /* 清除高电平累计，避免串口空闲高电平被当成历史松开计数。 */
+	filter->stable_pressed = false; /* 复用模式改变后不继承此前已经按下的稳定状态。 */
+	filter->press_event = false;    /* 清除一次性按下沿，禁止切换当周期误启动。 */
+	filter->release_event = false;  /* 清除一次性松开沿，禁止切换当周期误停止。 */
+}
+
+/*
+ * 函数功能：按通道把A键PE2或B键PE0切换为上拉GPIO输入或对应UART接收复用。
+ * 输入参数：channel 为CHANNEL_A/CHANNEL_B；target_mode 为目标GPIO或UART模式；filter和current_mode属于同一通道。
+ * 返回参数：无；无效通道或无效目标模式不改硬件。
+ */
+static void HandleRunKey_ApplyPinMode(uint8_t channel,
+									  HandleRunKeyPinMode_t target_mode,
+									  HandleRunKeyDebounce_t *filter,
+									  HandleRunKeyPinMode_t *current_mode)
+{
+	GPIO_InitTypeDef gpio_init = {0}; /* 每次完整填写引脚模式，避免沿用其它GPIO初始化参数。 */
+	GPIO_TypeDef *gpio_port = NULL;   /* 运行时按逻辑通道选择固定端口，A/B当前都位于GPIOE。 */
+	uint16_t gpio_pin = 0U;           /* 保存A通道PE2或B通道PE0的引脚位掩码。 */
+	uint32_t uart_alternate = 0U;     /* 保存A通道UART10或B通道UART8的接收复用编号。 */
+
+	if ((*current_mode == target_mode) ||
+		((target_mode != HANDLE_RUN_KEY_PIN_MODE_GPIO) &&
+		 (target_mode != HANDLE_RUN_KEY_PIN_MODE_UART)))
+	{
+		return; /* 模式未改变时不重复改寄存器；目标非法时保持当前安全配置。 */
+	}
+
+	if (channel == CHANNEL_A)
+	{
+		gpio_port = BOARD_RES_HANDLE_RUN_KEY_A_PORT;       /* A按钮固定使用PE2。 */
+		gpio_pin = BOARD_RES_HANDLE_RUN_KEY_A_PIN;         /* 选中PE2引脚位。 */
+		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_A_UART_AF; /* KSZ手柄下PE2切为UART10_RX。 */
+	}
+	else if (channel == CHANNEL_B)
+	{
+		gpio_port = BOARD_RES_HANDLE_RUN_KEY_B_PORT;       /* B按钮固定使用PE0。 */
+		gpio_pin = BOARD_RES_HANDLE_RUN_KEY_B_PIN;         /* 选中PE0引脚位。 */
+		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_B_UART_AF; /* KSZ手柄下PE0切为UART8_RX。 */
+	}
+	else
+	{
+		return; /* 非A/B通道没有复用引脚，禁止写未知GPIO寄存器。 */
+	}
+
+	gpio_init.Pin = gpio_pin; /* 本次只修改目标通道RX/按钮复用脚，不影响同端口其它引脚。 */
+	if (target_mode == HANDLE_RUN_KEY_PIN_MODE_UART)
+	{
+		gpio_init.Mode = GPIO_MODE_AF_PP;             /* KSZ内部MCU输出串口数据，RX脚恢复硬件复用输入路径。 */
+		gpio_init.Pull = GPIO_NOPULL;                  /* 串口模式沿用CubeMX现有无上下拉配置。 */
+		gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;   /* 串口复用沿用UART MSP初始化速度。 */
+		gpio_init.Alternate = uart_alternate;          /* A绑定UART10_RX，B绑定UART8_RX，禁止交叉。 */
+	}
+	else
+	{
+		gpio_init.Mode = GPIO_MODE_INPUT;              /* 非KSZ手柄使用普通数字输入读取实体按钮。 */
+		gpio_init.Pull = GPIO_PULLUP;                  /* 按钮仍为低电平有效，松开时由内部上拉保持高电平。 */
+		gpio_init.Speed = GPIO_SPEED_FREQ_LOW;         /* 普通按钮无需高速翻转，保持低速GPIO配置。 */
+		gpio_init.Alternate = 0U;                      /* GPIO输入模式不使用复用编号，显式清零便于审查。 */
+	}
+
+	HAL_GPIO_Init(gpio_port, &gpio_init); /* 只在型号/在线状态导致模式变化时执行一次硬件切换。 */
+	HandleRunKey_ResetDebounce(filter);    /* 切换后重新建立稳定电平，避免UART数据边沿误触发按钮。 */
+	*current_mode = target_mode;           /* 硬件配置完成后再记录状态，下一周期无需重复初始化。 */
+}
+
+/*
+ * 函数功能：根据A/B通道在线型号同步PE2/PE0的GPIO或UART复用模式。
+ * 输入参数：无，直接读取通道在线标志和各自MemoryMsg手柄型号。
+ * 返回参数：无。
+ */
+static void HandleRunKey_UpdatePinModes(void)
+{
+	HandleRunKeyPinMode_t a_target_mode = HANDLE_RUN_KEY_PIN_MODE_GPIO; /* A离线或普通手柄默认使用PE2上拉输入。 */
+	HandleRunKeyPinMode_t b_target_mode = HANDLE_RUN_KEY_PIN_MODE_GPIO; /* B离线或普通手柄默认使用PE0上拉输入。 */
+
+	if ((WorkMessage.Channel_Aonline == true) &&
+		(HandleRunKey_IsUartModel(MemoryMsgA.hand_model) == true))
+	{
+		a_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* A识别到KSZ后把PE2切换为UART10_RX。 */
+	}
+	if ((WorkMessage.Channel_Bonline == true) &&
+		(HandleRunKey_IsUartModel(MemoryMsgB.hand_model) == true))
+	{
+		b_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* B识别到KSZ后把PE0切换为UART8_RX。 */
+	}
+
+	HandleRunKey_ApplyPinMode(CHANNEL_A, a_target_mode, &s_handle_run_key_a_filter, &s_handle_run_key_a_pin_mode); /* 独立更新A，B型号变化不影响PE2。 */
+	HandleRunKey_ApplyPinMode(CHANNEL_B, b_target_mode, &s_handle_run_key_b_filter, &s_handle_run_key_b_pin_mode); /* 独立更新B，A型号变化不影响PE0。 */
 }
 
 /*
@@ -371,6 +480,7 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 
 	if (HandleRunKey_SetMotorRun(true) == true)
 	{
+
 		s_handle_run_key_owner_channel = channel; /* 启动成功后记录owner通道，后续按该手柄型号决定松开停止或二次按下停止。 */
 	}
 }
@@ -382,8 +492,17 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
  */
 static void HandleKey_ScanRunKeys(void)
 {
-	bool key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 读取逻辑A映射后的实体键并生成一次稳定按下沿事件。 */
-	bool key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 读取逻辑B映射后的实体键并生成一次稳定按下沿事件。 */
+	bool key_a_press_event = false; /* UART模式没有GPIO按下沿；后续接入明确的KSZ报文协议后再由串口解析结果赋值。 */
+	bool key_b_press_event = false; /* UART模式没有GPIO按下沿；禁止把UART数据跳变当作低有效实体键。 */
+
+	if (s_handle_run_key_a_pin_mode == HANDLE_RUN_KEY_PIN_MODE_GPIO)
+	{
+		key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 普通A手柄读取PE2，连续低电平约60ms后产生按下沿。 */
+	}
+	if (s_handle_run_key_b_pin_mode == HANDLE_RUN_KEY_PIN_MODE_GPIO)
+	{
+		key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 普通B手柄读取PE0，连续低电平约60ms后产生按下沿。 */
+	}
 
 	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理A，按型号选择翻转启停或松开停止。 */
 	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理B，若A已取得owner则B会被忽略。 */
@@ -397,6 +516,7 @@ static void HandleKey_ScanRunKeys(void)
 void HANDLEKEYTaskFunc(uint32_t event)
 {
 	(void)event; /* 当前任务只按固定 30ms 周期运行，不使用调度事件值。 */
+	HandleRunKey_UpdatePinModes(); /* 无论控制权是否被占用都先跟随识别结果切换复用脚，避免KSZ串口长期停在GPIO模式。 */
 	HandleRunKey_ServiceFootAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
 	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 	{

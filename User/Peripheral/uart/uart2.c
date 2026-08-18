@@ -3,6 +3,7 @@
 #include "main.h"
 #include "uart2.h"
 #include "bsp_uart.h"
+#include "board.h"
 #include "common.h"
 //#include "delay.h"
 
@@ -40,14 +41,27 @@ static void Uart2_DMAReset(void)
   Uart2_Flag_Last = UART2_MAX_PACKET_SIZE;                     /* 复位剩余长度快照，让下一包从空缓存状态开始判断。 */
 }
 
+/*
+ * 函数功能：初始化外部通信 UART2 接收，并确保 V4.0 RS485 芯片处于接收状态。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void Uart2_Init(void)
 {
-  Uart2_DmaInit();
+  HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_RESET); /* 低电平关闭驱动并使能接收，避免初始化阶段占用 RS485 总线。 */
+  Uart2_DmaInit(); /* 方向稳定为接收后再启动 DMA，保证外部设备下行帧可以立即进入缓存。 */
 }
 
+/*
+ * 函数功能：切换 V4.0 RS485 芯片到发送状态，阻塞发送完整帧后恢复接收状态。
+ * 输入参数：pData 为待发送数据缓冲区；Length 为本次发送的字节数。
+ * 返回参数：无。
+ */
 void Uart2_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  Bsp_UartTransmit(BSP_UART_PORT_2, pData, Length, 100);       /* 外部通信帧固定从 USART2 发出，保持与主控板外部通信接口一致。 */
+  HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_SET);   /* 高电平使能 DE 并关闭 /RE，避免发送数据被本机 DMA 回收。 */
+  (void)Bsp_UartTransmit(BSP_UART_PORT_2, pData, Length, 100); /* 阻塞发送会等待 UART_TC；异常或超时返回后也继续释放总线。 */
+  HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_RESET); /* 最后停止位发送完成后立即恢复接收，允许外部设备应答。 */
 }
 
 uint16_t Uart2_DMARecvDataPeek(uint8_t *data)

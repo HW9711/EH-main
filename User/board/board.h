@@ -25,8 +25,8 @@ extern "C" {
     XX(5, UART5, 9600)       /* UART5 - 预留 */ \
     XX(6, USART6, 115200)   /* USART6 - 预留 */ \
     XX(7, UART7, 9600)       /* UART7 - 预留 */ \
-    XX(8, UART8, 115200)     /* UART8 - 预留 */ \
-    XX(10, UART10, 115200)   /* UART10 - 预留 */
+    XX(8, UART8, 115200)     /* UART8 - B通道KSZ手柄通信 */ \
+    XX(10, UART10, 115200)   /* UART10 - A通道KSZ手柄通信 */
 
 /* UART引脚配置 - 如需更改引脚，修改以下定义 */
 #define BOARD_UART1_TX_PORT   GPIOB        /* USART1_TX - PB6 */
@@ -42,6 +42,9 @@ extern "C" {
 #define BOARD_UART2_RX_PORT   GPIOD        /* USART2_RX - PD6 */
 #define BOARD_UART2_RX_PIN    GPIO_PIN_6
 #define BOARD_UART2_RX_AF     GPIO_AF7_USART2
+/* V4.0 主控板使用 PD4 同时驱动 CA-IS3092W 的 DE 和 /RE，低电平接收、高电平发送。 */
+#define BOARD_UART2_RS485_DIR_PORT  GPIOD        /* USART2_RD - PD4 */
+#define BOARD_UART2_RS485_DIR_PIN   GPIO_PIN_4
 
 #define BOARD_UART3_TX_PORT   GPIOD        /* USART3_TX - PD8 */
 #define BOARD_UART3_TX_PIN    GPIO_PIN_8
@@ -81,7 +84,7 @@ extern "C" {
 #define BOARD_UART8_TX_PORT   GPIOE        /* UART8_TX - PE1 */
 #define BOARD_UART8_TX_PIN    GPIO_PIN_1
 #define BOARD_UART8_TX_AF     GPIO_AF8_UART8
-#define BOARD_UART8_RX_PORT   GPIOE        /* UART8_RX - PE0 */
+#define BOARD_UART8_RX_PORT   GPIOE        /* UART8_RX/普通B实体键 - PE0 */
 #define BOARD_UART8_RX_PIN    GPIO_PIN_0
 #define BOARD_UART8_RX_AF     GPIO_AF8_UART8
 
@@ -96,7 +99,7 @@ extern "C" {
 #define BOARD_UART10_TX_PORT  GPIOE        /* UART10_TX - PE3 */
 #define BOARD_UART10_TX_PIN   GPIO_PIN_3
 #define BOARD_UART10_TX_AF    GPIO_AF11_UART10
-#define BOARD_UART10_RX_PORT  GPIOE        /* UART10_RX - PE2 */
+#define BOARD_UART10_RX_PORT  GPIOE        /* UART10_RX/普通A实体键 - PE2 */
 #define BOARD_UART10_RX_PIN   GPIO_PIN_2
 #define BOARD_UART10_RX_AF    GPIO_AF11_UART10
 
@@ -184,8 +187,7 @@ extern "C" {
 #define BOARD_M_D1_PIN             GPIO_PIN_2
 #define BOARD_M_D2_PORT            GPIOD
 #define BOARD_M_D2_PIN             GPIO_PIN_3
-#define BOARD_M_D3_PORT            GPIOD
-#define BOARD_M_D3_PIN             GPIO_PIN_4
+/* V4.0 主控板已取消 M_D3 输入，原 PD4 固定改作 USART2 RS485 收发方向控制。 */
 
 /*----------------- 手柄按键输入 -----------------*/
 #define BOARD_H_MD1_PORT           GPIOD
@@ -358,12 +360,10 @@ extern "C" {
 /*----------------- Interface.Handle -----------------*/
 #define M_D1_Pin       BOARD_M_D1_PIN
 #define M_D2_Pin       BOARD_M_D2_PIN
-#define M_D3_Pin       BOARD_M_D3_PIN
 #define M_D_GPIO_Port  BOARD_M_D1_PORT
 
 #define M_D1_STATUS()  HAL_GPIO_ReadPin(M_D_GPIO_Port, M_D1_Pin)
 #define M_D2_STATUS()  HAL_GPIO_ReadPin(M_D_GPIO_Port, M_D2_Pin)
-#define M_D3_STATUS()  HAL_GPIO_ReadPin(M_D_GPIO_Port, M_D3_Pin)
 
 #define H_MD1_Pin       BOARD_H_MD1_PIN
 #define H_MD1_GPIO_Port BOARD_H_MD1_PORT
