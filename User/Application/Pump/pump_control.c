@@ -455,10 +455,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			/* A 泵处于屏幕定时排空时拒绝调速，确保固定排空速度不被覆盖。 */
 			if (pumpMessageA.timingDrainage_flag == true)
 				return;
-			pumpMessageA.speed_step_value = 5;
+			pumpMessageA.speed_step_value = PUMP_WATER_FLOW_STEP; /* 注水泵改用与灌注泵共用的宏步进，当前每次调节 30。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = 30;
+			pumpMessageA.speed_step_value = PUMP_WATER_FLOW_STEP; /* 灌注泵同步读取共用宏，修改配置后两类泵仍保持相同步进。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -519,10 +519,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			if (pumpMessageB.timingDrainage_flag == true)
 
 				return;
-			pumpMessageB.speed_step_value = 5;
+			pumpMessageB.speed_step_value = PUMP_WATER_FLOW_STEP; /* B 注水泵同样按共用宏每次调节 30，保持 A/B 行为一致。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = 30;
+			pumpMessageB.speed_step_value = PUMP_WATER_FLOW_STEP; /* B 灌注泵使用同一宏，避免两类泵步进配置再次分叉。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */

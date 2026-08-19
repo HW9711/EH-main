@@ -97,16 +97,16 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 	if(pump_type==INJECTWATER)//注水
 	{
 		if(value==0U)gear_value=0U; /* 注水流量为 0 时显示停止档，不点亮进度。 */
-		else if(value<=5U)gear_value=1U; /* 1~5 档流量归入第 1 格，保持低流量可见。 */
-		else if(value<=10U)gear_value=2U; /* 6~10 档流量映射到第 2 格。 */
-		else if(value<=15U)gear_value=3U; /* 11~15 档流量映射到第 3 格。 */
-		else if(value<=20U)gear_value=4U; /* 16~20 档流量映射到第 4 格。 */
-		else if(value<=25U)gear_value=5U; /* 21~25 档流量映射到第 5 格。 */
-		else if(value<=30U)gear_value=6U; /* 26~30 档流量映射到第 6 格。 */
-		else if(value<=40U)gear_value=7U; /* 31~40 档流量映射到第 7 格。 */
-		else if(value<=50U)gear_value=8U; /* 41~50 档流量映射到第 8 格。 */
-		else if(value<=60U)gear_value=9U; /* 51~60 档流量映射到第 9 格。 */
-		else gear_value=10U;
+		else if(value<=30U)gear_value=1U; /* 注水泵 1~30ml 映射到第 1 格，与灌注泵量程保持一致。 */
+		else if(value<=60U)gear_value=2U; /* 注水泵 31~60ml 映射到第 2 格。 */
+		else if(value<=90U)gear_value=3U; /* 注水泵 61~90ml 映射到第 3 格。 */
+		else if(value<=120U)gear_value=4U; /* 注水泵 91~120ml 映射到第 4 格。 */
+		else if(value<=150U)gear_value=5U; /* 注水泵 121~150ml 映射到第 5 格。 */
+		else if(value<=180U)gear_value=6U; /* 注水泵 151~180ml 映射到第 6 格。 */
+		else if(value<=210U)gear_value=7U; /* 注水泵 181~210ml 映射到第 7 格。 */
+		else if(value<=240U)gear_value=8U; /* 注水泵 211~240ml 映射到第 8 格。 */
+		else if(value<=270U)gear_value=9U; /* 注水泵 241~270ml 映射到第 9 格。 */
+		else gear_value=10U; /* 注水泵 271~300ml 显示满格，异常更大值也在此钳位。 */
 	}
 	else if(pump_type==DRAWWATER)//抽吸
 	{
@@ -179,7 +179,7 @@ static uint16_t UIDP_PumpTypePicture(uint8_t pump_type, bool enable_flag)
 		case POURWATER:
 			return enable_flag ? 213U : 212U; /* 灌注泵标题使用 212/213 一组。 */
 		case INJECTWATER:
-			return enable_flag ? 211U : 210U; /* 注水泵识别后必须显示 211 黄色图标，停用态显示 210 灰色。 */
+			return enable_flag ? 213U : 210U; /* 注水泵识别在线后改用灌注泵 213 图标，停用态仍保留原 210 灰色图。 */
 		default:
 			return 0U; /* 未识别类型不再兜底为抽吸泵，调用侧负责隐藏类型标题。 */
 	}

@@ -277,7 +277,7 @@ typedef struct {
   volatile uint16_t  freq;//工作频率
   volatile uint16_t  dir;//工作方向
   volatile uint16_t  current_work;//当前通道记忆的驱动保护电流阈值，单位 0.01A；切到该通道时装载到 WorkMessage.current_work
-  volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~70，0或越界由业务层回退30
+  volatile uint16_t  default_injection_flow;//Page4默认注水流量，大端直接写1~300，0或越界由业务层回退30
 
   /* 8 位识别和控制状态集中放在尾部，所有字段继续按名称访问。 */
   volatile uint8_t   hand_model;//手柄类型
@@ -328,7 +328,7 @@ typedef struct
 	volatile uint16_t  overloadThresholdFor;//正转过流保护阈值，Page4[21..22] 小端存储，单位 0.01A
 	volatile uint16_t  overloadThresholdRev;//反转过流保护阈值，当前与正转共用 Page4[21..22]，单位 0.01A
 	volatile uint16_t  overloadThresholdOSC;//往复过流保护阈值，当前与正转共用 Page4[21..22]，单位 0.01A
-	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM大端直接写1~70，0或越界由业务层回退30
+	volatile uint16_t  default_injection_flow;//Page4默认注水流量，EEPROM大端直接写1~300，0或越界由业务层回退30
 	volatile uint16_t  speed_alarm_for;//Page4正转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
 	volatile uint16_t  speed_alarm_rev;//Page4反转速度报警阈值，EEPROM小端2字节，单位与WorkMessage.speed_work一致为实际rpm
 	volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值，只用于蜂鸣阈值

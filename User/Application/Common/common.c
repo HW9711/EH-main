@@ -148,7 +148,7 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 {
 	float temp = 0;
 	uint32_t temp1 = 0;
-	//  1mL ~ 70mL
+	//  历史分段标定覆盖 1mL~70mL，超过 70mL 时继续沿用下方基础比例，保持原换算行为不变。
 	//  temp1 = NumFluid / 0.37;
 	//  temp = temp1 + temp1 * 0.23;
 	temp=NumFluid;
@@ -168,7 +168,7 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 		}
 		else /* 注水泵按现场标定区间补偿，保证不同流量段的实际出水量连续可控。 */
 		{
-			if(temp>65&&temp<=70) /* 65~70 档使用高流量标定式，限制在现有注水泵最大设定范围内。 */
+			if(temp>65&&temp<=70) /* 65~70 档继续使用原高流量标定式；扩大业务范围后不改该历史标定曲线。 */
 				temp1=(uint32_t )temp*(temp*0.02f+2.1f);//注水
 			
 				else if(temp>=45&&temp<=65) /* 45~65 档扣除 10 档机械起转补偿后再按原标定斜率换算。 */
@@ -180,7 +180,7 @@ uint32_t Common_CurrentVelocity(float NumFluid,uint8_t is_Irrigate_FLAG)
 				else if(temp>=30&&temp<40) /* 30~40 档使用低流量补偿系数，避免泵处于起转附近时输出不足。 */
 				temp1=(uint32_t )(temp-3)*(temp*0.02f+2.3f);
 				
-				else /* 低于 30 档或异常超范围值沿用基础比例，避免分段公式出现无匹配输出。 */
+				else /* 低于 30 档或高于 70 档沿用基础比例，保持扩大流量范围前后的驱动换算策略不变。 */
 					temp1 = (uint32_t )(temp*2.5f);	
 		}
 		

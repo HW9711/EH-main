@@ -68,8 +68,8 @@ static uint8_t s_handle_pressure_block_stop_latched = 0U;
 #define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 30U
 /* 注水泵默认流量最小有效值，0 表示 EEPROM 未配置或非法，不能直接启动泵。 */
 #define HANDLE_INJECTION_PUMP_FLOW_MIN 1U
-/* 注水泵默认流量最大有效值，保持和注水泵业务 0~70ml 范围一致。 */
-#define HANDLE_INJECTION_PUMP_FLOW_MAX 70U
+/* 注水泵默认流量最大有效值，保持和灌注泵业务 0~300ml 范围一致。 */
+#define HANDLE_INJECTION_PUMP_FLOW_MAX 300U
 /* 新屏速度按键在旧通道记忆无步进时的兜底步进，避免初次插入或旧参数为空时按键无效。 */
 #define SCREEN_SPEED_STEP_FALLBACK 1000U
 /* 新屏速度大步进缺省值，只有 EEPROM Page6[2..3] 无效时才使用，正常情况直接用手柄配置。 */
@@ -1981,7 +1981,7 @@ uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void)
 /*
  * 函数功能：把 Page4/RFID 默认注水流量规整到可启动的泵业务范围。
  * 输入参数：flow 为通道记忆中的默认注水流量。
- * 返回参数：1~70 直接返回；0 或超过 70 时返回程序默认流量 30。
+ * 返回参数：1~300 直接返回；0 或超过 300 时返回程序默认流量 30。
  */
 static uint16_t ClampInjectionStartFlow(uint16_t flow)
 {
@@ -2003,7 +2003,7 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 {
 	uint16_t flow = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 先读当前通道 Page4 默认注水流量，保证有配置时仍以 EEPROM 为准。 */
 
-	return ClampInjectionStartFlow(flow); /* 0 或越界时统一回退 30，正常 1~70 直接作为注水泵速度。 */
+	return ClampInjectionStartFlow(flow); /* 0 或越界时统一回退 30，正常 1~300 直接作为注水泵速度。 */
 }
 
 /*

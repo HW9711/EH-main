@@ -116,7 +116,7 @@ kernel_task_t HANDLESCANTaskHandle;
 /*
  * EEPROM 中 Page4 初始值信息区定义。
  * Page4 对应 AT24CS32 驱动页下标 3，读取整页可以同步校验页尾，避免默认速度、流量和报警阈值读到损坏数据。
- * Page4 默认注水流量按大端直接保存 1~70；速度和报警阈值字段仍按小端保存。
+ * Page4 默认注水流量按大端直接保存 1~300；速度和报警阈值字段仍按小端保存。
  */
 #define HANDLESCAN_INITIAL_INFO_PAGE_INDEX    3U
 #define HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET 0U
@@ -141,7 +141,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_PX_PLANER_PROFILE_MARK_3 0x31U /* 扩展标记第4字节ASCII“1”，后续格式升级必须更换版本。 */
 #define HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM 500U /* RFID协议专门约定普通刨刀最低速度字节0x00表示500rpm。 */
 #define HANDLESCAN_INITIAL_FLOW_MIN           1U
-#define HANDLESCAN_INITIAL_FLOW_MAX           70U
+#define HANDLESCAN_INITIAL_FLOW_MAX           300U
 #define HANDLESCAN_INITIAL_FLOW_DEFAULT       30U
 #define HANDLESCAN_INITIAL_DIRECTION_FORWARD  0x01U /* Page4[8]=0x01 表示默认正转。 */
 #define HANDLESCAN_INITIAL_DIRECTION_REVERSE  0x02U /* Page4[8]=0x02 表示默认反转。 */
@@ -1632,7 +1632,7 @@ static uint32_t Handlescan_ReadPage4DefaultSpeed(const uint8_t *buffer)
 }
 
 /*
- * 函数功能：把 EEPROM Page4 默认注水流量限制到 1~70，异常时使用程序默认值。
+ * 函数功能：把 EEPROM Page4 默认注水流量限制到 1~300，异常时使用程序默认值。
  * 输入参数：flow_value Page4 中直接保存的默认注水泵流量。
  * 返回参数：现有 pumpMessage.speed_work 使用的整数流量值。
  */
@@ -1641,10 +1641,10 @@ static uint16_t Handlescan_BuildDefaultInjectionFlow(uint16_t flow_value)
     if ((flow_value < HANDLESCAN_INITIAL_FLOW_MIN) ||
         (flow_value > HANDLESCAN_INITIAL_FLOW_MAX))
     {
-        return HANDLESCAN_INITIAL_FLOW_DEFAULT; /* EEPROM 写 0 或超过 70 时统一回退 30，避免注水泵 0 速或异常过量输出。 */
+        return HANDLESCAN_INITIAL_FLOW_DEFAULT; /* EEPROM 写 0 或超过 300 时统一回退 30，避免注水泵 0 速或异常过量输出。 */
     }
 
-    return flow_value; /* EEPROM 写入 1~70 时直接作为注水泵业务流量使用，方便生产端按实际 ml/min 写值。 */
+    return flow_value; /* EEPROM 写入 1~300 时直接作为注水泵业务流量使用，方便生产端按实际 ml/min 写值。 */
 }
 
 /*
@@ -1722,7 +1722,7 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
     }
     default_speed = Handlescan_ClampDefaultSpeed(default_speed, min_speed, max_speed); /* 默认速度按同页上下限钳位，保证上线速度合法。 */
 
-    message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16BE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* Page4 默认注水流量按大端直接保存，读出后只做 1~70 范围保护。 */
+    message->default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16BE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* Page4 默认注水流量按大端直接保存，读出后只做 1~300 范围保护。 */
     message->speed_min = min_speed;                         /* 保存 Page4 最小速度，屏幕和外控调速边界必须跟随 EEPROM 配置。 */
     message->speed_max = max_speed;                         /* 保存通用最大速度，供后续 UI/外控边界逻辑复用。 */
     message->speed_zzmin = min_speed;                       /* Page4 当前只有一组速度上下限，正转方向使用同一最小速度。 */

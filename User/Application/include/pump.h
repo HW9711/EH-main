@@ -16,11 +16,19 @@
 
 /*
  * PUMP_INJECTWATER_SPEED_MAX 是注水泵正常运行和手柄联动时的速度上限。
- * 屏幕、脚踏和上位机设置最终都会受本宏限制；当前现场要求最大为 70。
+ * 屏幕、脚踏和上位机设置最终都会受本宏限制；当前与灌注泵统一为 300。
  * 屏幕定时排空使用独立的 PUMP_TIMING_DRAINAGE_SPEED，不受本上限限制。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
-#define PUMP_INJECTWATER_SPEED_MAX 70U
+#define PUMP_INJECTWATER_SPEED_MAX 300U
+#endif
+
+/*
+ * PUMP_WATER_FLOW_STEP 是注水泵和灌注泵屏幕/HMI 每次加减流量使用的共用步进值。
+ * 两类泵使用同一宏可保证调节档位始终一致；需要调整步进时只修改此处。
+ */
+#ifndef PUMP_WATER_FLOW_STEP
+#define PUMP_WATER_FLOW_STEP 30U
 #endif
 
 /*
