@@ -42,7 +42,7 @@ kernel_task_t HANDLESCANTaskHandle;
  * 手柄扫描任务的调度周期和状态机时间参数。
  * 说明：
  * 1. 任务本身按 10ms 周期运行；
- * 2. 插入去抖使用 50ms，拔出去抖使用 500ms，避免短接线瞬断被误判为真实拔出；
+ * 2. 插入去抖使用 50ms；在线短接先按配置门槛连续确认，再沿用 500ms 拔出去抖，避免单个 10ms 毛刺触发重新认证；
  * 3. 插入稳定后额外等待 200ms 再做认证，给热插拔后的接口和 EEPROM 留出稳定时间；
  * 4. 单次认证失败后先做有限快速重试，避免上电或热插拔瞬间的 I2C 抖动把正确手柄判死；
  * 5. 多次认证仍失败后才进入最终报警保持，报警保持期间每 1000ms 慢速自恢复重试一次；
@@ -50,6 +50,7 @@ kernel_task_t HANDLESCANTaskHandle;
  */
 #define HANDLESCAN_TASK_PERIOD_MS             10U
 #define HANDLESCAN_INSERT_DEBOUNCE_MS         50U
+#define HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS 50U /* 在线手柄短接必须连续高电平达到该配置时长才进入拔出候选，便于现场按干扰宽度调整。 */
 #define HANDLESCAN_REMOVE_DEBOUNCE_MS         500U
 #define HANDLESCAN_VERIFY_START_DELAY_MS      200U
 #define HANDLESCAN_VERIFY_RETRY_DELAY_MS      200U
@@ -58,6 +59,7 @@ kernel_task_t HANDLESCANTaskHandle;
 #define HANDLESCAN_RFID_VERIFY_RETRY_MAX      2U  /* RFID 刀具头首次等待只保留 2 轮，900ms+200ms+900ms 约 2 秒后结束等待。 */
 
 #define HANDLESCAN_INSERT_DEBOUNCE_TICKS      (HANDLESCAN_INSERT_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
+#define HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS (HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS / HANDLESCAN_TASK_PERIOD_MS) /* 把在线毛刺门槛换算为 10ms 扫描次数，A/B 共用同一判定。 */
 #define HANDLESCAN_REMOVE_DEBOUNCE_TICKS      (HANDLESCAN_REMOVE_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_START_DELAY_TICKS   (HANDLESCAN_VERIFY_START_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
@@ -2647,6 +2649,23 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
     Handlescan_ResetVerifyRetry(
         context); /* 拔出候选出现时，下一轮认证必须重新累计失败次数。 */
 
+    if (context->stage == HANDLESCAN_STAGE_ONLINE) {
+      if (context->debounce.out_debounce_ticks <
+          HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS) {
+        ++context->debounce
+              .out_debounce_ticks; /* 在线阶段只累计连续高电平次数，单个 10ms 毛刺不能立即退出 ONLINE。 */
+      }
+      if (context->debounce.out_debounce_ticks <
+          HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS) {
+        return true; /* 连续高电平未满配置门槛时保持原在线状态，本轮禁止进入 EEPROM 重新认证。 */
+      }
+
+      ++context->navigation_generation; /* 连续高电平确认后才作废在途导航请求，避免普通运行毛刺改变访问代次。 */
+      context->stage =
+          HANDLESCAN_STAGE_DEBOUNCE_OUT; /* 达到配置门槛后进入原拔出去抖，后续仍按总计 500ms 确认真实离线。 */
+      return true; /* 当前连续高电平次数已经计入 500ms 计数，下一周期继续原拔出确认流程。 */
+    }
+
     /*
          * A
      * 通道已经上线，或者已经进入认证失败保持态时，如果此时短接线被拔掉，
@@ -2655,7 +2674,6 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
 
      */
     if ((context->offline_event_required != 0U) || /* 只要本通道曾请求过上线，阶段即使被一次插入毛刺改写，也必须继续完成配对离线事件。 */
-        (context->stage == HANDLESCAN_STAGE_ONLINE) || /* 已上线、正在拔出去抖或认证失败保持态都要完成稳定拔出流程。 */
         (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) ||
         (context->stage == HANDLESCAN_STAGE_VERIFY_FAIL) ||
         ((context->rfid_wait_started != 0U) &&
@@ -2740,6 +2758,11 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
     Handlescan_ClearToolSpecValues(
         spec_values); /* 插入未完成时也清空本通道刀具规格缓存。 */
     return true;      /* 当前只是插入取消，不做 UI 和报文更新。 */
+  }
+  if ((context->stage == HANDLESCAN_STAGE_ONLINE) &&
+      (context->debounce.out_debounce_ticks != 0U)) {
+    context->debounce.out_debounce_ticks =
+        0U; /* 在线短接在配置门槛前恢复时只清毛刺计数，保持 ONLINE 且不重新访问 EEPROM。 */
   }
   if (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) {
     context->debounce.out_debounce_ticks =
