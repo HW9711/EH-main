@@ -459,6 +459,8 @@ uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
 void Pubinterface_SetHandleInjectionPumpRun(bool enable);
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵、蜂鸣并显示 89 号弹窗；注水冷却时再停手柄。 */
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */
+void Pubinterface_HandlePumpDriverFault(uint8_t pump_channel); /* 步进驱动首次回报非零故障时停本泵和相关控制源，注水冷却时联动停手柄。 */
+void Pubinterface_ServicePumpDriverFaultHold(uint8_t pump_channel); /* 驱动故障锁存期持续保持安全停机，不重复蜂鸣或弹窗。 */
 void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 手控/触控/外控新的启动沿到来时清除压力停机锁存。 */
 bool Pubinterface_IsPressureBlockStopLatched(void); /* 查询注水冷却压力停机锁存是否仍有效，脚踏保持踩下时用它拦截自动重启。 */
 void Pubinterface_CheckSpeedThresholdAlarm(void);

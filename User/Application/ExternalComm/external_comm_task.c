@@ -2497,22 +2497,22 @@ void ExternalComm_ClearHandleInjectionPumpFollow(void)
 }
 
 /*
- * 函数功能：压力保护停泵时清除外控层保存的对应泵运行请求。
- * 输入参数：pump_channel 为触发压力保护的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
+ * 函数功能：泵因压力或驱动保护安全停机时，清除外控层保存的对应泵运行请求。
+ * 输入参数：pump_channel 为要撤销运行请求的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。
  */
-void ExternalComm_ClearPumpPressureRunRequest(uint8_t pump_channel)
+void ExternalComm_ClearPumpRunRequest(uint8_t pump_channel)
 {
     if (pump_channel == CHANNEL_A)
     {
-        s_uart5_pump_manual_run_request = 0U; /* A 泵压力停机后撤销外控独立 A 泵请求，避免刷新函数把 A 泵重新置为运行。 */
-        s_uart5_inject_pump_follow_run_request = 0U; /* A 泵可能也是手柄冷却跟随泵，压力停机时同步清掉跟随请求。 */
+        s_uart5_pump_manual_run_request = 0U; /* A 泵安全停机后撤销外控独立 A 泵请求，避免刷新函数重新置为运行。 */
+        s_uart5_inject_pump_follow_run_request = 0U; /* A 泵可能也是手柄冷却跟随泵，保护停机时同步清掉跟随请求。 */
         ExternalComm_RefreshUart5PumpRunState(); /* 请求清零后重算 A 泵最终状态，保证 run_flag 保持停止。 */
     }
     else if (pump_channel == CHANNEL_B)
     {
-        s_external_pump_b_manual_run_request = 0U; /* B 泵压力停机后撤销外控独立 B 泵请求，等待上位机下一次启动命令。 */
-        s_uart5_inject_pump_follow_run_request = 0U; /* B 作为唯一注水泵时也可能来自手柄冷却跟随，压力停机必须清掉。 */
+        s_external_pump_b_manual_run_request = 0U; /* B 泵安全停机后撤销外控独立 B 泵请求，等待上位机下一次启动命令。 */
+        s_uart5_inject_pump_follow_run_request = 0U; /* B 作为唯一注水泵时也可能来自手柄冷却跟随，保护停机必须清掉。 */
         ExternalComm_RefreshUart5PumpRunState(); /* 清掉跟随后同步 A 泵合并状态，避免 A 泵仍因旧跟随请求运行。 */
     }
     else

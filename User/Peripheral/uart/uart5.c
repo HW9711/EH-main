@@ -9,10 +9,6 @@
 
 #include <string.h>
 
-#define	UART5_TimeoutComp   3
-
-static uint8_t Uart5_Flag_Last = 0;
-static uint16_t Uart5_RecvWaitTimeCnt = 0;
 static uint8_t Uart5_DMABuf[UART5_MAX_PACKET_SIZE] = { 0 };
 
 static void Uart5_DmaInit(void)
@@ -31,14 +27,17 @@ void Uart5_Configuration(uint16_t baud)
   }
 }
 
+/*
+ * 函数功能：清空 UART5 本轮接收缓存并立即重新启动循环 DMA，下一条泵命令回包从缓存起点写入。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void Uart5_DMAReset(void)
 {
 
   Bsp_UartDmaStop(BSP_UART_PORT_5);
   memset(Uart5_DMABuf, 0, UART5_MAX_PACKET_SIZE);
   Bsp_UartReceiveDma(BSP_UART_PORT_5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
-  Uart5_RecvWaitTimeCnt = 0;
-  Uart5_Flag_Last = UART5_MAX_PACKET_SIZE;
 
 }
 
@@ -53,42 +52,32 @@ void Uart5_SendPacket(uint8_t *pData, uint16_t Length)
   Bsp_UartTransmit(BSP_UART_PORT_5, pData, Length, 100);
 }
 
+/*
+ * 函数功能：取走 UART5 DMA 在上一泵周期收到的全部字节，并立即重启 DMA 接收下一帧反馈。
+ * 输入参数：data 指向至少 UART5_MAX_PACKET_SIZE 字节的调用方缓存。
+ * 返回参数：本次复制的字节数；没有新字节或参数无效时返回 0。
+ */
 uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 {
-  uint32_t RemainLen = 0;
-  uint16_t rlen = 0;
+  uint32_t remain_len; /* 保存 DMA 当前尚未写入的字节数，用于换算本周期已接收长度。 */
+  uint16_t received_len; /* 保存本次需要交给泵协议层解析的实际字节数。 */
 
-  //------------------------------------------------------------------
-  Uart5_RecvWaitTimeCnt++;
-  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_5);
-
-  /* DMA 剩余数变化说明数据仍在到达，重新开始帧间静默计时。 */
-  if (RemainLen != Uart5_Flag_Last)
+  if (data == NULL)
   {
-	  Uart5_RecvWaitTimeCnt = 0;
-	  Uart5_Flag_Last = RemainLen;
-  }
-  else
-  {
-	  /* 接收长度连续不变达到门限后，才把当前缓存判定为完整帧。 */
-	  if (Uart5_RecvWaitTimeCnt >= UART5_TimeoutComp)
-	  {
-	    /* DMA 至少接收一个字节时才复制，空缓存不触发业务处理。 */
-	    if (RemainLen < UART5_MAX_PACKET_SIZE)
-	    {
-	      rlen = (UART5_MAX_PACKET_SIZE - RemainLen);
-
-	      Common_CopyData(Uart5_DMABuf, data, rlen);
-	      /* 驱动返回帧只保留给调用方读取，不再从 UART5 层转发到 UART10 输出测试文本。 */
-
-	      Uart5_DMAReset();
-	    }
-
-	    Uart5_RecvWaitTimeCnt = 0;
-	  }
+    return 0U; /* 调用方没有提供缓存时不得停止 DMA 或丢弃现场回包。 */
   }
 
-  return rlen;
+  remain_len = Bsp_UartRxDmaRemain(BSP_UART_PORT_5); /* 在下一条 25ms 泵命令发送前读取上一条命令的回包长度。 */
+  if (remain_len >= UART5_MAX_PACKET_SIZE)
+  {
+    return 0U; /* DMA 尚未收到新字节时保持当前接收，不执行无意义的停止和重启。 */
+  }
+
+  received_len = (uint16_t)(UART5_MAX_PACKET_SIZE - remain_len); /* 循环 DMA 每个泵周期都会重启，差值就是本周期完整接收长度。 */
+  Common_CopyData(Uart5_DMABuf, data, received_len); /* 先复制不可变快照，再释放底层 DMA 缓冲供下一帧覆盖。 */
+  Uart5_DMAReset(); /* 复制完成后立即重启 DMA，保证随后发送的泵命令能够收到对应反馈。 */
+
+  return received_len;
 }
 
 void Uart5_DeInit(void)

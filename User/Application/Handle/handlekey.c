@@ -32,7 +32,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	SimUart_HandleExti(GPIO_Pin); /* 压力软串口依赖 GPIO 边沿收数，任何手柄键整理都不能跳过该转发。 */
 }
 
-#define HANDLE_KEY_DEBOUNCE_COUNT 2U /* 30ms任务连续2次确认电平，约60ms去抖，避免触点抖动误启停。 */
+#define HANDLE_KEY_DEBOUNCE_COUNT 4U /* 30ms任务连续4次确认电平，约120ms去抖，避免触点抖动误启停。 */
 #define HANDLE_KEY_PRESSED_LEVEL GPIO_PIN_RESET /* 硬件默认上拉，按键按下后对应IO被拉低。 */
 
 typedef struct
@@ -497,11 +497,11 @@ static void HandleKey_ScanRunKeys(void)
 
 	if (s_handle_run_key_a_pin_mode == HANDLE_RUN_KEY_PIN_MODE_GPIO)
 	{
-		key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 普通A手柄读取PE2，连续低电平约60ms后产生按下沿。 */
+		key_a_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_a_filter, HANDLE_RUN_KEY_A_STATUS()); /* 普通A手柄读取PE2，连续低电平约120ms后产生按下沿。 */
 	}
 	if (s_handle_run_key_b_pin_mode == HANDLE_RUN_KEY_PIN_MODE_GPIO)
 	{
-		key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 普通B手柄读取PE0，连续低电平约60ms后产生按下沿。 */
+		key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 普通B手柄读取PE0，连续低电平约120ms后产生按下沿。 */
 	}
 
 	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理A，按型号选择翻转启停或松开停止。 */

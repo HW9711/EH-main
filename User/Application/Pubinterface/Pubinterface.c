@@ -1585,7 +1585,7 @@ static void HandlePressureStop(uint8_t pump_channel, bool new_event)
 	}
 
 	StopPressureBlockedPumps(blocked_mask); /* 无论该泵是否正在冷却手柄，触发压力阈值的泵都必须先停。 */
-	ExternalComm_ClearPumpPressureRunRequest(pump_channel); /* 清除外控层旧运行请求，避免下一次刷新把压力停机泵重新拉起。 */
+	ExternalComm_ClearPumpRunRequest(pump_channel); /* 清除外控层旧运行请求，避免下一次刷新把保护停机泵重新拉起。 */
 
 	cooling_mask = (uint8_t)(target_mask | s_handle_injection_pump_follow_mask); /* 现场可能已经切通道或刷新类型，实际跟随标记也必须算入冷却目标。 */
 	/* 堵塞泵不在当前冷却位图时，仅在“手柄仍运行且该泵确为注水泵”这一旧路径下补入联动停机。 */
@@ -1634,6 +1634,26 @@ void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel)
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel)
 {
 	HandlePressureStop(pump_channel, false); /* 保持态只压住本泵输出，注水冷却时才阻止连续控制源自动恢复手柄。 */
+}
+
+/*
+ * 函数功能：A/B 泵步进驱动首次回报非零故障时，同步停泵与相关控制源；注水冷却泵故障时联动停手柄。
+ * 输入参数：pump_channel 为驱动回报故障的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
+ * 返回参数：无。
+ */
+void Pubinterface_HandlePumpDriverFault(uint8_t pump_channel)
+{
+	HandlePressureStop(pump_channel, false); /* 复用成熟的分泵停机和注水冷却联动链，驱动故障不弹出压力 89 号图。 */
+}
+
+/*
+ * 函数功能：步进驱动故障锁存期持续保持本泵和必要的手柄冷却链停机，不重复触发蜂鸣。
+ * 输入参数：pump_channel 为处于驱动故障锁存的泵通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
+ * 返回参数：无。
+ */
+void Pubinterface_ServicePumpDriverFaultHold(uint8_t pump_channel)
+{
+	HandlePressureStop(pump_channel, false); /* 每 25ms 重申安全停机，防止外控保活或连续控制源重新拉起故障泵。 */
 }
 
 /*
@@ -1705,11 +1725,11 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		ControlSignalMessage.jtR_control_flag = false;    /* 清除右脚踏运行来源，双脚踏两侧行为一致。 */
 		if ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U)
 		{
-			ExternalComm_ClearPumpPressureRunRequest(CHANNEL_A); /* A 冷却泵压力锁存期间清掉外控 A 泵请求，防止旧请求刷新后重启。 */
+			ExternalComm_ClearPumpRunRequest(CHANNEL_A); /* A 冷却泵压力锁存期间清掉外控 A 泵请求，防止旧请求刷新后重启。 */
 		}
 		if ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_B) != 0U)
 		{
-			ExternalComm_ClearPumpPressureRunRequest(CHANNEL_B); /* B 冷却泵压力锁存期间清掉外控 B 泵请求，等待下一次明确启动。 */
+			ExternalComm_ClearPumpRunRequest(CHANNEL_B); /* B 冷却泵压力锁存期间清掉外控 B 泵请求，等待下一次明确启动。 */
 		}
 		StopInjectionPumps((uint8_t)(target_mask | s_handle_injection_pump_follow_mask)); /* 压力锁存中继续保持联动注水泵停止。 */
 		Pubinterface_RefreshControlModeDisplay();         /* 运行来源已经被拒绝，立即刷新控制图标显示。 */

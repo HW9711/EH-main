@@ -11,10 +11,6 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#define	UART7_TimeoutComp   3
-
-static uint8_t Uart7_Flag_Last = 0;
-static uint16_t Uart7_RecvWaitTimeCnt = 0;
 static uint8_t Uart7_DMABuf[UART7_MAX_PACKET_SIZE] = { 0 };
 static uint32_t Uart7_BaudRate = 115200U;
 
@@ -29,23 +25,45 @@ void Uart7_Configuration(uint16_t baud)
   }
 }
 
+/*
+ * 函数功能：首次启动 UART7 泵驱动反馈 DMA，接收缓冲保持本物理串口独占。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Uart7_DmaInit(void)
+{
+  Bsp_UartReceiveDma(BSP_UART_PORT_7, Uart7_DMABuf, UART7_MAX_PACKET_SIZE); /* UART7 改为全双工后立即接收 B 泵驱动回包。 */
+}
+
+/*
+ * 函数功能：清空 UART7 本轮接收缓存并立即重新启动循环 DMA，下一条泵命令回包从缓存起点写入。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void Uart7_DMAReset(void)
 {
 
   Bsp_UartDmaStop(BSP_UART_PORT_7);
   memset(Uart7_DMABuf, 0, UART7_MAX_PACKET_SIZE);
   Bsp_UartReceiveDma(BSP_UART_PORT_7, Uart7_DMABuf, UART7_MAX_PACKET_SIZE);
-  Uart7_RecvWaitTimeCnt = 0;
-  Uart7_Flag_Last = UART7_MAX_PACKET_SIZE;
 
 }
 
+/*
+ * 函数功能：启动 UART7 泵驱动反馈 DMA，保证 B 泵首条控制命令即可得到正式回包。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void Uart7_Init(void)
 {
-  Uart7_RecvWaitTimeCnt = 0;
-  Uart7_Flag_Last = UART7_MAX_PACKET_SIZE;
+  Uart7_DmaInit(); /* UART7 的 RX 引脚和 DMA 已由 HAL MSP 初始化，此处只启动实际接收。 */
 }
 
+/*
+ * 函数功能：发送 UART7 泵控制帧；发送异常时重建串口、恢复反馈 DMA 后仅重试一次。
+ * 输入参数：pData 指向完整控制帧；Length 为发送字节数。
+ * 返回参数：发送成功返回 1，重试后仍失败返回 0。
+ */
 uint8_t Uart7_SendPacket(uint8_t *pData, uint16_t Length)
 {
   /* 首次发送失败时复位 UART7 并重建波特率，给泵控制帧一次恢复发送机会。 */
@@ -56,6 +74,7 @@ uint8_t Uart7_SendPacket(uint8_t *pData, uint16_t Length)
     /* 串口重新初始化成功后才允许重发，避免继续使用未恢复的硬件。 */
     if (Bsp_UartInit(BSP_UART_PORT_7, Uart7_BaudRate) == HAL_OK)
     {
+      Uart7_DmaInit(); /* HAL 重初始化会释放原 RX DMA，重发控制帧前必须恢复驱动反馈接收。 */
       return (Bsp_UartTransmit(BSP_UART_PORT_7, pData, Length, 100) == HAL_OK) ? 1U : 0U;
     }
 
@@ -65,41 +84,32 @@ uint8_t Uart7_SendPacket(uint8_t *pData, uint16_t Length)
   return 1U;
 }
 
+/*
+ * 函数功能：取走 UART7 DMA 在上一泵周期收到的全部字节，并立即重启 DMA 接收下一帧反馈。
+ * 输入参数：data 指向至少 UART7_MAX_PACKET_SIZE 字节的调用方缓存。
+ * 返回参数：本次复制的字节数；没有新字节或参数无效时返回 0。
+ */
 uint16_t Uart7_DMARecvDataPeek(uint8_t *data)
 {
-  uint32_t RemainLen = 0;
-  uint16_t rlen = 0;
+  uint32_t remain_len; /* 保存 DMA 当前尚未写入的字节数，用于换算本周期已接收长度。 */
+  uint16_t received_len; /* 保存本次需要交给泵协议层解析的实际字节数。 */
 
-  //------------------------------------------------------------------
-  Uart7_RecvWaitTimeCnt++;
-  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_7);
-
-  /* DMA 剩余数仍在变化表示字节持续到达，重新开始帧间静默计时。 */
-  if (RemainLen != Uart7_Flag_Last)
+  if (data == NULL)
   {
-	  Uart7_RecvWaitTimeCnt = 0;
-	  Uart7_Flag_Last = RemainLen;
-  }
-  else
-  {
-	  /* 剩余数连续多个周期不变时认为一帧接收结束，开始搬运本帧数据。 */
-	  if (Uart7_RecvWaitTimeCnt >= UART7_TimeoutComp)
-	  {
-	    /* DMA 已消耗至少一个字节时才复制，空帧不触发解析和 DMA 重置。 */
-	    if (RemainLen < UART7_MAX_PACKET_SIZE)
-	    {
-	      rlen = (UART7_MAX_PACKET_SIZE - RemainLen);
-
-	      Common_CopyData(Uart7_DMABuf, data, rlen);
-
-	      Uart7_DMAReset();
-	    }
-
-	    Uart7_RecvWaitTimeCnt = 0;
-	  }
+    return 0U; /* 调用方没有提供缓存时不得停止 DMA 或丢弃现场回包。 */
   }
 
-  return rlen;
+  remain_len = Bsp_UartRxDmaRemain(BSP_UART_PORT_7); /* 在下一条 25ms 泵命令发送前读取上一条命令的回包长度。 */
+  if (remain_len >= UART7_MAX_PACKET_SIZE)
+  {
+    return 0U; /* DMA 尚未收到新字节时保持当前接收，不执行无意义的停止和重启。 */
+  }
+
+  received_len = (uint16_t)(UART7_MAX_PACKET_SIZE - remain_len); /* 每个泵周期重启 DMA 后，差值就是本周期完整接收长度。 */
+  Common_CopyData(Uart7_DMABuf, data, received_len); /* 先复制不可变快照，避免重启 DMA 后覆盖正在解析的数据。 */
+  Uart7_DMAReset(); /* 复制完成后立即重启 DMA，保证随后发送的泵命令能够收到对应反馈。 */
+
+  return received_len;
 }
 
 void Uart7_DeInit(void)

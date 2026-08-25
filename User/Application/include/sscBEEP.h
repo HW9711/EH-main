@@ -7,6 +7,7 @@
 #define BEEP_MSG_ALARM  2   //报警消息
 #define BEEP_MSG_ALARM_TIMED 3 //限时报警消息，到期后蜂鸣任务自动退出报警
 #define BEEP_MSG_KEY_IF_IDLE 4 //空闲提示音消息，报警蜂鸣占用时静默丢弃
+#define BEEP_MSG_DOUBLE_IF_IDLE 5 //报警空闲时播放响-停-响-停四相位故障提示
 
 void SendKeyBeepMessage(uint8_t time);
 /*
@@ -21,6 +22,12 @@ void Beep_Pulse100ms(void);
  * 返回参数：无。
  */
 void SendKeyBeepMessageIfIdle(uint8_t time);
+/*
+ * 函数功能：蜂鸣任务没有报警占用时播放两声 100ms 故障提示音。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void SendDoubleBeepMessageIfIdle(void);
 void SendAlarmMessage(uint8_t flag);
 void SendAlarmMessageTimed(uint8_t flag, uint16_t duration_ms);
 

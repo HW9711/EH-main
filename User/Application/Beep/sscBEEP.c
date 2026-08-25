@@ -15,7 +15,7 @@ static QueueHandle_t BeepMsgQueue = NULL;
 
 //蜂鸣器消息类型
 typedef struct {
-    uint8_t msgType;         //消息类型: 1=按键响应, 2=报警, 3=限时报警, 4=报警空闲时按键响应
+    uint8_t msgType;         //消息类型: 1=按键响应, 2=报警, 3=限时报警, 4=报警空闲时按键响应, 5=报警空闲时双响
     uint8_t keyBeepTime;     //按键蜂鸣器响应时长
     uint8_t alarmFlag;       //报警标志位
     uint16_t alarmHoldTicks;  //限时报警保持周期，单位为蜂鸣任务100ms周期
@@ -67,6 +67,27 @@ void SendKeyBeepMessageIfIdle(uint8_t time)
     msg.alarmFlag = 0U;                 /* 空闲提示不携带报警码，保持现有报警来源不变。 */
     msg.alarmHoldTicks = 0U;            /* 空闲提示不创建限时报警倒计时。 */
     (void)Kernel_QueueSend(BeepMsgQueue, &msg, 0); /* 非阻塞投递，避免外控任务等待蜂鸣队列。 */
+}
+
+/*
+ * 函数功能：蜂鸣任务没有报警占用时播放两声 100ms 故障提示音。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void SendDoubleBeepMessageIfIdle(void)
+{
+    BeepMessage_t msg; /* 双响由 100ms 蜂鸣任务生成，故障解析任务不直接阻塞延时。 */
+
+    if (BeepMsgQueue == NULL)
+    {
+        return; /* 蜂鸣任务尚未创建时不访问空队列。 */
+    }
+
+    msg.msgType = BEEP_MSG_DOUBLE_IF_IDLE; /* 独立消息类型保证两声之间包含明确的停顿相位。 */
+    msg.keyBeepTime = 0U; /* 双响不使用普通按键音计数字段。 */
+    msg.alarmFlag = 0U; /* 本提示不创建或清除任何报警码。 */
+    msg.alarmHoldTicks = 0U; /* 四个双响相位由任务内部独立计数。 */
+    (void)Kernel_QueueSend(BeepMsgQueue, &msg, 0); /* 非阻塞投递，不拉长 25ms 泵控制周期。 */
 }
 
 /*
@@ -132,6 +153,7 @@ static uint8_t alarmCounter = 0;     // 每个阶段的计数器 (0-9, 共10次=
 static uint8_t key_flag = 0;
 static uint8_t alarm_flag = 0;
 static uint16_t alarm_limited_ticks = 0U; //限时报警剩余周期，递减到0后自动关闭蜂鸣
+static uint8_t double_beep_phase = 0U; //双响剩余相位：4=响、3=停、2=响、1=停，每相位100ms
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -149,6 +171,7 @@ if(BeepMsgQueue != NULL)
             key_flag = msg.keyBeepTime;
             alarm_flag = 0;
             alarm_limited_ticks = 0U;
+            double_beep_phase = 0U; /* 明确的普通按键音结束尚未播完的双响相位。 */
         }
         /* 外控通道切换提示只能在报警空闲时播放，不得清除持续报警或限时报警。 */
         else if(msg.msgType == BEEP_MSG_KEY_IF_IDLE)
@@ -157,6 +180,17 @@ if(BeepMsgQueue != NULL)
             if(alarm_flag == 0U)
             {
                 key_flag = msg.keyBeepTime; /* 仅更新普通按键音周期数，不改报警码和报警倒计时。 */
+                double_beep_phase = 0U; /* 同一时刻只播放一种非报警提示，避免相位互相覆盖。 */
+            }
+        }
+        /* 泵驱动故障双响只在报警空闲时接管蜂鸣，不覆盖持续或限时报警。 */
+        else if(msg.msgType == BEEP_MSG_DOUBLE_IF_IDLE)
+        {
+            if(alarm_flag == 0U)
+            {
+                key_flag = 0U; /* 故障双响比普通按键音优先，从第一声完整相位开始。 */
+                alarmCounter = 0U; /* 清除历史报警翻转相位，不把旧相位带入双响。 */
+                double_beep_phase = 4U; /* 创建响-停-响-停四个 100ms 相位。 */
             }
         }
         /* 持续报警由外部发送 0 才结束，因此清掉内部限时倒计时。 */
@@ -166,6 +200,7 @@ if(BeepMsgQueue != NULL)
             alarm_flag = msg.alarmFlag;
             alarm_limited_ticks = 0U;                     /* 普通报警保持到外部发送 0，不使用内部倒计时。 */
             key_flag = 0;
+            double_beep_phase = 0U;                       /* 报警优先级高于双响，到达后立即结束双响。 */
         }
         /* 限时报警使用消息自带倒计时，到期后由蜂鸣任务自行关闭。 */
         else if(msg.msgType == BEEP_MSG_ALARM_TIMED)
@@ -173,6 +208,7 @@ if(BeepMsgQueue != NULL)
             alarm_flag = msg.alarmFlag;                   /* 限时报警进入同一个蜂鸣翻转状态，保证声音形式一致。 */
             alarm_limited_ticks = msg.alarmHoldTicks;     /* 保存倒计时，到期后本任务自己清报警蜂鸣。 */
             key_flag = 0;
+            double_beep_phase = 0U;                       /* 限时报警同样高于双响提示。 */
         }
     }
 }
@@ -183,6 +219,19 @@ if(BeepMsgQueue != NULL)
 	{
 		BEEP_ON();                                     /* 按键蜂鸣采用非阻塞计数，当前 100ms 周期打开蜂鸣器后立即返回。 */
 		key_flag--;                                    /* 每个任务周期扣减一次，time=1 时保持一个 100ms 蜂鸣周期。 */
+	}
+	/* 故障双响仅在无报警时依次输出响-停-响-停四个 100ms 相位。 */
+	else if((double_beep_phase > 0U) && (alarm_flag == 0U))
+	{
+		if((double_beep_phase & 1U) == 0U)
+		{
+			BEEP_ON(); /* 偶数相位 4 和 2 分别输出第一声和第二声。 */
+		}
+		else
+		{
+			BEEP_OFF(); /* 奇数相位 3 和 1 形成两声之间和结尾的停顿。 */
+		}
+		--double_beep_phase; /* 每个 100ms 周期完成一个相位，减到 0 后回到正常关闭状态。 */
 	}
 	// 报警模式
 	/* 报警有效时进入周期翻转蜂鸣，并按需要维护限时报警倒计时。 */
@@ -219,6 +268,7 @@ if(BeepMsgQueue != NULL)
 		BEEP_OFF();
 		alarmCounter = 0;
 		key_flag = 0;
+		double_beep_phase = 0U; /* 空闲态不保留已完成的双响相位。 */
 		//ALARMdisplay();
 	}
 }
