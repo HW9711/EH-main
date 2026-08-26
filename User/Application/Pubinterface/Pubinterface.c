@@ -233,7 +233,7 @@ static bool IsRfidToolModel(uint8_t hand_model)
  */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
 {
-	return (tool_type == PLANER); /* 普通刨刀、MXYTP和PXYTP均归一为PLANER，是否允许电气往复还要结合基座与raw_tool_type判断。 */
+	return (tool_type == PLANER); /* 普通刨刀、0x06反向刨刀、MXYTP和PXYTP均归一为PLANER，是否允许电气往复还要结合基座与raw_tool_type判断。 */
 }
 
 /*
@@ -251,7 +251,7 @@ bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type)
                                 (hand_model == DHYTM_ONLINES)); /* DHYTM固定显示Page4反转方向，屏幕、实体键和外控均不得换向。 */
     bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
                              (hand_model == PXBB_ONLINES) ||
-                             (hand_model == COMMON_SOCKET_ONLINES)); /* 只有EPC基座才按raw_tool_type解释0x03~0x05。 */
+                             (hand_model == COMMON_SOCKET_ONLINES)); /* EPC基座的0x03~0x05固定方向；0x06反向刨刀仍允许选择正转、反转和往复。 */
 
     if (fixed_eeprom_handle)
     {
@@ -265,7 +265,7 @@ bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type)
 
     return ((raw_tool_type == RFID_TOOL_MODEL_REVERSE_ROTATION) ||
             (raw_tool_type == RFID_TOOL_MODEL_MXYTP) ||
-            (raw_tool_type == RFID_TOOL_MODEL_MXYTM)); /* 三类机械刀具方向由EPC定义，运行期不得改写标签语义。 */
+            (raw_tool_type == RFID_TOOL_MODEL_MXYTM)); /* 三类机械刀具方向由EPC定义；0x06反向刨刀故意不锁方向，单向取反留在驱动输出层。 */
 }
 /*
  * 函数功能：判断当前手柄基座是否可承载支持电气往复的普通刨刀。
@@ -277,7 +277,7 @@ static bool IsOscSupportedModel(uint8_t hand_model)
     return ((hand_model == PXBA_ONLINES) ||
             (hand_model == PXBB_ONLINES) ||
             (hand_model == COMMON_SOCKET_ONLINES) ||
-            (hand_model == PX_YIP_ONLINES)); /* PXB和公共接头可随0x01刨刀进入电气往复；PXYTP保持原有一体式往复能力。 */
+            (hand_model == PX_YIP_ONLINES)); /* PXB和公共接头可随0x01普通刨刀或0x06反向刨刀进入电气往复；PXYTP保持原有一体式往复能力。 */
 }
 /*
  * 函数功能：综合基座型号、业务刀具能力和RFID原始型号判断是否支持电气往复。

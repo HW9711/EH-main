@@ -4399,7 +4399,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
          (handle_model == PXBB_ONLINES)) &&
         (recognize->raw_tool_type != 0U))
     {
-        tool_type = recognize->raw_tool_type; /* RFID来源上报EPC byte0原始0x01~0x05，使反旋、MXYTP和MXYTM可被上位机区分。 */
+        tool_type = recognize->raw_tool_type; /* RFID来源上报EPC byte0原始0x01~0x06，使反旋、MXYTP、MXYTM和反向刨刀可被上位机区分。 */
     }
     use_recognize_tool_fields = (bool)((recognize->tool_type != 0U) &&
                                        ((memory->tool_type == 0U) ||
@@ -4421,7 +4421,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     /* block byte1：刀具信息来源，区分 EEPROM 和 RFID EPC。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_GetHandleToolSource(handle_model));
     /* block byte2：实际刀具类型，RFID 手柄来自标签，普通手柄来自 EEPROM 第三页。 */
-    ExternalComm_HeartbeatAppendU8(info_area, info_len, tool_type); /* RFID保留0x01~0x05原始型号；EEPROM来源保持现有类型码。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, tool_type); /* RFID保留0x01~0x06原始型号；EEPROM来源保持现有类型码。 */
     /* block byte3：刀具直径，沿用扫描层已解析单位。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->diameter);
     /* block byte4~5：刀具长度，按大端 16 位上报。 */

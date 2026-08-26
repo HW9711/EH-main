@@ -744,15 +744,16 @@ static uint32_t Handlescan_BuildRfidEpcReductionRatio(uint8_t ratio_hi, uint8_t 
 
 /*
  * 函数功能：把 EPC 标签刀具型号转换为业务刀具能力。
- * 输入参数：tool_model为EPC byte0，协议定义0x01普通刨刀、0x02普通磨刀、0x03反旋、0x04 MXYTP、0x05 MXYTM。
- * 返回参数：PLANER或GRINDH；MXYTP按刨刀外观显示，其它机械刀具按磨刀外观显示，未知值按磨刀保护。
+ * 输入参数：tool_model为EPC byte0，协议定义0x01普通刨刀、0x02普通磨刀、0x03反旋、0x04 MXYTP、0x05 MXYTM、0x06反向刨刀。
+ * 返回参数：PLANER或GRINDH；普通刨刀、MXYTP和反向刨刀按刨刀外观显示，其它机械刀具按磨刀外观显示，未知值按磨刀保护。
  */
 static uint8_t Handlescan_MapRfidToolType(uint8_t tool_model)
 {
     if ((tool_model == RFID_TOOL_MODEL_PLANER) ||
-        (tool_model == RFID_TOOL_MODEL_MXYTP))
+        (tool_model == RFID_TOOL_MODEL_MXYTP) ||
+        (tool_model == RFID_TOOL_MODEL_REVERSE_PLANER))
     {
-        return PLANER; /* 普通刨刀和MXYTP都按刨刀外观显示；MXYTP的机械往复能力由原始型号继续区分。 */
+        return PLANER; /* 普通刨刀、MXYTP和反向刨刀都按刨刀外观显示；各自机械方向能力继续由原始型号区分。 */
     }
 
     return GRINDH; /* 普通磨刀、反旋刀具、MXYTM和异常值按磨头能力处理，禁止误开放电气往复。 */
@@ -769,9 +770,10 @@ static uint8_t Handlescan_BuildRfidRunDirection(uint8_t tool_model, uint8_t rfid
         return OSCDIR; /* MXYTP由机械结构把电机单向转动转换成往复，屏幕固定显示往复。 */
     }
 
-    if (tool_model == RFID_TOOL_MODEL_PLANER)
+    if ((tool_model == RFID_TOOL_MODEL_PLANER) ||
+        (tool_model == RFID_TOOL_MODEL_REVERSE_PLANER))
     {
-        return rfid_direction; /* 普通刨刀支持正转、反转和电气往复，默认方向直接服从EPC标签。 */
+        return rfid_direction; /* 普通刨刀和反向刨刀均支持正转、反转和电气往复；0x06标签默认写往复时保留OSCDIR。 */
     }
 
     if (rfid_direction == FZDIR)
@@ -966,14 +968,15 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
     direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
     reduction_ratio = Handlescan_BuildRfidEpcReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比，自动识别模式下按标签倍率换算电机速度。 */
-    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0按0x01~0x05映射业务外观，机械能力继续由原始型号区分。 */
+    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0按0x01~0x06映射业务外观，机械能力继续由原始型号区分。 */
     reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* x100 减速值除以 100 得到旧字段需要的整数镜像，增速时低 16 位为 0。 */
     message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 旧字段最大只能表示 255，超限时钳位而不是低字节回绕。 */
     current_threshold = (uint16_t)payload[11] * 10U; /* EPC byte11 每单位表示 0.1A，乘 10 后转换为驱动帧要求的 0.01A；100 对应 10.00A。 */
     message->overloadThresholdFor = current_threshold; /* 正转使用标签换算后的保护电流，0 仍表示不覆盖驱动内部默认阈值。 */
     message->overloadThresholdRev = current_threshold; /* 反转沿用同一刀具电机阈值，保持标签只配置一个电流值。 */
     message->overloadThresholdOSC = current_threshold; /* 往复沿用同一刀具电机阈值，驱动侧按 0.01A 直接解释。 */
-    message->freq_default = (tool_model == RFID_TOOL_MODEL_PLANER) ? 40U : 0U; /* 只有普通刨刀使用4Hz电气往复默认值；机械往复MXYTP不下发频率。 */
+    message->freq_default = ((tool_model == RFID_TOOL_MODEL_PLANER) ||
+                             (tool_model == RFID_TOOL_MODEL_REVERSE_PLANER)) ? 40U : 0U; /* 普通刨刀和反向刨刀使用4Hz电气往复默认值；机械往复MXYTP不下发频率。 */
 
     if ((max_speed != 0U) && (default_speed > max_speed))
     {

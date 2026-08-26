@@ -110,11 +110,11 @@ static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t displ
 {
     bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
                              (hand_model == PXBB_ONLINES) ||
-                             (hand_model == COMMON_SOCKET_ONLINES)); /* 只有通过公共接头/PXB基座读取EPC时，0x03~0x05才表示机械刀具型号。 */
+                             (hand_model == COMMON_SOCKET_ONLINES)); /* 只有通过公共接头/PXB基座读取EPC时，0x03~0x06才表示新增机械方向语义。 */
 
     if (rfid_tool_handle == false)
     {
-        return display_direction; /* EEPROM Page3历史刀具码可能与0x03~0x05重号，非RFID基座必须保持原方向。 */
+        return display_direction; /* EEPROM Page3历史刀具码可能与0x03~0x06重号，非RFID基座必须保持原方向。 */
     }
 
     if (raw_tool_type == RFID_TOOL_MODEL_MXYTP)
@@ -122,19 +122,25 @@ static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t displ
         return ZZDIR; /* MXYTP由机械结构形成往复，电机必须始终单向正转。 */
     }
 
-    if (raw_tool_type == RFID_TOOL_MODEL_REVERSE_ROTATION)
+    if ((raw_tool_type == RFID_TOOL_MODEL_REVERSE_ROTATION) ||
+        (raw_tool_type == RFID_TOOL_MODEL_REVERSE_PLANER))
     {
         if (display_direction == ZZDIR)
         {
-            return FZDIR; /* 标签要求屏幕显示正向时，反旋机械结构需要电机实际反转。 */
+            return FZDIR; /* 屏幕选择正向单向运行时，反旋刀具和反向刨刀都需要电机实际反转。 */
         }
 
         if (display_direction == FZDIR)
         {
-            return ZZDIR; /* 标签要求屏幕显示反向时，反旋机械结构需要电机实际正转。 */
+            return ZZDIR; /* 屏幕选择反向单向运行时，反旋刀具和反向刨刀都需要电机实际正转。 */
         }
 
-        return ZZDIR; /* 反旋刀具不支持电气往复，异常方向保护为电机正转且上层仍保持停机门禁。 */
+        if ((raw_tool_type == RFID_TOOL_MODEL_REVERSE_PLANER) && (display_direction == OSCDIR))
+        {
+            return OSCDIR; /* 0x06反向刨刀的默认往复保持电气往复，只对用户选择的正转或反转单向模式取反。 */
+        }
+
+        return ZZDIR; /* 0x03反旋刀具不支持电气往复；其它异常方向保护为电机正转且上层仍保持停机门禁。 */
     }
 
     return display_direction; /* 普通刨磨刀具和MXYTM的屏幕方向就是实际电机方向。 */

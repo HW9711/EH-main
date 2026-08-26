@@ -14,6 +14,7 @@
 #define RFID_TOOL_MODEL_REVERSE_ROTATION  0x03U /* 反旋机械刀具，屏幕方向服从标签，驱动实际方向与屏幕方向相反。 */
 #define RFID_TOOL_MODEL_MXYTP             0x04U /* MXYTP 机械往复刀具，屏幕固定往复，驱动实际固定正转。 */
 #define RFID_TOOL_MODEL_MXYTM             0x05U /* MXYTM 单向磨刀具，屏幕和驱动方向均服从标签。 */
+#define RFID_TOOL_MODEL_REVERSE_PLANER    0x06U /* 反向刨刀具，默认可往复；选择正转或反转单向运行时驱动实际方向取反。 */
 
 typedef enum
 {
