@@ -208,6 +208,13 @@ uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_
         return 0U;
     }
 
+    /* 600.0g 是压力板自标定未完成的固定哨兵，不把它误报为真实堵塞事件。 */
+    if (weight_x10 == PUMP_PRESSURE_CONTROL_NOT_READY_X10)
+    {
+        /* 未就绪状态由后续限速路径把输出压到 0，这里不建立堵塞报警锁存。 */
+        return 0U;
+    }
+
     /* 压力模块阈值为 0 表示当前压力数据尚未有效，不能用 0 阈值误触发停泵。 */
     if (threshold_g == 0U)
     {
@@ -248,6 +255,13 @@ uint8_t PumpPressureControl_ShouldForceStop(uint16_t target_speed, uint32_t weig
     {
         /* 返回 0，保持停止态不被压力阈值重复锁存。 */
         return 0U;
+    }
+
+    /* 自标定未完成时必须保持泵输出为 0，但不走真实堵塞的报警锁存链。 */
+    if (weight_x10 == PUMP_PRESSURE_CONTROL_NOT_READY_X10)
+    {
+        /* 返回硬停使排空等旁路也不能在压力尚未就绪时重新生成非零输出。 */
+        return 1U;
     }
 
     /* 阈值为 0 表示压力模块尚未给出有效保护阈值，此时不能用 0 阈值误触发停泵。 */
@@ -302,6 +316,13 @@ uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, u
     if (target_speed == 0U)
     {
         /* 返回 0，避免后续阈值计算影响停泵状态。 */
+        return 0U;
+    }
+
+    /* 压力板仍在自标定时保持零输出，真实重量恢复后才重新进入正常闭环。 */
+    if (weight_x10 == PUMP_PRESSURE_CONTROL_NOT_READY_X10)
+    {
+        /* 保留上层运行请求但不下发速度，避免 600.0g 触发错误的 89 号堵塞报警。 */
         return 0U;
     }
 
