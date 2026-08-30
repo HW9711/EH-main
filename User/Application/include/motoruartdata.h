@@ -17,6 +17,9 @@ typedef struct
 	uint8_t valid;             /* 已收到至少一份CRC正确回包时置1。 */
 } MotorUartFeedbackSnapshot_t;
 
+/* 停止命令生效后，超过250ms未收到新回包时不再让旧非零速度永久占用本地控制权。 */
+#define MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 250U
+
 /*
  * 电机驱动细分报警图片开关：
  * 0U：生产模式只显示 84/86/87 公用报警图，未配置公用图的驱动错误不弹出误导图片。
@@ -49,6 +52,13 @@ void MotorUartData_Init(void);
  * 返回参数：快照有效且复制成功返回1，否则返回0。
  */
 uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot);
+
+/*
+ * 函数功能：判断近期有效驱动回包是否仍报告电机转动，过期回包只保留诊断值、不再作为忙状态。
+ * 输入参数：无，内部使用 MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 作为反馈新鲜度窗口。
+ * 返回参数：true表示近期反馈速度非零，复制冲突时按旧非零值保守保持；false表示零速、尚无反馈或反馈已过期。
+ */
+bool MotorUart_IsRecentFeedbackMoving(void);
 
 /*
  * 函数功能：查询当前是否有脚踏来源的驱动故障仍在等待脚踏释放。

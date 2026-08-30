@@ -4,6 +4,7 @@
 #include "queue.h"
 #include <string.h>
 #include "Pubinterface.h"
+#include "screenkey.h"
 #include "sscKEYBH.h"
 
   kernel_task_t    KeyBehaviorsHandle;
@@ -15,6 +16,7 @@ typedef struct
 {
 	uint8_t control_type;//脚踏key,显示屏key,外部通讯key，手控key
 	uint8_t control_key;
+	uint32_t queued_tick_ms; /* 保存事件准备入队的HAL毫秒时刻，旧触控保活即使积压也不能延迟启动。 */
 }KeyBehMessage_t;
 static void KeyBehivQueue_Init(void)
 {
@@ -40,6 +42,7 @@ bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
+	msg.queued_tick_ms = HAL_GetTick(); /* 普通按键只携带诊断时刻；触控保活在出队时用它执行420ms过期门禁。 */
 	if (control_type == PLUGunPLUG)
 	{
 		wait_ticks = KEYBEH_PLUG_EVENT_WAIT_TICKS; /* 插拔/RFID 刷新必须尽量入队，否则 MemoryMsg 和心跳会停在旧状态。 */
@@ -268,6 +271,14 @@ void KeyBehaviors()
 	{
 		uint8_t control_type=msg.control_type; /* 当前队列项的来源类型，用于仲裁和后续分发。 */
 		uint8_t control_key=msg.control_key; /* 当前队列项的业务按键值，保持与来源类型一一对应。 */
+		uint32_t queued_age_ms=(uint32_t)(HAL_GetTick()-msg.queued_tick_ms); /* 每条事件按自己的入队时刻判定，后续新保活不能掩盖旧消息积压。 */
+		if((control_type==SCREENKey) &&
+		   (control_key==SCREENKey_TouchKeepAlive) &&
+		   ((queued_age_ms>=SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS) ||
+		    (ScreenKey_IsAcceptedTouchKeepAliveFresh()==0U)))
+		{
+			continue; /* 消息过期或会话已被报警/退出撤销时只移除旧0x5520，不得再启动电机。 */
+		}
 		/* 任一控制方式被其它来源持有时，只丢弃当前本地控制键，继续处理后续插拔/RFID 状态事件。 */
 		if(ControlArbitration_ShouldBlockLocalKey(control_type, control_key))
 		{

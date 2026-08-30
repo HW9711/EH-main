@@ -5,6 +5,9 @@
 
 #include <stdint.h>
 
+/* 8寸屏0x5520保活从成功入队时起最多有效420ms，旧队列消息超过该窗口不得再启动电机。 */
+#define SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS 420U
+
 // 一次性按键事件的空值，保持与历史屏幕键值一致，避免定标页误处理无按键状态。
 #ifndef KEY_NONE
 #define KEY_NONE 0xFFU
@@ -59,6 +62,13 @@
 // 屏幕启动页和脚踏定标页通过一次性事件缓存取键，避免继续写旧全局键值。
 void ScreenKey_LegacyEventPost(uint8_t key_value);
 uint8_t ScreenKey_LegacyEventTake(void);
+
+/*
+ * 函数功能：判断最近一份成功入队的触控保活是否仍在420ms有效窗口内。
+ * 输入参数：无，读取当前HAL毫秒时钟和最近接受时刻。
+ * 返回参数：1表示租约有效；0表示从未接受、已主动失效或已超过420ms。
+ */
+uint8_t ScreenKey_IsAcceptedTouchKeepAliveFresh(void);
 
 //============================================================================
 //接收串口数据任务，收到的数据放入缓冲区

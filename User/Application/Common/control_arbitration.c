@@ -1,10 +1,8 @@
 #include "control_arbitration.h"
 
+#include "motoruartdata.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
-
-/* 电机速度降到 0 后才允许释放当前控制权，防止驱动仍在减速时被其它控制源抢占。 */
-#define CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD 0U
 
 /* 当前独占控制源只由本模块维护，业务模块通过公开接口申请、查询和释放。 */
 static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
@@ -83,14 +81,14 @@ uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
 }
 
 /*
- * 函数功能：判断驱动板反馈的实际转速是否仍表示电机在转动。
- * 输入参数：无，直接读取 WorkMessage.driver_speed_feedback。
- * 返回参数：true 表示驱动反馈转速仍大于停止阈值；false 表示反馈已经低于停止阈值。
+ * 函数功能：判断近期驱动板反馈的实际转速是否仍表示电机在转动。
+ * 输入参数：无，通过电机回包模块读取带毫秒时刻的一致性快照。
+ * 返回参数：true表示近期反馈仍非零；false表示已反馈零速、尚无反馈或旧反馈已经超过有效时间窗。
  */
 static bool ControlArbitration_IsMotorMoving(void)
 {
-	/* 反馈转速来自 UART1 驱动板回包，用于避免刚下发停止命令但电机还未真实停稳时提前释放控制权。 */
-	return (WorkMessage.driver_speed_feedback > CONTROL_ARBITRATION_MOTOR_STOP_SPEED_THRESHOLD);
+	/* 反馈新鲜时继续等待真实零速；停止后回包中断时，过期的最后非零值不再永久占用控制权。 */
+	return MotorUart_IsRecentFeedbackMoving();
 }
 
 /*

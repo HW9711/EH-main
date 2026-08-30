@@ -12,6 +12,7 @@
 #include "sscBEEP.h"
 #include "sscRFID.h"
 #include "handlescan.h"
+#include "motoruartdata.h"
 #include "external_comm_task.h"
 
 ChannelrecognizeMessage_t ChannelrecognizeMessageA;
@@ -1059,9 +1060,9 @@ bool Pubinterface_ApplyFootControlPriorityOnConnect(void)
 		return false; /* 手柄正在运行时不抢控制模式，避免脚踏热插入改变正在执行的控制来源。 */
 	}
 
-	if (WorkMessage.driver_speed_feedback > 0U)
+	if (MotorUart_IsRecentFeedbackMoving())
 	{
-		return false; /* 停止命令刚下发但电机反馈还未归零时，仍视为未停稳，不允许脚踏抢模式。 */
+		return false; /* 停止命令刚下发且近期反馈仍非零时保持原门禁；过期旧值不再让脚踏上线永久失效。 */
 	}
 
 	if (s_foot_priority_manual_lock != 0U)

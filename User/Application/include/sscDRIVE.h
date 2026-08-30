@@ -21,16 +21,21 @@
 #define PX_YIM_CURRENT_2 66
 #define PX_YIP_CURRENT_45 40
 
-/* 电机命令快照供外部通信任务读取，字段均表示最近一次实际改变并送入 UART1 的驱动命令。 */
+/* 电机命令快照同时保存最近一次50ms输出判定和最近一次实际改变并送入UART1的驱动命令。 */
 typedef struct
 {
+    uint32_t evaluated_tick_ms; /* HAL毫秒时钟：最近一次50ms输出任务完成启停判定的时刻。 */
     uint32_t sent_tick_ms;      /* HAL 毫秒时钟：不同命令实际送入 UART1 的时刻。 */
+    uint32_t source_speed_rpm;  /* 当前控制来源提供的原始目标速度，尚未做机械倍率和低速补偿。 */
     uint32_t command_speed_rpm; /* 驱动帧 byte4~5 换算后的电机指令速度，停机固定为 0rpm。 */
     uint16_t sequence;          /* 不同命令序号，自然回绕；重复的50ms保活帧不递增。 */
     uint8_t channel;            /* 命令形成时的逻辑 A/B 通道。 */
     uint8_t run_state;          /* 1表示启动帧，0表示停止帧。 */
     uint8_t direction;          /* 实际 UART1 帧 byte1 控制模式。 */
     uint8_t motor_type;         /* 实际 UART1 帧 byte3 驱动电机类型。 */
+    uint8_t requested_run_state;/* WorkMessage在本次50ms判定时提出的原始运行请求。 */
+    uint8_t drive_type;         /* 本次请求来源：脚踏、手控、触控或外控，数值沿用drivetype_work。 */
+    uint8_t zero_speed_blocked; /* 1表示请求RUN但原始或协议量化速度为0，本周期实际发送STOP。 */
     uint8_t valid;              /* 已形成至少一份周期电机命令时置1。 */
 } MotorDriveCommandSnapshot_t;
 

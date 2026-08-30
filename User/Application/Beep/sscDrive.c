@@ -291,38 +291,54 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 
 
 /*
- * 函数功能：在周期电机命令内容发生变化时，记录真实UART1命令序号、时刻和关键字段。
- * 输入参数：command为即将发送的11字节驱动帧；logical_channel为逻辑通道；run_state为启停态；command_speed_rpm为实际指令转速。
- * 返回参数：无；与上一份周期命令完全一致时不更新序号和时刻。
+ * 函数功能：记录本次50ms输出判定，并在周期电机命令内容变化时同步记录真实UART1命令序号和时刻。
+ * 输入参数：command为11字节驱动帧；logical_channel、run_state和command_speed_rpm描述实际帧；其余参数描述原始运行请求。
+ * 返回参数：无；重复帧仍更新请求诊断字段，但不增加命令序号和sent_tick_ms。
  */
 static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
                                              uint8_t logical_channel,
                                              uint8_t run_state,
-                                             uint32_t command_speed_rpm)
+                                             uint32_t command_speed_rpm,
+                                             uint8_t requested_run_state,
+                                             uint8_t drive_type,
+                                             uint32_t source_speed_rpm,
+                                             uint8_t zero_speed_blocked)
 {
+    uint8_t command_changed = 0U; /* 只有完整11字节帧变化才递增序号，50ms重复保活只刷新请求诊断。 */
+    uint32_t evaluated_tick_ms; /* 一次读取HAL时钟同时供本次判定时刻和新命令发送时刻使用。 */
+
     if (command == NULL)
     {
         return; /* 内部调用参数异常时不改变历史快照，避免遥测出现半更新字段。 */
     }
 
-    if ((s_motor_drive_last_command_valid != 0U) &&
-        (memcmp(s_motor_drive_last_command, command, motor_frem_length) == 0))
+    evaluated_tick_ms = HAL_GetTick(); /* 记录本次50ms任务真正完成输出判定的主控单调毫秒时刻。 */
+    if ((s_motor_drive_last_command_valid == 0U) ||
+        (memcmp(s_motor_drive_last_command, command, motor_frem_length) != 0))
     {
-        return; /* 50ms周期重复发送相同帧只维持驱动通信，不制造新的阶跃起点。 */
+        command_changed = 1U; /* 首帧或任意协议字段变化都形成新的真实驱动命令阶跃。 */
     }
 
     ++s_motor_drive_snapshot_version; /* 先把版本改成奇数，外部通信任务会等待本次写入结束。 */
     __DMB(); /* 保证版本奇数先于后续快照字段对另一个任务可见。 */
-    memcpy(s_motor_drive_last_command, command, motor_frem_length); /* 保存完整实际帧，方向、电机类型或电流变化也会触发新序号。 */
-    s_motor_drive_last_command_valid = 1U; /* 首份命令记录完成后开放后续逐字节判重。 */
-    s_motor_drive_command_snapshot.sequence = (uint16_t)(s_motor_drive_command_snapshot.sequence + 1U); /* 不同命令序号按16位自然回绕。 */
-    s_motor_drive_command_snapshot.sent_tick_ms = HAL_GetTick(); /* 在调用UART1发送前记录主控单调毫秒时钟，作为阶跃真实起点。 */
-    s_motor_drive_command_snapshot.command_speed_rpm = command_speed_rpm; /* 保存已经过主控机械倍率和驱动协议量化后的电机指令rpm。 */
-    s_motor_drive_command_snapshot.channel = logical_channel; /* 保存形成本帧时的逻辑通道，避免仅凭物理电机类型反推A/B。 */
-    s_motor_drive_command_snapshot.run_state = run_state; /* 启动帧写1，周期停止帧写0。 */
-    s_motor_drive_command_snapshot.direction = command[1]; /* 直接保存实际帧byte1，包含机械方向换算后的控制模式。 */
-    s_motor_drive_command_snapshot.motor_type = command[3]; /* 直接保存实际帧byte3，反映板级A/B映射和有刷/无刷类型。 */
-    s_motor_drive_command_snapshot.valid = 1U; /* 所有字段写完后标记本快照可用于遥测。 */
+    s_motor_drive_command_snapshot.evaluated_tick_ms = evaluated_tick_ms; /* 每个周期都刷新，断点可确认输出任务仍在调度。 */
+    s_motor_drive_command_snapshot.source_speed_rpm = source_speed_rpm; /* 保存倍率和补偿前的原始速度，直接定位零速RUN来源。 */
+    s_motor_drive_command_snapshot.requested_run_state = requested_run_state; /* 保存业务层提出的RUN/STOP，不用反推实际UART帧。 */
+    s_motor_drive_command_snapshot.drive_type = drive_type; /* 保存脚踏、手控、触控或外控来源，定位是哪条控制路径留下请求。 */
+    s_motor_drive_command_snapshot.zero_speed_blocked = zero_speed_blocked; /* RUN加零速被门禁时置1，便于现场直接观察。 */
+    if (command_changed != 0U)
+    {
+        memcpy(s_motor_drive_last_command, command, motor_frem_length); /* 保存完整实际帧，方向、电机类型或电流变化也会触发新序号。 */
+        s_motor_drive_last_command_valid = 1U; /* 首份命令记录完成后开放后续逐字节判重。 */
+        s_motor_drive_command_snapshot.sequence = (uint16_t)(s_motor_drive_command_snapshot.sequence + 1U); /* 不同命令序号按16位自然回绕。 */
+        s_motor_drive_command_snapshot.sent_tick_ms = evaluated_tick_ms; /* 新命令调用UART1发送前记录阶跃真实起点。 */
+        s_motor_drive_command_snapshot.command_speed_rpm = command_speed_rpm; /* 保存机械倍率和协议量化后的实际命令rpm。 */
+        s_motor_drive_command_snapshot.channel = logical_channel; /* 保存形成本帧时的逻辑通道，避免仅凭物理电机类型反推A/B。 */
+        s_motor_drive_command_snapshot.run_state = run_state; /* 启动帧写1，周期停止帧和零速重装帧写0。 */
+        s_motor_drive_command_snapshot.direction = command[1]; /* 直接保存实际帧byte1，包含机械方向换算后的控制模式。 */
+        s_motor_drive_command_snapshot.motor_type = command[3]; /* 直接保存实际帧byte3，反映板级A/B映射和有刷/无刷类型。 */
+        s_motor_drive_command_snapshot.valid = 1U; /* 第一份真实UART1周期命令形成后开放快照读取。 */
+    }
     __DMB(); /* 保证所有字段完成后才发布最终偶数版本。 */
     ++s_motor_drive_snapshot_version; /* 写入结束恢复偶数版本，读取方可一次性复制整份快照。 */
 }
@@ -366,23 +382,29 @@ uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot)
 }
 
 /*
- * 函数功能：发送周期电机停止帧，并在停止命令相对上一帧发生变化时建立阶跃快照。
- * 输入参数：无，逻辑通道从WorkMessage读取。
+ * 函数功能：发送周期电机停止帧，并记录本次原始请求和零速门禁诊断。
+ * 输入参数：requested_run_state、drive_type、source_speed_rpm和zero_speed_blocked描述本次输出判定来源。
  * 返回参数：无。
  */
-static void MotorStops(void)
+static void MotorStops(uint8_t requested_run_state,
+                       uint8_t drive_type,
+                       uint32_t source_speed_rpm,
+                       uint8_t zero_speed_blocked)
 {
  MotorDrive_UpdateCommandCrc(motor_stopcode); /* 每次停机发送前重新生成 CRC，确保量产驱动只接受完整可信的零速帧。 */
- MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U); /* 停机速度固定为0，记录后再实际送入UART1。 */
+ MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
+                                  requested_run_state, drive_type, source_speed_rpm, zero_speed_blocked); /* 实际STOP和原始请求同源记录后再送入UART1。 */
  Uart1_SendPacket(motor_stopcode, motor_frem_length);
 }
 
 /*
- * 函数功能：按已组装的msg发送周期电机启动帧，并在命令变化时建立阶跃快照。
- * 输入参数：command_speed_rpm为写入驱动帧byte4~5后对应的实际电机指令rpm。
+ * 函数功能：按已组装的msg发送周期电机启动帧，并把原始来源速度写入一致性诊断快照。
+ * 输入参数：command_speed_rpm为实际指令rpm；drive_type和source_speed_rpm描述本次已通过零速门禁的请求来源。
  * 返回参数：无。
  */
-static void MotorStart(uint32_t command_speed_rpm)
+static void MotorStart(uint32_t command_speed_rpm,
+                       uint8_t drive_type,
+                       uint32_t source_speed_rpm)
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
@@ -397,11 +419,13 @@ static void MotorStart(uint32_t command_speed_rpm)
         motor_rearmcode[4] = 0U; /* 驱动协议 byte4 为速度高字节，清零后明确表示本帧不得产生运动。 */
         motor_rearmcode[5] = 0U; /* 驱动协议 byte5 为速度低字节，与高字节共同形成安全零速命令。 */
         MotorDrive_UpdateCommandCrc(motor_rearmcode); /* 速度字段改变后必须重新计算 CRC，否则驱动会拒绝本次重装帧。 */
-        MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U); /* 先记录并发送真实零速命令，使遥测与 UART1 实际顺序一致。 */
+        MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U,
+                                         1U, drive_type, source_speed_rpm, 0U); /* 重装帧实际为STOP，但保留已通过门禁的原始RUN来源。 */
         Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先让驱动解除上电或通信超时后的零速重装锁存。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
-    MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm); /* 以实际UART1帧为判重依据，按钮点击时刻不参与阶跃计时。 */
+    MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm,
+                                     1U, drive_type, source_speed_rpm, 0U); /* 记录原始来源和最终UART1运行命令，便于现场对照。 */
     
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
@@ -421,6 +445,9 @@ void MOTORRUN(void)
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    uint8_t requested_run_state=0U; /* 保存脚踏停止锁存处理后的业务RUN请求，供输出门禁和诊断共同使用。 */
+    uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
+    uint8_t zero_speed_blocked=0U; /* RUN请求在原始或协议量化阶段得到0rpm时置1，现场可直接确认被门禁改为STOP。 */
     if((WorkMessage.drivetype_work==JTWORK) && (Foot_IsMotorStopLatched()!=0U))
     {
         WorkMessage.runflag_work=false; /* 脚踏松开或失效锁存优先覆盖普通运行标志，防止其它业务分支把旧 RUN 重新写回。 */
@@ -456,7 +483,16 @@ void MOTORRUN(void)
         motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
         display_speed_value=MotorDrive_QuantizeFootDisplaySpeed(WorkMessage.speed_work); /* 屏幕只显示 100rpm 整数倍；电机仍使用上方未量化的完整速度。 */
     }
-    ssc_speed_value=MotorDrive_ApplyToolReductionRatio(motor_source_speed); /* 本次控制源速度统一按 EEPROM/RFID 倍率换算成电机实际 rpm。 */
+    requested_run_state=(WorkMessage.runflag_work!=false)?1U:0U; /* 在任何倍率和低速补偿前冻结本周期原始启停请求。 */
+    if((requested_run_state!=0U) && (motor_source_speed==0U))
+    {
+        zero_speed_blocked=1U; /* 记录业务请求与速度矛盾，本周期必须按STOP处理且不得进入500rpm低速钳位。 */
+    }
+    if((requested_run_state!=0U) && (motor_source_speed!=0U))
+    {
+        motor_output_run_state=1U; /* 只有RUN和非零原始速度同时成立，才允许进行机械倍率与启动补偿。 */
+        ssc_speed_value=MotorDrive_ApplyToolReductionRatio(motor_source_speed); /* 合法非零目标统一按EEPROM/RFID倍率换算成电机实际rpm。 */
+    }
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
     //     ssc_speed_value=WorkMessage.speed_set_work*5U; /* PXYTP 机械端自带 5 倍减速，屏幕仍显示刀具端目标速度，电机端下发速度需要放大 5 倍。 */
@@ -466,7 +502,8 @@ void MOTORRUN(void)
     //     }
     // }
     /* PXBA/PXBB 分体手柄需要保留原刨刀低速补偿，其它手柄直接使用倍率换算后的速度。 */
-    if(WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES)
+    if((motor_output_run_state!=0U) &&
+       (WorkMessage.hand_model==PXBA_ONLINES||WorkMessage.hand_model==PXBB_ONLINES))
     {
         /* 只有刨刀在低速下需要补偿启动扭矩，磨头不得进入该速度修正。 */
         if(WorkMessage.tool_type==PLANER)
@@ -479,9 +516,19 @@ void MOTORRUN(void)
           ssc_speed_value=500;
         }
     }
+
+    if(motor_output_run_state!=0U) /* 原始速度与机械换算都完成后，再检查驱动协议最终可表达值。 */
+    {
+        command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* GE2433字段按rpm/10量化，最终字段为0时仍属于零速命令。 */
+        if(command_speed_value==0U)
+        {
+            motor_output_run_state=0U; /* 禁止用RUN状态发送byte4~5全零帧，统一转入下方周期STOP分支。 */
+            zero_speed_blocked=1U; /* source_speed_rpm仍保留原值，可区分原始零速和倍率/协议量化归零。 */
+        }
+    }
    
-    /* 电机运行标志有效时组装并发送启动帧；无效时进入下方停止帧分支。 */
-    if(WorkMessage.runflag_work)
+    /* 实际输出门禁要求RUN、原始非零速度和最终非零协议字段同时成立，任何0rpm都不能形成启动帧。 */
+    if(motor_output_run_state!=0U)
     {
         /* 首次起转必须刷新；脚踏运行中只有量化显示速度变化时才再次写屏。 */
         if((huci==0) || ((WorkMessage.drivetype_work==JTWORK) && (last_display_speed!=display_speed_value)))
@@ -555,12 +602,13 @@ void MOTORRUN(void)
                  msg.run_type=0x04; /* 有刷物理B路的运行类型与电机类型保持一致。 */
             }
         }
-      command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 最终输出给电机前按 GE2433 协议把实际 rpm 转为 rpm/10 字段。 */
       msg.speed_h=command_speed_value/256;
       msg.speed_l=(command_speed_value)%256;//速度
       msg.pro_current_h=WorkMessage.current_work/256; /* 保护电流来自手柄 EEPROM Page4[21..22]，单位 0.01A；0 表示驱动板使用内部默认保护。 */
       msg.pro_current_l=WorkMessage.current_work%256;//电流
-      MotorStart((uint32_t)command_speed_value * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM); /* 快照速度使用驱动16位字段可真实表达的量化后rpm。 */
+      MotorStart((uint32_t)command_speed_value * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM,
+                 WorkMessage.drivetype_work,
+                 motor_source_speed); /* 同时记录控制来源、原始速度和驱动16位字段可表达的最终rpm。 */
     }
     else
     {
@@ -578,7 +626,10 @@ void MOTORRUN(void)
 	        LCD_Show_2byte_Number(0x9473,0xffff);
 
          }
-       MotorStops();
+       MotorStops(requested_run_state,
+                  WorkMessage.drivetype_work,
+                  motor_source_speed,
+                  zero_speed_blocked); /* STOP分支保留原始请求诊断，区分正常停止和零速RUN被门禁。 */
     }
 
 }

@@ -447,6 +447,30 @@ uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
 	return 0U;
 }
 
+/*
+ * 函数功能：判断近期有效驱动回包是否仍报告电机转动，过期回包只保留诊断值、不再作为忙状态。
+ * 输入参数：无，内部使用 MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 作为反馈新鲜度窗口。
+ * 返回参数：true表示近期反馈速度非零，复制冲突时按旧非零值保守保持；false表示零速、尚无反馈或反馈已过期。
+ */
+bool MotorUart_IsRecentFeedbackMoving(void)
+{
+	MotorUartFeedbackSnapshot_t feedback_snapshot; /* 使用一致性快照判断速度和时刻，禁止分别读取两份驱动回包。 */
+	uint32_t feedback_age_ms; /* 保存当前时刻距最后CRC正确回包的毫秒数，使用无符号减法兼容HAL时钟回绕。 */
+
+	if (MotorUart_CopyFeedbackSnapshot(&feedback_snapshot) == 0U)
+	{
+		return (WorkMessage.driver_speed_feedback != 0U); /* 快照碰到接收任务写入时按旧非零值保持“忙”，避免瞬时并发导致提前释放控制权。 */
+	}
+
+	feedback_age_ms = (uint32_t)(HAL_GetTick() - feedback_snapshot.feedback_tick_ms); /* 统一按快照形成时刻计算新鲜度，不改写最后诊断数据。 */
+	if (feedback_age_ms >= MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS)
+	{
+		return false; /* 运行请求已经撤销后，旧非零回包超过250ms不再永久锁住脚踏、屏幕或手柄控制权。 */
+	}
+
+	return (feedback_snapshot.speed_rpm != 0U); /* 近期回包速度非零时继续等待真实停稳，速度为零时允许正常释放。 */
+}
+
 //============================================================================
 //接收串口数据任务，收到的数据放入缓冲区
 // 无刷
