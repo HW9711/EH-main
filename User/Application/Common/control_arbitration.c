@@ -1,11 +1,22 @@
 #include "control_arbitration.h"
 
 #include "motoruartdata.h"
+#include "motor_foot_trace.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
 
 /* 当前独占控制源只由本模块维护，业务模块通过公开接口申请、查询和释放。 */
 static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
+
+/*
+ * 函数功能：只读返回当前电机控制权持有者，供跨模块诊断快照使用。
+ * 输入参数：无。
+ * 返回参数：CONTROL_OWNER_* 当前值。
+ */
+uint8_t ControlArbitration_GetCurrentOwner(void)
+{
+	return s_control_owner; /* 单字节读在当前 MCU 上原子完成，诊断接口不得改写 owner。 */
+}
 
 /*
  * 函数功能：仲裁切换或释放控制权时统一停止电机、脚踏/外控标志和 A/B 泵输出。
@@ -115,6 +126,8 @@ static bool ControlArbitration_IsMotorBusy(void)
  */
 static void ControlArbitration_ReleaseLocalIfIdle(void)
 {
+	uint8_t old_owner; /* 保存自动释放前的本地 owner，诊断日志需要同时看到前后值。 */
+
 	/* 外部通信必须由主动退出、超时释放或急停释放，不能因为本地电机停稳自动退出。 */
 	if (s_control_owner == CONTROL_OWNER_EXTERNAL)
 	{
@@ -130,7 +143,9 @@ static void ControlArbitration_ReleaseLocalIfIdle(void)
 	/* 电机命令和反馈都已经停止时，本地控制源结束，本地三种方式可以重新竞争。 */
 	if (ControlArbitration_IsMotorBusy() == false)
 	{
+		old_owner = s_control_owner; /* 只在确认停稳的真实释放边沿保存旧值。 */
 		s_control_owner = CONTROL_OWNER_NONE;
+		MotorFootTrace_Record(MF_TRACE_OWNER_EXIT, old_owner, CONTROL_OWNER_NONE); /* 自动释放也属于 owner 变化，不能只记录显式 Exit。 */
 	}
 }
 
@@ -386,6 +401,8 @@ bool ControlArbitration_IsBusyByOther(uint8_t owner)
  */
 bool ControlArbitration_TryEnter(uint8_t owner)
 {
+	uint8_t old_owner; /* 保存成功进入前的 owner，失败申请不产生伪变化记录。 */
+
 	/* 无效来源不能写入 owner，避免未知按键把仲裁状态写乱。 */
 	if (ControlArbitration_IsValidOwner(owner) == false)
 	{
@@ -414,7 +431,9 @@ bool ControlArbitration_TryEnter(uint8_t owner)
 	}
 
 	/* 电机已经空闲时记录新的控制源；本地泵动作不会调用本路径占用 owner。 */
+	old_owner = s_control_owner; /* 成功写入前保存旧值，通常为 NONE。 */
 	s_control_owner = owner;
+	MotorFootTrace_Record(MF_TRACE_OWNER_ENTER, old_owner, owner); /* 记录真实成功进入，不改变仲裁返回值。 */
 	return true;
 }
 
@@ -429,6 +448,7 @@ void ControlArbitration_Exit(uint8_t owner)
 	if (s_control_owner == owner)
 	{
 		s_control_owner = CONTROL_OWNER_NONE;
+		MotorFootTrace_Record(MF_TRACE_OWNER_EXIT, owner, CONTROL_OWNER_NONE); /* 保存显式释放前后 owner。 */
 	}
 }
 
@@ -474,8 +494,11 @@ void ControlArbitration_RefreshMotorOwner(void)
  */
 void ControlArbitration_ForceRelease(void)
 {
+	uint8_t old_owner = s_control_owner; /* 急停清理前保存真实持有者。 */
+
 	/* 急停或系统级清状态使用强制释放，让任何来源都不能继续占用控制权。 */
 	s_control_owner = CONTROL_OWNER_NONE;
+	MotorFootTrace_Record(MF_TRACE_OWNER_FORCE_RELEASE, old_owner, CONTROL_OWNER_NONE); /* 强制释放单独使用事件11，便于和正常停稳退出区分。 */
 }
 
 /*

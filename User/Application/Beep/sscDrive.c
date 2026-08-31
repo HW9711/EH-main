@@ -12,6 +12,7 @@
 #include "lcd.h"
 #include "uart1.h"
 #include "motoruartdata.h"
+#include "motor_foot_trace.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
 #include "sscRFID.h"
@@ -394,6 +395,10 @@ static void MotorStops(uint8_t requested_run_state,
  MotorDrive_UpdateCommandCrc(motor_stopcode); /* 每次停机发送前重新生成 CRC，确保量产驱动只接受完整可信的零速帧。 */
  MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
                                   requested_run_state, drive_type, source_speed_rpm, zero_speed_blocked); /* 实际STOP和原始请求同源记录后再送入UART1。 */
+ MotorFootTrace_OnMotorCommand(0U,
+                               s_motor_drive_command_snapshot.sequence,
+                               0U,
+                               s_motor_drive_command_snapshot.motor_type); /* 只把最终快照字段交给诊断模块，不能用业务意图替代真实STOP。 */
  Uart1_SendPacket(motor_stopcode, motor_frem_length);
 }
 
@@ -421,11 +426,19 @@ static void MotorStart(uint32_t command_speed_rpm,
         MotorDrive_UpdateCommandCrc(motor_rearmcode); /* 速度字段改变后必须重新计算 CRC，否则驱动会拒绝本次重装帧。 */
         MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U,
                                          1U, drive_type, source_speed_rpm, 0U); /* 重装帧实际为STOP，但保留已通过门禁的原始RUN来源。 */
+        MotorFootTrace_OnMotorCommand(0U,
+                                      s_motor_drive_command_snapshot.sequence,
+                                      0U,
+                                      s_motor_drive_command_snapshot.motor_type); /* 新启动沿的零速重装也是真实UART1 STOP，必须按发送顺序记录。 */
         Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先让驱动解除上电或通信超时后的零速重装锁存。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
     MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm,
                                      1U, drive_type, source_speed_rpm, 0U); /* 记录原始来源和最终UART1运行命令，便于现场对照。 */
+    MotorFootTrace_OnMotorCommand(1U,
+                                  s_motor_drive_command_snapshot.sequence,
+                                  s_motor_drive_command_snapshot.command_speed_rpm,
+                                  s_motor_drive_command_snapshot.motor_type); /* 发送前记录最终非零命令，释放后误发RUN可在同一边沿冻结。 */
     
     Uart1_SendPacket(motor_startcode, motor_frem_length);
 }
@@ -462,6 +475,9 @@ void MOTORRUN(void)
         }
         else
         {
+            MotorFootTrace_Record(MF_TRACE_MOTOR_TX_BLOCKED_BY_PARAM,
+                                  (WorkMessage.runflag_work != false) ? 1U : 0U,
+                                  Foot_IsMotorStopLatched()); /* 参数维护占用导致本周期不发控制帧时保存运行请求和脚踏锁存。 */
             return; /* 电机早已收到STOP时允许静止调参；运行请求则继续等待事务结束，禁止控制帧与维护响应交叉。 */
         }
     }

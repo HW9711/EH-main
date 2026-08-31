@@ -392,6 +392,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_Init(BOARD_UART2_TX_PORT, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = BOARD_UART2_RX_PIN;
+    GPIO_InitStruct.Pull = GPIO_PULLUP; /* CA-IS3092W 在 /RE 拉高的主控发送阶段会让 RO 进入高阻，弱上拉使 USART2_RX 保持合法空闲高电平，避免噪声错误中止 RX DMA。 */
     GPIO_InitStruct.Alternate = BOARD_UART2_RX_AF;
     HAL_GPIO_Init(BOARD_UART2_RX_PORT, &GPIO_InitStruct);
 

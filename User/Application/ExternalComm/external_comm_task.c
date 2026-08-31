@@ -1,5 +1,6 @@
 #include "external_comm_task.h"
 
+#include "diagnostic_config.h"
 #include "external_comm_protocol.h"
 #include "external_comm_simple_protocol.h"
 
@@ -12,6 +13,7 @@
 #include "handlescan.h"
 #include "kernel_scheduler.h"
 #include "mainboard_software_version.h"
+#include "motor_foot_trace.h"
 #include "motoruartdata.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
@@ -5394,8 +5396,19 @@ static void ExternalCommTaskFunc(uint32_t event)
     }
 }
 
+/*
+ * 函数功能：按编译配置启动正式外控任务，或在临时诊断固件中把 UART2 独占给脚踏/手柄故障导出。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void ExternalComm_Init(void)
 {
+#if (MOTOR_FOOT_TRACE_ENABLE == 1U) && (MOTOR_FOOT_TRACE_UART2_EXCLUSIVE == 1U)
+    (void)ExternalCommTaskHandle; /* 诊断编译仍保留正式代码便于一键回退，显式引用避免内部调试构建产生未使用告警。 */
+    (void)ExternalCommTaskFunc; /* 正式任务入口在本配置中不启动，UART2只能由诊断导出占用。 */
+    MotorFootTrace_Init(); /* 诊断模式只创建RAM采集、固定在线帧和故障后导出任务，不启动原外控收包、心跳、ACK和遥测。 */
+    return; /* 明确保证 UART2 只有诊断模块一个发送所有者，测试固件不提供外部控制功能。 */
+#else
     /* 上电初始化显式清除协议来源和候选，保证正式/简易协议都必须从第一帧开始确认。 */
     ExternalComm_ResetProtocolSession();
     /* 初始化外控 RX FIFO，保证任务第一次运行前已经准备好接收粘包/半包数据。 */
@@ -5404,4 +5417,5 @@ void ExternalComm_Init(void)
     Kernel_TaskCreate(&ExternalCommTaskHandle, ExternalCommTaskFunc);
     /* 任务常驻运行，每 10ms 执行一次接收和心跳调度。 */
     Kernel_TaskStart(&ExternalCommTaskHandle, KERNEL_TASK_ALWAYS, EXTERNAL_COMM_TASK_PERIOD_MS);
+#endif
 }

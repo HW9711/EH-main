@@ -99,6 +99,25 @@ typedef struct {
     uint8_t offlineCounter;      //离线计数
 } FootParsedData_t;
 
+/* 脚踏诊断快照只提供只读字段，诊断模块不得直接访问 sscFOOT.c 内部 static 状态。 */
+typedef struct
+{
+    uint16_t frame_sequence;       /* 每份 CRC 正确 UART4 实时帧递增一次，自然回绕。 */
+    uint8_t pedal_type;            /* 1 单踏板、2 双段、3 双脚踏。 */
+    uint8_t runtime_frame_valid;    /* 250ms 实时帧门禁当前是否有效。 */
+    uint16_t adc_left;             /* 单踏板/双段实时值或双脚踏左值。 */
+    uint16_t adc_right;            /* 双脚踏右值，其它类型为 0。 */
+    uint16_t low_left;             /* 左侧低点定标。 */
+    uint16_t mid_left;             /* 左侧中点定标。 */
+    uint16_t high_left;            /* 左侧高点定标。 */
+    uint16_t low_right;            /* 右侧低点定标。 */
+    uint16_t mid_right;            /* 右侧中点定标。 */
+    uint16_t high_right;           /* 右侧高点定标。 */
+    uint8_t stop_latched;          /* 独立脚踏停机锁存。 */
+    uint8_t release_ready;         /* 已观察到释放，等待下一次有效踩下。 */
+    uint8_t active_source;         /* 0 无、1 左、2 右。 */
+} FootTraceSnapshot_t;
+
 //==============================================================================
 // 函数声明
 //==============================================================================
@@ -129,6 +148,20 @@ FootParsedData_t* Foot_GetParsedData(void);
  * @brief 清除按键状态
  */
 void Foot_ClearKeyStatus(void);
+
+/*
+ * 函数功能：复制脚踏实时帧、定标值和停机门禁的一致性只读快照。
+ * 输入参数：snapshot 指向调用方提供的快照缓存。
+ * 返回参数：复制成功返回 1，空指针返回 0。
+ */
+uint8_t Foot_CopyTraceSnapshot(FootTraceSnapshot_t *snapshot);
+
+/*
+ * 函数功能：判断当前可信脚踏 ADC 是否已经退出手柄电机运行区。
+ * 输入参数：无。
+ * 返回参数：已在释放区返回 1；帧无效、定标不完整或仍在运行区返回 0。
+ */
+uint8_t Foot_TraceCurrentAdcIsInMotorReleaseRegion(void);
 
 /*
  * 函数功能：查询脚踏手柄电机是否处于独立停止锁存状态。

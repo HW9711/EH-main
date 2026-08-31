@@ -12,6 +12,7 @@
 #define CONTROL_OWNER_HANDLE    4U
 
 bool ControlArbitration_IsExternalActive(void); /* 查询外控是否持有独占控制权。 */
+uint8_t ControlArbitration_GetCurrentOwner(void); /* 只读返回当前控制源，供诊断快照使用。 */
 uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void); /* 外控/触控退出后按脚踏、手柄可用状态选择本地方式。 */
 uint8_t ControlArbitration_GetOwnerByPumpKey(uint8_t key_value); /* 把泵业务按键来源转换成控制权编号。 */
 bool ControlArbitration_IsOwner(uint8_t owner); /* 判断指定来源是否为当前控制源。 */

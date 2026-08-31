@@ -1,6 +1,7 @@
 //motoruartdata.c
 
 #include "motoruartdata.h"
+#include "motor_foot_trace.h"
 #include "common.h"
 #include "uart1.h"
 #include "pump.h"
@@ -691,6 +692,11 @@ void BrushlessMotorUartData_ReceiveData(void)
 			{
 				Common_CopyData(&dat[i], dat1, 12);    //截取10个数据
 				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC正确后先形成速度、电流、Err同源快照，供50ms遥测一致读取。 */
+				MotorFootTrace_OnDriverFeedback(s_motor_uart_feedback_snapshot.valid,
+				                                s_motor_uart_feedback_snapshot.sequence,
+				                                s_motor_uart_feedback_snapshot.speed_rpm,
+				                                s_motor_uart_feedback_snapshot.raw_error,
+				                                s_motor_uart_feedback_snapshot.current_x100); /* 只在CRC正确且一致性快照发布后记录真实反馈。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是当前模式ADC滤波实际电流 * 100：无刷为AllCur、有刷为CurLPF，单位0.01A，只上传给上位机显示。 */
 					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */
