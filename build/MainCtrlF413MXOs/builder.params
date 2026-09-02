@@ -95,7 +95,6 @@
         "../User/Application/Beep/sscUIDP.c",
         "../User/Application/Common/common.c",
         "../User/Application/Common/control_arbitration.c",
-        "../User/Application/Debug/motor_foot_trace.c",
         "../User/Application/Common/work_alarm.c",
         "../User/Application/DataHand/datahand.c",
         "../User/Application/DriveCtrl/drivectrl_adapter.c",

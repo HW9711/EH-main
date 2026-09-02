@@ -457,6 +457,7 @@ void Pubinterface_RefreshPumpADisplay(void); /* 对外刷新 A 泵数值区和�
 void Pubinterface_RefreshPumpBDisplay(void); /* 对外刷新 B 泵数值区和启停按钮，供屏幕路径和上位机路径共用。 */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void);
 void Pubinterface_SetHandleInjectionPumpRun(bool enable);
+uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 只读返回当前手柄冷却联动泵位图，供脚踏确认实际建立和释放的 A/B 泵归属。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* 抽吸/注水/灌注泵压力堵塞首次触发时由泵任务调用，负责停本泵、蜂鸣并显示 89 号弹窗；注水冷却时再停手柄。 */
 void Pubinterface_ServicePumpPressureHold(uint8_t pump_channel); /* 压力锁止保持期间由泵任务调用，继续停本泵；注水冷却时防止连续控制源把手柄重新拉起。 */
 void Pubinterface_HandlePumpDriverFault(uint8_t pump_channel); /* 步进驱动首次回报非零故障时停本泵和相关控制源，注水冷却时联动停手柄。 */

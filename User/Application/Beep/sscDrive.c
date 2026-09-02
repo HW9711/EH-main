@@ -12,7 +12,6 @@
 #include "lcd.h"
 #include "uart1.h"
 #include "motoruartdata.h"
-#include "motor_foot_trace.h"
 #include "Pubinterface.h"
 #include "sscUIDP.h"
 #include "sscRFID.h"
@@ -35,7 +34,9 @@
 #define MOTOR_DRIVE_ZERO_REARM_GAP_MS 5U /* 新启动沿先发送同通道零速帧，并保留驱动串口分帧间隔后再发送非零目标。 */
 
 kernel_task_t MOTORRUNTaskHandle;
-static uint8_t motor_stopcode[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00};
+static const uint8_t s_motor_stop_fallback[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00}; /* 上电尚未形成运行模板时只发送历史兼容零速帧，此状态下主控从未授权本次电机运行。 */
+static uint8_t s_motor_stop_template[motor_frem_length]; /* 保存最近一份真实 RUN 帧除速度外的全部协议字段，STOP 必须沿用同一物理通道、方向和运行方式。 */
+static uint8_t s_motor_stop_template_valid = 0U; /* 首次组装真实 RUN 帧后置 1，防止未初始化模板被周期停机任务使用。 */
 
 typedef struct {
   
@@ -85,6 +86,25 @@ static void MotorDrive_UpdateCommandCrc(uint8_t *command)
     crc = Common_Crc16(command, (uint16_t)(motor_frem_length - 2U)); /* CRC 覆盖地址、模式、通道、速度和保护电流。 */
     command[motor_frem_length - 2U] = (uint8_t)(crc & 0x00FFU); /* 协议第 10 字节发送 CRC 低字节。 */
     command[motor_frem_length - 1U] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 协议第 11 字节发送 CRC 高字节。 */
+}
+
+/*
+ * 函数功能：从所有类型手柄的本次 RUN 帧生成后续 STOP 模板，只清零速度并重新计算 CRC。
+ * 输入参数：run_command 指向已经完成方向、物理通道、运行方式、电流和 CRC 组装的 11 字节 RUN 帧。
+ * 返回参数：无；空指针时保留上一份可信模板。
+ */
+static void MotorDrive_UpdateStopTemplate(const uint8_t *run_command)
+{
+    if (run_command == NULL)
+    {
+        return; /* 内部组帧异常时不能破坏上一份可用于安全停机的真实模板。 */
+    }
+
+    memcpy(s_motor_stop_template, run_command, motor_frem_length); /* 无刷/有刷、物理A/B、霍尔/无霍尔及各方向都保留各自 RUN 配置。 */
+    s_motor_stop_template[4] = 0U; /* 协议 byte4 为速度高字节，STOP 模板固定清零。 */
+    s_motor_stop_template[5] = 0U; /* 协议 byte5 为速度低字节，与高字节共同形成零速命令。 */
+    MotorDrive_UpdateCommandCrc(s_motor_stop_template); /* 速度改变后重新生成 CRC，驱动端才能接受该停止帧。 */
+    s_motor_stop_template_valid = 1U; /* 所有 11 字节完成后再开放模板，周期任务不会读取半更新数据。 */
 }
 
 /*
@@ -392,14 +412,22 @@ static void MotorStops(uint8_t requested_run_state,
                        uint32_t source_speed_rpm,
                        uint8_t zero_speed_blocked)
 {
- MotorDrive_UpdateCommandCrc(motor_stopcode); /* 每次停机发送前重新生成 CRC，确保量产驱动只接受完整可信的零速帧。 */
+ uint8_t motor_stopcode[motor_frem_length]; /* 本周期私有 STOP 帧，避免公共模板被后续 RUN 更新时影响当前发送。 */
+
+ if (s_motor_stop_template_valid != 0U)
+ {
+     memcpy(motor_stopcode, s_motor_stop_template, motor_frem_length); /* 正常停机沿用最近 RUN 的通道、方向、run_type、电流和频率。 */
+ }
+ else
+ {
+     memcpy(motor_stopcode, s_motor_stop_fallback, motor_frem_length); /* 上电尚无 RUN 时使用零速兼容帧，不读取未初始化模板。 */
+ }
+ motor_stopcode[4] = 0U; /* 发送前再次强制速度高字节为 0，避免任何模板异常产生非零停止帧。 */
+ motor_stopcode[5] = 0U; /* 发送前再次强制速度低字节为 0，与高字节共同形成零速命令。 */
+ MotorDrive_UpdateCommandCrc(motor_stopcode); /* 最终零速字段确定后重新生成 CRC。 */
  MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
                                   requested_run_state, drive_type, source_speed_rpm, zero_speed_blocked); /* 实际STOP和原始请求同源记录后再送入UART1。 */
- MotorFootTrace_OnMotorCommand(0U,
-                               s_motor_drive_command_snapshot.sequence,
-                               0U,
-                               s_motor_drive_command_snapshot.motor_type); /* 只把最终快照字段交给诊断模块，不能用业务意图替代真实STOP。 */
- Uart1_SendPacket(motor_stopcode, motor_frem_length);
+ (void)Uart1_SendPacket(motor_stopcode, motor_frem_length); /* 周期停止帧按最近 RUN 的完整配置下发，所有手柄类型共用同一路径。 */
 }
 
 /*
@@ -415,32 +443,32 @@ static void MotorStart(uint32_t command_speed_rpm,
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
       ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0x00 ,0x00};
     uint8_t motor_rearmcode[motor_frem_length]; /* 新启动沿使用与目标帧相同的通道、模式和保护参数，只把速度清零解除驱动重装锁存。 */
+    HAL_StatusTypeDef transmit_status; /* 保存安全零速帧和 RUN 帧的 UART1 实际发送结果。 */
     bool zero_rearm_required = ((s_motor_drive_command_snapshot.valid == 0U) ||
                                 (s_motor_drive_command_snapshot.run_state == 0U)); /* 仅从未发送或停止态进入运行时重装，运行中的速度更新不能插入零速。 */ 
     MotorDrive_UpdateCommandCrc(motor_startcode); /* 启动帧只在全部业务字段确定后计算 CRC，避免速度或电流更新使校验失效。 */
+    MotorDrive_UpdateStopTemplate(motor_startcode); /* 所有手柄 RUN 字段确定后生成同配置 STOP 模板，松脚时只允许速度归零。 */
     if (zero_rearm_required)
     {
         memcpy(motor_rearmcode, motor_startcode, sizeof(motor_rearmcode)); /* 复制本次目标帧，保证零速重装作用于即将启动的真实物理通道。 */
         motor_rearmcode[4] = 0U; /* 驱动协议 byte4 为速度高字节，清零后明确表示本帧不得产生运动。 */
         motor_rearmcode[5] = 0U; /* 驱动协议 byte5 为速度低字节，与高字节共同形成安全零速命令。 */
         MotorDrive_UpdateCommandCrc(motor_rearmcode); /* 速度字段改变后必须重新计算 CRC，否则驱动会拒绝本次重装帧。 */
+        transmit_status = Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先下发同配置零速帧，并取得底层真实发送结果。 */
+        if (transmit_status != HAL_OK)
+        {
+            return; /* 安全零速帧发送失败时禁止紧接着发送非零 RUN，下一 50ms 周期重新尝试。 */
+        }
         MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U,
-                                         1U, drive_type, source_speed_rpm, 0U); /* 重装帧实际为STOP，但保留已通过门禁的原始RUN来源。 */
-        MotorFootTrace_OnMotorCommand(0U,
-                                      s_motor_drive_command_snapshot.sequence,
-                                      0U,
-                                      s_motor_drive_command_snapshot.motor_type); /* 新启动沿的零速重装也是真实UART1 STOP，必须按发送顺序记录。 */
-        Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先让驱动解除上电或通信超时后的零速重装锁存。 */
+                                         1U, drive_type, source_speed_rpm, 0U); /* 发送成功后才发布重装 STOP，失败时保持原状态以便下周期继续重装。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
-    MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm,
-                                     1U, drive_type, source_speed_rpm, 0U); /* 记录原始来源和最终UART1运行命令，便于现场对照。 */
-    MotorFootTrace_OnMotorCommand(1U,
-                                  s_motor_drive_command_snapshot.sequence,
-                                  s_motor_drive_command_snapshot.command_speed_rpm,
-                                  s_motor_drive_command_snapshot.motor_type); /* 发送前记录最终非零命令，释放后误发RUN可在同一边沿冻结。 */
-    
-    Uart1_SendPacket(motor_startcode, motor_frem_length);
+    transmit_status = Uart1_SendPacket(motor_startcode, motor_frem_length); /* 非零 RUN 发送完成后再更新公开快照。 */
+    if (transmit_status == HAL_OK)
+    {
+        MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm,
+                                         1U, drive_type, source_speed_rpm, 0U); /* 只有成功下发的 RUN 才成为后续重装和状态上传依据。 */
+    }
 }
 /*
  * 函数功能：根据当前 WorkMessage 运行态组装电机驱动帧，向 UART1 电机驱动板下发启动或停止命令。
@@ -475,9 +503,6 @@ void MOTORRUN(void)
         }
         else
         {
-            MotorFootTrace_Record(MF_TRACE_MOTOR_TX_BLOCKED_BY_PARAM,
-                                  (WorkMessage.runflag_work != false) ? 1U : 0U,
-                                  Foot_IsMotorStopLatched()); /* 参数维护占用导致本周期不发控制帧时保存运行请求和脚踏锁存。 */
             return; /* 电机早已收到STOP时允许静止调参；运行请求则继续等待事务结束，禁止控制帧与维护响应交叉。 */
         }
     }

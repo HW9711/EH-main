@@ -921,11 +921,6 @@
               <FilePath>..\User\Application\Common\control_arbitration.c</FilePath>
             </File>
             <File>
-              <FileName>motor_foot_trace.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\User\Application\Debug\motor_foot_trace.c</FilePath>
-            </File>
-            <File>
               <FileName>work_alarm.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Application\Common\work_alarm.c</FilePath>

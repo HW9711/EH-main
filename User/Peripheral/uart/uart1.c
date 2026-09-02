@@ -47,9 +47,14 @@ void Uart1_Init(void)
   Uart1_DmaInit();
 }
 
-void Uart1_SendPacket(uint8_t *pData, uint16_t Length)
+/*
+ * 函数功能：阻塞发送一帧 UART1 手柄驱动数据，并向调用方返回底层 HAL 发送结果。
+ * 输入参数：pData 指向待发送数据；Length 为发送字节数。
+ * 返回参数：HAL_OK/HAL_ERROR/HAL_BUSY/HAL_TIMEOUT，供上层在零速帧失败时禁止继续发送非零启动帧。
+ */
+HAL_StatusTypeDef Uart1_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  Bsp_UartTransmit(BSP_UART_PORT_1, pData, Length, 100);
+  return Bsp_UartTransmit(BSP_UART_PORT_1, pData, Length, 100); /* 直接透传 UART1 阻塞发送结果，供启动安全门禁使用。 */
 //	HAL_Delay(20);
 }
 

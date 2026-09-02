@@ -1783,6 +1783,17 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		pumpMessageB.timingDrainage_times = 0U;   /* B 排空计数清零，避免下一轮排空继承旧计数。 */
 		s_handle_injection_pump_follow_mask &= (uint8_t)(~HANDLE_INJECTION_FOLLOW_PUMP_B); /* 清掉 B 跟随占用标记，后续停止手柄不再重复改写 B 泵。 */
 	}
+
+}
+
+/*
+ * 函数功能：只读取得当前由手柄冷却联动持有的 A/B 泵位图。
+ * 输入参数：无。
+ * 返回参数：bit0 表示 A 泵正在被手柄联动持有，bit1 表示 B 泵正在被手柄联动持有。
+ */
+uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void)
+{
+	return s_handle_injection_pump_follow_mask; /* 8 位读取在当前 MCU 上为原子操作，脚踏只据此确认是否实际持有联动泵。 */
 }
 
 /*
