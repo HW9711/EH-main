@@ -313,12 +313,12 @@ typedef struct
     volatile uint32_t  speed_fzmin;
       volatile uint32_t  speed_oscmax;
     volatile uint32_t  speed_oscmin;
-   volatile uint16_t speed_zzstep;//正向小步进速度，来自 EEPROM Page6[0..1]
-    volatile uint16_t speed_fzstep;//反向小步进速度，来自 EEPROM Page6[0..1]
-   volatile uint16_t speed_oscstep;//往复小步进速度，来自 EEPROM Page6[0..1]
-   volatile uint16_t speed_zzstep_large;//正向大步进速度，来自 EEPROM Page6[2..3]，供屏幕大加/大减键使用
-   volatile uint16_t speed_fzstep_large;//反向大步进速度，来自 EEPROM Page6[2..3]，避免继续用小步进乘 2
-   volatile uint16_t speed_oscstep_large;//往复大步进速度，来自 EEPROM Page6[2..3]，只影响往复方向调速
+   volatile uint16_t speed_zzstep;//正向小步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
+    volatile uint16_t speed_fzstep;//反向小步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
+   volatile uint16_t speed_oscstep;//往复小步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
+   volatile uint16_t speed_zzstep_large;//正向大步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
+   volatile uint16_t speed_fzstep_large;//反向大步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
+   volatile uint16_t speed_oscstep_large;//往复大步进速度，普通手柄来自 Page6，公共接头按 RFID 速度范围分档
   volatile uint32_t speed_zzdefault;//速度
   volatile uint32_t speed_fzdefault;//速度
   volatile uint32_t speed_oscdefault;//速度
@@ -373,7 +373,7 @@ typedef struct
   volatile bool     online_flag;//压力模块已识别，泵在线
   volatile bool     run_flag;//普通运行或联动运行请求
   volatile bool     timingDrainage_flag;//屏幕10秒定时排空请求
-  volatile bool     pedalDrainage_flag;//双脚踏轻踩来源标志：使用speed_work设定速度，不进入屏幕10秒排空计时
+  volatile bool     pedalDrainage_flag;//脚踏/HMI轻排来源标志：使用speed_work设定速度，排空期间旁路压力保护且不进入屏幕10秒计时
   volatile bool     pressure_hold_flag;//压力触发停泵后的锁止标志，只能由下一次控制源启动沿清除
 }
 pumpMessage_t;

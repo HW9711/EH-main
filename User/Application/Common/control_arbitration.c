@@ -35,11 +35,13 @@ static void ControlArbitration_StopMotionOutput(void)
 	/* 停止 A 泵输出，并取消排空计时，避免退出外控后继续出水。 */
 	pumpMessageA.run_flag = false;
 	pumpMessageA.timingDrainage_flag = false;
+	pumpMessageA.pedalDrainage_flag = false; /* 仲裁停机同步结束 A 轻排压力旁路，后续新控制源必须按自身模式重新建立。 */
 	pumpMessageA.timingDrainage_times = 0U;
 	/* 外控申请只停止 A 泵输出，不清除 speed_work 设定值，避免屏幕在外控授权后把泵速度显示成 0。 */
 	/* 停止 B 泵输出，并取消排空计时，保持两路泵的仲裁动作一致。 */
 	pumpMessageB.run_flag = false;
 	pumpMessageB.timingDrainage_flag = false;
+	pumpMessageB.pedalDrainage_flag = false; /* 仲裁停机同步结束 B 轻排压力旁路，避免普通启动继承排空状态。 */
 	pumpMessageB.timingDrainage_times = 0U;
 	/* 外控申请只停止 B 泵输出，不清除 speed_work 设定值，保证停止态仍显示原来的泵速度参数。 */
 	Pubinterface_RefreshPumpADisplay(); /* 仲裁停泵后刷新 A 泵数值和按钮，避免退出外控后屏幕保留旧速度。 */

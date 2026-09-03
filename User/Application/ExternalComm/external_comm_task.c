@@ -2152,11 +2152,13 @@ static void ExternalComm_RefreshUart5PumpRunState(void)
         }
         pumpMessageA.run_flag = true;             /* 任一来源请求 A 泵运行时，A 泵最终运行标志置位。 */
         pumpMessageA.timingDrainage_flag = false; /* 上位机独立启动和手柄跟随都不是排空模式，必须清掉排空计时。 */
+        pumpMessageA.pedalDrainage_flag = false;  /* 上位机普通运行或手柄冷却联动必须恢复 A 压力保护，不能继承轻排旁路。 */
     }
     else
     {
         pumpMessageA.run_flag = false;            /* 上位机独立请求和 A 目标跟随都不存在时，才真正停止 A 泵。 */
         pumpMessageA.timingDrainage_flag = false; /* 停止时同步取消排空状态，保证下一周期发送停泵帧。 */
+        pumpMessageA.pedalDrainage_flag = false;  /* 停止 A 泵时清除轻排来源，保证下一次启动按实际控制模式判断压力。 */
     }
     Pubinterface_RefreshPumpADisplay();           /* A 泵最终 run_flag/speed_work 重算后同步屏幕按钮和数值。 */
 }
@@ -2580,12 +2582,14 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
         s_external_pump_b_manual_run_request = 1U; /* 记录 B 泵外控输出请求，供外控运行图标判断。 */
         pumpMessageB.run_flag = true; /* 泵任务下一周期按当前设定速度发送 B 泵运行帧。 */
         pumpMessageB.timingDrainage_flag = false; /* 外控普通启动不属于 10 秒定时排空。 */
+        pumpMessageB.pedalDrainage_flag = false; /* 外控普通启动必须恢复 B 压力保护，不能继承此前轻排旁路。 */
     }
     else
     {
         s_external_pump_b_manual_run_request = 0U; /* 停止后清除 B 泵外控输出锁存。 */
         pumpMessageB.run_flag = false; /* 泵任务下一周期发送 B 泵停止帧。 */
         pumpMessageB.timingDrainage_flag = false; /* 同时退出可能残留的定时排空状态。 */
+        pumpMessageB.pedalDrainage_flag = false; /* 停止 B 泵时同步结束轻排状态，防止下次普通启动误旁路压力。 */
     }
 
     Pubinterface_RefreshPumpBDisplay(); /* B 泵状态改变后立即同步屏幕数值和按钮。 */

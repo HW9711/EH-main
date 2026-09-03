@@ -24,14 +24,6 @@
 #endif
 
 /*
- * PUMP_WATER_FLOW_STEP 是注水泵和灌注泵屏幕/HMI 每次加减流量使用的共用步进值。
- * 两类泵使用同一宏可保证调节档位始终一致；需要调整步进时只修改此处。
- */
-#ifndef PUMP_WATER_FLOW_STEP
-#define PUMP_WATER_FLOW_STEP 30U
-#endif
-
-/*
  * PUMP_DRIVER_COMMAND_SPEED_MAX 是主控与步进驱动共同执行的协议速度安全上限。
  * 当前最大合法值来自抽吸泵 15 档乘 42，结果为 630；超过该值说明换算或通信数据异常。
  */

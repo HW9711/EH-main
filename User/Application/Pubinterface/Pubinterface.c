@@ -2781,15 +2781,15 @@ void ControlTypeActive(uint8_t key_value)
 }
 
 /*
- * 函数功能：处理速度增减键，慢档使用当前手柄/方向识别步进，快档使用慢档两倍。
+ * 函数功能：处理速度增减键，慢档和快档分别使用当前通道识别缓存中的小步进和大步进；公共接头步进按 RFID 转速范围分档生成。
  * 输入参数：key_value 为手柄、HMI 或新屏速度键值。
  * 返回参数：无。
  */
 void SpeedActive(uint8_t key_value)
 {
 	uint32_t speed_value = WorkMessage.speed_set_work; /* 以当前设定速度为基准，Page4 24位最大速度可能超过16位，调速过程必须保留32位。 */
-	uint32_t speed_step = 0U;                          /* 本次实际步进，普通键和小步进键使用 Page6 小步进。 */
-	uint32_t speed_large_step = 0U;                    /* 屏幕大加/大减使用的 Page6 大步进，不能再由小步进乘 2 推导。 */
+	uint32_t speed_step = 0U;                          /* 本次实际步进，普通键和小步进键使用当前识别结果的小步进。 */
+	uint32_t speed_large_step = 0U;                    /* 屏幕大加/大减使用当前识别结果的大步进，不再由小步进乘 2 推导。 */
 	uint32_t speed_max = 0U;                           /* 当前通道、当前方向允许的最大设定速度，支持 Page4 24位上限。 */
 	uint32_t speed_min = 0U;                           /* 当前通道、当前方向允许的最小设定速度。 */
 	bool add_key = false;                              /* true 表示本次按键为增加速度。 */
@@ -2811,21 +2811,21 @@ void SpeedActive(uint8_t key_value)
 		if (WorkMessage.dir_work == ZZDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_zzstep; /* A 通道正转旧键步进来自 EEPROM/识别参数。 */
-			speed_large_step = ChannelrecognizeMessageA.speed_zzstep_large; /* A 通道正转大步进来自 EEPROM Page6[2..3]。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_zzstep_large; /* A 通道正转大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageA.speed_zzmax;   /* A 通道正转最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_zzmin;   /* A 通道正转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == FZDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_fzstep; /* A 通道反转旧键步进来自 EEPROM/识别参数。 */
-			speed_large_step = ChannelrecognizeMessageA.speed_fzstep_large; /* A 通道反转大步进来自 EEPROM Page6[2..3]。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_fzstep_large; /* A 通道反转大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageA.speed_fzmax;   /* A 通道反转最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_fzmin;   /* A 通道反转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == OSCDIR)
 		{
 			speed_step = ChannelrecognizeMessageA.speed_oscstep; /* A 通道往复旧键步进来自 EEPROM/识别参数。 */
-			speed_large_step = ChannelrecognizeMessageA.speed_oscstep_large; /* A 通道往复大步进来自 EEPROM Page6[2..3]。 */
+			speed_large_step = ChannelrecognizeMessageA.speed_oscstep_large; /* A 通道往复大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageA.speed_oscmax;   /* A 通道往复最大速度。 */
 			speed_min = ChannelrecognizeMessageA.speed_oscmin;   /* A 通道往复最小速度。 */
 		}
@@ -2840,21 +2840,21 @@ void SpeedActive(uint8_t key_value)
 		if (WorkMessage.dir_work == ZZDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_zzstep; /* B 通道正转旧键步进来自 B 通道识别参数。 */
-			speed_large_step = ChannelrecognizeMessageB.speed_zzstep_large; /* B 通道正转大步进来自 B 通道 Page6。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_zzstep_large; /* B 通道正转大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageB.speed_zzmax;   /* B 通道正转最大速度，避免误用 A 通道限幅。 */
 			speed_min = ChannelrecognizeMessageB.speed_zzmin;   /* B 通道正转最小速度，避免误用 A 通道限幅。 */
 		}
 		else if (WorkMessage.dir_work == FZDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_fzstep; /* B 通道反转旧键步进来自 B 通道识别参数。 */
-			speed_large_step = ChannelrecognizeMessageB.speed_fzstep_large; /* B 通道反转大步进来自 B 通道 Page6。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_fzstep_large; /* B 通道反转大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageB.speed_fzmax;   /* B 通道反转最大速度。 */
 			speed_min = ChannelrecognizeMessageB.speed_fzmin;   /* B 通道反转最小速度。 */
 		}
 		else if (WorkMessage.dir_work == OSCDIR)
 		{
 			speed_step = ChannelrecognizeMessageB.speed_oscstep; /* B 通道往复旧键步进来自 B 通道识别参数。 */
-			speed_large_step = ChannelrecognizeMessageB.speed_oscstep_large; /* B 通道往复大步进来自 B 通道 Page6。 */
+			speed_large_step = ChannelrecognizeMessageB.speed_oscstep_large; /* B 通道往复大步进来自当前识别结果。 */
 			speed_max = ChannelrecognizeMessageB.speed_oscmax;   /* B 通道往复最大速度。 */
 			speed_min = ChannelrecognizeMessageB.speed_oscmin;   /* B 通道往复最小速度。 */
 		}
@@ -2874,7 +2874,7 @@ void SpeedActive(uint8_t key_value)
 	}
 	if (speed_large_step == 0U)
 	{
-		speed_large_step = SCREEN_SPEED_LARGE_STEP_FALLBACK; /* Page6 大步进无效时单独兜底，不再复用小步进乘法。 */
+		speed_large_step = SCREEN_SPEED_LARGE_STEP_FALLBACK; /* 当前识别结果的大步进无效时单独兜底，不再复用小步进乘法。 */
 	}
 
 	switch (key_value)
@@ -2893,14 +2893,14 @@ void SpeedActive(uint8_t key_value)
 		add_key = true; /* 新屏慢加直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Add_Large:
-		speed_step = speed_large_step; /* 新屏大加直接使用 EEPROM Page6[2..3] 大步进。 */
+		speed_step = speed_large_step; /* 新屏大加直接使用当前识别结果的大步进。 */
 		add_key = true; /* 本次按键方向为增加。 */
 		break;
 	case SCREENKey_SPEED_Sub_Small:
 		sub_key = true; /* 新屏慢减直接使用当前方向寄存器步进。 */
 		break;
 	case SCREENKey_SPEED_Sub_Large:
-		speed_step = speed_large_step; /* 新屏大减直接使用 EEPROM Page6[2..3] 大步进。 */
+		speed_step = speed_large_step; /* 新屏大减直接使用当前识别结果的大步进。 */
 		sub_key = true; /* 本次按键方向为减少。 */
 		break;
 	case HANDLEKey_greaI:

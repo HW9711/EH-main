@@ -83,6 +83,28 @@ static uint16_t Pump_GetSpeedMin(const pumpMessage_t *pump_message)
 	return pump_message->speed_Min; /* 当前工程未初始化 speed_Min 时自然为 0，后续配置非零时可自动生效。 */
 }
 
+/*
+ * 函数功能：按当前注水/灌注流量和本次调节方向取得分段步进值。
+ * 输入参数：current_flow 为当前 speed_work 流量；increase 为 true 表示增加流量，false 表示减少流量。
+ * 返回参数：0~30 区间返回 2，30~100 区间返回 5，100~200 区间返回 10，200 以上返回 20。
+ */
+static uint16_t Pump_GetWaterFlowStep(uint16_t current_flow, bool increase)
+{
+	if ((current_flow < 30U) || ((increase == false) && (current_flow == 30U)))
+	{
+		return 2U; /* 低于 30 始终用 2；恰好为 30 时只有减流量继续使用低区间步进。 */
+	}
+	if ((current_flow < 100U) || ((increase == false) && (current_flow == 100U)))
+	{
+		return 5U; /* 30~100 使用 5；边界 100 减流量时按即将进入的下一区间选择 5。 */
+	}
+	if ((current_flow < 200U) || ((increase == false) && (current_flow == 200U)))
+	{
+		return 10U; /* 100~200 使用 10；边界 200 减流量时仍按下方区间选择 10。 */
+	}
+	return 20U; /* 高于 200 使用 20；恰好为 200 时增加流量也从本档开始使用 20。 */
+}
+
 
 /*
  * 函数功能：按 EX8 屏幕交互表判断屏幕泵按键是否应被拒绝。
@@ -431,7 +453,7 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 }
 
 /*
- * 函数功能：处理屏幕和 HMI 的 A/B 泵加减速，按泵类型设置步进并限制在原上下限内。
+ * 函数功能：处理屏幕和 HMI 的 A/B 泵加减速，注水/灌注按当前流量分段设置步进并限制在原上下限内。
  * 输入参数：key_value 为 A/B 泵加速或减速键值。
  * 返回参数：无。
  */
@@ -439,6 +461,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 {
 	uint16_t pump_speed_max = 0U; /* 当前泵类型允许的速度上限，防止加速越界。 */
 	uint16_t pump_speed_min = 0U; /* 当前泵类型允许的速度下限，防止无符号减法下溢。 */
+	bool increase = false; /* 保存本次按键方向，供分段步进和最终加减运算使用同一判断。 */
 
 	switch (key_value)
 	{
@@ -446,6 +469,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 	case SCREENKey_APUMP_Add:
 	case HMIkey_APUMP_Sub:
 	case SCREENKey_APUMP_Sub:
+		increase = (key_value == HMIkey_APUMP_Add || key_value == SCREENKey_APUMP_Add); /* A 加键为 true，减键为 false，边界步进按调节方向选择。 */
 		switch (pumpMessageA.type)
 		{
 		case DRAWWATER: // 抽
@@ -455,10 +479,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			/* A 泵处于屏幕定时排空时拒绝调速，确保固定排空速度不被覆盖。 */
 			if (pumpMessageA.timingDrainage_flag == true)
 				return;
-			pumpMessageA.speed_step_value = PUMP_WATER_FLOW_STEP; /* 注水泵改用与灌注泵共用的宏步进，当前每次调节 30。 */
+			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = PUMP_WATER_FLOW_STEP; /* 灌注泵同步读取共用宏，修改配置后两类泵仍保持相同步进。 */
+			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 灌注泵复用同一分段规则，保持两类水泵调节手感一致。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -467,7 +491,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 		pump_speed_max = Pump_GetSpeedMax(&pumpMessageA); /* A 泵调速上限按类型兜底，解决 speed_Max 未初始化导致加速回 0 的问题。 */
 		pump_speed_min = Pump_GetSpeedMin(&pumpMessageA); /* A 泵调速下限来自配置，当前未配置时保持 0。 */
 		/* A 泵加速键进入上限保护路径，其余同组键按减速路径处理。 */
-		if (key_value == HMIkey_APUMP_Add || key_value == SCREENKey_APUMP_Add)
+		if (increase != false)
 		{
 			if (pumpMessageA.speed_work >= pump_speed_max)
 			{
@@ -490,7 +514,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			}
 			else if ((uint16_t)(pumpMessageA.speed_work - pump_speed_min) <= pumpMessageA.speed_step_value)
 			{
-				pumpMessageA.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免 0 减 30 变成 65506。 */
+				pumpMessageA.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免无符号减法下溢。 */
 			}
 			else
 			{
@@ -509,6 +533,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 	case SCREENKey_BPUMP_Add:
 	case HMIkey_BPUMP_Sub:
 	case SCREENKey_BPUMP_Sub:
+		increase = (key_value == HMIkey_BPUMP_Add || key_value == SCREENKey_BPUMP_Add); /* B 加键为 true，减键为 false，保证边界步进与 A 通道一致。 */
 		switch (pumpMessageB.type)
 		{
 		case DRAWWATER: // 抽
@@ -519,10 +544,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			if (pumpMessageB.timingDrainage_flag == true)
 
 				return;
-			pumpMessageB.speed_step_value = PUMP_WATER_FLOW_STEP; /* B 注水泵同样按共用宏每次调节 30，保持 A/B 行为一致。 */
+			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = PUMP_WATER_FLOW_STEP; /* B 灌注泵使用同一宏，避免两类泵步进配置再次分叉。 */
+			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 灌注泵复用同一分段规则，避免 A/B 调节行为分叉。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -531,7 +556,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 		pump_speed_max = Pump_GetSpeedMax(&pumpMessageB); /* B 泵调速上限按类型兜底，解决 speed_Max 未初始化导致屏幕加速仍显示 0 的问题。 */
 		pump_speed_min = Pump_GetSpeedMin(&pumpMessageB); /* B 泵调速下限来自配置，当前未配置时保持 0。 */
 		/* B 泵加速键进入上限保护路径，其余同组键按减速路径处理。 */
-		if (key_value == HMIkey_BPUMP_Add || key_value == SCREENKey_BPUMP_Add)
+		if (increase != false)
 		{
 			if (pumpMessageB.speed_work >= pump_speed_max)
 			{
@@ -554,7 +579,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			}
 			else if ((uint16_t)(pumpMessageB.speed_work - pump_speed_min) <= pumpMessageB.speed_step_value)
 			{
-				pumpMessageB.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免 0 减 30 变成 65506。 */
+				pumpMessageB.speed_work = pump_speed_min; /* 距离下限不足一个步进时直接贴下限，避免无符号减法下溢。 */
 			}
 			else
 			{
@@ -603,6 +628,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 轻排启动也要补非零注水流量，避免只置运行标志但泵不转。 */
 				}
+				pumpMessageA.pedalDrainage_flag = true; /* 标记 A 当前属于轻排阶段，泵行为任务据此旁路压力报警与压力限速。 */
 				pumpMessageA.run_flag = true;
 			}
 		}
@@ -622,6 +648,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 注水泵轻排启动时补非零流量，保持和屏幕/外控启泵一致。 */
 				}
+				pumpMessageB.pedalDrainage_flag = true; /* 左轻排回退到 B 时记录实际排空泵，确保只旁路 B 的压力保护。 */
 				pumpMessageB.run_flag = true;
 				// 队列发送启动B
 			}
@@ -635,6 +662,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 		{
 			// 队列通知A泵停
 			pumpMessageA.run_flag = false;
+			pumpMessageA.pedalDrainage_flag = false; /* 左轻排停止时结束 A 排空旁路，下一次普通运行立即恢复压力保护。 */
 			;
 		}
 		/* A 不是注水泵时停止回退使用的 B 注水泵。 */
@@ -642,6 +670,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 		{
 			// 队列通知B泵停
 			pumpMessageB.run_flag = false;
+			pumpMessageB.pedalDrainage_flag = false; /* 左轻排回退泵停止时同步恢复 B 的正常压力保护。 */
 			;
 		}
 		ControlArbitration_ExitLocalControlIfIdle(pump_owner);
@@ -668,6 +697,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* 右轻排启动 B 注水泵时补非零流量，避免 0 速不转。 */
 				}
+				pumpMessageB.pedalDrainage_flag = true; /* 标记 B 当前属于右轻排阶段，只在该排空阶段旁路压力保护。 */
 				pumpMessageB.run_flag = true;
 			}
 		}
@@ -688,6 +718,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 右轻排回退启动 A 注水泵时补非零流量。 */
 				}
+				pumpMessageA.pedalDrainage_flag = true; /* 右轻排回退到 A 时记录实际排空泵，不能误旁路 B 的压力保护。 */
 				pumpMessageA.run_flag = true;
 			}
 		}
@@ -701,6 +732,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 		{
 			// 队列通知A泵停
 			pumpMessageB.run_flag = false;
+			pumpMessageB.pedalDrainage_flag = false; /* 右轻排停止时结束 B 排空旁路，恢复普通运行压力检测。 */
 			;
 		}
 		/* B 不是注水泵时停止回退使用的 A 注水泵。 */
@@ -708,6 +740,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 		{
 			// 队列通知B泵停
 			pumpMessageA.run_flag = false;
+			pumpMessageA.pedalDrainage_flag = false; /* 右轻排回退泵停止时同步恢复 A 的正常压力保护。 */
 			;
 		}
 		ControlArbitration_ExitLocalControlIfIdle(pump_owner);
@@ -735,6 +768,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* HMI 轻排启动 A 注水泵时补非零流量。 */
 				}
+				pumpMessageA.pedalDrainage_flag = true; /* HMI 轻排也属于排空阶段，复用逐泵标志旁路 A 压力保护。 */
 				pumpMessageA.run_flag = true;
 			}
 			/* A 不是注水泵时回退选择 B 注水泵，保证轻排仍有可用水泵。 */
@@ -750,6 +784,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* HMI 轻排启动 B 注水泵时补非零流量。 */
 				}
+				pumpMessageB.pedalDrainage_flag = true; /* HMI 从 A 通道回退到 B 时只标记 B 为排空压力旁路。 */
 				pumpMessageB.run_flag = true;
 			}
 		}
@@ -769,6 +804,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* HMI 当前 B 通道轻排时补 B 注水泵启动流量。 */
 				}
+				pumpMessageB.pedalDrainage_flag = true; /* HMI 当前 B 通道轻排时标记 B 排空，压力保护仅在退出后恢复。 */
 				pumpMessageB.run_flag = true;
 			}
 			/* B 不是注水泵时回退选择 A 注水泵，保证轻排仍有可用水泵。 */
@@ -784,6 +820,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* HMI 当前 B 通道但 A 是注水泵时补 A 启动流量。 */
 				}
+				pumpMessageA.pedalDrainage_flag = true; /* HMI 从 B 通道回退到 A 时只标记 A 为排空压力旁路。 */
 				pumpMessageA.run_flag = true;
 			}
 		}
@@ -800,12 +837,14 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 			{
 				// 队列发送停止A
 				pumpMessageA.run_flag = false;
+				pumpMessageA.pedalDrainage_flag = false; /* HMI 轻排停止时结束 A 排空旁路，恢复后续普通注水压力保护。 */
 			}
 			/* A 不是注水泵时停止启动阶段回退使用的 B 注水泵。 */
 			else if (pumpMessageB.type == INJECTWATER)
 			{
 				// 队列发送停止B
 				pumpMessageB.run_flag = false;
+				pumpMessageB.pedalDrainage_flag = false; /* HMI 回退 B 停止时同步清除 B 排空压力旁路。 */
 			}
 		}
 		/* 当前工作通道为 B 时按启动时的 B 优先顺序停止注水泵。 */
@@ -816,12 +855,14 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 			{
 				// 队列发送停止B
 				pumpMessageB.run_flag = false;
+				pumpMessageB.pedalDrainage_flag = false; /* HMI 当前 B 通道停止轻排时恢复 B 压力保护。 */
 			}
 			/* B 不是注水泵时停止启动阶段回退使用的 A 注水泵。 */
 			else if (pumpMessageA.type == INJECTWATER)
 			{
 				// 队列停止B
 				pumpMessageA.run_flag = false;
+				pumpMessageA.pedalDrainage_flag = false; /* HMI 回退 A 停止时同步清除 A 排空压力旁路。 */
 			}
 		}
 		ControlArbitration_ExitLocalControlIfIdle(pump_owner);

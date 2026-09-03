@@ -909,6 +909,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint32_t reduction_ratio = HANDLESCAN_TOOL_RATIO_UNIT; /* RFID 标签解析出的 x100 完整倍率，默认 100 表示直联。 */
     uint16_t reduction_integer; /* 保存低 16 位减速倍率的整数部分，用于兼容旧 8 位镜像字段。 */
     uint16_t current_threshold; /* 保存 RFID 电流阈值换算结果；标签单位 0.1A，主控与驱动协议统一使用 0.01A。 */
+    uint32_t speed_range;       /* 保存公共接头 RFID 最大/最小转速差，计算前先确认上限大于下限，避免无符号下溢。 */
+    uint16_t common_speed_step_small; /* 保存公共接头按 RFID 速度范围分档后选中的小步进。 */
+    uint16_t common_speed_step_large; /* 保存公共接头按 RFID 速度范围分档后选中的大步进。 */
     uint8_t default_flow;        /* RFID 标签中的默认泵流量。 */
     uint8_t direction;           /* RFID 标签中的方向字段。 */
     uint8_t business_tool_type = 0U; /* 业务层使用的刀具能力类型，和 RFID 原始型号分开保存。 */
@@ -1011,6 +1014,31 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->speed_zzstep_large = keep_speed_zzstep_large; /* RFID 成功后恢复正转大步进，让屏幕快加/快减使用 Page6 大步进。 */
     message->speed_fzstep_large = keep_speed_fzstep_large; /* RFID 成功后恢复反转大步进，避免反转快键回退为小步进。 */
     message->speed_oscstep_large = keep_speed_oscstep_large; /* RFID 成功后恢复往复大步进，保证往复调速两档均来自 EEPROM。 */
+    if ((mapped_model == COMMON_SOCKET_ONLINES) && (max_speed > min_speed))
+    {
+        speed_range = max_speed - min_speed; /* 合法 RFID 范围先求差值；EPC 速度单位换算后最大差值为 255000rpm，不会溢出 32 位。 */
+        if (speed_range >= 70000U)
+        {
+            common_speed_step_large = 10000U; /* 速度范围达到 7 万及以上时，大步进固定为 10000rpm。 */
+            common_speed_step_small = 2000U; /* 速度范围达到 7 万及以上时，小步进固定为 2000rpm。 */
+        }
+        else if (speed_range <= 10000U)
+        {
+            common_speed_step_large = 1000U; /* 速度范围不超过 1 万时，大步进固定为 1000rpm。 */
+            common_speed_step_small = 500U; /* 速度范围不超过 1 万时，小步进固定为 500rpm。 */
+        }
+        else
+        {
+            common_speed_step_large = 5000U; /* 速度范围大于 1 万且小于 7 万时，大步进固定为 5000rpm。 */
+            common_speed_step_small = 1000U; /* 速度范围大于 1 万且小于 7 万时，小步进固定为 1000rpm。 */
+        }
+        message->speed_zzstep = common_speed_step_small; /* 公共接头正转小步进改由当前刀具标签范围分档决定，不再使用基座 Page6 固定值。 */
+        message->speed_fzstep = common_speed_step_small; /* 公共接头反转沿用同一分档小步进，保证方向切换后的慢调档一致。 */
+        message->speed_oscstep = common_speed_step_small; /* 公共接头往复方向使用相同小步进，避免不同方向调速手感不一致。 */
+        message->speed_zzstep_large = common_speed_step_large; /* 公共接头正转大步进使用当前 RFID 范围对应的分档值。 */
+        message->speed_fzstep_large = common_speed_step_large; /* 公共接头反转大步进使用当前 RFID 范围对应的分档值。 */
+        message->speed_oscstep_large = common_speed_step_large; /* 公共接头往复大步进使用当前 RFID 范围对应的分档值。 */
+    }
     if (message->speed_zzstep == 0U)
     {
         message->speed_zzstep = HANDLESCAN_SPEED_STEP_FALLBACK; /* RFID 标签未携带 Page6 步进时，正转调速按 1000 兜底。 */

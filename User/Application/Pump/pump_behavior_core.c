@@ -371,8 +371,28 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
 }
 
 /*
+ * 函数功能：按两类泵统一的 /1.51 基础比例换算 UART 速度，并对 200ml/min 以上流量应用实测补偿。
+ * 输入参数：pump_flow 为压力处理后的注水泵或灌注泵业务流量。
+ * 返回参数：200 及以下返回 /1.51 截断结果；200 以上返回按实测曲线反算并四舍五入后的 UART 速度。
+ */
+static uint16_t PumpBehavior_ConvertWaterFlowToUart(uint16_t pump_flow)
+{
+    uint32_t corrected_flow_x3; /* 保存补偿后等效流量的 3 倍值，避免 4/3 补偿过程提前丢失小数。 */
+    const uint32_t uart_divisor_x3 = 151U * 3U; /* 两类泵统一使用 /1.51；乘 3 后与 corrected_flow_x3 的倍率对应。 */
+
+    if (pump_flow <= 200U)
+    {
+        return (uint16_t)(((uint32_t)pump_flow * 100U) / 151U); /* 低流量统一按 /1.51 截断，注水泵与灌注泵发送相同速度。 */
+    }
+
+    corrected_flow_x3 = ((uint32_t)pump_flow * 4U) - 200U; /* 实测拟合为实际值=3/4设定值+50，反算得到等效流量=(4设定值-200)/3。 */
+
+    return (uint16_t)(((corrected_flow_x3 * 100U) + (uart_divisor_x3 / 2U)) / uart_divisor_x3); /* 高流量结果四舍五入，减小驱动整数速度带来的流量误差。 */
+}
+
+/*
  * 函数功能：按泵类型完成方向选择、普通运行速度上限和 UART 数值换算，再执行压力闭环。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；pump_type 为识别出的泵类型；pump_speed 指向待处理业务速度；drainage_active 表示当前是否为屏幕定时排空；force_stop 返回压力硬停状态。
+ * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；pump_type 为识别出的泵类型；pump_speed 指向待处理业务速度；drainage_active 表示当前是否为屏幕定时排空；force_stop 返回非排空阶段的压力硬停状态。
  * 返回参数：换算后的 16 位 UART 速度字段。
  */
 static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
@@ -402,8 +422,15 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 普通运行和手柄联动最多输出 300，屏幕定时排空仍保留独立的 100 档。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 换算 UART 前先应用压力保护。 */
-            uart_data = (uint16_t)(*pump_speed / 1.6); /* 保留原浮点除数和 AC5 截断结果。 */
+            if ((drainage_active == 0U) && (binding->message->pedalDrainage_flag == false))
+            {
+                *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 普通注水及手柄冷却联动仍执行原压力限速、停泵和报警链路。 */
+            }
+            else if (force_stop != NULL)
+            {
+                *force_stop = 0U; /* 屏幕定时排空或轻排阶段不读取压力、不新增报警；本分支不主动清除压力锁存字段。 */
+            }
+            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 注水泵按统一 /1.51 基础比例换算，并在 200 以上叠加实测补偿。 */
             break;
 
         case POURWATER:
@@ -413,7 +440,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
                 *pump_speed = 300U; /* 灌注最大速度继续保持 300ml。 */
             }
             *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 换算 UART 前先应用压力保护。 */
-            uart_data = (uint16_t)(*pump_speed / 1.51); /* 保留原浮点除数和 AC5 截断结果。 */
+            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注泵调用同一函数，确保基础比例和高流量补偿均与注水泵一致。 */
             break;
 
         default:
@@ -424,13 +451,12 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
 }
 
 /*
- * 函数功能：维持注水泵 10 秒排空计时，并在压力停泵或计时结束时强制零输出。
- * 输入参数：message 为本通道泵状态；timing_drainage_active 为本周期开始时锁存的排空标志；force_stop 为压力硬停状态；pump_speed 和 uart_data 为待发布输出。
+ * 函数功能：维持注水泵 10 秒排空计时，并在计时结束时强制零输出。
+ * 输入参数：message 为本通道泵状态；timing_drainage_active 为本周期开始时锁存的排空标志；pump_speed 和 uart_data 为待发布输出。
  * 返回参数：无。
  */
 static void PumpBehavior_ServiceDrainage(pumpMessage_t *message,
                                          uint8_t timing_drainage_active,
-                                         uint8_t force_stop,
                                          uint16_t *pump_speed,
                                          uint16_t *uart_data)
 {
@@ -439,12 +465,7 @@ static void PumpBehavior_ServiceDrainage(pumpMessage_t *message,
         return; /* 非排空周期不修改排空计数和正常运行输出。 */
     }
 
-    if (force_stop != 0U)
-    {
-        *uart_data = 0U;  /* 压力硬停时禁止排空逻辑重新生成非零驱动速度。 */
-        *pump_speed = 0U; /* 屏幕和上位机同步显示真实零输出。 */
-    }
-    else if (message->timingDrainage_times >= PUMP_TIMING_DRAINAGE_TICKS)
+    if (message->timingDrainage_times >= PUMP_TIMING_DRAINAGE_TICKS)
     {
         *uart_data = 0U;                        /* 达到 10 秒后立即发送零速。 */
         *pump_speed = 0U;                       /* 实际业务输出同步清零。 */
@@ -528,7 +549,7 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     uint8_t pump_type = 0U;               /* 无运行请求时保持旧默认类型 0，不进入任何换算分支。 */
     uint16_t pump_speed = 0U;             /* 本周期实际业务速度默认 0。 */
     uint16_t uart_data;                   /* 本周期最终下发给泵驱动的速度字段。 */
-    uint8_t force_stop = 0U;              /* 压力保护是否要求本周期硬停。 */
+    uint8_t force_stop = 0U;              /* 非排空阶段的压力保护是否要求本周期硬停。 */
     uint8_t drainage_active;              /* 锁存周期开始时的10秒定时排空状态，保持原分支判断时序。 */
     uint8_t request_active;               /* 运行或排空任一有效都视为有输出请求。 */
     uint8_t driver_fault_active;          /* 步进驱动故障锁存期为 1，本周期必须跳过所有非零输出路径。 */
@@ -565,8 +586,8 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
         pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
     }
 
-    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active, &force_stop); /* 排空标志用于区分固定 100 档与普通注水 300 档上限。 */
-    PumpBehavior_ServiceDrainage(binding->message, drainage_active, force_stop, &pump_speed, &uart_data); /* 保持 10 秒排空与压力停泵优先级。 */
+    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active, &force_stop); /* 定时排空标志区分固定速度，函数同时读取轻排标志决定是否旁路压力。 */
+    PumpBehavior_ServiceDrainage(binding->message, drainage_active, &pump_speed, &uart_data); /* 屏幕排空只保留 10 秒计时，排空阶段不再读取压力停泵结果。 */
     binding->publish_output_speed(pump_speed); /* 先发布实际速度，再按原顺序发送驱动帧和刷新颜色。 */
     PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction); /* 每个周期继续发送 6 字节帧。 */
     PumpBehavior_UpdateColor(binding, runtime, uart_data); /* 只在启停边沿刷新对应逻辑泵颜色。 */
