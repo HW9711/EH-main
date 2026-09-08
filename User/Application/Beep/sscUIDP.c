@@ -1081,7 +1081,7 @@ void UIDISPLAYBehavior()
 					UIAIARMDP(0,0,0);
 					UIMANUALBUTTONDP(0,0,0,0);
 					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
-					SendKeyBeepMessage(1U); /* 主运行页已经切换完成，蜂鸣一次提示开机进入运行界面。 */
+					/* 切入主运行页不表示泵已标定成功；提示音统一等驱动READY或FAILED结果，避免提前单响。 */
 					s_uidp_startup_replay_ticks = UIDP_STARTUP_REPLAY_TOTAL_TICKS; /* 进入主运行页后开启短窗口补刷，等待 A/B 手柄识别和 RFID 首包完成。 */
 					s_uidp_startup_replay_period = 0U; /* 首次调度允许立即检查当前状态，避免 B 手柄已经在线但仍显示未连接。 */
 					break;

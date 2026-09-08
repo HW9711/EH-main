@@ -2,6 +2,7 @@
 
 #include "Pubinterface.h"
 #include "pump.h"
+#include "pump_behavior_core.h" /* 启动与失败恢复必须以驱动真实定位状态为准，不能只看设备类型。 */
 #include "sscUIDP.h"
 
 /* 抽吸泵内部设定上限，无流量单位，允许 0~15；改值还须同步核对泵任务中的 15 上限及 42 倍协议换算。 */
@@ -321,7 +322,7 @@ static void Pump_HandleGearKey(uint8_t key_value)
 }
 
 /*
- * 函数功能：处理 A/B 泵启停和屏幕注水泵排空请求；只有屏幕排空按钮使用固定速度和10秒计时。
+ * 函数功能：按驱动就绪门禁处理泵启停/排空；失败时屏幕泵键仅申请独立重定位，成功后须再次按键启动。
  * 输入参数：key_value 为泵启停键值，pump_owner 为该键对应的控制权来源。
  * 返回参数：无。
  */
@@ -348,6 +349,15 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 			/* A 泵当前停止时进入启动路径；已经运行时由对应 else 分支执行停止。 */
 			if (!pumpMessageA.run_flag)
 			{
+				if (PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U)
+				{
+					if (key_value == SCREENKey_APUMP_control)
+					{
+						(void)PumpBehavior_RequestRealign(PUMP_BEHAVIOR_CHANNEL_A); /* 仅失败时登记零速校准，定位中按键不会重置次数或打断定位。 */
+					}
+					Pubinterface_RefreshPumpADisplay(); /* 保持停止显示；青色定位、红色失败由周期任务按真实回包刷新。 */
+					return; /* 本次按键不保存任何运行/排空请求，完成后必须有新的启动动作。 */
+				}
 				/* HMI 启泵先申请外控权限；本地脚踏和屏幕只控制泵，不占用手柄电机的控制权限。 */
 				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 					return;
@@ -404,6 +414,15 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 			/* B 泵当前停止时进入启动路径；已经运行时由对应 else 分支执行停止。 */
 			if (!pumpMessageB.run_flag)
 			{
+				if (PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U)
+				{
+					if (key_value == SCREENKey_BPUMP_control)
+					{
+						(void)PumpBehavior_RequestRealign(PUMP_BEHAVIOR_CHANNEL_B); /* B通道独立登记校准，不复用非零速度，也不影响A泵。 */
+					}
+					Pubinterface_RefreshPumpBDisplay(); /* 失败键只恢复定位，屏幕按钮仍处于停止状态。 */
+					return; /* 脚踏/HMI普通启泵不能触发重定位，任何来源均不缓存提前启动。 */
+				}
 				/* HMI 启泵先申请外控权限；本地脚踏和屏幕只控制泵，不占用手柄电机的控制权限。 */
 				if ((pump_owner != CONTROL_OWNER_NONE) && (ControlArbitration_TryEnter(pump_owner) == false))
 					return;

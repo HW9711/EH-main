@@ -7,6 +7,7 @@
 // #include "datahand.h"
 /* 屏幕调泵速和泵任务使用同一组速度上限，避免屏幕允许设置但驱动无法执行。 */
 #include "pump.h"
+#include "pump_behavior_core.h" /* 冷却联动必须等待泵驱动完成定位及零速握手，不能只凭泵类型启动。 */
 #include "sscDRIVE.h"
 #include "sscUIDP.h"
 #include "sscBEEP.h"
@@ -1692,7 +1693,7 @@ bool Pubinterface_IsPressureBlockStopLatched(void)
 }
 
 /*
- * 函数功能：按照“手柄运行则冷却出口识别为注水泵时运行、手柄停止则联动泵停止”的规则刷新冷却泵状态。
+ * 函数功能：按冷却目标刷新注水泵联动；目标驱动未就绪时撤销本次手柄/泵启动，释放后才能重新触发。
  * 输入参数：enable 为 true 表示手柄已经进入运行态，需要在冷却出口识别为注水泵时启动冷却；false 表示手柄已经停止，需要同步关闭联动泵。
  * 返回参数：无。
  */
@@ -1724,6 +1725,19 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		{
 			target_mask = HANDLE_INJECTION_FOLLOW_PUMP_B; /* 只有 B 泵是注水泵时，A/B 任一手柄运行都必须启动 B 泵给手柄降温。 */
 		}
+	}
+
+	if (enable && ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U) &&
+		(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U))
+	{
+		HandlePumpDriverFaultStop(CHANNEL_A); /* A冷却泵定位或失联时同时撤销手柄请求，沿用真实释放锁，不能踩住等待自动启动。 */
+		return; /* 此处不发故障双响：BUSY只是未就绪，真实保护由泵反馈解析提示。 */
+	}
+	if (enable && ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_B) != 0U) &&
+		(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U))
+	{
+		HandlePumpDriverFaultStop(CHANNEL_B); /* B目标同样在写run_flag之前拒绝，不能把冷却泵请求缓存到定位完成。 */
+		return; /* 保留驱动有界校准，不发送非零速度打断它。 */
 	}
 
 	if (enable == false)

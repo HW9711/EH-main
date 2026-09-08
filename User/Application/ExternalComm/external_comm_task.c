@@ -14,6 +14,7 @@
 #include "mainboard_software_version.h"
 #include "motoruartdata.h"
 #include "Pubinterface.h"
+#include "pump_behavior_core.h" /* 外控启动须验证泵定位就绪，不能对未执行的启泵返回成功。 */
 #include "sscBEEP.h"
 #include "sscDRIVE.h"
 #include "sscUIDP.h"
@@ -252,6 +253,7 @@ static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵时置 1；独立停泵、保护停机或退出外控时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
 static uint8_t s_external_pump_b_manual_run_request = 0U; /* 记录上位机是否独立请求 B 泵运行，用于简易协议启停切换和小电脑图标显示。 */
+static uint8_t s_pump_driver_wait_stop_mask = 0U; /* bit0/1表示A/B提前启动已被拒绝；须显式停止后才能重新申请，不接受持续旧启动自动复转。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
 static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收 FIFO 句柄，保存读写指针和初始化状态。 */
@@ -2189,8 +2191,16 @@ static void ExternalComm_SetUart5PumpManualRun(uint8_t enable)
     ExternalComm_RefreshUart5PumpRunState();                    /* 按“独立请求 OR 公共规则选中 A 泵的跟随请求”重新计算 A 泵最终 run_flag。 */
 }
 
+/*
+ * 函数功能：急停、退出外控或外控失联时撤销两泵外控请求，同时取消未完成定位。
+ * 输入参数：无，普通单泵零速保活不调用本函数。
+ * 返回参数：无。
+ */
 static void ExternalComm_ClearPumpRequests(void)
 {
+    PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_A); /* 明确全停必须停止A定位，不能只发送仍授权校准的普通零速。 */
+    PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_B); /* B使用独立取消槽，丢帧时由本泵任务持续确认停止。 */
+    s_pump_driver_wait_stop_mask = 0U; /* 明确全停已释放被拒的外控启动，后续仍需新的READY和新启动帧。 */
     s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
     s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
     s_external_pump_b_manual_run_request = 0U;   /* 同步清除 B 泵外控运行请求，避免退出后小电脑图标继续显示 40。 */
@@ -2576,13 +2586,19 @@ void ExternalComm_ClearPumpRunRequest(uint8_t pump_channel)
 /*
  * 函数功能：执行上位机对 A 泵的独立启动或停止命令。
  * 输入参数：area_code 为 0x01 时启动 A 泵，为 0x02 时停止 A 泵。
- * 返回参数：true 表示命令执行成功；false 表示 A 泵离线，失败应答已发送。
+ * 返回参数：true 表示命令执行成功；false 表示 A 泵离线、定位未就绪或尚未确认停止，失败应答已发送。
  */
 static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
 {
     /* 0x01 是 A 泵启动命令，其余已由上层限定为 0x02，统一进入停止分支。 */
     if (area_code == 0x01U)
     {
+        if ((PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U) || ((s_pump_driver_wait_stop_mask & 0x01U) != 0U))
+        {
+            s_pump_driver_wait_stop_mask |= 0x01U; /* 外控在定位中启动后必须先发A停止，READY到达不能让旧重复启动自动生效。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code, EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 使用既有失败应答，不伪报已经启泵。 */
+            return false; /* 不写手动运行请求，不通过外控路径申请重定位。 */
+        }
         if (pumpMessageA.online_flag == false)
         {
             ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
@@ -2595,6 +2611,7 @@ static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
     }
     else
     {
+        s_pump_driver_wait_stop_mask &= (uint8_t)~0x01U; /* 显式A停止是被拒启动的释放边界，后续还须新READY和新启动命令。 */
         ExternalComm_SetUart5PumpManualRun(0U); /* 只清除 A 泵独立运行请求，仍有冷却跟随时泵继续运行。 */
     }
 
@@ -2605,13 +2622,19 @@ static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
 /*
  * 函数功能：执行上位机对 B 泵的独立启动或停止命令。
  * 输入参数：area_code 为 0x03 时启动 B 泵，为 0x04 时停止 B 泵。
- * 返回参数：true 表示命令执行成功；false 表示 B 泵离线，失败应答已发送。
+ * 返回参数：true 表示命令执行成功；false 表示 B 泵离线、定位未就绪或尚未确认停止，失败应答已发送。
  */
 static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
 {
     /* 0x03 是 B 泵启动命令，其余已由上层限定为 0x04，统一进入停止分支。 */
     if (area_code == 0x03U)
     {
+        if ((PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U) || ((s_pump_driver_wait_stop_mask & 0x02U) != 0U))
+        {
+            s_pump_driver_wait_stop_mask |= 0x02U; /* B提前启动被拒后只由显式B停止解除，不受A停止或READY回包影响。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code, EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 向上位机明确反馈未执行，不缓存泵启动。 */
+            return false;
+        }
         if (pumpMessageB.online_flag == false)
         {
             ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
@@ -2631,6 +2654,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
     }
     else
     {
+        s_pump_driver_wait_stop_mask &= (uint8_t)~0x02U; /* 只有显式B停止才解除旧启动拒绝锁，下一条启动仍需驱动READY。 */
         s_external_pump_b_manual_run_request = 0U; /* 已收到独立停止 B 泵命令，清除此前保存的运行请求。 */
         pumpMessageB.run_flag = false; /* 泵任务下一周期发送 B 泵停止帧。 */
         pumpMessageB.timingDrainage_flag = false; /* 同时退出可能残留的定时排空状态。 */
