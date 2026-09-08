@@ -11,20 +11,20 @@
 #define BOARD_RES_STATE_LED_PORT          BOARD_STATE_LED_PORT
 #define BOARD_RES_STATE_LED_PIN           BOARD_STATE_LED_PIN
 
-/* 原物理A接口仅保留短接检测PD1；实体运行键已改为固定的串口复用脚。 */
+/* 板上原A接口用PD1检测手柄插入；运行键另接固定引脚，不使用PD1。 */
 #define BOARD_RES_HANDLE_PHYSICAL_A_SHORT_PORT   GPIOD
 #define BOARD_RES_HANDLE_PHYSICAL_A_SHORT_PIN    GPIO_PIN_1
 
-/* 原物理B接口仅保留短接检测PD0；实体运行键已改为固定的串口复用脚。 */
+/* 板上原B接口用PD0检测手柄插入；运行键另接固定引脚，不使用PD0。 */
 #define BOARD_RES_HANDLE_PHYSICAL_B_SHORT_PORT   GPIOD
 #define BOARD_RES_HANDLE_PHYSICAL_B_SHORT_PIN    GPIO_PIN_0
 
 #if (HANDLE_PHYSICAL_AB_SWAP_ENABLE == 1U)
-/* 镜像线束下，逻辑A使用原物理B的短接检测。 */
+/* A/B交叉接线时，屏幕A根据板上原B接口判断是否插入。 */
 #define BOARD_RES_HANDLESCAN_A_SHORT_PORT BOARD_RES_HANDLE_PHYSICAL_B_SHORT_PORT
 #define BOARD_RES_HANDLESCAN_A_SHORT_PIN  BOARD_RES_HANDLE_PHYSICAL_B_SHORT_PIN
 
-/* 镜像线束下，逻辑B使用原物理A的短接检测。 */
+/* A/B交叉接线时，屏幕B根据板上原A接口判断是否插入。 */
 #define BOARD_RES_HANDLESCAN_B_SHORT_PORT BOARD_RES_HANDLE_PHYSICAL_A_SHORT_PORT
 #define BOARD_RES_HANDLESCAN_B_SHORT_PIN  BOARD_RES_HANDLE_PHYSICAL_A_SHORT_PIN
 #else

@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define UART6_MAX_PACKET_SIZE  150
+#define UART6_MAX_PACKET_SIZE  150 /* 触控屏串口接收缓存容量，单位：字节；增大时也要检查屏幕解析用的缓存。 */
 
 void Uart6_Configuration(uint16_t baud);
 

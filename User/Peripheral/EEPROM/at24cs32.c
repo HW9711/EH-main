@@ -1,13 +1,13 @@
 #include "at24cs32.h"
 #include <string.h>
 
-/* I2C 阻塞读写超时时间，单位毫秒 */
+/* 单次HAL I2C读写/应答等待的超时时间，单位ms；调大可能延长手柄识别任务等待，调小可能使正常读写超时。 */
 #define AT24CS32_I2C_TIMEOUT_MS        100U
-/* 连续读取时的分块长度，避免单次传输过长 */
+/* 连续读取一次最多传输的字节数；64字节读完再读下一块，不是EEPROM的物理页大小。 */
 #define AT24CS32_READ_CHUNK_SIZE       64U
-/* EEPROM 读前设备就绪检查的轮询次数 */
+/* 读写前最多检查EEPROM应答的次数；调大可能延长未连接手柄的等待时间。 */
 #define AT24CS32_READY_TRIALS          3U
-/* 发生 BUSY/TIMEOUT 后，I2C 软恢复完成后的等待时间 */
+/* I2C忙或超时后，重新初始化总线并等待的毫秒数；等待结束后才重试访问。 */
 #define AT24CS32_RECOVER_DELAY_MS      2U
 /* 调试信息中的操作类型定义：1 表示读，2 表示写 */
 #define AT24CS32_DEBUG_OP_READ         1U
@@ -48,8 +48,9 @@ static uint8_t At24_IsReady(I2C_HandleTypeDef *hi2c)
 }
 
 /*
- * 判断当前 I2C 句柄是否就是手柄认证所使用的 I2C2。
- * 当前现场问题主要集中在 I2C2，因此恢复逻辑会优先对 I2C2 做定向处理。
+ * 函数功能：检查传入的是否为I2C2，以便恢复时选择对应的初始化函数。
+ * 输入参数：hi2c为待检查的I2C接口。
+ * 返回参数：1表示I2C2，0表示其它接口或空指针。
  */
 static uint8_t At24_IsI2c2(I2C_HandleTypeDef *hi2c)
 {
@@ -104,9 +105,9 @@ static uint8_t At24_NeedsRecovery(I2C_HandleTypeDef *hi2c, HAL_StatusTypeDef hal
 }
 
 /*
- * 对 I2C 总线执行一次最小侵入的软恢复。
- * 当前优先采用 HAL DeInit + Init 的方式，把外设状态机从 BUSY/TIMEOUT 状态中拉回来。
- * 这样改动面较小，也更适合先验证是不是“外设状态卡死”导致的首包读取失败。
+ * 函数功能：关闭并重新初始化出错的I2C接口，等待后让上层重试EEPROM访问。
+ * 输入参数：hi2c为要恢复的I2C接口；空指针不执行操作。
+ * 返回参数：无；重新初始化不代表下一次读写一定成功。
  */
 static void At24_RecoverBus(I2C_HandleTypeDef *hi2c)
 {
@@ -115,11 +116,11 @@ static void At24_RecoverBus(I2C_HandleTypeDef *hi2c)
         return;
     }
 
-    /* I2C2 使用项目固定初始化入口恢复 A 通道引脚、时钟和速度配置。 */
+    /* 恢复I2C2的引脚、时钟和速度；屏幕A/B归属由手柄接口交换配置决定。 */
     if (At24_IsI2c2(hi2c) != 0U) {
         HAL_I2C_DeInit(&hi2c2);
         MX_I2C2_Init();
-    /* I2C3 使用独立初始化入口恢复 B 通道，避免误套 I2C2 引脚配置。 */
+    /* 恢复I2C3，不能错误地使用I2C2的引脚配置。 */
     } else if (hi2c == &hi2c3) {
         HAL_I2C_DeInit(&hi2c3);
         MX_I2C3_Init();

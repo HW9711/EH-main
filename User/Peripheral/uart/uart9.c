@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static uint8_t Uart9_DMABuf[UART9_MAX_PACKET_SIZE] = { 0U }; /* UART9 DMA接收缓存保存原物理B侧RFID回包，逻辑归属由上层统一映射。 */
+static uint8_t Uart9_DMABuf[UART9_MAX_PACKET_SIZE] = { 0U }; /* 只保存 UART9 收到的 RFID 数据；属于哪个手柄由上层请求决定。 */
 
 /*
  * 函数功能：启动 UART9 的 DMA 接收。
@@ -28,18 +28,18 @@ static void Uart9_DmaInit(void)
 static void Uart9_DMAReset(void)
 {
   (void)Bsp_UartDmaStop(BSP_UART_PORT_9); /* 先停止 UART9 DMA，避免清缓存时硬件继续写入旧回包。 */
-  memset(Uart9_DMABuf, 0, UART9_MAX_PACKET_SIZE); /* 清空原物理B侧RFID缓存，防止旧标签回包被下一次请求复用。 */
-  (void)Bsp_UartReceiveDma(BSP_UART_PORT_9, Uart9_DMABuf, UART9_MAX_PACKET_SIZE); /* 重新开启UART9 DMA，等待原物理B侧RFID回包。 */
+  memset(Uart9_DMABuf, 0, UART9_MAX_PACKET_SIZE); /* 清掉旧 RFID 数据，避免下次请求读到上一张标签。 */
+  (void)Bsp_UartReceiveDma(BSP_UART_PORT_9, Uart9_DMABuf, UART9_MAX_PACKET_SIZE); /* 重新接收 UART9 所连 RFID 模块的回包。 */
 }
 
 /*
- * 函数功能：初始化 UART9 应用层接收通道。
+ * 函数功能：开始接收 UART9 RFID 数据。
  * 输入参数：无。
  * 返回参数：无。
  */
 void Uart9_Init(void)
 {
-  Uart9_DmaInit(); /* 系统启动后打开逻辑B侧RFID DMA，固定线束不跟随手柄物理交换。 */
+  Uart9_DmaInit(); /* 启动 UART9 自己的 DMA，不更改 RFID 线束或手柄分配关系。 */
 }
 
 /*
@@ -49,7 +49,7 @@ void Uart9_Init(void)
  */
 void Uart9_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  (void)Bsp_UartTransmit(BSP_UART_PORT_9, pData, Length, 100U); /* UART9固定发送到逻辑B侧RFID模块。 */
+  (void)Bsp_UartTransmit(BSP_UART_PORT_9, pData, Length, 100U); /* 发到 UART9 所连 RFID 模块，最多等待 100ms。 */
 }
 
 /*
@@ -59,13 +59,13 @@ void Uart9_SendPacket(uint8_t *pData, uint16_t Length)
  */
 void Uart9_ClearRecvData(void)
 {
-  Uart9_DMAReset(); /* 新 RFID 请求开始前调用，保证 B 通道只解析本轮回包。 */
+  Uart9_DMAReset(); /* 新 RFID 请求开始前清掉旧数据，避免误认成新请求的回包。 */
 }
 
 /*
- * 函数功能：读取 UART9 DMA 缓存中已经收到的 RFID 字节。
- * 输入参数：data 指向调用方接收缓冲区。
- * 返回参数：本次取出的有效字节数，0 表示尚未收到回包。
+ * 函数功能：取出 UART9 当前已收到的 RFID 字节并重新接收；本函数不等待完整帧。
+ * 输入参数：data 指向至少 UART9_MAX_PACKET_SIZE 字节的输出缓存。
+ * 返回参数：复制的字节数；未收到字节或 data 为空时返回 0。
  */
 uint16_t Uart9_DMARecvDataPeek(uint8_t *data)
 {
@@ -77,23 +77,23 @@ uint16_t Uart9_DMARecvDataPeek(uint8_t *data)
     return 0U; /* 调用方缓冲区无效时不访问 DMA 数据，避免异常写内存。 */
   }
 
-  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_9); /* 读取 UART9 RX DMA 当前剩余搬运数量。 */
+  RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_9); /* 读取 DMA 缓存还可接收多少字节。 */
   if (RemainLen < UART9_MAX_PACKET_SIZE)
   {
     rlen = (uint16_t)(UART9_MAX_PACKET_SIZE - RemainLen); /* DMA 剩余数变小的部分就是本轮收到的 RFID 字节数。 */
-    Common_CopyData(Uart9_DMABuf, data, rlen); /* 把原物理B侧RFID回包复制到任务缓存，逻辑归属由上层请求决定。 */
+    Common_CopyData(Uart9_DMABuf, data, rlen); /* 复制给 RFID 任务；由任务判断数据属于哪个请求、是否完整。 */
     Uart9_DMAReset(); /* 取走数据后立即清空并重启 DMA，下一轮 RFID 请求不受旧回包影响。 */
   }
 
-  return rlen; /* 返回 0 时表示本周期还没有足够数据可解析。 */
+  return rlen; /* 返回本次实际取出的字节数，不代表 RFID 回包已经校验通过。 */
 }
 
 /*
- * 函数功能：反初始化 UART9 外设。
+ * 函数功能：关闭并清除 UART9 的外设配置。
  * 输入参数：无。
  * 返回参数：无。
  */
 void Uart9_DeInit(void)
 {
-  (void)Bsp_UartDeInit(BSP_UART_PORT_9); /* 释放 UART9 硬件资源，保留给后续调试或低功耗流程调用。 */
+  (void)Bsp_UartDeInit(BSP_UART_PORT_9); /* 关闭 UART9；再次收发前需要重新初始化。 */
 }

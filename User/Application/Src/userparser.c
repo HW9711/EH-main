@@ -46,10 +46,9 @@
 #include "iic.h"
 
 /*
- * V1.8 新接口数据容器初始化。
- * 当前阶段先把 WorkMessage、通道识别、通道记忆、泵状态和控制信号统一清零，
- * 保证后续逐步切换 handlescan、脚踏、按键、泵和 UI 时不会读到随机状态。
- * 任务启动顺序仍保持当前工程原有架构，避免在旧模块尚未完全下线前改变硬件时序。
+ * 函数功能：在启动业务任务前，设置手柄、当前工作参数、泵和控制标志的初始值。
+ * 输入参数：无。
+ * 返回参数：无。
  */
 static void Userparser_PubinterfaceInit(void)
 {
@@ -70,14 +69,14 @@ void Userparser_Init(void)
   Iwdg_Reset();
 
   //1.GPIO
-  Board_GPIOConfiguration(); /* 直接初始化业务 GPIO 和中断映射，删除只转发一次的硬件启动函数。 */
+  Board_GPIOConfiguration(); /* 先配置业务引脚和中断，后续总线读写才能使用正确的引脚状态。 */
 
   //2.IIC、1-@Wire
   EEPROM_AT24CXX_Init();
   (void)MainboardSoftwareVersion_Sync();  //主控板 AT24C32 Page1 只保存软件版本；同步失败不阻塞原有主控启动流程
 
   //3.UART
-  Uart1_Init();  //无刷
+  Uart1_Init();  //手柄电机驱动通信，包含无刷和有刷类型。
   Uart2_Init();  //外部通讯
   Uart3_Init();  //射频
 #if (RFID_USE_DUAL_UART_MODE == 1U)
@@ -95,10 +94,10 @@ void Userparser_Init(void)
 
   LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);     //清除新屏报警显示区，旧屏提示接口不再参与开机流程
 
-  Motor_ErrorEmergencyStop_Ctrl();  //21ms 电机停止发送...
+  Motor_ErrorEmergencyStop_Ctrl();  //开机先发送电机停止命令，避免驱动板保留上次运行状态。
 
-  //”出厂配置模式“等待
-  UI_Start_Fun();//脚踏定标界面，关系界面
+  //设置启动页状态，允许后续通过界面进入脚踏定标。
+  UI_Start_Fun();//初始化启动页和脚踏定标入口。
   Iwdg_Reset();
   Delay_ms(500);
 	Iwdg_Reset();
@@ -116,19 +115,19 @@ void Userparser_Init(void)
 	SscKeyBehaviorTask_Init();
 	HandlescanTaskInit();//手柄扫描
 
-	SscFootControlTask_Init(); //脚踏解析和行为事件统一进入新接口
-	ScreenKey_ScanInit();  //22ms  屏幕按键
+	SscFootControlTask_Init(); //创建脚踏控制任务，由其处理踩下、松开和泵联动。
+	ScreenKey_ScanInit();  //创建屏幕按键接收处理任务，周期在该函数内部设置。
 	SscDriveMotorTask_Init();
 	HandleKeyScan_Init();//手柄按键扫描
 	
 	MotorUartData_Init(); 
 	ExternalComm_Init();  //UART2 外部通信协议任务，独立接收下行帧并周期上传心跳。
-	SscSplitTypeAutoModeGetData_Init();  //200ms 请求分体式手柄的刀具信息（自动设别刀具模式）
+	SscSplitTypeAutoModeGetData_Init();  //创建分体式手柄刀具信息读取任务，用于自动识别刀具。
 	SscPumpATask_Init();
 	SscPumpBTask_Init();
 	SscUIDisplayTask_Init();
 	SimUartTask_Init();
 
-	SendUIDSMessage(UI_POWERINIT_ID, false, NULL); //屏幕开机初始化由 UIDP 任务统一刷新，避免绕过统一 UI 入口
+	SendUIDSMessage(UI_POWERINIT_ID, false, NULL); //通知显示任务刷新开机页面，业务初始化函数不直接重复发送页面参数。
 
 }

@@ -14,11 +14,16 @@
 static uint8_t Uart7_DMABuf[UART7_MAX_PACKET_SIZE] = { 0 };
 static uint32_t Uart7_BaudRate = 115200U;
 
+/*
+ * 函数功能：设置 UART7 泵驱动串口波特率，并记下该值供发送失败后重新初始化使用。
+ * 输入参数：baud 为波特率，单位：bit/s。
+ * 返回参数：无。
+ */
 void Uart7_Configuration(uint16_t baud)
 {
   Uart7_BaudRate = baud;
 
-  /* UART7 初始化失败时进入统一故障处理，避免泵驱动串口处于半配置状态。 */
+  /* 初始化失败后不能继续用泵驱动串口收发。 */
   if (Bsp_UartInit(BSP_UART_PORT_7, baud) != HAL_OK)
   {
     Error_Handler();
@@ -26,7 +31,7 @@ void Uart7_Configuration(uint16_t baud)
 }
 
 /*
- * 函数功能：首次启动 UART7 泵驱动反馈 DMA，接收缓冲保持本物理串口独占。
+ * 函数功能：启动 UART7 DMA，把泵驱动回包存入 UART7 自己的接收缓存。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -50,7 +55,7 @@ static void Uart7_DMAReset(void)
 }
 
 /*
- * 函数功能：启动 UART7 泵驱动反馈 DMA，保证 B 泵首条控制命令即可得到正式回包。
+ * 函数功能：启动 UART7 DMA 接收，为 B 泵第一条控制命令的回包做好准备。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -60,13 +65,13 @@ void Uart7_Init(void)
 }
 
 /*
- * 函数功能：发送 UART7 泵控制帧；发送异常时重建串口、恢复反馈 DMA 后仅重试一次。
+ * 函数功能：发送 UART7 泵控制命令；失败时重新初始化串口、恢复 DMA 接收，再重发一次。
  * 输入参数：pData 指向完整控制帧；Length 为发送字节数。
  * 返回参数：发送成功返回 1，重试后仍失败返回 0。
  */
 uint8_t Uart7_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  /* 首次发送失败时复位 UART7 并重建波特率，给泵控制帧一次恢复发送机会。 */
+  /* 第一次发送失败后按原波特率重新初始化 UART7，只重试一次。 */
   if (Bsp_UartTransmit(BSP_UART_PORT_7, pData, Length, 100) != HAL_OK)
   {
     Bsp_UartAbort(BSP_UART_PORT_7);
@@ -96,7 +101,7 @@ uint16_t Uart7_DMARecvDataPeek(uint8_t *data)
 
   if (data == NULL)
   {
-    return 0U; /* 调用方没有提供缓存时不得停止 DMA 或丢弃现场回包。 */
+    return 0U; /* 没有输出缓存就不取数据，保留 DMA 中已收到的回包。 */
   }
 
   remain_len = Bsp_UartRxDmaRemain(BSP_UART_PORT_7); /* 在下一条 25ms 泵命令发送前读取上一条命令的回包长度。 */
@@ -105,8 +110,8 @@ uint16_t Uart7_DMARecvDataPeek(uint8_t *data)
     return 0U; /* DMA 尚未收到新字节时保持当前接收，不执行无意义的停止和重启。 */
   }
 
-  received_len = (uint16_t)(UART7_MAX_PACKET_SIZE - remain_len); /* 每个泵周期重启 DMA 后，差值就是本周期完整接收长度。 */
-  Common_CopyData(Uart7_DMABuf, data, received_len); /* 先复制不可变快照，避免重启 DMA 后覆盖正在解析的数据。 */
+  received_len = (uint16_t)(UART7_MAX_PACKET_SIZE - remain_len); /* 用缓存容量减去 DMA 剩余空间，得到本次可取出的字节数。 */
+  Common_CopyData(Uart7_DMABuf, data, received_len); /* 先把已收到的字节复制给泵任务，再清空 DMA 缓存。 */
   Uart7_DMAReset(); /* 复制完成后立即重启 DMA，保证随后发送的泵命令能够收到对应反馈。 */
 
   return received_len;

@@ -9,8 +9,7 @@ extern "C" {
 
 #include <stdint.h>
 
-/* 模拟串口接口返回值。
- * 该状态码同时用于双通道新接口和单通道兼容包装接口。 */
+/* 两路新接口和默认通道 1 的旧接口共用这些返回值。 */
 typedef enum {
     SOFT_UART_OK = 0,
     SOFT_UART_ERROR,
@@ -27,41 +26,38 @@ typedef enum {
     SIM_UART_NONE = 0xFF
 } sim_uart_channel_t;
 
-/* 模拟串口测试透传配置。
- * 默认关闭；开启后仅把选中通道收到的原始字节透传到 UART10，
- * 不改变原有环形缓冲、任务搬运与队列读取逻辑。 */
-#define SOFT_UART_TEST_FORWARD_OFF        0U
-#define SOFT_UART_TEST_FORWARD_SIM_UART_1 1U
-#define SOFT_UART_TEST_FORWARD_SIM_UART_2 2U
+/* 测试时可把一路压力串口的原始字节额外发到 UART10，方便用串口助手查看。
+ * 默认关闭；开启会增加 UART10 发送等待，但不替代原有压力解析和字节队列。 */
+#define SOFT_UART_TEST_FORWARD_OFF        0U /* 关闭测试输出。 */
+#define SOFT_UART_TEST_FORWARD_SIM_UART_1 1U /* 只输出 SIM_UART_1/PE4 收到的 A 泵压力字节。 */
+#define SOFT_UART_TEST_FORWARD_SIM_UART_2 2U /* 只输出 SIM_UART_2/PE6 收到的 B 泵压力字节。 */
 
 #ifndef SOFT_UART_TEST_FORWARD_SOURCE
-#define SOFT_UART_TEST_FORWARD_SOURCE SOFT_UART_TEST_FORWARD_OFF
+#define SOFT_UART_TEST_FORWARD_SOURCE SOFT_UART_TEST_FORWARD_OFF /* 选 0/1/2：关闭/A 泵/B 泵；正式使用默认关闭。 */
 #endif
 
 #ifndef SOFT_UART_TEST_FORWARD_UART_TIMEOUT_MS
-#define SOFT_UART_TEST_FORWARD_UART_TIMEOUT_MS 20U
+#define SOFT_UART_TEST_FORWARD_UART_TIMEOUT_MS 20U /* 每批测试数据在 UART10 最多等待 20ms；仅开启测试输出时生效。 */
 #endif
 
-/* 每路模拟串口的运行统计信息。
- * 这些计数用于上层诊断接收稳定性、队列压力和异常重叠情况。 */
+/* 每路串口的接收和丢字节计数，用于检查数据接收是否正常。 */
 typedef struct {
-    uint32_t received_bytes;
-    uint32_t queue_overflow_count;
-    uint32_t buffer_overflow_count;
+    uint32_t received_bytes; /* 成功放入中断缓存的字节总数。 */
+    uint32_t queue_overflow_count; /* 字节队列满后未能放入的次数；压力解析已在入队前完成。 */
+    uint32_t buffer_overflow_count; /* 中断缓存满后丢弃新字节的次数。 */
     uint32_t overlap_drop_count; /* 兼容旧诊断接口；双定时器接收后正常应保持为 0。 */
-    uint32_t framing_error_count;
+    uint32_t framing_error_count; /* 起始位或停止位电平不符合串口要求的次数。 */
 } SimUartStats;
 
 /* 初始化两路模拟串口底层资源。
  * 包括 GPIO、EXTI、A 路 TIM11、B 路 TIM13、环形缓冲和静态消息队列。 */
 void SimUart_InitAll(void);
 
-/* 创建并启动模拟串口后台任务。
- * 该任务按 100ms 周期运行，仅负责把 ISR 环形缓冲中的字节搬运到队列。 */
+/* 创建并启动 100ms 周期任务：取出中断缓存字节、解析压力帧、复制到旧接口队列并检查掉线。 */
 void SimUartTask_Init(void);
 
-/* 发送单个字节。
- * 发送仍使用阻塞式 bit-bang，便于保持和现有工程的兼容性。 */
+/* 用 GPIO 电平逐位发送 1 字节，函数等待发送结束才返回。
+ * 任一路正在接收时返回 SOFT_UART_BUSY，不开始发送。 */
 SoftUART_Status SimUart_SendByte(sim_uart_channel_t channel, uint8_t data);
 
 /* 连续发送指定长度的数据缓冲区。 */
@@ -77,7 +73,7 @@ SoftUART_Status SimUart_ReadByte(sim_uart_channel_t channel, uint8_t *data);
 /* 获取指定通道当前队列中的待取字节数。 */
 uint32_t SimUart_GetPendingBytes(sim_uart_channel_t channel);
 
-/* 读取指定通道的统计信息快照。 */
+/* 一次复制指定通道的各项计数，复制时暂时关闭中断，避免计数在读取中途变化。 */
 void SimUart_GetStats(sim_uart_channel_t channel, SimUartStats *stats);
 
 /* 以下快捷接口用于按统计项分别读取诊断计数。 */
@@ -91,7 +87,7 @@ uint32_t SimUart_GetOverlapDropCount(sim_uart_channel_t channel);
 void SimUart_HandleExti(uint16_t GPIO_Pin);
 
 /* 在 TIM11/TIM13 中断入口中调用。
- * channel 固定指定本次要推进的 PE4 或 PE6 接收状态，两路可同时采样。 */
+ * channel 指定本次读取 PE4 还是 PE6 的电平；两路各用自己的定时器。 */
 void SimUart_TimerIrqHandler(sim_uart_channel_t channel);
 
 /* 以下为单通道历史兼容接口，默认映射到通道 1。 */

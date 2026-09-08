@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define UART9_MAX_PACKET_SIZE  150U /* UART9 RFID 接收缓存长度，与 UART3 保持一致，避免协议解析缓冲区大小不一致。 */
+#define UART9_MAX_PACKET_SIZE  150U /* UART9 RFID 接收缓存容量，单位：字节；与 UART3 相同，修改时也要检查 RFID 任务的接收缓存。 */
 
 void Uart9_Init(void);
 

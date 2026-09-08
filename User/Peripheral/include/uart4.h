@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define UART4_MAX_PACKET_SIZE  150
+#define UART4_MAX_PACKET_SIZE  150 /* 脚踏串口接收缓存容量，单位：字节；增大时也要检查脚踏任务的接收缓存。 */
 
 void Uart4_Init(void);
 

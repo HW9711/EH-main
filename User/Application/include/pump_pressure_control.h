@@ -7,102 +7,103 @@ extern "C" {
 
 #include <stdint.h>
 
-/* PUMP_PRESSURE_CONTROL_ENABLE 控制压力闭环总开关，默认 1 让所有控制来源都经过按泵速变化的压力闭环保护。 */
+/* 压力检查总开关：0 关闭报警且忽略 6000 未就绪值；非 0 启用报警并在未就绪时输出零速。超压只弹窗和蜂鸣，不停泵或手柄。 */
 #ifndef PUMP_PRESSURE_CONTROL_ENABLE
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
 #endif
 
 /*
- * PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE 控制压力闭环临时调试输出。
- * 旧联调时曾用 UART10 打印压力判断和 UART5 控制帧；现在现场运行必须保持 0，避免测试文本影响泵控制节拍。
- * 若以后需要重新抓闭环日志，应单独开临时分支验证，不能把该开关作为默认配置带入烧录版本。
+ * 旧版 UART10 压力调试开关，保留 0=关闭、1=开启的历史定义。
+ * 当前代码没有读取该宏，改成 1 不会产生调试日志；正式配置保持 0。
  */
 #ifndef PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE
 #define PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE 0U
 #endif
 
-/* 压力板自标定未完成时固定上报 600.0g；主控将其作为未就绪哨兵，只停输出而不报堵塞。 */
+/* 压力板未完成自标定时发送的特殊值，单位 0.1g，6000 表示“未就绪”而非真实超压。需与压力板协议一致；非排空时输出零速且不报堵塞。 */
 #define PUMP_PRESSURE_CONTROL_NOT_READY_X10 6000U
 
-/* PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN 表示 50 ml/min 实测堵管阈值标定点。 */
+/* 第 1 个报警标定流量，单位 mL/min；不超过此流量时使用 ALARM_50_G，改值会改变低流量阈值范围。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN 50U
-/* PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN 表示 110 ml/min 实测堵管阈值标定点。 */
+/* 第 2 个报警标定流量，单位 mL/min，对应 ALARM_110_G；须大于前一点、小于后一点，改值会改变相邻区间阈值。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_110_ML_MIN 110U
-/* PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN 表示 140 ml/min 实测堵管阈值标定点。 */
+/* 第 3 个报警标定流量，单位 mL/min，对应 ALARM_140_G；须大于前一点、小于后一点，改值会改变相邻区间阈值。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_140_ML_MIN 140U
-/* PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN 表示 200 ml/min 实测堵管阈值标定点。 */
+/* 第 4 个报警标定流量，单位 mL/min，对应 ALARM_200_G；须大于前一点、小于后一点，改值会改变相邻区间阈值。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_200_ML_MIN 200U
-/* PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN 表示 260 ml/min 实测堵管阈值标定点。 */
+/* 第 5 个报警标定流量，单位 mL/min，对应 ALARM_260_G；须大于前一点、小于后一点，改值会改变相邻区间阈值。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_260_ML_MIN 260U
-/* PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 表示 300 ml/min 实测堵管阈值标定点。 */
+/* 最高报警标定流量，单位 mL/min；须大于前一点，超过此流量仍使用 ALARM_300_G，改值会改变最高区间范围。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 300U
 
-/* PUMP_PRESSURE_CONTROL_REDUCE_50_G 表示 50 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_50_G 60U
-/* PUMP_PRESSURE_CONTROL_REDUCE_110_G 表示 110 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_110_G 100U
-/* PUMP_PRESSURE_CONTROL_REDUCE_140_G 表示 140 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_140_G 120U
-/* PUMP_PRESSURE_CONTROL_REDUCE_200_G 表示 200 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_200_G 150U
-/* PUMP_PRESSURE_CONTROL_REDUCE_260_G 表示 260 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_260_G 180U
-/* PUMP_PRESSURE_CONTROL_REDUCE_300_G 表示 300 ml/min 开始限速的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_REDUCE_300_G 200U
+/* 不超过第 1 标定流量时的报警阈值，单位 g，当前 100；调大后更晚报警，调小后更易报警，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_50_G 100U
+/* 第 2 标定流量的报警阈值，单位 g，当前 180；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_110_G 180U
+/* 第 3 标定流量的报警阈值，单位 g，当前 210；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_140_G 210U
+/* 第 4 标定流量的报警阈值，单位 g，当前 240；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_200_G 240U
+/* 第 5 标定流量的报警阈值，单位 g，当前 280；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_260_G 280U
+/* 最高标定流量及以上的报警阈值，单位 g，当前 300；须不低于前一点，调大后更晚提示，调小后更易提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_300_G 300U
 
-/* PUMP_PRESSURE_CONTROL_STOP_50_G 表示 50 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_50_G 100U
-/* PUMP_PRESSURE_CONTROL_STOP_110_G 表示 110 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_110_G 180U
-/* PUMP_PRESSURE_CONTROL_STOP_140_G 表示 140 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_140_G 210U
-/* PUMP_PRESSURE_CONTROL_STOP_200_G 表示 200 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_200_G 240U
-/* PUMP_PRESSURE_CONTROL_STOP_260_G 表示 260 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_260_G 280U
-/* PUMP_PRESSURE_CONTROL_STOP_300_G 表示 300 ml/min 输出压到 0 的压力，单位 g。 */
-#define PUMP_PRESSURE_CONTROL_STOP_300_G 300U
+/* 压力连续达到或超过报警线多久才提示，单位 ms；当前 1000，增大会延后提示，减小会更容易响应短时压力升高。 */
+#define PUMP_PRESSURE_ALARM_CONFIRM_MS 1000U
+/* 压力连续降到恢复线或以下多久才允许下次报警，单位 ms；当前 1000，增大会延长两次报警之间的恢复确认。 */
+#define PUMP_PRESSURE_ALARM_RECOVER_MS 1000U
+/* 恢复线比报警线低多少，单位 g，当前 20；值越大，压力需降得越低才允许再次报警，避免临界值附近反复提示。 */
+#define PUMP_PRESSURE_ALARM_HYSTERESIS_G 20U
+/* 新压力帧允许的最大间隔，单位 ms，当前 1000；间隔达到此值便重新计时，调大可容忍更长断帧但更易沿用旧计时。 */
+#define PUMP_PRESSURE_ALARM_MAX_SAMPLE_GAP_MS 1000U
 
-/* PUMP_PRESSURE_CONTROL_SOURCE_AUTO 仅保留旧宏值兼容，当前默认配置不再使用自动回退。 */
+/* 旧版压力源编号 0：自动选择；当前任务不读取这些压力源宏，不能用本值切换接线。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_AUTO 0U
-/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPA 表示闭环压力数据来自 pumpMessageA；当前由 SIM_UART_1/PE4 解析结果写入该结构。 */
+/* 旧版压力源编号 1：pumpMessageA，对应 SIM_UART_1/PE4；此处只保留编号定义。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_PUMPA 1U
-/* PUMP_PRESSURE_CONTROL_SOURCE_PUMPB 表示闭环压力数据来自 pumpMessageB；当前由 SIM_UART_2/PE6 解析结果写入该结构。 */
+/* 旧版压力源编号 2：pumpMessageB，对应 SIM_UART_2/PE6；此处只保留编号定义。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_PUMPB 2U
 
 /*
- * PUMP_PRESSURE_CONTROL_A_SOURCE 用于记录 A 泵闭环压力源固定配置。
- * 当前压力线束为 A 泵压力传感器接 PE4，模拟串口层写入 pumpMessageA；泵驱动串口不参与该映射。
+ * A 泵旧版压力源配置，取上面的 SOURCE_* 编号；当前任务直接读取 pumpMessageA，不读取本宏。
+ * 只改本宏不会换压力源。当前 A 压力传感器接 PE4，由模拟串口写入 pumpMessageA，与泵驱动串口无关。
  */
 #ifndef PUMP_PRESSURE_CONTROL_A_SOURCE
 #define PUMP_PRESSURE_CONTROL_A_SOURCE PUMP_PRESSURE_CONTROL_SOURCE_PUMPA
 #endif
 
 /*
- * PUMP_PRESSURE_CONTROL_B_SOURCE 用于记录 B 泵闭环压力源固定配置。
- * 当前压力线束为 B 泵压力传感器接 PE6，模拟串口层写入 pumpMessageB；泵驱动串口不参与该映射。
+ * B 泵旧版压力源配置，取上面的 SOURCE_* 编号；当前任务直接读取 pumpMessageB，不读取本宏。
+ * 只改本宏不会换压力源。当前 B 压力传感器接 PE6，由模拟串口写入 pumpMessageB，与泵驱动串口无关。
  */
 #ifndef PUMP_PRESSURE_CONTROL_B_SOURCE
 #define PUMP_PRESSURE_CONTROL_B_SOURCE PUMP_PRESSURE_CONTROL_SOURCE_PUMPB
 #endif
 
-/*
- * PumpPressureControl_Apply 根据当前泵速查询 REDUCE/STOP 宏表限速或停泵。
- * target_speed 是上层业务原本准备输出的泵速；weight_x10 是压力模块换算重量 0.1g；threshold_g 仅用于判断压力模块阈值字段是否有效，实际停泵点来自 PUMP_PRESSURE_CONTROL_STOP_xx_G。
- */
-uint16_t PumpPressureControl_Apply(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
+/* 每路泵任务独占一份报警状态，避免 A/B 压力样本和确认计时互相影响。 */
+typedef struct
+{
+    uint32_t condition_tick_ms; /* 当前超限或恢复条件开始时间，单位 ms。 */
+    uint32_t last_sample_tick_ms; /* 最近一个新压力样本时间，用于断帧后重新确认。 */
+    uint16_t target_speed; /* 上次计算报警线用的流量设定；设定变化后重新开始超限或恢复计时。 */
+    uint8_t last_sequence; /* 最近处理的压力帧序号；序号相同就不重复计算持续时间。 */
+    uint8_t sequence_valid; /* 已接收首个有效样本时置 1，允许首帧序号为 0。 */
+    uint8_t alarm_active; /* 本次超压事件已经提示，压力稳定回落前不重复提示。 */
+    uint8_t timing_active; /* 1 表示正在计算超限或恢复持续时间，不控制泵和手柄启停。 */
+} PumpPressureAlarmState_t;
 
-/*
- * PumpPressureControl_IsPressureStopReached 判断当前压力是否已经达到当前泵速对应的 STOP 宏表停泵阈值。
- * target_speed 是本周期准备输出的泵速，用于查询停泵表并过滤 0 速请求；weight_x10 是压力模块上报 0.1g 单位重量；threshold_g 仅用于判断压力帧是否有效。
- */
-uint8_t PumpPressureControl_IsPressureStopReached(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
-
-/*
- * PumpPressureControl_ShouldForceStop 判断当前泵速是否已经到达 STOP 宏表硬停阈值。
- * target_speed 用于查询 PUMP_PRESSURE_CONTROL_STOP_xx_G 停泵表；threshold_g 只作为压力模块有效帧门禁，防止无效阈值时误停泵。
- */
-uint8_t PumpPressureControl_ShouldForceStop(uint16_t target_speed, uint32_t weight_x10, uint16_t threshold_g);
+/* 停止、排空或读数无效时清除单路报警状态，不修改输出请求。 */
+void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state);
+/* 依据新压力帧及持续时间判断是否产生一次报警事件，返回 1 时只允许提示。 */
+uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
+                                        uint16_t target_speed,
+                                        uint32_t weight_x10,
+                                        uint16_t threshold_g,
+                                        uint8_t sequence,
+                                        uint32_t now_ms);
+/* 压力板报告未就绪时返回零速；真实压力超限仍返回原目标速度。 */
+uint16_t PumpPressureControl_ApplyReadiness(uint16_t target_speed, uint32_t weight_x10);
 
 #ifdef __cplusplus
 }

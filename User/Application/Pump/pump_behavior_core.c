@@ -16,23 +16,23 @@
 #define PUMP_DRIVER_FEEDBACK_FRAME_HEAD       0xAAU /* 步进驱动回包首字节固定为 0xAA。 */
 #define PUMP_DRIVER_FEEDBACK_FRAME_SIZE       7U    /* 回包固定为帧头、方向、实际速度2字节、故障码和CRC2字节。 */
 #define PUMP_DRIVER_FEEDBACK_CRC_DATA_SIZE    5U    /* CRC16/MODBUS 覆盖回包前 5 字节。 */
-#define PUMP_DRIVER_ERROR_NONE                0U    /* 驱动回包故障码 0 表示保护已解除。 */
+#define PUMP_DRIVER_ERROR_NONE                0U    /* 驱动回包故障码 0 表示当前无故障；主控仍需等运行请求释放后才允许重启。 */
 #define PUMP_DRIVER_FEEDBACK_RX_BUFFER_SIZE   UART5_MAX_PACKET_SIZE /* A/B 解析缓存按现有 UART5/7 共同 DMA 容量分配。 */
 
 #if (UART5_MAX_PACKET_SIZE != UART7_MAX_PACKET_SIZE)
 #error "Pump driver UART5/UART7 DMA buffer sizes must match"
 #endif
 
-/* PumpBehaviorBinding_t 集中记录 A/B 固定差异，公共算法不再散落通道判断。 */
+/* 每路泵对应的运行数据、屏幕地址、方向和串口函数，让同一套处理代码可用于 A/B 两路。 */
 typedef struct
 {
     pumpMessage_t *message;                    /* 本通道唯一的泵运行状态和压力数据。 */
-    uint8_t public_channel;                     /* 压力锁止时交给 Pubinterface 的逻辑通道号。 */
+    uint8_t public_channel;                     /* 报警提示和驱动故障处理使用的逻辑通道号。 */
     uint16_t output_color_address;              /* 本通道在当前屏幕映射下的运行颜色地址。 */
     uint8_t draw_direction;                     /* 抽吸类型使用的原业务方向值。 */
     uint8_t inject_direction;                   /* 注水和灌注类型使用的原业务方向值。 */
     uint8_t invert_protocol_direction;          /* 为 1 时发送前取反，保留 A 泵原协议方向规则。 */
-    void (*publish_output_speed)(uint16_t);     /* 发布压力修正后的实际业务速度。 */
+    void (*publish_output_speed)(uint16_t);     /* 保存本周期最终输出设定，不是实测转速；真实超压不改变该值。 */
     void (*send_packet)(uint8_t *, uint16_t);   /* 把完整 6 字节控制帧送到固定物理 UART。 */
     uint16_t (*receive_data)(uint8_t *);        /* 取走同一物理 UART 上一命令对应的步进驱动回包。 */
 } PumpBehaviorBinding_t;
@@ -40,18 +40,18 @@ typedef struct
 /* PumpBehaviorRuntime_t 保存每路任务自己的跨周期状态，A/B 不能互相覆盖。 */
 typedef struct
 {
-    uint8_t last_request_active; /* 上一周期是否有运行请求，用于只在新启动沿解除压力锁止。 */
+    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护持续超限和恢复确认，只产生报警事件。 */
     uint8_t output_was_stopped;  /* 对应旧 huici 状态，只在启停变化时刷新屏幕颜色。 */
-    uint8_t business_direction;  /* 保留上一次业务方向，停泵帧继续沿用原方向字节时序。 */
+    uint8_t business_direction;  /* 记住按泵类型选定的方向，停泵命令也使用同一方向。 */
     uint8_t driver_fault_hold;   /* 收到非零驱动故障后锁存停机，故障清零且控制源释放后才解除。 */
     uint8_t last_feedback_error; /* 保存最近一帧 CRC 正确回包的原始故障码。 */
 } PumpBehaviorRuntime_t;
 
-/* 两个静态元素分别属于 A/B 独立任务，不共享启动边沿、颜色或方向状态。 */
+/* A/B 各保存一份启停、颜色和方向记录，互不覆盖。 */
 static PumpBehaviorRuntime_t s_pump_runtime[PUMP_BEHAVIOR_CHANNEL_COUNT];
-/* 每路快照仅由对应泵任务写入，调试或遥测读取方通过版本号复制。 */
+/* A/B 各保存最近一帧驱动反馈；读取时检查版本号，避免拿到更新到一半的数据。 */
 static PumpDriverFeedbackSnapshot_t s_pump_feedback_snapshot[PUMP_BEHAVIOR_CHANNEL_COUNT];
-/* 偶数表示快照稳定，奇数表示对应泵任务正在更新多字节字段。 */
+/* 偶数表示数据已写完，奇数表示对应泵任务正在更新字段。 */
 static volatile uint32_t s_pump_feedback_version[PUMP_BEHAVIOR_CHANNEL_COUNT];
 
 /*
@@ -110,35 +110,35 @@ static uint16_t PumpBehavior_ReceivePacketB(uint8_t *data)
 #endif
 }
 
-/* A/B 固定绑定只描述真实差异，不提供运行时注册，避免重新增加抽象层。 */
+/* 固定列出 A/B 两路使用的状态、屏幕地址、方向和收发串口，运行中不改变此表。 */
 static const PumpBehaviorBinding_t s_pump_binding[PUMP_BEHAVIOR_CHANNEL_COUNT] =
 {
     {
         &pumpMessageA,                          /* A 压力源保持 SIM_UART_1/PE4 写入的 pumpMessageA。 */
-        CHANNEL_A,                              /* A 压力锁止继续处理逻辑 A 通道。 */
-        UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,         /* A 实际输出颜色继续使用屏幕映射后的 A 地址。 */
+        CHANNEL_A,                              /* A 报警与驱动故障处理保持逻辑 A 通道。 */
+        UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,         /* 按下发命令的零速/非零状态更新屏幕 A 泵颜色。 */
         0U,                                     /* A 抽吸业务方向保持 0。 */
         1U,                                     /* A 注水和灌注业务方向保持 1。 */
         1U,                                     /* A 协议方向保持发送前取反。 */
-        Pubinterface_UpdatePumpAOutputSpeed,     /* A 实际速度继续发布到 pumpMessageA.speed_output。 */
+        Pubinterface_UpdatePumpAOutputSpeed,     /* A 最终输出设定写入 pumpMessageA.speed_output，不是实测转速。 */
         PumpBehavior_SendPacketA,                /* A 帧继续走 A 逻辑出口。 */
         PumpBehavior_ReceivePacketA              /* A 回包从同一逻辑出口对应的物理串口取回。 */
     },
     {
         &pumpMessageB,                          /* B 压力源保持 SIM_UART_2/PE6 写入的 pumpMessageB。 */
-        CHANNEL_B,                              /* B 压力锁止继续处理逻辑 B 通道。 */
-        UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,         /* B 实际输出颜色继续使用屏幕映射后的 B 地址。 */
+        CHANNEL_B,                              /* B 报警与驱动故障处理保持逻辑 B 通道。 */
+        UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,         /* 按下发命令的零速/非零状态更新屏幕 B 泵颜色。 */
         1U,                                     /* B 抽吸业务方向保持 1。 */
         0U,                                     /* B 注水和灌注业务方向保持 0。 */
         0U,                                     /* B 协议方向保持不取反。 */
-        Pubinterface_UpdatePumpBOutputSpeed,     /* B 实际速度继续发布到 pumpMessageB.speed_output。 */
+        Pubinterface_UpdatePumpBOutputSpeed,     /* B 最终输出设定写入 pumpMessageB.speed_output，不是实测转速。 */
         PumpBehavior_SendPacketB,                /* B 帧继续走 B 逻辑出口。 */
         PumpBehavior_ReceivePacketB              /* B 回包从同一逻辑出口对应的物理串口取回。 */
     }
 };
 
 /*
- * 函数功能：把一帧 CRC 正确的步进驱动回包发布为指定逻辑泵的一致性快照。
+ * 函数功能：保存指定泵的一帧有效驱动反馈，并用版本号标明何时正在写入、何时已经写完。
  * 输入参数：channel 为逻辑 A/B 通道；frame 指向已通过帧头和 CRC 检查的 7 字节回包。
  * 返回参数：无。
  */
@@ -146,25 +146,25 @@ static void PumpBehavior_RecordDriverFeedback(PumpBehaviorChannel_t channel, con
 {
     if ((channel >= PUMP_BEHAVIOR_CHANNEL_COUNT) || (frame == NULL))
     {
-        return; /* 非法通道或空帧不能更新调试快照，保留最后一份可信数据。 */
+        return; /* 通道无效或没有回包数据时不写入，保留上一次有效反馈。 */
     }
 
     ++s_pump_feedback_version[channel]; /* 先发布奇数版本，阻止读取方复制半更新字段。 */
-    __DMB(); /* 保证写入中标志先于后续快照字段可见。 */
+    __DMB(); /* 先让读取方看到“正在写入”，然后再修改数据字段。 */
     s_pump_feedback_snapshot[channel].feedback_tick_ms = HAL_GetTick(); /* 记录主控完成本帧协议校验的时刻。 */
     s_pump_feedback_snapshot[channel].sequence = (uint16_t)(s_pump_feedback_snapshot[channel].sequence + 1U); /* 每份有效回包递增，便于断点判断回包是否持续到达。 */
     s_pump_feedback_snapshot[channel].direction = frame[1]; /* 保留驱动端实际方向原始值，不用主控业务方向替代。 */
     s_pump_feedback_snapshot[channel].actual_speed = (uint16_t)(((uint16_t)frame[2] << 8U) | frame[3]); /* 按协议高字节在前还原驱动实际速度。 */
     s_pump_feedback_snapshot[channel].raw_error = frame[4]; /* 保留驱动原始故障码，方便现场直接查看 0x04 等保护原因。 */
     s_pump_feedback_snapshot[channel].valid = 1U; /* 所有字段完成后标记本通道已有可信回包。 */
-    __DMB(); /* 保证快照字段先于最终偶数版本对其它任务可见。 */
-    ++s_pump_feedback_version[channel]; /* 写入完成后恢复偶数版本，开放一致性复制。 */
+    __DMB(); /* 先写完所有数据，再标记“已经写完”，避免读到新旧混合数据。 */
+    ++s_pump_feedback_version[channel]; /* 恢复偶数版本，读取方此时可以复制完整反馈。 */
 }
 
 /*
- * 函数功能：一致性复制指定逻辑泵最近一帧 CRC 正确的步进驱动回包快照。
- * 输入参数：channel 为逻辑 A/B 通道；snapshot 指向调用方提供的快照缓存。
- * 返回参数：快照有效且复制成功返回 1，否则返回 0 并把输出清零。
+ * 函数功能：复制指定泵最近的有效驱动反馈，保证各字段来自同一次更新。
+ * 输入参数：channel 为逻辑 A/B 通道；snapshot 指向调用方提供的结果缓存。
+ * 返回参数：已有有效反馈且复制成功返回 1；否则返回 0，通道无效或连续三次遇到更新时清空结果。
  */
 uint8_t PumpBehavior_CopyDriverFeedbackSnapshot(PumpBehaviorChannel_t channel,
                                                 PumpDriverFeedbackSnapshot_t *snapshot)
@@ -177,7 +177,7 @@ uint8_t PumpBehavior_CopyDriverFeedbackSnapshot(PumpBehaviorChannel_t channel,
     }
     if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT)
     {
-        memset(snapshot, 0, sizeof(*snapshot)); /* 通道越界时返回明确无效快照，不保留调用方旧值。 */
+        memset(snapshot, 0, sizeof(*snapshot)); /* 通道越界时清空结果，避免调用方误用上一次数据。 */
         return 0U;
     }
 
@@ -191,13 +191,13 @@ uint8_t PumpBehavior_CopyDriverFeedbackSnapshot(PumpBehaviorChannel_t channel,
             continue; /* 对应泵任务正在写入时立即重试，不返回混合字段。 */
         }
 
-        __DMB(); /* 版本检查完成后再复制共享快照。 */
+        __DMB(); /* 先确认没有写入，再开始复制反馈字段。 */
         *snapshot = s_pump_feedback_snapshot[channel]; /* 后续诊断只读调用方私有副本。 */
         __DMB(); /* 字段复制结束后再复核最终版本。 */
         version_after = s_pump_feedback_version[channel];
         if ((version_before == version_after) && ((version_after & 1U) == 0U))
         {
-            return (snapshot->valid != 0U) ? 1U : 0U; /* 前后版本一致时返回快照自身有效位。 */
+            return (snapshot->valid != 0U) ? 1U : 0U; /* 复制期间版本未变，按是否收到过有效反馈返回结果。 */
         }
     }
 
@@ -244,14 +244,14 @@ static void PumpBehavior_ParseDriverFeedback(PumpBehaviorChannel_t channel,
             continue;
         }
 
-        PumpBehavior_RecordDriverFeedback(channel, &rx_data[offset]); /* 先发布原始快照，断点可直接看方向、实际速度和故障码。 */
-        driver_error = rx_data[offset + 4U]; /* 仅 CRC 正确帧才能驱动故障状态机。 */
+        PumpBehavior_RecordDriverFeedback(channel, &rx_data[offset]); /* 先保存原始反馈，断点可直接看方向、回报速度和故障码。 */
+        driver_error = rx_data[offset + 4U]; /* 只有 CRC 正确的故障码才参与停泵和重启判断。 */
         runtime->last_feedback_error = driver_error; /* 记住最新驱动状态，供故障锁存判断是否允许解除。 */
         if ((driver_error != PUMP_DRIVER_ERROR_NONE) && (runtime->driver_fault_hold == 0U))
         {
             runtime->driver_fault_hold = 1U; /* 非零故障首帧立即锁存，后续正常回包不能自动复转。 */
             Pubinterface_HandlePumpDriverFault(binding->public_channel); /* 同步停本泵和各控制源，若为手柄冷却泵则联动停手柄。 */
-            SendDoubleBeepMessageIfIdle(); /* 故障边沿只投递一次双响，已存在高优先级报警时不覆盖。 */
+            SendDoubleBeepMessageIfIdle(); /* 首次发现故障时请求双响，已有高优先级报警时不打断它。 */
         }
 
         offset = (uint16_t)(offset + PUMP_DRIVER_FEEDBACK_FRAME_SIZE); /* 有效帧整帧跳过，继续处理 DMA 中可能粘连的下一帧。 */
@@ -259,8 +259,8 @@ static void PumpBehavior_ParseDriverFeedback(PumpBehaviorChannel_t channel,
 }
 
 /*
- * 函数功能：在步进驱动故障锁存期持续保持安全停机，并完成明确的重启解锁。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；request_active 是停机处理前锁存的本周期控制请求。
+ * 函数功能：驱动报故障后持续停泵，直到驱动回报正常且运行请求已经释放才允许再次启动。
+ * 输入参数：binding 为本通道固定配置；runtime 为本通道状态；request_active 表示故障处理前是否还有运行或排空请求。
  * 返回参数：本周期仍需故障停机返回 1；未锁存或已满足解锁条件返回 0。
  */
 static uint8_t PumpBehavior_ServiceDriverFaultHold(const PumpBehaviorBinding_t *binding,
@@ -269,23 +269,21 @@ static uint8_t PumpBehavior_ServiceDriverFaultHold(const PumpBehaviorBinding_t *
 {
     if (runtime->driver_fault_hold == 0U)
     {
-        return 0U; /* 未收到驱动故障时不改现有压力保护和泵运行时序。 */
+        return 0U; /* 没有驱动故障记录时，不干预后续压力检查和泵输出。 */
     }
 
     if ((runtime->last_feedback_error == PUMP_DRIVER_ERROR_NONE) && (request_active == 0U))
     {
         runtime->driver_fault_hold = 0U; /* 只有驱动已回报 0 且用户已释放运行源才结束本次故障锁存。 */
-        runtime->last_request_active = 0U; /* 解锁后保留无请求状态，下一次明确启动可形成新上升沿。 */
         return 0U;
     }
 
     Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 每周期清除本泵、外控和必要的手柄联动请求，阻止持续控制源复转。 */
-    runtime->last_request_active = request_active; /* 保留停机处理前的实际控制源状态，用于等待释放。 */
     return 1U;
 }
 
 /*
- * 函数功能：读取本通道队列中的一条最新速度命令，保持原来每周期最多处理一条消息的节拍。
+ * 函数功能：按入队顺序取出本通道的一条速度命令，每周期最多处理一条。
  * 输入参数：binding 指向本通道固定配置；message_queue 为本通道独立队列，可为 NULL。
  * 返回参数：无。
  */
@@ -295,7 +293,7 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 
     if (message_queue == NULL)
     {
-        return; /* 队列尚未初始化时保持公共状态不变，沿用旧任务的静默返回行为。 */
+        return; /* 队列还未创建时不等待、不改速度，直接结束本次接收。 */
     }
 
     if (Kernel_QueueReceive(message_queue, &message, 0) == pdTRUE)
@@ -305,69 +303,31 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：在本通道从无请求变为有请求时解除上一次压力锁止。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立跨周期状态；request_active 表示本周期是否请求运行或排空。
- * 返回参数：无。
- */
-static void PumpBehavior_ClearHoldOnStart(const PumpBehaviorBinding_t *binding,
-                                                       PumpBehaviorRuntime_t *runtime,
-                                                       uint8_t request_active)
-{
-    if ((request_active != 0U) && (runtime->last_request_active == 0U))
-    {
-        binding->message->pressure_hold_flag = false; /* 只允许新的控制启动沿解除锁止，压力自然下降不能自动复转。 */
-        binding->message->pressure_recover_ms = 0U;   /* 清零保留计时字段，避免调试时误判为仍在恢复计时。 */
-    }
-
-    runtime->last_request_active = request_active; /* 连续踩住脚踏或持续触控不重复视为新启动。 */
-}
-
-/*
- * 函数功能：按当前压力和锁止状态修正本周期业务速度，达到停泵点时执行现有公共安全处理。
- * 输入参数：binding 为本通道固定配置；pump_speed 为类型限幅后的业务速度；force_stop 用于返回本周期是否必须停泵。
- * 返回参数：压力闭环修正后的实际业务速度，锁止或达到停泵点时返回 0。
+ * 函数功能：用新压力帧判断是否提示超压；只有压力板未完成自标定时才把输出设为零。
+ * 输入参数：binding 为本通道固定配置；runtime 保存独立报警状态；pump_speed 为类型限幅后的业务速度。
+ * 返回参数：有效压力始终返回原业务速度，压力板未就绪时返回 0。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
-                                           uint16_t pump_speed,
-                                           uint8_t *force_stop)
+                                           PumpBehaviorRuntime_t *runtime,
+                                           uint16_t pump_speed)
 {
-    uint32_t weight_x10 = binding->message->weight_x10;          /* 一次读取本周期压力，避免多字节 volatile 值前后不一致。 */
-    uint16_t threshold_g = binding->message->pressure_threshold; /* 阈值字段仍只作为压力帧有效门禁。 */
+    uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
+    uint16_t threshold_g; /* 压力帧中此字段为 0 表示数据无效；实际报警阈值由主控配置表计算。 */
+    uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
 
-    if (force_stop != NULL)
+    taskENTER_CRITICAL(); /* 与压力串口写入方互斥，避免把不同帧的读数和序号拼成一个样本。 */
+    weight_x10 = binding->message->weight_x10; /* 复制当前完整压力帧的重量值。 */
+    threshold_g = binding->message->pressure_threshold; /* 复制同一帧的有效性字段。 */
+    sequence = binding->message->seq; /* 最后复制同一帧序号，供持续超限确认使用。 */
+    taskEXIT_CRITICAL(); /* 三个字段复制完立即恢复正常调度，报警消息在临界区外发送。 */
+
+    if (PumpPressureControl_UpdateAlarm(&runtime->pressure_alarm, pump_speed,
+                                         weight_x10, threshold_g, sequence, HAL_GetTick()) != 0U)
     {
-        *force_stop = 0U; /* 默认没有硬停，只有保持态或新触发停泵时改为 1。 */
+        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 确认超限后只弹窗和蜂鸣，不清运行源也不停止联动手柄。 */
     }
 
-    if (binding->message->pressure_hold_flag == true)
-    {
-        binding->message->pressure_recover_ms = 0U; /* 现策略不按时间自动恢复，保持字段清零。 */
-        Pubinterface_ServicePumpPressureHold(binding->public_channel); /* 保持停泵，并按原规则处理注水手柄联动。 */
-        if (force_stop != NULL)
-        {
-            *force_stop = 1U; /* 通知排空分支禁止重新生成非零输出。 */
-        }
-        return 0U; /* 压力锁止期间始终发送零速，直到新的启动沿解除锁止。 */
-    }
-
-    if (PumpPressureControl_IsPressureStopReached(pump_speed, weight_x10, threshold_g) != 0U)
-    {
-        binding->message->pressure_hold_flag = true; /* 第一次达到停泵点后建立锁止，禁止压力回落即复转。 */
-        binding->message->pressure_recover_ms = 0U;  /* 记录当前没有自动恢复倒计时。 */
-        if (force_stop != NULL)
-        {
-            *force_stop = 1U; /* 本周期立即进入硬停输出。 */
-        }
-        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 沿用原报警、蜂鸣和控制请求撤销链。 */
-        return 0U; /* 达到停泵点的首周期立即输出零速。 */
-    }
-
-    if (force_stop != NULL)
-    {
-        *force_stop = PumpPressureControl_ShouldForceStop(pump_speed, weight_x10, threshold_g); /* 保留旧硬停结果回传。 */
-    }
-
-    return PumpPressureControl_Apply(pump_speed, weight_x10, threshold_g); /* 未锁止时按原线性闭环限速。 */
+    return PumpPressureControl_ApplyReadiness(pump_speed, weight_x10); /* 真实压力超限保持设定输出，仅未就绪协议状态仍等待标定。 */
 }
 
 /*
@@ -391,16 +351,15 @@ static uint16_t PumpBehavior_ConvertWaterFlowToUart(uint16_t pump_flow)
 }
 
 /*
- * 函数功能：按泵类型完成方向选择、普通运行速度上限和 UART 数值换算，再执行压力闭环。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立状态；pump_type 为识别出的泵类型；pump_speed 指向待处理业务速度；drainage_active 表示当前是否为屏幕定时排空；force_stop 返回非排空阶段的压力硬停状态。
+ * 函数功能：按泵类型限制设定值并换算驱动速度；正常运行检查压力，注水排空不检查压力。
+ * 输入参数：binding 为本通道配置；runtime 为独立运行态；pump_type 为泵类型；pump_speed 为业务速度；drainage_active 为屏幕定时排空标志。
  * 返回参数：换算后的 16 位 UART 速度字段。
  */
 static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
                                            uint8_t pump_type,
                                            uint16_t *pump_speed,
-                                           uint8_t drainage_active,
-                                           uint8_t *force_stop)
+                                           uint8_t drainage_active)
 {
     uint16_t uart_data = 0U; /* 未识别类型或零速状态默认发送 0。 */
 
@@ -410,9 +369,9 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             runtime->business_direction = binding->draw_direction; /* 保留 A/B 原抽吸业务方向差异。 */
             if (*pump_speed > 15U)
             {
-                *pump_speed = 15U; /* 抽吸泵继续按原 1.5L 档位上限裁剪。 */
+                *pump_speed = 15U; /* 抽吸泵的内部设定最多为 15，之后按 42 倍换成协议速度。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 限幅后再做压力保护。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 抽吸沿用原阈值档位判断，超压只提示。 */
             uart_data = (uint16_t)(*pump_speed * 42U); /* 抽吸泵继续使用原 42 倍驱动换算。 */
             break;
 
@@ -420,15 +379,15 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             runtime->business_direction = binding->inject_direction; /* 保留 A/B 原注水业务方向差异。 */
             if ((drainage_active == 0U) && (*pump_speed > PUMP_INJECTWATER_SPEED_MAX))
             {
-                *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 普通运行和手柄联动最多输出 300，屏幕定时排空仍保留独立的 100 档。 */
+                *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 普通注水和手柄联动最多设为 300 mL/min；屏幕排空单独设定流量。 */
             }
             if ((drainage_active == 0U) && (binding->message->pedalDrainage_flag == false))
             {
-                *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 普通注水及手柄冷却联动仍执行原压力限速、停泵和报警链路。 */
+                *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 正常注水和手柄冷却超压只报警，泵和手柄继续按原请求运行。 */
             }
-            else if (force_stop != NULL)
+            else
             {
-                *force_stop = 0U; /* 屏幕定时排空或轻排阶段不读取压力、不新增报警；本分支不主动清除压力锁存字段。 */
+                PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 排空不读取压力，并清旧确认时间，退出排空后重新判断持续超限。 */
             }
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 注水泵按统一 /1.51 基础比例换算，并在 200 以上叠加实测补偿。 */
             break;
@@ -437,13 +396,14 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             runtime->business_direction = binding->inject_direction; /* 灌注与注水继续使用同一业务方向。 */
             if (*pump_speed > 300U)
             {
-                *pump_speed = 300U; /* 灌注最大速度继续保持 300ml。 */
+                *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, *pump_speed, force_stop); /* 换算 UART 前先应用压力保护。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 灌注同样只产生压力报警，保持设定流量和高流量补偿。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注泵调用同一函数，确保基础比例和高流量补偿均与注水泵一致。 */
             break;
 
         default:
+            PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 停止、离线或驱动故障期间清报警确认记录，下一次运行重新采样。 */
             break; /* 未识别类型不改变上次方向，只发送零速，与旧代码一致。 */
     }
 
@@ -468,7 +428,7 @@ static void PumpBehavior_ServiceDrainage(pumpMessage_t *message,
     if (message->timingDrainage_times >= PUMP_TIMING_DRAINAGE_TICKS)
     {
         *uart_data = 0U;                        /* 达到 10 秒后立即发送零速。 */
-        *pump_speed = 0U;                       /* 实际业务输出同步清零。 */
+        *pump_speed = 0U;                       /* 屏幕使用的输出设定也清零，不再显示排空流量。 */
         message->timingDrainage_flag = false;   /* 结束本次排空请求。 */
         message->run_flag = false;              /* 保留旧逻辑，同时撤销普通运行请求。 */
         message->timingDrainage_times = 0U;      /* 清零计数，等待下一次排空重新累计。 */
@@ -480,7 +440,7 @@ static void PumpBehavior_ServiceDrainage(pumpMessage_t *message,
 }
 
 /*
- * 函数功能：按严格 CRC16 协议组装并发送 6 字节泵驱动帧。
+ * 函数功能：按协议组装 6 字节泵命令，计算 CRC16 校验后发送。
  * 输入参数：binding 为本通道固定配置；uart_data 为驱动速度；business_direction 为该泵原业务方向值。
  * 返回参数：无。
  */
@@ -510,12 +470,12 @@ static void PumpBehavior_SendFrame(const PumpBehaviorBinding_t *binding,
     frame[4] = (uint8_t)(crc & 0x00FFU);            /* 驱动协议第 5 字节固定发送 CRC 低字节。 */
     frame[5] = (uint8_t)((crc >> 8U) & 0x00FFU);    /* 驱动协议第 6 字节固定发送 CRC 高字节。 */
 
-    binding->send_packet(frame, 6U); /* 每个 25ms 周期发送一帧 CRC 命令，用于续租驱动端 100ms 通信授权。 */
+    binding->send_packet(frame, 6U); /* 每 25ms 发一帧，使驱动持续收到有效命令，避免触发 100ms 通信超时。 */
 }
 
 /*
  * 函数功能：仅在泵启停状态发生变化时刷新屏幕输出颜色，避免每 25ms 重复写屏。
- * 输入参数：binding 为本通道固定配置；runtime 为本通道独立颜色状态；uart_data 为本周期实际驱动速度。
+ * 输入参数：binding 为本通道固定配置；runtime 为本通道颜色记录；uart_data 为本周期下发的速度，不是实测转速。
  * 返回参数：无。
  */
 static void PumpBehavior_UpdateColor(const PumpBehaviorBinding_t *binding,
@@ -527,18 +487,18 @@ static void PumpBehavior_UpdateColor(const PumpBehaviorBinding_t *binding,
         if (runtime->output_was_stopped == 0U)
         {
             runtime->output_was_stopped = 1U; /* 记录已经显示停止色，后续零速周期不重复写屏。 */
-            LCD_Show_2byte_Number(binding->output_color_address, 0xFFFFU); /* 白色表示当前泵无实际输出。 */
+            LCD_Show_2byte_Number(binding->output_color_address, 0xFFFFU); /* 白色表示本周期下发零速命令。 */
         }
     }
     else if (runtime->output_was_stopped != 0U)
     {
         runtime->output_was_stopped = 0U; /* 记录已经恢复运行色，后续运行周期不重复写屏。 */
-        LCD_Show_2byte_Number(binding->output_color_address, 0xFFE0U); /* 黄色表示当前泵正在实际输出。 */
+        LCD_Show_2byte_Number(binding->output_color_address, 0xFFE0U); /* 黄色表示下发了非零速度命令，不代表已收到转动反馈。 */
     }
 }
 
 /*
- * 函数功能：执行指定逻辑泵的一次 25ms 行为周期，处理驱动回包、故障锁存、队列速度、压力保护、排空、显示和 UART 下发。
+ * 函数功能：每 25ms 处理指定泵的速度请求、驱动故障、压力提示和排空计时，再发送命令并刷新显示。
  * 输入参数：channel 为逻辑 A/B 通道；message_queue 为该通道原有的独立 FreeRTOS 消息队列。
  * 返回参数：无。
  */
@@ -547,9 +507,8 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     const PumpBehaviorBinding_t *binding; /* 指向本周期固定的 A/B 硬件和状态绑定。 */
     PumpBehaviorRuntime_t *runtime;       /* 指向本通道独立跨周期状态。 */
     uint8_t pump_type = 0U;               /* 无运行请求时保持旧默认类型 0，不进入任何换算分支。 */
-    uint16_t pump_speed = 0U;             /* 本周期实际业务速度默认 0。 */
+    uint16_t pump_speed = 0U;             /* 本周期待输出设定默认 0；不是驱动回报的实测速度。 */
     uint16_t uart_data;                   /* 本周期最终下发给泵驱动的速度字段。 */
-    uint8_t force_stop = 0U;              /* 非排空阶段的压力保护是否要求本周期硬停。 */
     uint8_t drainage_active;              /* 锁存周期开始时的10秒定时排空状态，保持原分支判断时序。 */
     uint8_t request_active;               /* 运行或排空任一有效都视为有输出请求。 */
     uint8_t driver_fault_active;          /* 步进驱动故障锁存期为 1，本周期必须跳过所有非零输出路径。 */
@@ -564,12 +523,11 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
 
     PumpBehavior_ReceiveSpeed(binding, message_queue); /* 每周期最多取一条速度消息，等待时间保持 0。 */
 
-    request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 在故障处理清状态前锁存真实控制源，供释放门禁判断。 */
+    request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 先记住是否还有运行或排空请求，故障处理清标志后仍用此值判断是否允许重启。 */
     PumpBehavior_ParseDriverFeedback(channel, binding, runtime); /* 发送下一命令前先解析上一条命令的驱动回包。 */
     driver_fault_active = PumpBehavior_ServiceDriverFaultHold(binding, runtime, request_active); /* 故障锁存期持续清除运行源并输出零速。 */
     if (driver_fault_active == 0U)
     {
-        PumpBehavior_ClearHoldOnStart(binding, runtime, request_active); /* 驱动故障已解锁时，才允许新启动沿清除压力锁止。 */
         drainage_active = binding->message->timingDrainage_flag ? 1U : 0U; /* 压力处理前锁存排空状态。 */
     }
     else
@@ -586,9 +544,9 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
         pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
     }
 
-    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active, &force_stop); /* 定时排空标志区分固定速度，函数同时读取轻排标志决定是否旁路压力。 */
+    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active); /* 超压只报警，未就绪时输出零速，排空不查压力；驱动故障时始终输出零速。 */
     PumpBehavior_ServiceDrainage(binding->message, drainage_active, &pump_speed, &uart_data); /* 屏幕排空只保留 10 秒计时，排空阶段不再读取压力停泵结果。 */
-    binding->publish_output_speed(pump_speed); /* 先发布实际速度，再按原顺序发送驱动帧和刷新颜色。 */
+    binding->publish_output_speed(pump_speed); /* 先保存本周期输出设定，再发送驱动帧和刷新颜色；该值不是实测转速。 */
     PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction); /* 每个周期继续发送 6 字节帧。 */
-    PumpBehavior_UpdateColor(binding, runtime, uart_data); /* 只在启停边沿刷新对应逻辑泵颜色。 */
+    PumpBehavior_UpdateColor(binding, runtime, uart_data); /* 只在零速与非零速度之间切换时刷新对应泵颜色。 */
 }

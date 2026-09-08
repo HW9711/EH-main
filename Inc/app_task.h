@@ -10,9 +10,8 @@
 typedef void (*cbFunc)(uint32_t event);
 
 /*
- * APP_TASK_THREAD_STACK_DEPTH 是每个软任务迁移成独立 FreeRTOS 线程后的静态栈深度，单位为 StackType_t 字。
- * 原来所有软任务共用一个 AppTask 线程栈；现在每个 task_t 自带一份栈，方便调试器和 Tracealyzer 分别观察。
- * 这里保持 1024 words，优先保证旧业务回调的栈空间不因为拆线程而变小。
+ * 每个业务任务分配的栈大小，单位为StackType_t；当前MCU每项4字节，1024项就是4KB。
+ * 每个task_t都有一份栈：调大后每个任务都多占RAM，调小则要检查最深调用路径是否栈溢出。
  */
 #ifndef APP_TASK_THREAD_STACK_DEPTH
 #define APP_TASK_THREAD_STACK_DEPTH 1024U
@@ -27,18 +26,14 @@ typedef struct task_s
     bool threadCreated;
     const char *name;
     /*
-     * 独立线程运行资源全部静态保存在 task_t 内部。
-     * 业务模块原来已经声明了全局 kernel_task_t/task_t 句柄，因此这里扩展结构体即可完成静态 TCB/栈分配，
-     * 不需要额外集中数组，也不会引入 FreeRTOS heap 消耗。
+     * 每个任务的管理信息和栈直接放在该结构体中，创建线程时不再向FreeRTOS申请堆内存。
      */
     TaskHandle_t threadHandle;
     StaticTask_t threadTcb;
     StackType_t threadStack[APP_TASK_THREAD_STACK_DEPTH];
     /*
-     * Tracealyzer 事件格式句柄缓存。
-     * AppTask 是一个承载多个软任务的真实 FreeRTOS 任务，单靠系统任务名无法区分内部软任务；
-     * 因此每个软任务保存 CREATE/START/STOP/BEGIN/END 等格式句柄，用于在用户事件通道中标记
-     * 软任务生命周期和执行边界，避免运行中反复注册字符串造成额外开销。
+     * 保存Tracealyzer已登记的事件文字编号，用来显示该任务何时创建、启动、停止和执行。
+     * 复用这些编号，避免每次运行都重新登记相同文字。
      */
     uintptr_t traceBeginHandle;
     uintptr_t traceEndHandle;
@@ -52,7 +47,7 @@ typedef struct task_s
 
 /*
  * 调试器可直接查看的调度任务创建结果。
- * 0 通常表示 pdPASS；非 0 表示 xTaskCreate 失败。
+ * 与FreeRTOS定义比较：pdPASS表示创建成功，pdFAIL表示创建失败；不要把0当成成功。
  */
 extern volatile int32_t g_appTaskSchedulerCreateResult;
 

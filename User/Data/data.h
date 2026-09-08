@@ -1,11 +1,13 @@
 //data.h
+/* 旧版状态、型号和屏幕事件定义，保留给仍使用旧名称的代码。
+ * 当前业务参数以User/Application/include中的对应模块为准；修改未被引用的旧宏不会改变实际运行行为。 */
 
 #ifndef __DATA_H
 #define __DATA_H
 
 #include <stdint.h>
 
-#define ADDR_BASE 0x080E0000 	// FLASH 存储手柄型号的起始地址 (128K : 0x080E0000 ~ 0x080FFFFF)
+#define ADDR_BASE 0x080E0000 	//旧版手柄型号存储地址，当前源码未引用；不是现用参数保存地址的配置入口。
 
 #define OFF  0
 #define ON   1
@@ -52,7 +54,7 @@
 
 #define FootCtrl      0  //脚控
 #define ManualCtrl    1  //手控
-#define FootPedalValueOffset   20
+#define FootPedalValueOffset   20 /* 旧版脚踏偏移量，当前源码未引用；现用脚踏阈值在sscFOOT.c中处理。 */
 
 #define NO_Press  0       //抬起
 #define Press     1       //按下
@@ -207,9 +209,9 @@
 
 
 
-#define PUMPMLUNITMAX  70  //ML
+#define PUMPMLUNITMAX  70  //旧版泵流量上限，当前源码未引用；现用上限请查pump.h，修改这里不会改变泵输出。
 
-#define FREQUENCYMAX  40  //最大频率
+#define FREQUENCYMAX  40  //旧版往复频率上限，当前源码未引用；现用频率范围由工作参数和刀具识别结果决定。
 
 /**************操作指令码定义******************************/
 /*DS2431 ROM功能命令*/

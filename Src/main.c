@@ -116,12 +116,12 @@ int main(void)
   MX_TIM10_Init();
   MX_TIM14_Init();
   /* USER CODE BEGIN 2 */
-  /* 启动阶段默认关闭 Tracealyzer 记录器，后续需要抓调度日志时再临时打开。 */
+  /* 当前不调用调试记录初始化；即使TRACEALYZER_SNAPSHOT_ENABLE为1，也不会在这里启动记录。 */
   //Tracealyzer_RecorderInit();
 
   MX_I2C_Init(); /* CubeMX 外设初始化完成后再初始化业务使用的 I2C2/I2C3 总线。 */
 
-  Userparser_Init(); /* 板级总线就绪后直接初始化各业务模块，删除无业务含义的启动转发层。 */
+  Userparser_Init(); /* 总线初始化完成后，再设置业务状态并创建手柄、泵、脚踏等任务。 */
   /* USER CODE END 2 */
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
@@ -211,16 +211,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-	//10ms 锟斤拷锟斤拷锟斤拷
+	//TIM10溢出回调；此处不再处理蜂鸣器。
   else if (htim->Instance == TIM10) {
     /*
-     * 蜂鸣器行为已迁移到 SscBeepControlTask_Init() 创建的调度任务。
-     * TIM10 保留节拍入口但不再直接驱动 BEEP，避免新旧蜂鸣逻辑同时抢占IO。
+     * 蜂鸣器由SscBeepControlTask_Init()创建的任务控制。
+     * 这里不再写BEEP引脚，避免两处代码互相改变蜂鸣器状态。
      */
   }
-	//1s
+	//TIM14溢出回调；此处没有业务计时处理。
   else if (htim->Instance == TIM14) {
-    /* 旧计时状态已经下线，TIM14 只保留中断入口，避免旧报警蜂鸣计数继续运行。 */
+    /* 旧报警计数已停用，这个分支保留为空，不改变当前报警或蜂鸣状态。 */
   }
   /* USER CODE END Callback 1 */
 }

@@ -18,9 +18,8 @@ enum KERNEL_TASK_MODE
 };
 
 /*
- * 软任务统一通过宏补充函数名，避免各业务模块逐个手写名称。
- * Tracealyzer 侧会把该名称写入 AppTask 的 CREATE/START/STOP/BEGIN/END 事件，
- * 从而可以在同一个 FreeRTOS AppTask 线程内部区分不同软任务的运行边界。
+ * 用回调函数名作为任务名称，省去各模块重复填写名称。
+ * Tracealyzer据此显示每个业务任务的创建、启动、停止和执行记录。
  */
 #define Kernel_TaskCreate(task, func) Kernel_TaskCreateNamed((task), #func, (func))
 
@@ -33,8 +32,8 @@ BaseType_t Kernel_QueueSendNamed(QueueHandle_t queue, const void *item, TickType
 BaseType_t Kernel_QueueReceiveNamed(QueueHandle_t queue, void *buffer, TickType_t ticks_to_wait, const char *queue_name);
 
 /*
- * 队列命名与收发事件统一封装在 Kernel 层：业务模块仍保持 FreeRTOS 队列语义，
- * 但 Tracealyzer 可以看到清晰的对象名，以及 SEND/RECV 的返回值和阻塞等待参数。
+ * 这些宏调用FreeRTOS队列，并额外记录队列名称、发送/接收结果和等待时间。
+ * 队列满、队列空及等待规则都不变；等待时间单位仍是系统tick，不是毫秒。
  */
 #define Kernel_QueueCreate(length, item_size, name) Kernel_QueueCreateNamed((length), (item_size), (name))
 #define Kernel_QueueSend(queue, item, ticks_to_wait) Kernel_QueueSendNamed((queue), (item), (ticks_to_wait), #queue)

@@ -15,15 +15,15 @@ kernel_task_t SCREENKEYTaskHandle;
 
 /* 启动页和脚踏定标页仍沿用少量旧按键编码，这里只保存一次性事件，不再回写 旧全局键值。 */
 static uint8_t s_screenkey_legacy_event = KEY_NONE;
-/* 报警后的松手确认保持原14个30ms扫描周期，不改变现有长按报警恢复手感。 */
+/* 报警后确认松手所需的无信号周期数：14 × 30ms，约 420ms。增大会延长再次按下前的等待，减小会更容易把短暂断包当成松手。 */
 #define SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS 14U
-/* 只记录成功进入按键队列的0x5520时刻，队列满时收到的串口帧不能延长运行租约。 */
+/* 0x5520 是屏幕持续发送的“仍在按住”信号。只记录成功放入按键队列的时刻，队列满而丢弃的信号不能延长运行时间。 */
 static volatile uint32_t s_touch_keepalive_accepted_tick_ms = 0U;
-/* 1表示已经成功入队至少一份当前触控会话保活；退出触控、外控或报警时立即失效。 */
+/* 1 表示本次触控已有有效的按住信号；退出触控、进入外控或报警时清零。 */
 static volatile uint8_t s_touch_keepalive_accepted_valid = 0U;
 /* 触控长按过程中发生报警后置位，必须等屏幕停止发送 0x5520 一段时间才允许再次运行。 */
 static uint8_t s_touch_alarm_release_required = 0U;
-/* 报警锁存期间的原始保活帧间隔计数，持续收到 0x5520 时清零，只有真正松手才增长到超时。 */
+/* 报警后用于判断是否松手：收到 0x5520 就清零，一直收不到才逐渐数到松手确认值。 */
 static uint8_t s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS;
 
 /*
@@ -34,7 +34,7 @@ static uint8_t s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TIC
 void ScreenKey_LegacyEventPost(uint8_t key_value)
 {
   /* KEY_NONE 表示没有事件；非空键值只保留最后一次，行为与旧全局键值被覆盖的方式一致。 */
-  if (key_value != KEY_NONE) /* 空事件不能覆盖尚未被页面任务消费的有效按键。 */
+  if (key_value != KEY_NONE) /* 没有按键时不能覆盖尚未处理的有效按键。 */
   {
     s_screenkey_legacy_event = key_value;
   }
@@ -49,56 +49,56 @@ uint8_t ScreenKey_LegacyEventTake(void)
 {
   uint8_t key_value = s_screenkey_legacy_event;
 
-  /* 读取后立即清空，保证启动页和定标页不会重复消费同一次屏幕/脚踏事件。 */
+  /* 取出后立即清空，保证启动页和定标页不会重复处理同一次按键。 */
   s_screenkey_legacy_event = KEY_NONE;
 
   return key_value;
 }
 
 /*
- * 函数功能：使当前触控保活租约失效，旧时间戳只保留为调试值且不能继续维持电机运行。
+ * 函数功能：取消之前收到的按住信号，后续不能再靠旧信号启动或维持电机运行。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void ScreenKey_InvalidateTouchKeepAlive(void)
 {
   s_touch_keepalive_accepted_valid = 0U; /* 先撤销有效标志，退出触控、外控或报警后旧保活不得再次启动。 */
-  __DMB(); /* 保证其它任务先看到租约失效，再观察后续控制状态变化。 */
+  __DMB(); /* 保证上面的清零先完成，其他任务不能误用旧的有效标志。 */
 }
 
 /*
- * 函数功能：记录一份已经成功进入按键行为队列的8寸屏触控保活。
+ * 函数功能：按住信号已成功放入按键队列后，记录它的接收时刻。
  * 输入参数：无，函数在SendKeyBehMessage确认成功后读取HAL毫秒时钟。
  * 返回参数：无。
  */
 static void ScreenKey_RecordAcceptedTouchKeepAlive(void)
 {
-  s_touch_keepalive_accepted_tick_ms = HAL_GetTick(); /* 以成功入队后的真实时刻开始420ms租约，解析到但丢队列的帧不计入。 */
-  __DMB(); /* 时间戳必须先写完，再向30ms保活任务发布有效标志。 */
-  s_touch_keepalive_accepted_valid = 1U; /* 发布当前触控会话仍有一份近期已接受保活。 */
+  s_touch_keepalive_accepted_tick_ms = HAL_GetTick(); /* 从成功放入队列时起计算 420ms；未放入队列的信号不算。 */
+  __DMB(); /* 先写好接收时刻，再允许其他任务按“有效信号”读取。 */
+  s_touch_keepalive_accepted_valid = 1U; /* 标记本次触控已收到有效的按住信号。 */
 }
 
 /*
- * 函数功能：判断最近一份成功入队的触控保活是否仍在420ms有效窗口内。
+ * 函数功能：检查最近一次已放入按键队列的按住信号是否还有效。
  * 输入参数：无，读取当前HAL毫秒时钟和最近接受时刻。
- * 返回参数：1表示租约有效；0表示从未接受、已主动失效或已超过420ms。
+ * 返回参数：1 表示未到 420ms；0 表示没有有效信号、信号已取消或已到 420ms。
  */
 uint8_t ScreenKey_IsAcceptedTouchKeepAliveFresh(void)
 {
-  uint32_t accepted_tick_ms; /* 本地副本用于一次计算，避免跨任务读取时刻两次造成边界不一致。 */
+  uint32_t accepted_tick_ms; /* 只取一次接收时刻，避免计算期间被新信号更新。 */
 
   if (s_touch_keepalive_accepted_valid == 0U)
   {
-    return 0U; /* 当前会话没有成功入队保活时必须保持停机。 */
+    return 0U; /* 本次触控没有有效的按住信号，不能继续运行。 */
   }
 
-  __DMB(); /* 有效标志发布后再读取与它配套的成功入队时刻。 */
-  accepted_tick_ms = s_touch_keepalive_accepted_tick_ms; /* 读取单调毫秒时刻，32位无符号差值兼容HAL计数回绕。 */
+  __DMB(); /* 先确认有效标志，再读取对应的接收时刻。 */
+  accepted_tick_ms = s_touch_keepalive_accepted_tick_ms; /* 保存接收毫秒数；用无符号数相减，可处理时钟计满后从零开始的情况。 */
   return (((uint32_t)(HAL_GetTick() - accepted_tick_ms) < SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS) ? 1U : 0U); /* 到达420ms边界即判过期。 */
 }
 
 /*
- * 函数功能：记录报警锁存期间仍然收到触控保活帧。
+ * 函数功能：报警后仍收到按住信号时，重新开始等待松手。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -108,7 +108,7 @@ static void ScreenKey_MarkAlarmKeepAlive(void)
 }
 
 /*
- * 函数功能：判断本次 0x5520 保活帧是否应因报警锁存被拦截。
+ * 函数功能：报警中或报警后尚未松手时，拦住本次 0x5520 按住信号。
  * 输入参数：无。
  * 返回参数：true 表示本帧不投递业务队列；false 表示允许按普通触控保活处理。
  */
@@ -122,13 +122,13 @@ static uint8_t ScreenKey_BlockAlarmKeepAlive(void)
     return 1U; /* 报警帧不再投递到 ControlTypeActive，避免报警解除后同一次长按继续启动。 */
   }
 
-  if (s_touch_alarm_release_required != 0U) /* 报警虽已解除，但用户尚未松手时仍要保持运行锁存。 */
+  if (s_touch_alarm_release_required != 0U) /* 报警已解除但还没松手，仍不允许恢复运行。 */
   {
     ScreenKey_MarkAlarmKeepAlive(); /* 报警已解除但原始保活仍在，继续等待用户松手。 */
-    return 1U; /* 锁存未解除前不投递运行保活。 */
+    return 1U; /* 松手确认完成前，不把按住信号交给运行控制。 */
   }
 
-  return 0U; /* 没有报警锁存时，0x5520 可按正常触控保活处理。 */
+  return 0U; /* 没有报警且不再等待松手，可正常处理按住信号。 */
 }
 
 /*
@@ -141,21 +141,21 @@ static void ScreenKey_ServiceKeepAlive(void)
 
   if (WorkMessage.hmiactive_work != 0U) /* 外控复用 TOUCHWORK，但不属于屏幕触控保活。 */
   {
-    ScreenKey_InvalidateTouchKeepAlive(); /* 外控占用时撤销本机触控租约，退出外控后旧0x5520不能延迟启动。 */
-    s_touch_alarm_release_required = 0U; /* 外控期间触控锁存直接视为空闲，退出外控后下一次触控重新开始计时。 */
+    ScreenKey_InvalidateTouchKeepAlive(); /* 外控运行时取消旧触控信号，退出外控后不能靠旧信号启动。 */
+    s_touch_alarm_release_required = 0U; /* 外控期间不等待触控松手，下次触控重新判断。 */
     s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS; /* 同步复位释放计数，避免外控结束后沿用旧触控长按状态。 */
-    return; /* 外控虽然复用 TOUCHWORK 互斥标志，但不能进入本机触控保活状态机。 */
+    return; /* 外控也使用 TOUCHWORK 标志，但不能被屏幕按住信号超时而停机。 */
   }
 
   if ((WorkMessage.drivetype_work != TOUCHWORK) || (WorkMessage.touchactive_work != TOUCHWORK)) /* 只有本机触控已激活才进入保活状态机。 */
   {
-    ScreenKey_InvalidateTouchKeepAlive(); /* 非触控模式撤销旧租约，后续重新进入触控必须收到新的已入队保活。 */
-    s_touch_alarm_release_required = 0U; /* 已经退出触控模式时清掉报警后松手锁存，下一次触控重新开始。 */
+    ScreenKey_InvalidateTouchKeepAlive(); /* 不在触控模式就取消旧信号，下次触控必须重新收到有效信号。 */
+    s_touch_alarm_release_required = 0U; /* 退出触控后清除“报警后先松手”的要求，下次触控重新判断。 */
     s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS; /* 同步恢复释放计数到空闲态。 */
     return; /* 非触控控制源不能被本任务的保活超时逻辑停止。 */
   }
 
-  if (WorkMessage.alarm_flag == true) /* 报警处理可能先于下一份0x5520到达，周期任务也要主动撤销报警前租约。 */
+  if (WorkMessage.alarm_flag == true) /* 报警出现后立即取消旧信号，不必等下一次 0x5520 才处理。 */
   {
     ScreenKey_InvalidateTouchKeepAlive(); /* 旧保活消息即使尚在按键队列中，也不能在报警解除后恢复本次运行。 */
   }
@@ -165,7 +165,7 @@ static void ScreenKey_ServiceKeepAlive(void)
   {
     if (s_touch_alarm_release_ticks < SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS) /* 未到松手确认时间时继续累计空闲周期。 */
     {
-      s_touch_alarm_release_ticks++; /* 锁存期间只有没有收到原始 0x5520 时才累计，持续按压会被接收函数清零。 */
+      s_touch_alarm_release_ticks++; /* 每次检查加一；若仍收到按住信号，接收函数会把此计数清零。 */
     }
     if (s_touch_alarm_release_ticks >= SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS) /* 连续14个扫描周期未收到保活，确认本次按压已经释放。 */
     {
@@ -174,23 +174,19 @@ static void ScreenKey_ServiceKeepAlive(void)
     }
   }
 
-  if ((WorkMessage.runflag_work == true) && (ScreenKey_IsAcceptedTouchKeepAliveFresh() == 0U)) /* 触控实际运行必须持续持有近期已接受保活。 */
+  if ((WorkMessage.runflag_work == true) && (ScreenKey_IsAcceptedTouchKeepAliveFresh() == 0U)) /* 触控运行时必须持续收到有效的按住信号。 */
   {
-    ScreenKey_InvalidateTouchKeepAlive(); /* 超时后先撤销租约，确保下一次运行必须由新的成功入队保活重新武装。 */
-    s_touch_alarm_release_required = 0U; /* 普通松手停机不需要继续保持报警后松手锁存。 */
+    ScreenKey_InvalidateTouchKeepAlive(); /* 超时就取消旧信号，下次启动必须重新收到有效信号。 */
+    s_touch_alarm_release_required = 0U; /* 普通松手停机不需要再等待一次“报警后松手”。 */
     Pubinterface_StopTouchKeepAliveRun(); /* 420ms内没有成功入队新保活时只停电机，不退出触控界面。 */
   }
 }
 
 /*
- * 函数功能：把旧屏页面按键编号映射为现行业务事件，完成可用性门禁并只投递真正接受的触控消息。
+ * 函数功能：把屏幕按键编号转换为当前业务按键，确认此键允许使用后再放入按键队列。
  * 输入参数：legacy_key为屏幕串口协议解析出的旧页面按键编号。
- * 返回参数：无；未映射、不可用或队列已满时保持静默且不续期触控保活。
- * 屏幕串口协议仍沿用旧的页面地址和按键编号，但业务出口改为 V1.8 新接口事件。
- * 这里集中维护旧 `ScreenKey_data` 数字到 `SCREENKey_*` 枚举的映射：
- * 1. 解析层继续按原 HMI 帧格式识别按键，避免改动串口协议；
- * 2. 行为层统一交给 sscKEYBH 分发，逐步替代旧屏幕模块的按键仓库职责；
- * 3. 无新接口等价项的旧码暂时静默，后续迁 UI/RFID 时再补专用事件。
+ * 返回参数：无；未定义、不可用或队列已满的按键不执行、不蜂鸣，也不延长触控运行时间。
+ * 屏幕仍发送原编号；此处转成 SCREENKey_* 后由 sscKEYBH 调用对应业务函数。
  */
 static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
 {
@@ -315,7 +311,7 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
       screen_key = SCREENKey_HMI_EXIT;
       break;
 
-    case 44U: /* ScreenKey_TouchKeepAlive：脚本验收标记，实际业务宏名保持 SCREENKey_TouchKeepAlive。 */
+    case 44U: /* 0x5520 按住信号在本函数中使用编号 44。 */
       screen_key = SCREENKey_TouchKeepAlive; /* 8 寸屏 0x5520 触控按住保活，持续收到才允许触控运行。 */
       break;
 
@@ -350,11 +346,11 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
   if (screen_key != 0U) /* 只有成功映射为现行业务键的触摸才进入可用性判断，未定义坐标保持静默。 */
   {
     uint8_t beep_enable = 1U; /* 默认所有有效触控按键响一声，给操作者明确反馈。 */
-    if (screen_key == SCREENKey_TouchKeepAlive) /* 触控运行保活需要先处理报警后的“必须松手”锁存。 */
+    if (screen_key == SCREENKey_TouchKeepAlive) /* 处理按住信号前，先确认报警后已松手。 */
     {
       if (ScreenKey_BlockAlarmKeepAlive() != 0U) /* 报警期间或报警后仍在长按时，当前保活帧必须静默丢弃。 */
       {
-        return; /* 报警锁存期间屏幕仍在长按时不蜂鸣、不投递，必须松手后下一次按压才有效。 */
+        return; /* 报警后仍在长按时不执行、不蜂鸣；必须松手后重新按下。 */
       }
     }
 
@@ -373,17 +369,17 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
 
     if (SendKeyBehMessage(SCREENKey, screen_key) == false) /* 只有消息真正进入统一行为队列才允许改变保活和蜂鸣状态。 */
     {
-      return; /* 队列满或尚未创建时不续期、不蜂鸣，避免“主控未接受但运行租约被延长”。 */
+      return; /* 队列满或尚未创建时不延长有效时间，也不蜂鸣，避免提示已接受实际却未处理。 */
     }
 
-    if (screen_key == SCREENKey_TouchKeepAlive) /* 入队成功后才发布本次0x5520保活租约。 */
+    if (screen_key == SCREENKey_TouchKeepAlive) /* 成功放入队列后才更新本次按住信号的有效时间。 */
     {
       ScreenKey_RecordAcceptedTouchKeepAlive(); /* 业务队列已经持有该事件，此时续期不会掩盖投递失败。 */
     }
     else if (screen_key == SCREENKey_TouchEXIT) /* 用户主动退出触控时，立即结束报警后的松手等待。 */
     {
       ScreenKey_InvalidateTouchKeepAlive(); /* 退出事件已成功排队，当前会话旧保活从此不得延迟启动。 */
-      s_touch_alarm_release_required = 0U; /* 用户主动退出触控时视为已松手，清除报警锁存。 */
+      s_touch_alarm_release_required = 0U; /* 主动退出触控后，不再等待本次触控松手。 */
       s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS; /* 下一次进入触控重新计算报警后松手状态。 */
     }
 
@@ -394,8 +390,8 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
   }
 }
 
-#define SCREENKEY_MIN_FRAME_SIZE     9U  /* 当前按键帧至少包含帧头、命令、地址和 dat1[8] 键值。 */
-#define SCREENKEY_FRAME_BUFFER_SIZE 16U  /* 保持原局部帧缓存容量，超长声明帧直接丢弃，禁止覆盖任务栈。 */
+#define SCREENKEY_MIN_FRAME_SIZE     9U  /* 最短按键包长度，单位字节；9 字节才能读到 frame[8] 的键值，不能随意减小。 */
+#define SCREENKEY_FRAME_BUFFER_SIZE 16U  /* 单个按键包最多接收 16 字节；超长包丢弃，修改须同时检查屏幕协议和任务内存用量。 */
 
 /* 主运行页各区域的按键顺序与 DWIN 0x2400~0x2404 表格一致，数组下标为 key-1。 */
 static const uint8_t s_screen_handle_actions[] = {24U, 25U, 22U, 23U, 20U, 21U, 36U};
@@ -499,9 +495,9 @@ static void ScreenKey_DispatchFrame(const uint8_t *frame)
 {
   uint8_t action = 0U; /* 0 表示当前地址没有对应业务动作。 */
   uint8_t section = frame[5]; /* DWIN 地址低字节决定主运行页功能区。 */
-  uint8_t key_index = frame[8]; /* 数据区第一个字节是该功能区内的按键编号。 */
+  uint8_t key_index = frame[8]; /* 第一个数据字的低字节保存该功能区内的按键编号。 */
 
-  if (frame[4] == 0x55U) /* 0x55 地址族只承载触控运行保活，不按主页面 0x24 区域解析。 */
+  if (frame[4] == 0x55U) /* 地址高字节为 0x55 时，只检查触控按住信号，不按 0x24xx 按键区处理。 */
   {
     if (section == 0x20U) /* 仅 0x5520 是当前定义的触控保活地址，其它 0x55 地址不产生动作。 */
     {
@@ -521,7 +517,7 @@ static void ScreenKey_DispatchFrame(const uint8_t *frame)
 
   if (frame[4] != 0x24U) /* 非主运行页地址在本分发器中没有业务按键。 */
   {
-    return; /* 其它未定义地址只消费串口帧，不进入业务。 */
+    return; /* 未定义地址的数据包直接忽略，不执行任何按键动作。 */
   }
 
   switch (section)
@@ -565,7 +561,7 @@ static void ScreenKey_DispatchFrame(const uint8_t *frame)
       return; /* 未定义功能区不产生业务按键。 */
   }
 
-  if (action != 0U) /* 只有地址和 key 均匹配映射表时才进入统一按键门禁。 */
+  if (action != 0U) /* 地址和按键编号都有对应动作时，才继续检查此键是否允许使用。 */
   {
     ScreenKey_PostLegacyAction(action); /* 所有主运行页动作统一进入现有按键队列。 */
   }
@@ -588,7 +584,7 @@ static void ScreenKey_ParseRxData(uint8_t *data, uint16_t data_len)
     return; /* 调用方没有提供数据缓冲时不访问内存，也不产生任何按键事件。 */
   }
 
-  while ((data_len - offset) >= SCREENKEY_MIN_FRAME_SIZE) /* 剩余数据不足最短帧时停止扫描，半帧等待下一次 DMA 接收。 */
+  while ((data_len - offset) >= SCREENKEY_MIN_FRAME_SIZE) /* 不足 9 字节就停止；本函数没有保存或拼接跨次接收的半包。 */
   {
     remaining = data_len - offset; /* 每次按当前偏移重新计算，不能沿用未扣除噪声字节的总长度。 */
 

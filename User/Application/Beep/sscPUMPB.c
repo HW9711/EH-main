@@ -6,9 +6,9 @@
 #include "pump.h"
 #include "pump_behavior_core.h"
 
-/* B 泵继续使用独立队列，队列深度保持 2 条。 */
+/* B 泵速度队列最多存 2 条消息，不与 A 泵共用。 */
 static QueueHandle_t PUMPBMsgQueue = NULL;
-/* B 泵继续使用独立任务句柄和独立静态线程资源。 */
+/* B 泵任务的调度信息，与 A 泵分开保存。 */
 static kernel_task_t PUMPBBehaviorHandle;
 
 /*
@@ -22,8 +22,8 @@ static void PUMPBQueue_Init(void)
 }
 
 /*
- * 函数功能：向 B 泵队列提交新的业务速度，仅过滤已经成功入队的连续重复消息。
- * 输入参数：pump_type 为调用方携带的泵类型；value 为新的业务速度。
+ * 函数功能：向 B 泵队列提交新设定；与上次成功入队的消息完全相同时不重复发送。
+ * 输入参数：pump_type 为泵类型；value 为新设定，注水/灌注单位 mL/min，抽吸使用内部设定值。
  * 返回参数：无。
  */
 void SendPumpBMessage(uint8_t pump_type, uint16_t value)
@@ -34,7 +34,7 @@ void SendPumpBMessage(uint8_t pump_type, uint16_t value)
 
     if (PUMPBMsgQueue == NULL)
     {
-        return; /* 队列尚未创建时保持旧静默返回行为，不阻塞启动流程。 */
+        return; /* 队列还没创建，直接返回，不等待也不保存本次消息。 */
     }
     if ((last_queued_valid != 0U) &&
         (last_queued_msg.pump_type == pump_type) &&
@@ -43,12 +43,12 @@ void SendPumpBMessage(uint8_t pump_type, uint16_t value)
         return; /* 只有相同命令已经成功排队时才去重，避免队列满后永久丢失最新设定。 */
     }
 
-    new_msg.pump_type = pump_type; /* 把调用方泵类型写入本次候选消息，不提前改变去重状态。 */
-    new_msg.Value = value; /* 把最新业务速度写入候选消息，任务出队后只更新 speed_work。 */
+    new_msg.pump_type = pump_type; /* 保存本次消息的泵类型；接收端不据此改变已识别的设备类型。 */
+    new_msg.Value = value; /* 保存新设定，任务取到消息后用它更新 speed_work。 */
     if (Kernel_QueueSend(PUMPBMsgQueue, &new_msg, 0) == pdPASS)
     {
-        last_queued_msg = new_msg; /* 发送成功后才更新去重基准，表示该设定已经由泵任务排队接收。 */
-        last_queued_valid = 1U; /* 标记去重基准有效，后续连续相同消息可以安全过滤。 */
+        last_queued_msg = new_msg; /* 只在入队成功后记住消息；队列满时不改记录，方便下次重试。 */
+        last_queued_valid = 1U; /* 已有成功入队记录，下次可据此跳过重复消息。 */
     }
 }
 
@@ -60,7 +60,7 @@ void SendPumpBMessage(uint8_t pump_type, uint16_t value)
 static void PUMPBBehaviorTask(uint32_t event)
 {
     (void)event; /* 明确忽略调度事件，B 泵行为只按固定周期运行。 */
-    PumpBehaviorCore_Run(PUMP_BEHAVIOR_CHANNEL_B, PUMPBMsgQueue); /* 把逻辑 B 和 B 独立队列交给共用行为内核。 */
+    PumpBehaviorCore_Run(PUMP_BEHAVIOR_CHANNEL_B, PUMPBMsgQueue); /* 使用公共泵处理函数，只读取 B 队列并操作 B 泵状态。 */
 }
 
 /*

@@ -7,5 +7,5 @@ extern uint8_t DisPlayData[10];
 
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value);
 void SscUIDisplayTask_Init(void);
-void UIDP_ForceNoHandleDisplay(void); /* 最后一个手柄拔出时强制刷新无手柄关键控件，并丢弃旧 UI 队列残留。 */
-void UIDP_RequestHandleDisplayReplay(void); /* 手柄拔出状态落地后，在约 60ms/120ms 补发两次 A/B 权威连接快照。 */
+void UIDP_ForceNoHandleDisplay(void); /* 最后一个手柄拔出后，清掉旧显示消息并立即显示“无手柄”。 */
+void UIDP_RequestHandleDisplayReplay(void); /* 拔出后再补刷两次当前 A/B 连接状态；间隔至少约 60ms，队列忙时延后。 */

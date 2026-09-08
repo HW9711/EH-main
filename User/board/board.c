@@ -1,7 +1,7 @@
 ﻿/**
  * @file board.c
- * @brief 硬件配置实现文件 - 实现所有硬件接口的初始化
- *        使用board.h中的宏定义，修改引脚只需改board.h
+ * @brief 配置主控业务GPIO；串口、I2C和定时器由各自初始化函数设置。
+ *        引脚来自board.h和board_resource_map.h，改接线还须核对board_profile.h的通道交换开关。
  */
 #include "stm32f4xx_hal.h"
 #include "board.h"

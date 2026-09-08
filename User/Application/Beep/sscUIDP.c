@@ -19,36 +19,36 @@ typedef struct
 {
 	uint8_t areaId;//a泵区域，B泵区域，速度区域，等等
 
-	bool enable_flag;//激活
-	uint8_t Value[10];
+	bool enable_flag;//该显示区域是否启用；禁用时隐藏数字或显示不可用图标。
+	uint8_t Value[10]; //区域参数，具体字节含义由 areaId 对应的显示函数决定。
 }UIDPMessage_t ;
 
-static UIDPMessage_t s_uidp_last_msg = {0};//记录上一次成功投递的 UI 消息，用于复用副工程的重复刷新过滤效果。
+static UIDPMessage_t s_uidp_last_msg = {0};//记住上一次成功放入队列的显示消息，内容完全相同时不重复发送。
 static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
-/* UIDP 队列需要承接上电 A/B 手柄和 RFID 二次刷新连续消息，容量过小会导致后到的 B 通道或刀具规格消息丢失。 */
+/* 显示队列容量，单位条：默认 48。开机时需容纳 A/B 手柄及 RFID 连续刷新；减小可能丢消息，增大会多占内存。 */
 #define UIDP_QUEUE_LENGTH 48U
-/* 主运行页开机后 3 秒内允许补刷，覆盖手柄 EEPROM 和 RFID 首次识别完成的窗口。 */
+/* 开机补刷总时长，单位为 10ms 任务周期：300 对应约 3 秒；期间等待手柄和 RFID 识别结果后补刷。 */
 #define UIDP_STARTUP_REPLAY_TOTAL_TICKS 300U
-/* 每 200ms 尝试补刷一次，避免每个 10ms 周期都重复发送整页 UI。 */
+/* 开机补刷间隔，单位为 10ms 任务周期：20 对应约 200ms；队列未空还会继续等待，减小会增加写屏次数。 */
 #define UIDP_STARTUP_REPLAY_PERIOD_TICKS 20U
-/* 手柄拔出业务状态落地后补发两次 A/B 权威连接快照，覆盖屏幕串口或显示队列的低概率单帧丢失。 */
+/* 手柄拔出后的补发次数，默认 2 次：重新发送当前 A/B 连接和选中状态，减少屏幕漏收一次后显示不更新。 */
 #define UIDP_HANDLE_REPLAY_COUNT 2U
-/* 显示任务周期为 10ms，6 个周期对应 60ms；两次补发约发生在拔出后的 60ms 和 120ms。 */
+/* 拔出后补发的最短间隔，单位为 10ms 周期：6 对应约 60ms；队列未空时会延后，不保证正好在 60ms/120ms 发出。 */
 #define UIDP_HANDLE_REPLAY_PERIOD_TICKS 6U
-/* 泵档位正常运行态固定使用每档渐隐组的第 0 帧，取消动画后续如需播放再传入 1~4 帧。 */
+/* 泵档位固定显示的图片序号：0~4 对应同一档的 5 张图，当前为 0；改此值只换静态图片，不会自动播放动画。 */
 #define UIDP_PUMP_GEAR_RUN_FRAME 0U
-/* 每个显示任务周期最多连续处理 12 条 UI 消息，压缩上电主运行页控件逐个加载的可见时间。 */
+/* 每个 10ms 显示任务周期最多处理的消息条数，默认 12；增大可更快清空队列，但会延长单次任务和串口发送时间。 */
 #define UIDP_DISPLAY_BATCH_LIMIT 12U
-/* 泵档位表每档包含 5 张渐隐资源，0 档没有渐隐时 5 个槽位都保持同一张图。 */
+/* 每个泵档位的图片数量，固定 5 张，须与下方图片表一致；0 档的 5 项均为同一张图。 */
 #define UIDP_PUMP_GEAR_FRAME_COUNT 5U
-/* 泵档位最多显示 0~10 共 11 档，和屏幕工程 249/349 起始资源保持一致。 */
+/* 泵档位图片表的行数，固定 11 行，对应 0~10 档；不是泵流量上限，修改须同步图片表。 */
 #define UIDP_PUMP_GEAR_COUNT 11U
 static uint16_t s_uidp_startup_replay_ticks = 0U; /* 开机状态补刷剩余调度次数，倒计时结束后不再重发。 */
 static uint16_t s_uidp_startup_replay_period = 0U; /* 补刷间隔计数，确保 UI 队列有时间处理上一批消息。 */
-static volatile uint8_t s_uidp_handle_replay_remaining = 0U; /* 拔出后尚未发送的 A/B 连接快照次数，由插拔业务任务启动、显示任务消费。 */
-static volatile uint8_t s_uidp_handle_replay_period = 0U; /* 拔出连接快照的 10ms 周期倒计时，避免连续消息紧挨发送。 */
+static volatile uint8_t s_uidp_handle_replay_remaining = 0U; /* 拔出后还要补发几次 A/B 连接状态；插拔任务设置，显示任务每发一次减一。 */
+static volatile uint8_t s_uidp_handle_replay_period = 0U; /* 距离下次补发还有几个 10ms 周期，避免连续紧挨着发送。 */
 
-/* B 泵档位资源：249 为 0 档；250~254 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
+/* B 泵图片表：249 为 0 档；250~254 为 1 档的 5 张图；下一档图片号加 10，当前只显示每行第 0 张。 */
 static const uint16_t s_uidp_pump_b_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
 {
 	{249U, 249U, 249U, 249U, 249U},
@@ -64,7 +64,7 @@ static const uint16_t s_uidp_pump_b_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEA
 	{340U, 341U, 342U, 343U, 344U}
 };
 
-/* A 泵档位资源：349 为 0 档；350~354 为 1 档取消渐隐 5 帧；后续每 10 递增一档。 */
+/* A 泵图片表：349 为 0 档；350~354 为 1 档的 5 张图；下一档图片号加 10，当前只显示每行第 0 张。 */
 static const uint16_t s_uidp_pump_a_gear_pic[UIDP_PUMP_GEAR_COUNT][UIDP_PUMP_GEAR_FRAME_COUNT] =
 {
 	{349U, 349U, 349U, 349U, 349U},
@@ -87,8 +87,8 @@ static void UIDPQueue_Init(void)
 
 /*
  * 函数功能：按泵类型和流量值换算屏幕 0~10 档档位。
- * 输入参数：pump_type 为 DRAWWATER/INJECTWATER/POURWATER；value 为当前泵流量/速度值。
- * 返回参数：0~10 档位，超出范围时按 10 档钳位。
+ * 输入参数：pump_type 为抽吸、注水或灌注类型；value 在注水/灌注时为 mL/min，在抽吸时为内部设置档值。
+ * 返回参数：屏幕 0~10 档，换算结果大于 10 时只显示 10 档。
  */
 static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 {
@@ -97,16 +97,16 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 	if(pump_type==INJECTWATER)//注水
 	{
 		if(value==0U)gear_value=0U; /* 注水流量为 0 时显示停止档，不点亮进度。 */
-		else if(value<=30U)gear_value=1U; /* 注水泵 1~30ml 映射到第 1 格，与灌注泵量程保持一致。 */
-		else if(value<=60U)gear_value=2U; /* 注水泵 31~60ml 映射到第 2 格。 */
-		else if(value<=90U)gear_value=3U; /* 注水泵 61~90ml 映射到第 3 格。 */
-		else if(value<=120U)gear_value=4U; /* 注水泵 91~120ml 映射到第 4 格。 */
-		else if(value<=150U)gear_value=5U; /* 注水泵 121~150ml 映射到第 5 格。 */
-		else if(value<=180U)gear_value=6U; /* 注水泵 151~180ml 映射到第 6 格。 */
-		else if(value<=210U)gear_value=7U; /* 注水泵 181~210ml 映射到第 7 格。 */
-		else if(value<=240U)gear_value=8U; /* 注水泵 211~240ml 映射到第 8 格。 */
-		else if(value<=270U)gear_value=9U; /* 注水泵 241~270ml 映射到第 9 格。 */
-		else gear_value=10U; /* 注水泵 271~300ml 显示满格，异常更大值也在此钳位。 */
+		else if(value<=30U)gear_value=1U; /* 注水泵 1~30mL/min 显示 1 格，与灌注泵相同。 */
+		else if(value<=60U)gear_value=2U; /* 注水泵 31~60mL/min 显示 2 格。 */
+		else if(value<=90U)gear_value=3U; /* 注水泵 61~90mL/min 显示 3 格。 */
+		else if(value<=120U)gear_value=4U; /* 注水泵 91~120mL/min 显示 4 格。 */
+		else if(value<=150U)gear_value=5U; /* 注水泵 121~150mL/min 显示 5 格。 */
+		else if(value<=180U)gear_value=6U; /* 注水泵 151~180mL/min 显示 6 格。 */
+		else if(value<=210U)gear_value=7U; /* 注水泵 181~210mL/min 显示 7 格。 */
+		else if(value<=240U)gear_value=8U; /* 注水泵 211~240mL/min 显示 8 格。 */
+		else if(value<=270U)gear_value=9U; /* 注水泵 241~270mL/min 显示 9 格。 */
+		else gear_value=10U; /* 注水泵大于 270mL/min 就显示满格，异常大值也不再增加格数。 */
 	}
 	else if(pump_type==DRAWWATER)//抽吸
 	{
@@ -119,15 +119,15 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 	else if(pump_type==POURWATER)//灌注
 	{
 		if(value==0U)gear_value=0U; /* 灌注流量为 0 时显示停止档。 */
-		else if(value<=30U)gear_value=1U; /* 1~30ml 映射到第 1 格。 */
-		else if(value<=60U)gear_value=2U; /* 31~60ml 映射到第 2 格。 */
-		else if(value<=90U)gear_value=3U; /* 61~90ml 映射到第 3 格。 */
-		else if(value<=120U)gear_value=4U; /* 91~120ml 映射到第 4 格。 */
-		else if(value<=150U)gear_value=5U; /* 121~150ml 映射到第 5 格。 */
-		else if(value<=180U)gear_value=6U; /* 151~180ml 映射到第 6 格。 */
-		else if(value<=210U)gear_value=7U; /* 181~210ml 映射到第 7 格。 */
-		else if(value<=240U)gear_value=8U; /* 211~240ml 映射到第 8 格。 */
-		else if(value<=270U)gear_value=9U; /* 241~270ml 映射到第 9 格。 */
+		else if(value<=30U)gear_value=1U; /* 1~30mL/min 显示 1 格。 */
+		else if(value<=60U)gear_value=2U; /* 31~60mL/min 显示 2 格。 */
+		else if(value<=90U)gear_value=3U; /* 61~90mL/min 显示 3 格。 */
+		else if(value<=120U)gear_value=4U; /* 91~120mL/min 显示 4 格。 */
+		else if(value<=150U)gear_value=5U; /* 121~150mL/min 显示 5 格。 */
+		else if(value<=180U)gear_value=6U; /* 151~180mL/min 显示 6 格。 */
+		else if(value<=210U)gear_value=7U; /* 181~210mL/min 显示 7 格。 */
+		else if(value<=240U)gear_value=8U; /* 211~240mL/min 显示 8 格。 */
+		else if(value<=270U)gear_value=9U; /* 241~270mL/min 显示 9 格。 */
 		else gear_value=10U;
 	}
 
@@ -142,7 +142,7 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 /*
  * 函数功能：按 A/B 泵、档位和渐隐帧号查找新屏泵区域图片资源。
  * 输入参数：pump_id 为 1 表示 A 泵、2 表示 B 泵；gear_value 为 0~10 档；fade_frame 为 0~4 渐隐帧。
- * 返回参数：屏幕图片资源号，异常参数返回对应泵 0 档图。
+ * 返回参数：图片编号；档位越界用 0 档，帧号越界用第 0 张，未知泵号用 B 泵 0 档。
  */
 static uint16_t UIDP_PumpGearPicture(uint8_t pump_id, uint8_t gear_value, uint8_t fade_frame)
 {
@@ -162,13 +162,13 @@ static uint16_t UIDP_PumpGearPicture(uint8_t pump_id, uint8_t gear_value, uint8_
 	{
 		return s_uidp_pump_b_gear_pic[gear_value][fade_frame]; /* B 泵使用 249~344 资源表。 */
 	}
-	return s_uidp_pump_b_gear_pic[0U][UIDP_PUMP_GEAR_RUN_FRAME]; /* 未知泵号按 B 泵 0 档兜底，避免返回 0 号图片。 */
+	return s_uidp_pump_b_gear_pic[0U][UIDP_PUMP_GEAR_RUN_FRAME]; /* 未知泵号显示 B 泵 0 档图，不返回无关的 0 号图片。 */
 }
 
 /*
  * 函数功能：按泵类型和启用状态选择泵类型标题图片。
  * 输入参数：pump_type 为泵业务类型；enable_flag 表示该泵是否可用。
- * 返回参数：210~215 范围内的新屏泵类型图片号。
+ * 返回参数：210~215 范围内的泵类型图片号；未知类型返回 0，由调用方隐藏标题。
  */
 static uint16_t UIDP_PumpTypePicture(uint8_t pump_type, bool enable_flag)
 {
@@ -181,7 +181,7 @@ static uint16_t UIDP_PumpTypePicture(uint8_t pump_type, bool enable_flag)
 		case INJECTWATER:
 			return enable_flag ? 213U : 210U; /* 注水泵识别在线后改用灌注泵 213 图标，停用态仍保留原 210 灰色图。 */
 		default:
-			return 0U; /* 未识别类型不再兜底为抽吸泵，调用侧负责隐藏类型标题。 */
+			return 0U; /* 未知类型不显示成抽吸泵，由调用方隐藏标题。 */
 	}
 }
 
@@ -214,9 +214,9 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
 	{
 		case DRAWWATER:
 		case POURWATER:
-			return enable_flag ? (run_flag ? 202U : 201U) : 200U; /* 抽吸泵和注水泵使用启动按钮组：200 禁用、201 停止、202 运行。 */
+			return enable_flag ? (run_flag ? 202U : 201U) : 200U; /* 抽吸和灌注泵使用启动按钮组：200 禁用、201 停止、202 运行。 */
 		case INJECTWATER:
-			return enable_flag ? (run_flag ? 205U : 204U) : 203U; /* 灌注泵使用排空按钮组：203 禁用、204 停止、205 运行。 */
+			return enable_flag ? (run_flag ? 205U : 204U) : 203U; /* 注水泵使用排空按钮组：203 禁用、204 停止、205 排空中。 */
 		default:
 			return 200U; /* 未识别泵类型统一回到启动按钮禁用图，避免误显示为可操作状态。 */
 	}
@@ -224,7 +224,7 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
 
 /*
  * 函数功能：向屏幕显示任务投递一个区域刷新消息。
- * 输入参数：areaId 为 UI 区域编号；enable_flag 为显示开关；Value 为最多 10 字节的区域参数，允许为空。
+ * 输入参数：areaId 为显示区域编号；enable_flag 为该区域启用状态；Value 为空或指向至少 10 字节参数，本函数固定复制 10 字节。
  * 返回参数：无。
  */
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
@@ -235,7 +235,7 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 	msg.enable_flag = enable_flag;
 	if(Value != NULL)
 	{
-		memcpy(msg.Value, Value, 10);//调用方传入有效参数时完整复制，保证显示任务读取到稳定快照
+		memcpy(msg.Value, Value, 10);//复制完整的 10 字节，调用方之后修改原数据不会改变已排队的显示内容。
 	}
 	else
 	{
@@ -256,18 +256,18 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 }
 
 /*
- * 函数功能：启动一次手柄拔出后的短时显示补发，在不重置 UI 队列的前提下重新发送两次 A/B 完整连接快照。
+ * 函数功能：安排手柄拔出后的两次补刷，重新显示当前 A/B 连接和选中状态，不清空现有显示队列。
  * 输入参数：无。
  * 返回参数：无。
  */
 void UIDP_RequestHandleDisplayReplay(void)
 {
-	s_uidp_handle_replay_remaining = UIDP_HANDLE_REPLAY_COUNT; /* 每次真实拔出都重新装载两次补发额度，覆盖最新 A/B 业务在线状态。 */
+	s_uidp_handle_replay_remaining = UIDP_HANDLE_REPLAY_COUNT; /* 每次拔出后重新安排两次补刷，发送时再读取当前 A/B 状态。 */
 	s_uidp_handle_replay_period = UIDP_HANDLE_REPLAY_PERIOD_TICKS; /* 首次补发延迟约 60ms，先让本次掉线、报警和参数清屏消息完成发送。 */
 }
 
 /*
- * 函数功能：刷新 A/B 泵流量可视化区域，按新屏 5 帧渐隐资源表查图。
+ * 函数功能：把 A/B 泵设置值换成 0~10 格，再显示该档位的固定图片。
  * 输入参数：pump_id 为 1 表示 A 泵、2 表示 B 泵；pump_type 为泵业务类型；value 为当前流量值。
  * 返回参数：无。
  */
@@ -361,8 +361,8 @@ if(!enable_flag)//B区域暗灭
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_UNIT, 220U);//B 泵单位暗态资源
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_GEAR_AREA, UIDP_PumpGearPicture(2U, 0U, UIDP_PUMP_GEAR_RUN_FRAME));//B 泵区域回到 0 档 249
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, false, false));//B 泵启动按钮暗态/停止图
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 222);//B 泵加按钮暗态，当前 EX8 导出 0x1422 绑定 498/499，不能再写 A 泵 222/225 资源
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 223);//B 泵减按钮暗态，当前 EX8 导出 0x1424 绑定 500/501，避免按钮触控有效但图标不显示
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 222);//B 泵不可用时，加号显示 222 号禁用图片。
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 223);//B 泵不可用时，减号显示 223 号禁用图片。
 		LCD_Disappear_Number(UIDP_LCD_SP_PUMP_B_VALUE);
 	}
 	else
@@ -391,8 +391,8 @@ if(!enable_flag)//B区域暗灭
 			break;
 		}
 		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_BUTTON, UIDP_PumpButtonPicture(pump_type, true, false));//档位图写完后再补画 B 侧停止态按钮，防止按钮区域被泵区刷新盖住
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 225);//B 泵加按钮亮态，对应 0x1422 当前导出的 499 号资源
-		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 224);//B 泵减按钮亮态，对应 0x1424 当前导出的 501 号资源
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_PLUS, 225);//B 泵可用时，加号显示 225 号图片。
+		LCD_Show_Picture(UIDP_LCD_VP_PUMP_B_MINUS, 224);//B 泵可用时，减号显示 224 号图片。
 	}
 }
 /*
@@ -404,7 +404,7 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 {
 	if(enable_flag)
 	{
-		//传入控制模式，是否需要重写代码
+		//只刷新指定控制方式的图标，其余控制方式不变。
 		if(control_type==1)//脚踏
 		{
 		   if(light_flag) /* 脚控被选中时显示黄色高亮，否则保持白色可选状态。 */
@@ -419,7 +419,7 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 			else
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE,34U);
 		}
-		else if(control_type==3)//触控，记得宏定义
+		else if(control_type==3)//触控模式。
 		{
 			light_flag?LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U):LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U);//触控入口使用 36~38 资源组
 		}
@@ -469,7 +469,7 @@ void UIDIRDP(bool enable_flag,uint8_t dir_type, uint8_t light_flag)
 {
 	if(enable_flag)
 	{
-		//传入方向，是否需要重写代码
+		//按指定方向和选中状态选择图片，不在这里改变电机转向。
 		switch(dir_type)
 		{
 			case 1://顺时针
@@ -534,7 +534,7 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 
 	if(enable_flag)
 	{
-		//传入工具，是否需要重写代码//AB通道分开显示，不互斥，防止未来双通道同时进行
+		//A/B 通道各自显示连接和选中状态；刷新图标不会启动手柄。
 		if(handle_channel==1)//A通道
 		{
           		switch(handle_type)
@@ -609,7 +609,7 @@ void UIHANDLEDP(bool enable_flag,uint16_t handle_type,uint8_t handle_channel,uin
 	}
 }
 /*
- * 函数功能：刷新磨头/刨刀类型显示。
+ * 函数功能：保留旧刀具显示入口；当前函数内代码已注释，不发送屏幕命令。
  * 输入参数：enable_flag 表示刀具区是否可用；tool_type 为 1 表示刨刀、0 表示磨头。
  * 返回参数：无。
  */
@@ -757,7 +757,7 @@ void UIFREQDP(bool enable_flag,uint8_t freq_value,bool update_value)
 	if(enable_flag)
 	{
        //显示频率值
-	   if(!update_value)//只更新数据
+	   if(!update_value)//不是“只更新数值”时，还要显示背景和数字控件。
 	   {
 		LCD_Show_Picture(UIDP_LCD_VP_FREQ_AREA,12U);//显示频率
 		LCD_Show_Number (UIDP_LCD_SP_FREQ_VALUE, UIDP_LCD_VP_FREQ_VALUE);
@@ -781,7 +781,7 @@ void UIFREQDP(bool enable_flag,uint8_t freq_value,bool update_value)
  */
 void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_flag)
 {
-	static uint8_t huchi=0U;//记录运行态黄色字体是否已经下发，避免副工程同类 UI 场景反复写屏。
+	static uint8_t huchi=0U;//记录黄色字体是否已发送，运行中不重复写相同颜色。
 	if(enable_flag)
 	{
        //显示速度值
@@ -907,7 +907,7 @@ void UIPUMPABUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)
  * 输入参数：enable_flag 表示按钮是否可用；button_type 表示当前泵业务类型；run_flag 表示泵是否处于运行态。
  * 返回参数：无。
  */
-void UIPUMPBBUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)//自动识别按钮，欠缺字体变黄，或者变黑
+void UIPUMPBBUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)//按 B 泵类型和运行状态刷新启停按钮。
 {
 	if(enable_flag)
 	{
@@ -922,28 +922,28 @@ void UIPUMPBBUTTONDP(bool enable_flag,uint8_t button_type,bool run_flag)//自动
 }
 
 /*
- * 函数功能：按当前 pumpMessage 快照直接预绘 A/B 泵显示，不经过 UI 队列二次排队。
- * 输入参数：pump_area_id 为 A/B 泵区域 UI 编号，button_area_id 为 A/B 泵启停按钮 UI 编号，pump_message 为当前泵状态快照。
+ * 函数功能：切到主运行页前，直接按当前泵状态写好 A/B 泵显示，不再放入显示队列等待。
+ * 输入参数：pump_area_id 为 A/B 泵显示区域编号；button_area_id 为启停按钮编号；pump_message 指向当前泵状态。
  * 返回参数：无。
  */
 static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_area_id, const pumpMessage_t *pump_message)
 {
-	uint8_t display_value[10] = {0U}; /* 复用 UIDP 队列协议的 10 字节参数格式，保证直接预绘和运行期刷新解释一致。 */
-	bool pump_available = false; /* 泵类型为 0 时表示尚未识别，开机预绘要显示禁用态而不是误显示抽吸泵。 */
+	uint8_t display_value[10] = {0U}; /* 与显示队列使用相同的 10 字节参数格式，开机和平时刷新都按同一规则解释。 */
+	bool pump_available = false; /* 尚未识别的泵先显示为不可用，不能默认画成抽吸泵。 */
 	bool button_active = false; /* 注水泵按钮只显示排空来源，不能根据普通冷却运行状态高亮。 */
 	uint16_t display_speed = 0U; /* 显示速度使用 Pubinterface 的统一换算，运行态显示实际输出，停止态显示设定值。 */
 
 	if(pump_message == NULL)
 	{
-		return; /* 防御空指针，避免开机预绘阶段异常访问导致 UI 任务中断。 */
+		return; /* 没有提供泵状态时不刷新，避免读取空指针使显示任务出错。 */
 	}
 
 	pump_available = (pump_message->type != 0U); /* 只有 CS1237 已识别出业务泵类型时，泵区才按可用态显示。 */
-	display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 保持与 Pubinterface_RefreshPumpADisplay/BDisplay 的速度口径一致。 */
-	button_active = pump_message->run_flag; /* 抽吸和灌注泵仍按普通运行状态预绘按钮。 */
+	display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 使用平时刷新 A/B 泵时相同的换算规则，避免开机显示值不同。 */
+	button_active = pump_message->run_flag; /* 抽吸和灌注泵按当前启停状态显示按钮。 */
 	if (pump_message->type == INJECTWATER)
 	{
-		button_active = (pump_message->timingDrainage_flag || pump_message->pedalDrainage_flag); /* 注水泵只有屏幕定时排空或脚踏轻排才预绘黄色按钮。 */
+		button_active = (pump_message->timingDrainage_flag || pump_message->pedalDrainage_flag); /* 注水泵只有定时排空或脚踏轻排时才显示黄色按钮，普通冷却注水不变黄。 */
 	}
 
 	display_value[0] = (uint8_t)pump_message->type; /* Value[0] 传泵类型，UIPUMPADP/UIPUMPBDP 用它选择注水、灌注或抽吸图标。 */
@@ -951,14 +951,14 @@ static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_ar
 	display_value[2] = (uint8_t)(display_speed & 0xFFU); /* Value[2] 传显示速度低字节，与队列刷新协议保持一致。 */
 	if(pump_area_id == UI_PUMPA_ID)
 	{
-		UIPUMPADP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* A 泵开机预绘直接写 VP，避免 page4 显示后再排队刷新。 */
+		UIPUMPADP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* 切到第 4 页前直接写好 A 泵区域，避免切页后才开始加载。 */
 	}
 	else if(pump_area_id == UI_PUMPB_ID)
 	{
-		UIPUMPBDP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* B 泵同样直接预绘，解决 B 区按钮/流量区后加载的可见闪动。 */
+		UIPUMPBDP(pump_available, display_value[0], (uint16_t)((display_value[1] << 8) | display_value[2])); /* 同样提前写好 B 泵区域，减少切页后才出现按钮和流量的闪动。 */
 	}
 
-	display_value[1] = button_active ? 1U : 0U; /* 预绘参数使用排空业务状态，手柄冷却联动时保持白色。 */
+	display_value[1] = button_active ? 1U : 0U; /* 保存刚算出的按钮状态；注水泵跟随手柄冷却时，排空按钮保持未启动显示。 */
 	display_value[2] = 0U; /* 按钮刷新不使用速度低字节，清零避免复用上面的流量参数。 */
 	if(button_area_id == UI_PUMPABUTTON_ID)
 	{
@@ -996,7 +996,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：周期消费屏幕刷新队列，并维护开机补刷及手柄拔出后的短时连接快照补发。
+ * 函数功能：取出显示消息并刷新屏幕，同时处理开机补刷和手柄拔出后的连接状态补刷。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1005,7 +1005,7 @@ void UIDISPLAYBehavior()
 	if(UIDPMsgQueue != NULL)
 	{
 		UIDPMessage_t msg;
-		uint8_t processed_count = 0U; /* 单次调度内批量消费少量 UI 消息，减少主运行页控件陆续出现。 */
+		uint8_t processed_count = 0U; /* 本次已处理的消息条数；一次处理多条，减少控件逐个出现的等待。 */
 		// 非阻塞方式接收消息
 		while(processed_count < UIDP_DISPLAY_BATCH_LIMIT)
 		{
@@ -1066,10 +1066,10 @@ void UIDISPLAYBehavior()
 					UIPUMPBBUTTONDP(msg.enable_flag,msg.Value[0],msg.Value[1]);
 					break;
 					case UI_POWERINIT_ID:
-					UIDP_DrawPumpDisplaySnapshot(UI_PUMPA_ID, UI_PUMPABUTTON_ID, &pumpMessageA);//A 泵按当前 pumpMessageA 直接预绘，切到 page4 后不再肉眼看到泵区二次加载
-					UIDP_DrawPumpDisplaySnapshot(UI_PUMPB_ID, UI_PUMPBBUTTON_ID, &pumpMessageB);//B 泵同样按当前 pumpMessageB 直接预绘，保持左右泵区来源一致
+					UIDP_DrawPumpDisplaySnapshot(UI_PUMPA_ID, UI_PUMPABUTTON_ID, &pumpMessageA);//切页前先按 pumpMessageA 写好 A 泵显示，减少切页后的加载过程。
+					UIDP_DrawPumpDisplaySnapshot(UI_PUMPB_ID, UI_PUMPBBUTTON_ID, &pumpMessageB);//切页前先按 pumpMessageB 写好 B 泵显示，两侧采用相同处理方式。
 					UICONTROLDP(0,0,0);
-					LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//开机预绘时只隐藏 0x1430 触控工作区，不改触控主按钮白色可选态
+					LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//开机先隐藏触控工作区，不在此处改触控主按钮的图片。
 					UIDIRDP(0,0,0);
 					UIHANDLEDP(0,0,1,0);//上电未插手柄时先画出 A 通道未连接状态，避免空白区域
 					UIHANDLEDP(0,0,2,0);//上电未插手柄时先画出 B 通道未连接状态，后续插拔事件再覆盖
@@ -1116,8 +1116,8 @@ void UIDISPLAYBehavior()
 			(UIDPMsgQueue != NULL) &&
 			(uxQueueMessagesWaiting(UIDPMsgQueue) == 0U))
 		{
-			--s_uidp_handle_replay_remaining; /* 队列已空时消费一次补发额度，确保本轮快照不会夹在旧消息中间。 */
-			s_uidp_handle_replay_period = UIDP_HANDLE_REPLAY_PERIOD_TICKS; /* 下一份快照再等待约 60ms，降低显示串口瞬时连续发送压力。 */
+			--s_uidp_handle_replay_remaining; /* 等旧显示消息处理完，再用掉一次补发次数，避免新旧状态交错显示。 */
+			s_uidp_handle_replay_period = UIDP_HANDLE_REPLAY_PERIOD_TICKS; /* 下次补发至少等待约 60ms，避免屏幕串口连续发送过多消息。 */
 			Pubinterface_RefreshOnlineHandleDisplay(); /* 只读取当前 A/B 在线态和选中态，不重复触发插拔业务、报警或蜂鸣。 */
 		}
 	}

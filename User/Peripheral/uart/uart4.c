@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define	UART4_TimeoutComp   3
+#define	UART4_TimeoutComp   3 /* 旧版等待次数；当前对应判断已注释掉，改此值不会改变脚踏接收等待时间。 */
 
 static uint8_t Uart4_Flag_Last = 0;
 static uint16_t Uart4_RecvWaitTimeCnt = 0;
@@ -22,9 +22,14 @@ static void Uart4_DmaInit(void)
   Bsp_UartReceiveDma(BSP_UART_PORT_4, Uart4_DMABuf, UART4_MAX_PACKET_SIZE);
 }
 
+/*
+ * 函数功能：设置脚踏 UART4 波特率；失败时交给 Error_Handler 处理。
+ * 输入参数：baud 为波特率，单位：bit/s。
+ * 返回参数：无。
+ */
 void Uart4_Configuration(uint16_t baud)
 {
-  /* UART4 初始化失败时进入统一故障处理，避免脚踏串口在错误波特率下继续运行。 */
+  /* 初始化失败后不能继续用脚踏串口收发。 */
   if (Bsp_UartInit(BSP_UART_PORT_4, baud) != HAL_OK)
   {
     Error_Handler();
@@ -53,6 +58,11 @@ void Uart4_SendPacket(uint8_t *pData, uint16_t Length)
 	
 }
 
+/*
+ * 函数功能：本次检查没有新字节时，取出 UART4 当前数据并重新接收。
+ * 输入参数：data 指向至少 UART4_MAX_PACKET_SIZE 字节的输出缓存。
+ * 返回参数：复制的字节数；仍有新字节到达或缓存为空时返回 0。
+ */
 uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
 {
   uint32_t RemainLen = 0;
@@ -62,7 +72,7 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
   Uart4_RecvWaitTimeCnt++;
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_4);
 
-  /* DMA 剩余数变化说明脚踏报文仍在到达，清零等待计数防止提前截帧。 */
+  /* 又收到脚踏数据时先不取出，等下一次检查接收长度是否停止变化。 */
   if (RemainLen != Uart4_Flag_Last)
   {
     Uart4_RecvWaitTimeCnt = 0;
@@ -71,7 +81,7 @@ uint16_t Uart4_DMARecvDataPeek(uint8_t *data)
   else
   {
     //if (Uart4_RecvWaitTimeCnt >= UART4_TimeoutComp)
-      /* DMA 至少收到一个字节时才复制脚踏报文，空缓存不送往解析层。 */
+      /* 至少收到 1 字节才复制；脚踏任务还要检查回包是否完整有效。 */
       if (RemainLen < UART4_MAX_PACKET_SIZE)
       {
         rlen = (UART4_MAX_PACKET_SIZE - RemainLen);

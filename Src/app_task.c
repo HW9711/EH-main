@@ -6,11 +6,11 @@
 #include "tracealyzer_recorder.h"
 #include "trcRecorder.h"
 
-// 定义应用程序任务相关的枚举常量，用于配置任务参数
+// 业务线程的优先级和等待时间；修改会影响任务响应速度与CPU占用。
 enum
 {
     APP_TASK_PRIORITY = tskIDLE_PRIORITY + 3,  // 定义应用程序任务优先级，比空闲任务优先级高3级
-    APP_TASK_IDLE_SLEEP_MS = 1,  // 软任务未启动时的轻量级轮询周期，保持 start 后快速响应
+    APP_TASK_IDLE_SLEEP_MS = 1,  // 任务未启动时每隔1ms检查一次；调大会延后响应start请求。
 };
 
 static task_t *app_task_list = NULL;
@@ -20,7 +20,7 @@ static volatile bool sTracealyzerStreamStartAttempted = false;
 static TraceStringHandle_t sSoftTaskTraceChannel = 0;
 volatile int32_t g_appTaskSchedulerCreateResult = (int32_t)pdPASS;
 
-#define TRACEALYZER_STREAM_START_DELAY_MS 1500U
+#define TRACEALYZER_STREAM_START_DELAY_MS 1500U /* 首个业务线程在进入业务循环前等待的毫秒数，然后尝试启动RTT；未初始化记录器时这段等待仍会发生。 */
 
 static void AppTaskTrace_EnsureFormats(void)
 {
@@ -295,14 +295,19 @@ static TickType_t AppTask_MsToTicks(uint32_t time_ms)
     return ticks;
 }
 
+/*
+ * 函数功能：第一个进入此处的业务线程先等待，再尝试启动RTT；其它业务线程不等待。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void AppTaskTrace_StartStreamingOnce(void)
 {
 #if (TRACEALYZER_SNAPSHOT_ENABLE == 1U) && (TRACEALYZER_TRANSPORT_MODE == TRACEALYZER_TRANSPORT_MODE_JLINK_RTT)
     bool shouldStartStreaming = false;
 
     /*
-     * 原来只有一个 AppTask 调度线程，Streaming 延时启动只会执行一次。
-     * 拆成多个独立软任务线程后，必须用临界区抢占一次性标志，避免多个线程同时延时和重复启动 RTT Streaming。
+     * 检查和设置标志期间暂不允许任务切换，保证只有一个任务负责启动RTT。
+     * 其它业务任务不需要重复等待这段启动延时。
      */
     taskENTER_CRITICAL();
     if (!sTracealyzerStreamStartAttempted)
@@ -320,6 +325,11 @@ static void AppTaskTrace_StartStreamingOnce(void)
 #endif
 }
 
+/*
+ * 函数功能：取得公共锁后执行一次业务回调，完成后释放锁；单次任务执行后清除启动标志。
+ * 输入参数：task为要执行的任务，空指针或无回调函数时不执行。
+ * 返回参数：无。
+ */
 static void AppTaskRuntimeGate(task_t *task)
 {
     if ((task == NULL) || (task->func == NULL))
@@ -328,9 +338,8 @@ static void AppTaskRuntimeGate(task_t *task)
     }
 
     /*
-     * 旧架构下所有软任务回调都在同一个 AppTask 线程里串行执行。
-     * 现在虽然每个软任务都有独立 FreeRTOS 线程，但真正进入业务回调前仍统一抢同一个静态互斥锁，
-     * 这样泵、脚踏、屏幕、外部通信等旧业务不会因为拆线程而突然并发访问全局状态。
+     * 泵、脚踏、屏幕、外控虽然各有线程，但使用同一把锁，每次只允许一个业务回调运行。
+     * 因此其它回调仍要等待，不能把“独立线程”理解成能同时修改公共状态。
      */
     if ((sAppTaskRuntimeMutex == NULL) ||
         (xSemaphoreTake(sAppTaskRuntimeMutex, portMAX_DELAY) != pdTRUE))
@@ -506,6 +515,11 @@ int app_task_stop(task_t *task)
     return true;
 }
 
+/*
+ * 函数功能：创建所有业务回调共用的锁，保证同一时刻只执行一个业务回调。
+ * 输入参数：无。
+ * 返回参数：无；创建失败会记录pdFAIL并触发断言。
+ */
 void AppTaskScheduler_Init(void)
 {
     if (sAppTaskRuntimeMutex != NULL)
@@ -514,8 +528,8 @@ void AppTaskScheduler_Init(void)
     }
 
     /*
-     * 独立软任务线程已经在 app_task_create_named() 中静态创建。
-     * 这里仅创建一个同样静态分配的运行互斥门，用来保持旧 AppTask 单线程串行业务语义。
+     * 各业务线程已经在app_task_create_named()中创建。
+     * 它们执行回调前必须先取得这把锁，防止两个回调同时修改公共状态。
      */
     sAppTaskRuntimeMutex = xSemaphoreCreateMutexStatic(&sAppTaskRuntimeMutexBuffer);
     if (sAppTaskRuntimeMutex == NULL)

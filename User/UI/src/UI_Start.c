@@ -11,17 +11,10 @@
 
 #include <stdint.h>
 
-#define UI_START_CALIBRATION_PRESS_COUNT 5U /* 启动页必须连续接收五次定标按钮事件才允许进入Page3。 */
+#define UI_START_CALIBRATION_PRESS_COUNT 5U /* 开机约 4 秒内进入脚踏定标页所需的点击次数，默认 5 次；调小更容易误入定标页，调大需要更多次点击。 */
 
-//============================================================================
-// 函数名称: UI_Start_Fun()
-// 功能描述: 起始页
-// 输　  入:
-// 输    出: 0返回主界面 1下一页
-// 函数说明: 开机扫描”LOGO点击动作“ 进入厂家配置 4s等待...
-//============================================================================
 /*
- * 函数功能：保持 EX8 启动页等待，并在正常业务任务创建前接收脚踏定标入口。
+ * 函数功能：在启动页等待约 4 秒；期间收到足够次数的定标按钮点击就进入脚踏定标页。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -37,12 +30,12 @@ void UI_Start_Fun(void)
     Delay_ms(2); /* 保持原启动页约 4 秒总等待节奏。 */
     ScreenKey_Scan(); /* 正常屏幕任务尚未创建，由启动流程独占读取 UART6。 */
 
-    key_value = ScreenKey_LegacyEventTake(); /* 每轮消费一次启动页事件，非入口事件保持静默。 */
+    key_value = ScreenKey_LegacyEventTake(); /* 取出后立即清除本次按键，非定标入口按键不处理。 */
     if (key_value == KEY_CONTINUOUSCLICK) /* DWIN每次独立触摸返回一个key1事件，前四次只累计不切页。 */
     {
       if (calibration_press_count < UI_START_CALIBRATION_PRESS_COUNT)
       {
-        calibration_press_count++; /* 计数保持饱和，避免异常重复帧造成8位计数回绕。 */
+        calibration_press_count++; /* 最多只数到要求次数，避免重复消息使计数溢出。 */
       }
 
       if (calibration_press_count >= UI_START_CALIBRATION_PRESS_COUNT)
@@ -51,7 +44,7 @@ void UI_Start_Fun(void)
         LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_PEDAL_CALIBRATION); /* 达到五次门槛后才显示Page3，避免启动页单次误触。 */
         Beep_Pulse100ms(); /* 蜂鸣任务尚未创建，直接输出100ms按键音确认定标入口已经生效。 */
         Delay_ms(5U); /* 给DWIN背景页切换留出发送间隔，再开始刷新定标数据。 */
-        UI_FootPedalCalibration_Fun(); /* 进入独占定标循环；电机、泵、外控和正常脚踏任务均尚未创建。 */
+        UI_FootPedalCalibration_Fun(); /* 此后只处理定标，直到重新上电；电机、泵、外控和正常脚踏任务尚未启动。 */
       }
     }
 
@@ -66,17 +59,15 @@ void UI_Start_Fun(void)
 }
 
 
-//============================================================================
-// 函数名称: UI_Show_init()
-// 功能描述: UI主界面初始化
-// 输　  入:
-// 输    出:
-// 函数说明:
-//============================================================================
+/*
+ * 函数功能：切到主运行页，并清除上次留下的报警图片。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void UI_Show_init(void)
 {
-  LCD_Show_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);        //新屏开机后主运行页固定为 page4，保持老成功版启动页和运行页分离
-  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//清掉新屏报警提示区，后续完整区域刷新由 UIDP 任务统一接管
+  LCD_Show_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);        //主运行页为第 4 页，不再停留在启动页。
+  LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//先隐藏旧报警图片，各区域后续由显示任务刷新。
 
 }
 

@@ -23,17 +23,18 @@ extern I2C_HandleTypeDef hi2c3;
  * I2C配置参数
  *============================================================================*/
 
+/* 保留的旧接口配置；当前i2c.c包含bsp_i2c_bus.h，实际总线配置请改那个头文件。 */
 /* I2C2默认配置 */
-#define I2C2_CLOCK_SPEED        100000U     /* I2C2时钟速率: 100KHz (标准模式) */
+#define I2C2_CLOCK_SPEED        100000U     /* I2C2总线时钟，单位Hz，当前100kHz；改动影响该接口EEPROM传输，须核对器件和接线允许的速率。 */
 #define I2C2_DUTY_CYCLE         I2C_DUTYCYCLE_2
 #define I2C2_OWN_ADDRESS        0x00        /* I2C2自身地址 */
 
 /* I2C3默认配置 */
-#define I2C3_CLOCK_SPEED        100000U     /* I2C3时钟速率: 100KHz (标准模式) */
+#define I2C3_CLOCK_SPEED        100000U     /* I2C3总线时钟，单位Hz；与I2C2分别配置，不能只改其中一路就认为两路都生效。 */
 #define I2C3_DUTY_CYCLE         I2C_DUTYCYCLE_2
 #define I2C3_OWN_ADDRESS        0x00        /* I2C3自身地址 */
 
-/* I2C超时时间 (ms) */
+/* 保留的默认超时定义，单位ms；当前读写接口使用传入的timeout，AT24CS32另有自己的超时宏，改这里不会统一改变等待时间。 */
 #define I2C_TIMEOUT_DEFAULT     100U
 
 /*============================================================================

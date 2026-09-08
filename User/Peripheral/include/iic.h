@@ -15,7 +15,8 @@
 #define AT24C128	16383
 #define AT24C256	32767
 
-//Mini STM32开发板使用的是24c02，所以定义EE_TYPE为AT24C02
+/* 旧单字节读写接口使用的EEPROM型号，影响地址发送方式；上面的型号值是最大字节地址。
+ * 当前保留AT24C02；主控版本记录使用独立的IIC_AT24C32_*接口，不读取此宏。 */
 #define EE_TYPE AT24C02
 
 #define AT24C32_IIC_WRITE_ADDR 0xA0U  /* 主控板 AT24C32 A0/A1/A2 接地，8 位写地址固定为 0xA0。 */

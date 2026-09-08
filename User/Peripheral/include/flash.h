@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+/* 各扇区起始字节地址，用于选择整扇区擦除范围；必须按芯片Flash分区核对，不是可自由分配的参数地址。 */
 #define ADDR_FLASH_SERTOR_0  (0x8000000)
 #define ADDR_FLASH_SERTOR_1  (0x8004000)  //16K
 #define ADDR_FLASH_SERTOR_2  (0x8008000)  //16K

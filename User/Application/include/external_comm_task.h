@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* 外部通信会话来源用于隔离正式协议和6字节简易协议，防止两套帧交叉累计或续命。 */
+/* 一次外控连接只能使用正式或简易协议中的一种；登录帧不能混着计数，另一协议也不能重置断线计时。 */
 typedef enum
 {
     EXTERNAL_COMM_PROTOCOL_SOURCE_NONE = 0U,   /* 当前没有完成三帧确认的外部通信会话。 */
@@ -21,30 +21,30 @@ void ExternalComm_Init(void);
 void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms);
 /* 手柄运行中掉线时清除外控层保存的注水泵跟随请求，避免后续外控刷新重新拉起联动泵。 */
 void ExternalComm_ClearHandleInjectionPumpFollow(void);
-/* 泵因压力或驱动保护安全停机时清除外控运行请求，避免旧外控锁存重新拉起故障泵。 */
+/* 泵因压力或驱动保护停机时，清除外控保存的运行请求，防止后续刷新再次启动故障泵。 */
 void ExternalComm_ClearPumpRunRequest(uint8_t pump_channel);
 /* 屏幕确认退出外控后提交退出请求，由外部通信任务统一释放控制权并通知上位机。 */
 void ExternalComm_RequestExit(void);
 
 /*
- * 函数功能：刷新外控链路活动时间，供同一 UART2 上的协议适配层复用原安全超时。
+ * 函数功能：收到当前协议的有效命令后，重置断线计时并刷新小电脑图标；不自动恢复已停止的电机和泵。
  * 输入参数：无。
  * 返回参数：无。
  */
 void ExternalComm_NotifyLink(void);
 
 /*
- * 函数功能：累计同一协议来源的首次连接帧，只有300ms内连续三份一致内容才确认该协议会话。
- * 输入参数：source为正式或简易协议来源；identity指向一致性标识；identity_len为标识长度，最大8字节。
- * 返回参数：会话已经确认且来源一致时返回1；仍在累计、来源冲突或参数非法时返回0。
+ * 函数功能：首次登录时，要求同一种协议在 300ms 内收到三份内容一致的申请，收齐后才允许申请控制权。
+ * 输入参数：source 为正式或简易协议；identity 为要比较的授权数据；identity_len 为字节数，正式协议为 8，简易协议为 0。
+ * 返回参数：本协议已完成三帧确认返回 1；未收齐、另一协议已连接或参数错误返回 0。
  */
 uint8_t ExternalComm_TryConfirmProtocol(ExternalCommProtocolSource_t source,
                                         const uint8_t *identity,
                                         uint16_t identity_len);
 
 /*
- * 函数功能：静默复用原外控协议业务分发，不向 UART2 发送原协议 ACK。
- * 输入参数：fun_code、area_code 为原协议分发字段；info_area 和 info_len 为可选载荷。
+ * 函数功能：把内部命令交给原外控处理函数执行，但不向 UART2 发送正式协议应答。
+ * 输入参数：fun_code、area_code 为原协议命令字段；info_area 为可选命令数据，info_len 为其字节数。
  * 返回参数：无。
  */
 void ExternalComm_RunSilent(uint8_t fun_code,

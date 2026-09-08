@@ -12,18 +12,17 @@ typedef struct
 } TracealyzerRecorderDiagnostics_t;
 
 /*
- * Tracealyzer global enable switch.
- * 1U: initialize and start the recorder during system startup.
- * 0U: keep recorder code compiled in, but do not start tracing.
+ * 调试记录编译开关：1=编入初始化及记录步骤，0=不执行这些步骤。
+ * 当前main.c已注释掉Tracealyzer_RecorderInit调用，仅把本宏设为1不会自动启动记录。
+ * 关闭后不再记录任务运行事件；部分代码仍参与编译，不代表相应RAM都会释放。
  */
 #ifndef TRACEALYZER_SNAPSHOT_ENABLE
 #define TRACEALYZER_SNAPSHOT_ENABLE 1U
 #endif
 
 /*
- * Transport mode selection.
- * RINGBUFFER: keep the previous snapshot-style workflow in MCU RAM.
- * JLINK_RTT: stream trace data continuously to the PC through J-Link RTT.
+ * 调试记录保存方式：0=留在MCU内存环形缓冲区，1=通过J-Link RTT持续发给电脑。
+ * 修改后调试工具须使用对应的读取方式；这不是主机业务通信的串口选择。
  */
 #define TRACEALYZER_TRANSPORT_MODE_RINGBUFFER 0U
 #define TRACEALYZER_TRANSPORT_MODE_JLINK_RTT  1U
@@ -33,31 +32,30 @@ typedef struct
 #endif
 
 /*
- * Ring buffer size used by the local snapshot transport.
+ * 内存记录模式使用的缓冲区大小，单位字节；调大可保留更多事件，但会多占用RAM。
  */
 #ifndef TRACEALYZER_RING_BUFFER_SIZE_BYTES
 #define TRACEALYZER_RING_BUFFER_SIZE_BYTES (32U * 1024U)
 #endif
 
 /*
- * RTT buffer sizing used by the J-Link streaming transport.
- * The UP buffer carries trace data from target to host.
- * The DOWN buffer receives Tracealyzer control commands from host to target.
+ * RTT发送缓冲区大小，单位字节；保存准备发给电脑的调试事件。
+ * 调大增加RAM占用；缓冲区能容纳的事件越多，越不容易因电脑读取不及时而丢失记录。
  */
 #ifndef TRACEALYZER_RTT_UP_BUFFER_SIZE_BYTES
 #define TRACEALYZER_RTT_UP_BUFFER_SIZE_BYTES (16U * 1024U)
 #endif
 
 #ifndef TRACEALYZER_RTT_DOWN_BUFFER_SIZE_BYTES
-#define TRACEALYZER_RTT_DOWN_BUFFER_SIZE_BYTES 32U
+#define TRACEALYZER_RTT_DOWN_BUFFER_SIZE_BYTES 32U /* RTT接收缓冲区字节数，只接收电脑发来的调试控制命令。 */
 #endif
 
 #ifndef TRACEALYZER_RTT_UP_BUFFER_INDEX
-#define TRACEALYZER_RTT_UP_BUFFER_INDEX 1U
+#define TRACEALYZER_RTT_UP_BUFFER_INDEX 1U /* 向电脑发送事件的RTT通道编号，不是硬件UART编号；电脑须读取同一通道。 */
 #endif
 
 #ifndef TRACEALYZER_RTT_DOWN_BUFFER_INDEX
-#define TRACEALYZER_RTT_DOWN_BUFFER_INDEX 1U
+#define TRACEALYZER_RTT_DOWN_BUFFER_INDEX 1U /* 从电脑接收调试命令的RTT通道编号，须与电脑配置一致。 */
 #endif
 
 /*

@@ -17,15 +17,17 @@
 extern "C" {
 #endif
 
-#define AT24CS32_AUTH_RESULT_SIZE            8U
-#define AT24CS32_AUTH_PAGE1_INDEX            0U
+#define AT24CS32_AUTH_RESULT_SIZE            8U /* 认证结果固定8字节，由4组CRC16拼成；修改会与现有手柄数据不兼容。 */
+#define AT24CS32_AUTH_PAGE1_INDEX            0U /* 保存认证结果的Page1，页索引从0开始，不是可调的识别参数。 */
 #define AT24CS32_AUTH_PAGE_START_INDEX       1U   /* Page2 对应页索引 1 */
 #define AT24CS32_AUTH_PAGE_COUNT             7U   /* Page2~Page8 共7页 */
-#define AT24CS32_AUTH_DATA_START_ADDR        0x0020U
-#define AT24CS32_AUTH_DATA_LENGTH            224U
-#define AT24CS32_AUTH_INPUT_LENGTH           (AT24CS32_SN_SIZE + AT24CS32_AUTH_DATA_LENGTH)
+#define AT24CS32_AUTH_DATA_START_ADDR        0x0020U /* Page2起始字节地址；保留作格式说明，实际读取按页索引计算。 */
+#define AT24CS32_AUTH_DATA_LENGTH            224U /* 参与认证的Page2~8共224字节，包含每页末尾校验和。 */
+#define AT24CS32_AUTH_INPUT_LENGTH           (AT24CS32_SN_SIZE + AT24CS32_AUTH_DATA_LENGTH) /* CRC输入共240字节：16字节序列号加224字节页数据。 */
 
-/* 认证使用4组CRC16，默认初值均为0xFFFF，支持宏覆盖 */
+/* 下列INIT/POLY按1~4成对设置每组CRC16的初值和计算多项式。
+ * 它们决定认证结果；任一值修改都要同步EEPROM写入工具及手柄记录，否则原有手柄会认证失败。
+ * 可由编译参数覆盖，不是放宽认证或调整识别速度的开关。 */
 #ifndef AT24CS32_CRC16_INIT_1
 #define AT24CS32_CRC16_INIT_1                0xFFFFU
 #endif
@@ -71,7 +73,7 @@ typedef struct
 } AT24CS32_CRC_Result;
 
 /*
- * RTOS推荐接口：显式绑定总线，避免全局句柄切换导致并发竞态
+ * 根据函数名选择I2C2或I2C3，不需要先修改全局总线变量；调用方仍须避免同时使用公共认证缓存。
  */
 /* 使用 I2C2 执行 Page1+Page2~8 布局认证校验，返回状态码 */
 AT24CS32_CRC_Status AT24CS32_VerifyCrc_I2C2(AT24CS32_CRC_Result *result);

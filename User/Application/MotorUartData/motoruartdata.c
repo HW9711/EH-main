@@ -30,12 +30,13 @@ kernel_task_t MOTORUARTTaskHandle;
 #define MOTOR_UART_DRIVER_ERR_PHASELOSS  14U /* 参考驱动 Err=14：缺相，主控按电机相位错误处理。 */
 #define MOTOR_UART_DRIVER_ERR_POSDRAG    15U /* 参考驱动 Err=15：有 Hall 拖动错误，归入驱动板故障。 */
 
-#define MOTOR_UART_DRIVER_PARAMETER_ADDRESS 0xFDU /* 内部维护协议使用固定地址，避免与原1/2地址和0xAA运行帧混淆。 */
-#define MOTOR_UART_DRIVER_PARAMETER_REQUEST_LEN 8U /* 主控只下发固定8字节的03读、06写维护请求。 */
-#define MOTOR_UART_DRIVER_PARAMETER_TIMEOUT_MS 300U /* 单笔维护事务最多占用UART1 300ms，超时后恢复周期运行帧。 */
-#define MOTOR_UART_DRIVER_PARAMETER_READY_TIMEOUT_MS 300U /* 结果形成后最多再保留300ms，防止上层未取结果而永久挡住正常通信。 */
-#define MOTOR_UART_TASK_PERIOD_MS 3U /* 本任务固定3ms调度，用于累计维护响应超时。 */
-#define MOTOR_UART_DRIVER_PICTURE_DELAY_MS 50U /* 驱动图片延后50ms确认物理短接脚，避免拔柄时87先于80闪现；报警状态和蜂鸣不延迟。 */
+/* 上方 Err 数值与驱动回包 byte7 一一对应，是协议编号，不是可调整的报警门限。 */
+#define MOTOR_UART_DRIVER_PARAMETER_ADDRESS 0xFDU /* 参数读写固定地址；改动须同步驱动板，不能与 0xAA 电机控制帧混用。 */
+#define MOTOR_UART_DRIVER_PARAMETER_REQUEST_LEN 8U /* 0x03 读参数、0x06 写参数请求都为 8 字节，包含 CRC；改动须同步协议。 */
+#define MOTOR_UART_DRIVER_PARAMETER_TIMEOUT_MS 300U /* 等待参数响应的最长时间，单位 ms；到期生成超时结果，取走结果或保留到期后才恢复周期控制帧。 */
+#define MOTOR_UART_DRIVER_PARAMETER_READY_TIMEOUT_MS 300U /* 参数结果最多保留 300ms；到期自动丢弃并恢复周期控制帧。调大可延长取结果时间，也会延长串口占用。 */
+#define MOTOR_UART_TASK_PERIOD_MS 3U /* 每次任务按 3ms 累计响应超时；修改时必须同步 MotorUartData_Init 的实际任务周期。 */
+#define MOTOR_UART_DRIVER_PICTURE_DELAY_MS 50U /* 报警图片等待时间，单位 ms；先确认手柄是否拔出，避免先闪驱动故障图再显示掉线图。只延后图片，不延后报警和蜂鸣。 */
 
 #define MOTOR_UART_ALARM_HALL         WORK_ALARM_HALL_ERROR         /* 霍尔断线/学习错误使用统一报警码 9，避免误触发过载锁存。 */
 #define MOTOR_UART_ALARM_OVERLOAD     WORK_ALARM_MOTOR_OVERLOAD_ALT /* 过流/堵转沿用统一报警码 5，保持脚踏松开门禁不变。 */
@@ -45,14 +46,14 @@ kernel_task_t MOTORUARTTaskHandle;
 static uint8_t s_motor_uart_alarm_owned = 0U;        /* 记录本模块最近一次写入的报警码，驱动恢复正常时只清自己拥有的报警。 */
 static uint8_t s_motor_uart_last_driver_error = 0U;  /* 记录上一帧驱动 Err，避免同一个故障每帧重复触发蜂鸣和上位机弹窗。 */
 static uint32_t s_motor_uart_alarm_start_tick = 0U;  /* 记录非脚踏驱动报警的最少显示起点，脚踏来源故障不使用该时间退出。 */
-static volatile uint8_t s_motor_uart_alarm_started_during_run = 0U; /* 记录驱动故障首帧是否发生在电机运行中，供500ms后手柄拔出确认恢复真实掉线语义。 */
+static volatile uint8_t s_motor_uart_alarm_started_during_run = 0U; /* 记录首次故障时是否要求电机运行；之后确认手柄已拔出时，可据此显示运行掉线报警。 */
 static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=0 后置位，脚踏来源报警必须同时满足该条件才能解除。 */
 static volatile uint8_t s_motor_uart_wait_foot_release = 0U; /* 任意驱动故障首次发生于脚踏运行时置位，禁止按固定时间自动清报警。 */
 static volatile uint8_t s_motor_uart_foot_release_observed = 0U; /* 记录本次脚踏来源故障是否已观察到松脚、掉线或实时数据失效。 */
 static uint8_t s_motor_uart_picture_pending = 0U; /* 驱动报警建立后等待50ms再决定是否向屏幕发送图片，安全报警状态已经立即生效。 */
 static uint8_t s_motor_uart_pending_picture_value = MOTOR_ALARM_PICTURE_NONE; /* 保存本次待显示的84/86/87或91~99图片号。 */
 static uint32_t s_motor_uart_picture_start_tick = 0U; /* 保存驱动报警图片延迟起点，不参与故障保护和报警退出计时。 */
-static MotorUartFeedbackSnapshot_t s_motor_uart_feedback_snapshot; /* 保存最近一份CRC正确驱动回包的一致性速度、电流和错误码。 */
+static MotorUartFeedbackSnapshot_t s_motor_uart_feedback_snapshot; /* 保存最近一包 CRC 正确的速度、电流和错误码，三者必须来自同一包。 */
 static volatile uint32_t s_motor_uart_feedback_version = 0U; /* 偶数表示快照稳定，奇数表示UART1接收任务正在更新。 */
 
 typedef enum
@@ -62,7 +63,7 @@ typedef enum
 	MOTOR_UART_DRIVER_PARAMETER_STATE_READY      /* 响应或超时结果已形成，等待外部通信任务取走。 */
 } MotorUartDriverParameterState_t;
 
-static volatile MotorUartDriverParameterState_t s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 串行化UART1维护事务，任何时刻只允许一笔。 */
+static volatile MotorUartDriverParameterState_t s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 一次只处理一条参数读写请求，记录空闲、等响应或等取结果。 */
 static volatile uint16_t s_driver_parameter_elapsed_ms = 0U; /* 从维护请求发出后累计的等待时间。 */
 static volatile uint16_t s_driver_parameter_ready_elapsed_ms = 0U; /* READY结果待取期间累计时间，超时后自动释放UART1。 */
 static uint8_t s_driver_parameter_response[MOTOR_UART_DRIVER_PARAMETER_MAX_FRAME_SIZE]; /* 保存CRC正确的驱动原始响应。 */
@@ -70,7 +71,7 @@ static uint8_t s_driver_parameter_response_len = 0U; /* 保存维护响应实际
 static MotorUartDriverParameterResult_t s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 保存待上层取走的链路结果。 */
 
 /*
- * 函数功能：清空驱动参数事务的内部状态并释放 UART1 周期控制链路。
+ * 函数功能：清除本次参数读写的计时和结果，让 UART1 恢复周期电机控制。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -78,8 +79,8 @@ static void MotorUart_ResetDriverParameterTransaction(void)
 {
 	s_driver_parameter_elapsed_ms = 0U; /* 清除请求等待计时，下一笔事务重新累计。 */
 	s_driver_parameter_ready_elapsed_ms = 0U; /* 清除结果保留计时，避免继承上一笔 READY 时间。 */
-	s_driver_parameter_response_len = 0U; /* 丢弃已消费、过期或被停机抢占的响应长度。 */
-	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 释放后不再向上层暴露旧事务结果。 */
+	s_driver_parameter_response_len = 0U; /* 清除已取走、过期或因停机而结束的响应长度。 */
+	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_NONE; /* 清除旧结果，下一次查询不能重复取得。 */
 	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE; /* 最后发布空闲状态，使50ms任务恢复手柄控制帧。 */
 }
 
@@ -92,13 +93,13 @@ static void MotorUart_SetAlarm(uint8_t alarm_value, uint8_t picture_value)
 {
 	WorkAlarm_Set(alarm_value);       /* 统一报警状态仍由 WorkAlarm_Set 维护，避免直接改 WorkMessage。 */
 	SendAlarmMessage(alarm_value);    /* 同步蜂鸣任务进入对应报警声。 */
-	s_motor_uart_pending_picture_value = picture_value; /* 屏幕专用覆盖值只做短暂缓存，不能写入全局报警码或外控协议。 */
+	s_motor_uart_pending_picture_value = picture_value; /* 暂存要显示的图片号；图片号与报警码不同，不能写入对外报警字段。 */
 	s_motor_uart_picture_start_tick = HAL_GetTick(); /* 从安全报警已经生效的时刻开始累计50ms显示确认窗口。 */
-	s_motor_uart_picture_pending = 1U; /* 标记图片等待显示；驱动任务后续按物理短接脚决定显示或继续等待80。 */
+	s_motor_uart_picture_pending = 1U; /* 标记图片尚未显示；稍后检查手柄插入检测脚，拔出时等待掉线报警图。 */
 }
 
 /*
- * 函数功能：延后显示驱动报警图片；物理拔柄期间抑制次生驱动图片，避免80号图前闪现87等其它图号。
+ * 函数功能：延后显示驱动故障图；如果检测到手柄拔出，先等掉线确认，避免掉线图前闪过其他故障图。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -132,7 +133,7 @@ static void MotorUart_ServicePendingAlarmPicture(void)
 
 	display_value[0] = s_motor_uart_alarm_owned; /* 物理连接仍稳定时按驱动真实逻辑报警码显示84/86/87等生产图片。 */
 	display_value[1] = s_motor_uart_pending_picture_value; /* 调试宏开启时保留91~99覆盖图号，关闭时由原映射显示公用图片。 */
-	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 只延迟屏幕图片；报警状态、蜂鸣、停泵和驱动保护已在故障首帧生效。 */
+	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 此处只补发图片；报警和蜂鸣已设置，故障首帧也已发送 A 泵零速并撤销 A/B 泵运行请求。 */
 	s_motor_uart_picture_pending = 0U; /* 图片已经成功投递，本次故障不再重复刷屏。 */
 }
 
@@ -261,13 +262,13 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 		return; /* 同一个驱动故障已上报过，本帧不重复投递蜂鸣/上位机报警。 */
 	}
 
-	/* 整个连续驱动故障生命周期只在第一帧快照控制来源，后续Err变化不能因脚踏运行位已被停机逻辑清除而丢失来源。 */
+	/* 一次故障只在首帧记录控制来源；后续即使错误码改变，也不能因启动标志被清除而忘记它来自脚踏。 */
 	if (s_motor_uart_alarm_owned == 0U)
 	{
-		s_motor_uart_alarm_started_during_run = (WorkMessage.runflag_work != false) ? 1U : 0U; /* 只在故障首帧保存运行上下文，后续Err=0清运行标志也不能丢失物理拔柄前状态。 */
+		s_motor_uart_alarm_started_during_run = (WorkMessage.runflag_work != false) ? 1U : 0U; /* 记住首次故障时是否有运行请求，供稍后的手柄拔出确认使用。 */
 		s_motor_uart_wait_foot_release =
 			(ControlSignalMessage.jtL_control_flag || ControlSignalMessage.jtR_control_flag) ? 1U : 0U; /* 故障首帧仍保留脚踏运行标志，可准确区分脚踏与其它控制来源。 */
-		s_motor_uart_foot_release_observed = 0U; /* 新的驱动故障生命周期必须重新等待本次脚踏真实释放，不能沿用上一次结果。 */
+		s_motor_uart_foot_release_observed = 0U; /* 每次新故障都重新等待松脚，不能沿用上一次已经松脚的记录。 */
 	}
 
 	s_motor_uart_last_driver_error = driver_error; /* 记录真实驱动 Err，便于下一帧判断是否发生了故障变化。 */
@@ -277,8 +278,8 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 }
 
 /*
- * 函数功能：按报警来源处理驱动故障退出；脚踏来源等待松脚和Err=0，其它来源沿用最少显示时间。
- * 输入参数：skip_hold_time 非 0 表示已满足脚踏双条件，可跳过普通故障显示计时；为 0 时按状态自行判断。
+ * 函数功能：决定是否清除驱动报警；脚踏启动时发生的故障，要等松脚且 Err=0，其他来源还要满足最短显示时间。
+ * 输入参数：skip_hold_time 非 0 表示跳过最短显示时间；脚踏故障仍必须满足“已松脚、Err=0”两个条件。
  * 返回参数：无；退出条件未满足时继续保持报警、蜂鸣和弹窗。
  */
 static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
@@ -312,11 +313,11 @@ static void MotorUart_ClearDriverAlarmIfOwned(uint8_t skip_hold_time)
 	s_motor_uart_alarm_owned = 0U;        /* 无论当前报警是否被其他模块接管，都释放本模块报警所有权。 */
 	s_motor_uart_last_driver_error = 0U;  /* 驱动恢复正常后清掉上一次真实 Err，下一次新故障可以重新上报。 */
 	s_motor_uart_alarm_start_tick = 0U;   /* 本次保持周期结束或报警归属已转移，清掉旧 tick 防止下次沿用。 */
-	s_motor_uart_alarm_started_during_run = 0U; /* 驱动报警生命周期结束后清掉运行快照，避免以后停机拔柄误判为运行掉线。 */
-	s_motor_uart_driver_recovered = 0U;   /* 本次报警生命周期结束，下一次故障必须重新等待 Err=0。 */
-	s_motor_uart_wait_foot_release = 0U;  /* 清除脚踏来源等待状态，下一次故障重新快照控制来源。 */
+	s_motor_uart_alarm_started_during_run = 0U; /* 本次报警结束，清除故障前的运行记录，避免下次停机拔柄被误判为运行掉线。 */
+	s_motor_uart_driver_recovered = 0U;   /* 本次报警结束，下次故障必须重新收到 Err=0 才算恢复。 */
+	s_motor_uart_wait_foot_release = 0U;  /* 清除等待松脚状态，下次故障重新记录控制来源。 */
 	s_motor_uart_foot_release_observed = 0U; /* 清除本次释放结果，避免下一次脚踏故障跳过松脚确认。 */
-	s_motor_uart_picture_pending = 0U; /* 报警生命周期结束时取消尚未送屏的驱动图片，防止恢复后迟到显示。 */
+	s_motor_uart_picture_pending = 0U; /* 报警结束时取消尚未显示的图片，防止恢复后又弹出旧故障图。 */
 	s_motor_uart_pending_picture_value = MOTOR_ALARM_PICTURE_NONE; /* 清掉旧覆盖图号，下一次故障重新按真实Err映射。 */
 	s_motor_uart_picture_start_tick = 0U; /* 清掉显示延迟起点，避免毫秒计数被下一次故障沿用。 */
 }
@@ -333,9 +334,9 @@ bool MotorUart_IsFootDriverAlarmWaitingRelease(void)
 }
 
 /*
- * 函数功能：查询当前屏幕驱动报警是否在电机运行期间开始，用于物理拔柄确认时让80号掉线报警覆盖次生驱动报警。
+ * 函数功能：查询驱动故障首次出现时是否有电机运行请求，供拔柄确认时改显示 80 号掉线报警图。
  * 输入参数：无。
- * 返回参数：true表示当前驱动报警由运行过程触发且仍由本模块持有；false表示没有对应运行上下文。
+ * 返回参数：true 表示故障发生时有运行请求且当前仍显示该驱动报警；false 表示条件不满足。
  */
 bool MotorUart_DidDriverAlarmStartDuringRun(void)
 {
@@ -354,7 +355,7 @@ void MotorUart_ReleaseFootDriverAlarm(void)
 {
 	if (s_motor_uart_wait_foot_release == 0U)
 	{
-		return; /* 当前驱动故障不是脚踏来源，不能改变手控、触控或外控报警的定时生命周期。 */
+		return; /* 不是脚踏启动时发生的故障，不通过松脚来清除，仍按其显示时间处理。 */
 	}
 
 	s_motor_uart_foot_release_observed = 1U; /* 先保存释放结果，覆盖“先松脚后Err=0”和脚踏通信丢失两种时序。 */
@@ -367,7 +368,7 @@ void MotorUart_ReleaseFootDriverAlarm(void)
 }
 
 /*
- * 函数功能：驱动故障恢复边沿撤销所有电机控制源的运行请求，防止旧请求自动恢复。
+ * 函数功能：驱动刚从故障恢复时，清除各来源的电机运行请求，防止沿用故障前的请求自动启动。
  * 输入参数：无，函数直接清理 WorkMessage 和 ControlSignalMessage。
  * 返回参数：无。
  */
@@ -383,7 +384,7 @@ static void MotorUart_StopAllWork(void)
 }
 
 /*
- * 函数功能：把一份CRC正确的12字节驱动回包原子更新为遥测反馈快照。
+ * 函数功能：保存一包 CRC 正确的驱动反馈；更新前后改变版本号，让读取方避开写入中的数据。
  * 输入参数：frame指向已经复制并通过CRC校验的驱动回包。
  * 返回参数：无。
  */
@@ -410,7 +411,7 @@ static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
 }
 
 /*
- * 函数功能：复制最近一次CRC正确驱动回包形成的一致性快照。
+ * 函数功能：读取最近一次有效驱动反馈，读取途中发生更新时重试，避免混用两次回包。
  * 输入参数：snapshot指向调用方提供的快照缓存。
  * 返回参数：快照有效且复制成功返回1，否则返回0。
  */
@@ -449,12 +450,12 @@ uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
 
 /*
  * 函数功能：判断近期有效驱动回包是否仍报告电机转动，过期回包只保留诊断值、不再作为忙状态。
- * 输入参数：无，内部使用 MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 作为反馈新鲜度窗口。
+ * 输入参数：无，反馈超过 MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 毫秒后不再用于判断是否转动。
  * 返回参数：true表示近期反馈速度非零，复制冲突时按旧非零值保守保持；false表示零速、尚无反馈或反馈已过期。
  */
 bool MotorUart_IsRecentFeedbackMoving(void)
 {
-	MotorUartFeedbackSnapshot_t feedback_snapshot; /* 使用一致性快照判断速度和时刻，禁止分别读取两份驱动回包。 */
+	MotorUartFeedbackSnapshot_t feedback_snapshot; /* 同时读取同一包的速度和接收时间，不能把新速度和旧时间配在一起。 */
 	uint32_t feedback_age_ms; /* 保存当前时刻距最后CRC正确回包的毫秒数，使用无符号减法兼容HAL时钟回绕。 */
 
 	if (MotorUart_CopyFeedbackSnapshot(&feedback_snapshot) == 0U)
@@ -462,7 +463,7 @@ bool MotorUart_IsRecentFeedbackMoving(void)
 		return (WorkMessage.driver_speed_feedback != 0U); /* 快照碰到接收任务写入时按旧非零值保持“忙”，避免瞬时并发导致提前释放控制权。 */
 	}
 
-	feedback_age_ms = (uint32_t)(HAL_GetTick() - feedback_snapshot.feedback_tick_ms); /* 统一按快照形成时刻计算新鲜度，不改写最后诊断数据。 */
+	feedback_age_ms = (uint32_t)(HAL_GetTick() - feedback_snapshot.feedback_tick_ms); /* 计算距最后有效回包过去了多久，不修改保存的反馈值。 */
 	if (feedback_age_ms >= MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS)
 	{
 		return false; /* 运行请求已经撤销后，旧非零回包超过250ms不再永久锁住脚踏、屏幕或手柄控制权。 */
@@ -476,12 +477,7 @@ bool MotorUart_IsRecentFeedbackMoving(void)
 // 无刷
 //============================================================================
 /*
- * 函数功能：解析 UART1 驱动板回包，更新实际转速、电流和驱动故障状态。
- * 输入参数：无，函数直接读取 UART1 DMA 接收缓冲区。
- * 返回参数：无；合法回包会更新 WorkMessage，并在故障时撤销电机和泵运行请求。
- */
-/*
- * 函数功能：按3ms任务周期累计驱动参数维护事务等待时间，并在300ms时形成超时结果。
+ * 函数功能：每次任务累计 3ms；参数响应等待到期时生成超时结果，结果保留到期时恢复周期通信。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -630,7 +626,7 @@ uint8_t MotorUart_PollDriverParameterResponse(uint8_t *response,
 }
 
 /*
- * 函数功能：让安全停机抢占尚在等待的驱动参数事务，并向外层保留一次超时结果。
+ * 函数功能：为停机结束当前参数响应等待，并把本次读写记为超时，供外层取走。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -645,11 +641,11 @@ void MotorUart_AbortDriverParameterTransaction(void)
 	s_driver_parameter_ready_elapsed_ms = 0U; /* 从抢占时刻开始给外层保留一次明确结果。 */
 	s_driver_parameter_response_len = 0U; /* 被抢占事务没有可交付的驱动响应。 */
 	s_driver_parameter_result = MOTOR_UART_DRIVER_PARAMETER_RESULT_TIMEOUT; /* 复用现有超时状态通知上层本次维护未完成。 */
-	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 结束等待占用；手柄停止帧不再受该状态阻挡。 */
+	s_driver_parameter_state = MOTOR_UART_DRIVER_PARAMETER_STATE_READY; /* 本次改为等取结果；调用方 MOTORRUN 可继续发送本周期停止帧，后续周期仍要检查此状态。 */
 }
 
 /*
- * 函数功能：查询驱动参数维护事务是否仍占用UART1。
+ * 函数功能：查询 UART1 是否正在等待参数响应或等待上层取走结果。
  * 输入参数：无。
  * 返回参数：等待或结果待取返回1；空闲返回0。
  */
@@ -658,6 +654,11 @@ uint8_t MotorUart_IsDriverParameterTransactionActive(void)
 	return (s_driver_parameter_state == MOTOR_UART_DRIVER_PARAMETER_STATE_IDLE) ? 0U : 1U; /* READY状态也保持暂停，防止响应尚未封装就恢复周期帧。 */
 }
 
+/*
+ * 函数功能：读取 UART1 接收包，按当前状态处理参数响应或 12 字节电机反馈。
+ * 输入参数：无，直接读取 UART1 DMA 接收缓冲区。
+ * 返回参数：无；更新速度、电流和报警。故障时发 A 泵零速并撤销 A/B 泵请求；故障恢复首帧再清电机请求。
+ */
 void BrushlessMotorUartData_ReceiveData(void)
 {
 	static uint8_t clean_huic=0; /* 记录上一周期是否出现驱动故障，用于故障恢复边沿再执行一次安全全停。 */
@@ -667,7 +668,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 	
   //读取串口数据
   rlen = Uart1_DMARecvDataPeek(dat);
-	/* 少于一帧所需字节时保留 DMA 数据等待后续接收，不能进入 CRC 和字段解析。 */
+	/* 参数读写期间优先处理参数响应，不按普通电机反馈解析。 */
 	if (s_driver_parameter_state == MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING)
 	{
 		(void)MotorUart_TryCaptureDriverParameterResponse(dat, rlen); /* 维护期间只解析0xFD响应，禁止落入0xAA运行反馈分支。 */
@@ -677,11 +678,11 @@ void BrushlessMotorUartData_ReceiveData(void)
 	{
 		return; /* 结果待取期间保持UART1业务解析静默，确保维护响应不会被普通反馈覆盖。 */
 	}
-  if (rlen < 11)   //不够一个数据包大小
+  if (rlen < 11)   //数据过短时返回；下方循环还要求从当前位置能取到完整 12 字节。
 	  return;
 
-  //查询本帧数据包的帧头0x01
-  for (i = 0; i < (rlen - 11); i++)    //最小帧数据包为4[0x01 0x03 0 0 0 0 0]
+  //逐字节查找电机反馈帧头 0xAA。
+  for (i = 0; i < (rlen - 11); i++)    //只检查从 i 开始至少还剩 12 字节的位置。
   {
 	  if (dat[i] == 0xAA)  
 	  {
@@ -689,7 +690,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 			/* CRC 通过后才允许修改运行状态，避免串口噪声被误当成驱动故障或速度反馈。 */
 			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
 			{
-				Common_CopyData(&dat[i], dat1, 12);    //截取10个数据
+				Common_CopyData(&dat[i], dat1, 12);    //复制完整 12 字节反馈，包含末尾两字节 CRC。
 				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC正确后先形成速度、电流、Err同源快照，供50ms遥测一致读取。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是当前模式ADC滤波实际电流 * 100：无刷为AllCur、有刷为CurLPF，单位0.01A，只上传给上位机显示。 */
@@ -697,7 +698,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 					if (dat1[7] == MOTOR_UART_DRIVER_ERR_NONE)
 					{
 						s_motor_uart_driver_recovered = 1U; /* 本帧确认驱动故障已经消失；脚踏来源故障仍需等待松脚条件。 */
-						/* 只在“上一帧故障、本帧恢复”的边沿再次全停，防止旧运行请求随故障解除自动恢复输出。 */
+						/* 只在上一帧有故障、本帧 Err=0 时清电机请求，避免故障恢复后沿用旧启动请求。 */
 						if(clean_huic==1){
 							clean_huic=0;
 							MotorUart_StopAllWork();
@@ -716,7 +717,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 						//Pump_SetSpeed_B(0);//泵停止运行
 						pumpMessageA.run_flag = false; /* 撤销 A 泵运行请求，防止泵任务下一周期重新拉起。 */
 						//pumpMessageA.speed_work = 0U;
-						pumpMessageB.run_flag = false; /* 同步撤销 B 泵请求，使驱动故障进入全泵停机状态。 */
+						pumpMessageB.run_flag = false; /* 撤销 B 泵普通运行请求；这里没有直接下发 B 泵零速，也没有清除排空标志。 */
 						//pumpMessageB.speed_work = 0U;
 						// MotorUart_StopAllWork();
 					}	
@@ -728,7 +729,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 
 					}
 					break;
-					case 0x02 :  //反向HALLEErrFlag
+					case 0x02 :  //反向回显；当前不据此修改主控方向。
 					{
 
 					}
@@ -758,9 +759,9 @@ void BrushlessMotorUartData_ReceiveData(void)
 //============================================================================
 /* USER CODE BEGIN Header_MOTORUARTTaskFunc */
 /**
-* @brief Function implementing the MOTORUARTTask thread.
-* @param argument: Not used
-* @retval None
+* 函数功能：每周期处理参数响应超时、电机反馈和待显示的报警图片。
+* 输入参数：event 为任务事件，当前不使用。
+* 返回参数：无。
 */
 /* USER CODE END Header_MOTORUARTTaskFunc */
 void MOTORUARTTaskFunc(uint32_t event)
@@ -776,6 +777,11 @@ void MOTORUARTTaskFunc(uint32_t event)
   /* USER CODE END MOTORUARTTaskFunc */
 }
 
+/*
+ * 函数功能：创建电机反馈任务，每 3ms 处理一次 UART1 接收及超时。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void MotorUartData_Init(void)
 {
   /* definition and creation of MOTORUARTTask */

@@ -18,9 +18,14 @@ static void Uart5_DmaInit(void)
   Bsp_UartReceiveDma(BSP_UART_PORT_5, Uart5_DMABuf, UART5_MAX_PACKET_SIZE);
 }
 
+/*
+ * 函数功能：设置 UART5 泵驱动串口波特率；失败时交给 Error_Handler 处理。
+ * 输入参数：baud 为波特率，单位：bit/s。
+ * 返回参数：无。
+ */
 void Uart5_Configuration(uint16_t baud)
 {
-  /* UART5 初始化失败时进入统一故障处理，避免逻辑 A 泵出口保持半配置状态。 */
+  /* 初始化失败后不能继续用泵驱动串口收发。 */
   if (Bsp_UartInit(BSP_UART_PORT_5, baud) != HAL_OK)
   {
     Error_Handler();
@@ -46,9 +51,14 @@ void Uart5_Init(void)
   Uart5_DmaInit();
 }
 
+/*
+ * 函数功能：等待 UART5 泵控制命令发送结束，最多等待 100ms。
+ * 输入参数：pData 为命令数据；Length 为发送字节数。
+ * 返回参数：无。
+ */
 void Uart5_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  /* UART5 泵控制帧只发给步进驱动，不再镜像到 UART10 打印测试信息，避免串口输出干扰泵控制节拍。 */
+  /* 泵控制命令只发到 UART5，不再额外占用 UART10 打印测试数据。 */
   Bsp_UartTransmit(BSP_UART_PORT_5, pData, Length, 100);
 }
 
@@ -64,7 +74,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 
   if (data == NULL)
   {
-    return 0U; /* 调用方没有提供缓存时不得停止 DMA 或丢弃现场回包。 */
+    return 0U; /* 没有输出缓存就不取数据，保留 DMA 中已收到的回包。 */
   }
 
   remain_len = Bsp_UartRxDmaRemain(BSP_UART_PORT_5); /* 在下一条 25ms 泵命令发送前读取上一条命令的回包长度。 */
@@ -73,8 +83,8 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
     return 0U; /* DMA 尚未收到新字节时保持当前接收，不执行无意义的停止和重启。 */
   }
 
-  received_len = (uint16_t)(UART5_MAX_PACKET_SIZE - remain_len); /* 循环 DMA 每个泵周期都会重启，差值就是本周期完整接收长度。 */
-  Common_CopyData(Uart5_DMABuf, data, received_len); /* 先复制不可变快照，再释放底层 DMA 缓冲供下一帧覆盖。 */
+  received_len = (uint16_t)(UART5_MAX_PACKET_SIZE - remain_len); /* 用缓存容量减去 DMA 剩余空间，得到本次可取出的字节数。 */
+  Common_CopyData(Uart5_DMABuf, data, received_len); /* 先把已收到的字节复制给泵任务，再清空 DMA 缓存。 */
   Uart5_DMAReset(); /* 复制完成后立即重启 DMA，保证随后发送的泵命令能够收到对应反馈。 */
 
   return received_len;

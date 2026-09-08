@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-/* 8寸屏0x5520保活从成功入队时起最多有效420ms，旧队列消息超过该窗口不得再启动电机。 */
+/* 触控按住信号的有效期，单位 ms：默认 420。0x5520 成功放入按键队列后开始计时；到期未收到新信号就停机，改大将延长松手后的最长停机等待。 */
 #define SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS 420U
 
 // 一次性按键事件的空值，保持与历史屏幕键值一致，避免定标页误处理无按键状态。
@@ -18,42 +18,42 @@
 #define KEY_CONTINUOUSCLICK 21U
 #endif
 
-// 脚踏定标页存储低点/高点/中点的事件值，来自屏幕串口按键解析。
+// 以下是脚踏定标页的保存按钮编号，不是定标数值；必须与屏幕按键解析一致。
 #ifndef KEY_STORAGEMIN
-#define KEY_STORAGEMIN 15U
+#define KEY_STORAGEMIN 15U // 保存单踏板或左踏板的低点。
 #endif
 
 #ifndef KEY_STORAGEMAX
-#define KEY_STORAGEMAX 16U
+#define KEY_STORAGEMAX 16U // 保存单踏板或左踏板的高点。
 #endif
 
 #ifndef KEY_STORAGEMIN2
-#define KEY_STORAGEMIN2 80U
+#define KEY_STORAGEMIN2 80U // 保存双脚踏右侧的低点。
 #endif
 
 #ifndef KEY_STORAGEMAX2
-#define KEY_STORAGEMAX2 81U
+#define KEY_STORAGEMAX2 81U // 保存双脚踏右侧的高点。
 #endif
 
 #ifndef KEY_STORAMEDIAN
-#define KEY_STORAMEDIAN 82U
+#define KEY_STORAMEDIAN 82U // 保存双段或双脚踏左侧的中点，普通单踏板不使用。
 #endif
 
 #ifndef KEY_STORAMEDIAN2
-#define KEY_STORAMEDIAN2 83U
+#define KEY_STORAMEDIAN2 83U // 保存双脚踏右侧的中点。
 #endif
 
-// 脚踏板物理按键桥接到定标页的事件值，保持旧协议数值不变。
+// 脚踏板实体键在定标页使用的编号，只切换调试显示，不保存定标值。
 #ifndef M_KEY_FOOT
-#define M_KEY_FOOT 85U
+#define M_KEY_FOOT 85U // 中间实体键。
 #endif
 
 #ifndef L_KEY_FOOT
-#define L_KEY_FOOT 86U
+#define L_KEY_FOOT 86U // 左侧实体键。
 #endif
 
 #ifndef R_KEY_FOOT
-#define R_KEY_FOOT 87U
+#define R_KEY_FOOT 87U // 右侧实体键。
 #endif
 
 //============================================================================
@@ -64,9 +64,9 @@ void ScreenKey_LegacyEventPost(uint8_t key_value);
 uint8_t ScreenKey_LegacyEventTake(void);
 
 /*
- * 函数功能：判断最近一份成功入队的触控保活是否仍在420ms有效窗口内。
+ * 函数功能：检查最近一次已放入按键队列的“仍在按住”信号是否还有效。
  * 输入参数：无，读取当前HAL毫秒时钟和最近接受时刻。
- * 返回参数：1表示租约有效；0表示从未接受、已主动失效或已超过420ms。
+ * 返回参数：1 表示未到 420ms；0 表示没有有效信号、信号已取消或已到 420ms。
  */
 uint8_t ScreenKey_IsAcceptedTouchKeepAliveFresh(void);
 

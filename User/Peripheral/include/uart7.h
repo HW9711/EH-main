@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define UART7_MAX_PACKET_SIZE  150
+#define UART7_MAX_PACKET_SIZE  150 /* UART7 泵驱动反馈缓存容量，单位：字节；不是泵的速度或流量上限。 */
 
 void Uart7_Init(void);
 

@@ -9,13 +9,13 @@
  * Keep board.h as current source of truth during migration.
  */
 
-#define BOARD_PROFILE_HAS_K1K2            BOARD_HAS_K1K2
-#define RFID_USE_DUAL_UART_MODE           0U  /* RFID硬件模式：1表示逻辑A固定UART3、逻辑B固定UART9；0表示UART3+R200-K8选通。 */
+#define BOARD_PROFILE_HAS_K1K2            BOARD_HAS_K1K2 /* 跟随 board.h 的继电器配置：0 表示不操作 K1/K2，1 表示硬件带有这两路继电器。 */
+#define RFID_USE_DUAL_UART_MODE           0U  /* RFID接线选择：0=A/B共用UART3，由R200-K8切换；1=A固定UART3、B固定UART9。只能按实际接线修改。 */
 
 /*
  * RFID 请求/应答与确认掉线统计开关：
  * 1U：主控分别累计 A/B 通道的读取命令、有效回包、无有效回包、异常帧、在线监测完成和确认掉线，并在心跳尾部上报。
- * 0U：不保留统计状态，也不追加心跳统计扩展，心跳字节格式恢复为原版本。
+ * 0U：不累计这些次数，心跳也不附带统计字段；修改后上位机必须能识别对应的心跳长度。
  */
 #ifndef RFID_LINK_STATS_ENABLE
 #define RFID_LINK_STATS_ENABLE             1U
@@ -28,7 +28,7 @@
 /*
  * UART2 简易外控协议开关：
  * 1U：识别并执行 AA BB CC FunCode EE FF 固定 6 字节指令，同时保留原外控协议。
- * 0U：完全屏蔽简易协议识别和执行，UART2 只运行原外控协议。
+ * 0U：不处理这类6字节指令，UART2只处理原外控协议；修改会影响简易上位机能否控制主机。
  */
 #ifndef EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE
 #define EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE 1U
@@ -53,9 +53,9 @@
 #endif
 
 /*
- * 手柄物理接口交换开关：
- * 1U：逻辑A使用原物理B接口，逻辑B使用原物理A接口，用于当前镜像安装线束。
- * 0U：逻辑A/B分别使用原物理A/B接口，可直接恢复旧硬件接线方式。
+ * 屏幕A/B与板上手柄接口的对应关系：
+ * 1U：屏幕A使用板上原B接口，屏幕B使用板上原A接口，适用于A/B交叉接线。
+ * 0U：屏幕A/B分别使用板上原A/B接口；必须按实际接线选择，不能用来切换当前工作通道。
  * 该配置只交换短接、EEPROM和电机等手柄接口资源；A键PE2/UART10、B键PE0/UART8固定不交换。
  * R200-K8旧硬件的RFID选通方向由RFID_R200_AB_SWAP_ENABLE单独控制。
  * MemoryMsgA/B、界面区域、报警归属和业务状态始终保持逻辑A/B不变。
@@ -93,7 +93,7 @@ static inline uint8_t BoardProfile_MapHandlePhysicalChannel(uint8_t logical_chan
     }
 #endif
 
-    /* 关闭交换或输入不是A/B时保持原编号，避免改变调用方既有异常语义。 */
+    /* 不需要交换或编号不是A/B时原样返回，错误编号仍交给调用方处理。 */
     return logical_channel;
 }
 

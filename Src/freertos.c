@@ -81,7 +81,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_QUEUES */
 
   /* USER CODE BEGIN RTOS_THREADS */
-  AppTaskScheduler_Init(); /* 直接创建现有应用调度任务，任务模型、周期和全局互斥锁均保持不变。 */
+  AppTaskScheduler_Init(); /* 创建业务回调共用的锁；各业务线程已在前面的Userparser_Init中创建。 */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */

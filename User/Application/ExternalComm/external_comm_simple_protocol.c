@@ -22,7 +22,7 @@
 #define EXT_SIMPLE_FUN_PUMP_B_TOGGLE      0x09U /* 切换 B 泵外控独立运行请求。 */
 #define EXT_SIMPLE_FUN_PUMP_A_GEAR        0x0AU /* 循环切换 A 泵 0～5 流量档。 */
 #define EXT_SIMPLE_FUN_PUMP_B_GEAR        0x0BU /* 循环切换 B 泵 0～5 流量档。 */
-#define EXT_SIMPLE_FUN_CLEAR_REMINDER     0x0CU /* 关闭蜂鸣和报警弹窗，不清安全报警锁存。 */
+#define EXT_SIMPLE_FUN_CLEAR_REMINDER     0x0CU /* 关闭蜂鸣和报警弹窗，不清除用于禁止启动的故障状态。 */
 
 #define EXT_SIMPLE_LEGACY_LOGIN           0x01U /* 复用原外控申请功能码，不把授权逻辑复制到本模块。 */
 #define EXT_SIMPLE_LEGACY_SWITCH          0x03U /* 复用原外控通道切换功能码。 */
@@ -34,12 +34,12 @@
 #define EXT_SIMPLE_AREA_PUMP_B_STOP       0x04U /* 原外控 B 泵停止动作。 */
 #define EXT_SIMPLE_AREA_HANDLE_START      0x05U /* 原外控当前手柄启动动作。 */
 #define EXT_SIMPLE_AREA_HANDLE_STOP       0x06U /* 原外控当前手柄停止动作。 */
-#define EXT_SIMPLE_AUTH_SIZE              8U    /* 原外控申请入口要求 8 字节内部授权载荷。 */
+#define EXT_SIMPLE_AUTH_SIZE              8U    /* 原外控申请函数要求 8 字节授权数据；仅在主控内部补齐，简易串口帧仍为 6 字节。 */
 
 #if (EXTERNAL_COMM_SIMPLE_PROTOCOL_ENABLE == 1U)
 
 static const uint8_t s_simple_head[EXT_SIMPLE_HEAD_SIZE] = {0xAAU, 0xBBU, 0xCCU}; /* 共用 FIFO 只搜索前三字节帧头。 */
-static uint8_t s_simple_session_active = 0U; /* 只有本协议 0x01 成功取得 owner 后，0x03～0x0C 才允许执行。 */
+static uint8_t s_simple_session_active = 0U; /* 0x01 登录并取得外控控制权后置 1，才允许执行 0x03～0x0C。 */
 
 /*
  * 函数功能：判断功能码是否属于用户定义的 0x01～0x0C 范围。
@@ -59,14 +59,14 @@ static uint8_t ExtSimple_IsKnown(uint8_t fun_code)
  */
 static void ExtSimple_Login(void)
 {
-    uint8_t auth_code[EXT_SIMPLE_AUTH_SIZE] = {0U}; /* 该载荷只在主控内部适配，不出现在简易协议线上。 */
+    uint8_t auth_code[EXT_SIMPLE_AUTH_SIZE] = {0U}; /* 给原申请函数补足所需的 8 字节数据，不通过串口发送。 */
 
     ExternalComm_NotifyLink(); /* 第三份登录帧确认简易会话后才点亮图标并刷新2秒/10秒链路保护。 */
     ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_LOGIN,
                            0xFFU,
                            auth_code,
-                           sizeof(auth_code)); /* 静默复用 owner 仲裁、屏幕退出保护和首次进入停输出逻辑。 */
-    s_simple_session_active = ControlArbitration_IsExternalActive() ? 1U : 0U; /* 只有真实取得外控 owner 才标记登录成功。 */
+                           sizeof(auth_code)); /* 沿用控制权检查、屏幕退出保护和首次登录停机处理，但不发送原协议应答。 */
+    s_simple_session_active = ControlArbitration_IsExternalActive() ? 1U : 0U; /* 确实取得外控控制权才记为登录成功，申请被拒绝时保持未登录。 */
 }
 
 /*
@@ -78,19 +78,19 @@ static void ExtSimple_Logout(void)
 {
     if (s_simple_session_active == 0U)
     {
-        return; /* 未由简易协议登录时不能释放另一套协议持有的外控 owner。 */
+        return; /* 简易协议未登录时直接返回，不能退出正式协议建立的外控连接。 */
     }
 
     ExternalComm_NotifyLink(); /* 退出帧也是合法链路活动，先刷新在线状态再执行安全释放。 */
     ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_LOGOUT,
                            0xFFU,
                            NULL,
-                           0U); /* 复用原退出路径，统一停止输出、清泵请求并释放 owner。 */
+                           0U); /* 沿用原退出处理，停止输出、清除泵运行请求并交还控制权。 */
     s_simple_session_active = 0U; /* 退出后本协议必须重新收到 0x01 才能执行控制动作。 */
 }
 
 /*
- * 函数功能：按当前通道选择另一个手柄，并复用原外控通道切换门禁。
+ * 函数功能：在 A/B 手柄之间切换；是否允许切换仍由原外控函数检查。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -131,13 +131,13 @@ static void ExtSimple_TogglePump(uint8_t pump_channel)
     {
         area_code = (ExternalComm_PumpRunRequested(CHANNEL_A) != 0U) ?
                     EXT_SIMPLE_AREA_PUMP_A_STOP :
-                    EXT_SIMPLE_AREA_PUMP_A_START; /* 按 A 泵外控请求锁存决定本次是停还是启。 */
+                    EXT_SIMPLE_AREA_PUMP_A_START; /* 已有独立运行请求就停止，否则发起独立启动；不按实测转速判断。 */
     }
     else if (pump_channel == CHANNEL_B)
     {
         area_code = (ExternalComm_PumpRunRequested(CHANNEL_B) != 0U) ?
                     EXT_SIMPLE_AREA_PUMP_B_STOP :
-                    EXT_SIMPLE_AREA_PUMP_B_START; /* 按 B 泵外控请求锁存决定本次是停还是启。 */
+                    EXT_SIMPLE_AREA_PUMP_B_START; /* 已有独立运行请求就停止，否则发起独立启动；不按实测转速判断。 */
     }
     else
     {
@@ -147,20 +147,20 @@ static void ExtSimple_TogglePump(uint8_t pump_channel)
     ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_CONTROL,
                            area_code,
                            NULL,
-                           0U); /* 原泵入口继续检查配置、压力保护、默认速度和外控 owner。 */
+                           0U); /* 原泵控制函数继续检查泵配置、压力保护、默认速度和外控控制权。 */
 }
 
 /*
  * 函数功能：在共用 UART2 FIFO 中查找简易协议帧头，并判断固定 6 字节是否已经收全。
- * 输入参数：available 为 FIFO 已有字节数；reader 为只读窥探回调；head_offset 返回帧头偏移。
- * 返回参数：返回未找到、半帧或候选帧已就绪状态。
+ * 输入参数：available 为接收缓存已有字节数；reader 读取缓存但不移除数据；head_offset 返回帧头位置。
+ * 返回参数：返回未找到帧头、帧未收全或 6 字节已收全；已收全不代表帧尾正确。
  */
 ExtSimpleProbeResult_t ExtSimple_Probe(uint16_t available,
                                       ExtSimpleReadFn reader,
                                       uint16_t *head_offset)
 {
-    uint16_t offset; /* 逐字节扫描候选帧头的 FIFO 偏移。 */
-    uint8_t candidate[EXT_SIMPLE_HEAD_SIZE]; /* 保存本次窥探的三个帧头字节。 */
+    uint16_t offset; /* 本次检查的缓存位置，每次向后移动 1 字节查找帧头。 */
+    uint8_t candidate[EXT_SIMPLE_HEAD_SIZE]; /* 暂存读取的 3 字节，用来比较 AA BB CC 帧头。 */
 
     if ((reader == NULL) || (head_offset == NULL))
     {
@@ -198,7 +198,7 @@ ExtSimpleProbeResult_t ExtSimple_Probe(uint16_t available,
 
 /*
  * 函数功能：校验并执行一帧 AA BB CC FunCode EE FF 简易外控指令。
- * 输入参数：frame 指向候选帧；frame_len 为候选帧长度。
+ * 输入参数：frame 指向待检查的帧；frame_len 为帧的字节数。
  * 返回参数：帧结构完整时返回 1；帧头、帧尾或长度错误时返回 0。
  */
 uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
@@ -219,7 +219,7 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
     fun_code = frame[3]; /* 固定头尾合法后读取功能码，避免坏帧影响会话状态。 */
     if (ExtSimple_IsKnown(fun_code) == 0U)
     {
-        return 1U; /* 未知功能码作为完整帧消费，但不执行动作、不刷新保活。 */
+        return 1U; /* 帧格式完整，可从接收缓存移除；未知功能码不执行，也不重置断线计时。 */
     }
 
     if (fun_code == EXT_SIMPLE_FUN_LOGIN)
@@ -228,21 +228,21 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
                                             NULL,
                                             0U) != 0U)
         {
-            ExtSimple_Login(); /* 第三份登录帧或已确认同源保活才允许刷新链路并申请外控owner。 */
+            ExtSimple_Login(); /* 收齐三份登录帧，或简易协议已连接时，才重置断线计时并申请控制权。 */
         }
         return 1U;
     }
 
     if (fun_code == EXT_SIMPLE_FUN_LOGOUT)
     {
-        ExtSimple_Logout(); /* 0x02 只退出本协议自己建立的会话，避免误释放旧协议 owner。 */
+        ExtSimple_Logout(); /* 0x02 只退出简易协议建立的连接，不能退出正式协议的连接。 */
         return 1U;
     }
 
     if ((s_simple_session_active == 0U) || (ControlArbitration_IsExternalActive() == false))
     {
-        s_simple_session_active = 0U; /* owner 已被超时或屏幕释放时同步作废私有会话。 */
-        return 1U; /* 未登录命令保持静默，不允许绕过 0x01 直接控制输出。 */
+        s_simple_session_active = 0U; /* 断线超时或屏幕退出导致外控失效时，同时清除简易协议登录状态。 */
+        return 1U; /* 未登录时忽略命令，不执行、不应答，必须先通过 0x01 登录。 */
     }
 
     ExternalComm_NotifyLink(); /* 已登录且已知的每条控制帧都刷新原有 2s/10s 链路保护。 */
@@ -253,7 +253,7 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
             ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_CONTROL,
                                    EXT_SIMPLE_AREA_HANDLE_START,
                                    NULL,
-                                   0U); /* 复用原手柄启动门禁，报警、掉线和无通道时仍拒绝运行。 */
+                                   0U); /* 沿用原手柄启动检查，报警、掉线或未选通道时均不启动。 */
             break;
         case EXT_SIMPLE_FUN_HANDLE_STOP:
             ExternalComm_RunSilent(EXT_SIMPLE_LEGACY_CONTROL,
@@ -283,14 +283,14 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
             PUMPActive(JTKey_right_short); /* 复用 B 泵类型对应的 0～5 档循环和显示刷新。 */
             break;
         case EXT_SIMPLE_FUN_CLEAR_REMINDER:
-            SendAlarmMessage(WORK_ALARM_NONE); /* 只关闭蜂鸣提醒，不清 WorkMessage 安全报警锁存。 */
-            SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 只关闭报警弹窗；故障门禁仍阻止电机和泵启动。 */
+            SendAlarmMessage(WORK_ALARM_NONE); /* 只关闭蜂鸣提醒，WorkMessage 中阻止再次启动的故障状态仍保留。 */
+            SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 只关闭报警弹窗；故障状态仍保留，电机和泵仍不能启动。 */
             break;
         default:
             break; /* 0x01、0x02 已在前面处理，其余未知值已被范围检查拦截。 */
     }
 
-    return 1U; /* 完整已知指令处理结束，接收层可消费固定 6 字节。 */
+    return 1U; /* 本帧处理结束，接收函数可从缓存移除这 6 字节。 */
 }
 
 #else
@@ -314,14 +314,14 @@ ExtSimpleProbeResult_t ExtSimple_Probe(uint16_t available,
 }
 
 /*
- * 函数功能：编译开关关闭时拒绝执行任何简易协议候选帧。
+ * 函数功能：简易协议编译开关关闭时，不执行收到的简易协议帧。
  * 输入参数：frame 和 frame_len 均不使用。
- * 返回参数：固定返回 0，通知接收层按坏候选逐字节重新同步。
+ * 返回参数：固定返回 0，接收函数按无效帧处理，逐字节重新查找帧头。
  */
 uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
 {
-    (void)frame; /* 关闭功能后不访问候选帧内容。 */
-    (void)frame_len; /* 关闭功能后不解析候选帧长度。 */
+    (void)frame; /* 功能已关闭，不读取帧内容。 */
+    (void)frame_len; /* 功能已关闭，不检查帧长度。 */
     return 0U; /* 不允许任何简易协议动作生效。 */
 }
 

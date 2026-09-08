@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define EXTERNAL_COMM_MAX_FRAME_SIZE       150U   /* UART2 当前单包缓存上限，禁止构造超过此长度的应用帧。 */
+#define EXTERNAL_COMM_MAX_FRAME_SIZE       150U   /* 正式协议整帧最大字节数；调大时必须同步检查 UART2 接收缓存和上位机帧长限制。 */
 #define EXTERNAL_COMM_FRAME_FIXED_SIZE     16U    /* 帧头4+传输码1+长度2+功能码1+区域码1+信息码1+CRC2+帧尾4。 */
 #define EXTERNAL_COMM_MAX_INFO_SIZE        (EXTERNAL_COMM_MAX_FRAME_SIZE - EXTERNAL_COMM_FRAME_FIXED_SIZE) /* InforArea 最大可用字节数。 */
 
@@ -15,18 +15,18 @@ extern "C" {
 #define EXTERNAL_COMM_TRAN_UPLOAD          0x01U  /* 本机主动上传或应答外部设备。 */
 #define EXTERNAL_COMM_TRAN_DOWNLOAD        0x02U  /* 外部设备下发控制、设置、读写 EEPROM 命令。 */
 
-/* 应用层功能码，协议字段保持独立，便于后续按文档调整映射。 */
+/* 上行功能码必须与上位机约定一致；修改数值会改变上位机对报文的识别。 */
 #define EXTERNAL_COMM_FUNC_EEPROM_UPLOAD   0x01U  /* 上传 EEPROM 单页有效数据。 */
 #define EXTERNAL_COMM_FUNC_HOST_SETTING    0x02U  /* 预留：上传主机设置内容。 */
-#define EXTERNAL_COMM_FUNC_HOST_RUNNING    0x03U  /* 预留：上传主机运行内容。 */
+#define EXTERNAL_COMM_FUNC_HOST_RUNNING    0x03U  /* 上传主机运行内容，目前用于报警和电机状态。 */
 #define EXTERNAL_COMM_FUNC_SOFTWARE_VERSION 0x0BU /* 上传主控板 AT24C32 保存的软件版本记录。 */
 #define EXTERNAL_COMM_FUNC_HEARTBEAT       0xAAU  /* 周期上传外部通信心跳。 */
-#define EXTERNAL_COMM_FUNC_HOST_EXIT       0xBBU  /* 预留：上传主机主动退出外部控制。 */
+#define EXTERNAL_COMM_FUNC_HOST_EXIT       0xBBU  /* 预留的主机主动退出上行功能码；当前退出通知使用 0xDD 应答携带 0xBB。 */
 #define EXTERNAL_COMM_FUNC_PLUG_SWITCH     0xCCU  /* 预留：上传接插切换内容。 */
 #define EXTERNAL_COMM_FUNC_ACK             0xDDU  /* 上传命令执行结果应答。 */
 #define EXTERNAL_COMM_FUNC_HOST_CONTROL    0xEEU  /* 预留：上传主机控制内容。 */
 
-/* 下行 0x0D 只控制50ms电机遥测订阅，不改变原100ms心跳和电机控制周期。 */
+/* 下行 0x0D 控制电机状态定时上传：数据区 0 关闭、1 开启；上传周期 50ms，不改变 100ms 心跳和电机控制周期。 */
 #define EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE 0x0DU
 
 #define EXTERNAL_COMM_AREA_NONE            0xFFU  /* 无区域码时填充 0xFF。 */
@@ -57,20 +57,19 @@ typedef enum
 typedef enum
 {
     EXTERNAL_COMM_BUILD_OK = 0,          /* 组帧成功。 */
-    EXTERNAL_COMM_BUILD_BAD_PARAM,       /* 输出缓存、长度指针或载荷指针非法。 */
-    EXTERNAL_COMM_BUILD_OVERFLOW         /* 输出缓存不足或载荷超过协议上限。 */
+    EXTERNAL_COMM_BUILD_BAD_PARAM,       /* 输出缓存、长度指针或所需的数据指针为空。 */
+    EXTERNAL_COMM_BUILD_OVERFLOW         /* 输出缓存不足，或 InforArea 字节数超过协议上限。 */
 } ExternalCommBuildResult_t;
 
 typedef struct
 {
-    /* 解析后的协议字段，info_area 只保存 InforArea 有效载荷。 */
-    uint8_t tran_code;
-    uint16_t length;
-    uint8_t fun_code;
-    uint8_t area_code;
-    uint8_t info_code;
-    uint16_t info_len;
-    uint8_t info_area[EXTERNAL_COMM_MAX_INFO_SIZE];
+    uint8_t tran_code;                  /* 传输方向：0x01 为主控上传，0x02 为上位机下发。 */
+    uint16_t length;                    /* Length 字段，包含帧头到帧尾的整帧字节数。 */
+    uint8_t fun_code;                   /* 功能码，决定设置参数、控制输出或访问 EEPROM。 */
+    uint8_t area_code;                  /* 区域码，具体表示通道、参数编号或页号，由功能码决定。 */
+    uint8_t info_code;                  /* 信息码，下行命令要求为 0xFF，上行可表示应答结果或状态类型。 */
+    uint16_t info_len;                  /* InforArea 数据字节数，不包含固定字段、CRC 和帧尾。 */
+    uint8_t info_area[EXTERNAL_COMM_MAX_INFO_SIZE]; /* 命令数据区，只保存 info_len 个有效字节。 */
 } ExternalCommFrame_t;
 
 /* 从 UART2 一次接收缓存中查找并校验完整帧，CRC 覆盖 TranCode 到 InforArea。 */
@@ -97,7 +96,7 @@ ExternalCommBuildResult_t ExternalCommProtocol_BuildAck(uint8_t ack_code,
                                                         uint16_t out_size,
                                                         uint16_t *out_len);
 
-/* 构造 0xAA 心跳帧，心跳载荷按协议在线/运行状态动态增减。 */
+/* 构造 0xAA 心跳帧；调用方按设备在线和运行状态决定要发送哪些字段。 */
 ExternalCommBuildResult_t ExternalCommProtocol_BuildHeartbeat(const uint8_t *heartbeat_info,
                                                               uint16_t heartbeat_info_len,
                                                               uint8_t *out_buf,

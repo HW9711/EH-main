@@ -13,14 +13,14 @@ kernel_task_t PEDALRECVTaskHandle;
 
 PedalCalibrationData_t PedalCalibrationData = { 0 };  // 脚踏定标页专用缓存，只保存 UART4 定标回包和按键事件。
 
-#define PEDAL_CALIBRATION_CONNECTED  1U    // 合法脚踏帧到达后使用的定标模式在线标志。
-#define PEDAL_CAL_OFFLINE_SCANS       500U  // 定标循环每2ms扫描一次，500次无合法帧约等于1秒离线。
-#define PEDAL_CAL_SINGLE_FRAME_LEN    10U   // 单踏板实时帧、旧读取回包和按键帧的固定长度。
-#define PEDAL_CAL_TWO_STAGE_FRAME_LEN 18U   // 双段踏板实时值及三点定标值的完整帧长度。
-#define PEDAL_CAL_DUAL_FRAME_LEN      24U   // 双脚踏左右实时值及两组三点定标值的完整帧长度。
+#define PEDAL_CALIBRATION_CONNECTED  1U    // 在线标志固定用 1，0 表示离线；这是状态编号，不是可调时间或阈值。
+#define PEDAL_CAL_OFFLINE_SCANS       500U  // 连续 500 次扫描无有效数据就清空页面；定标主循环约 2ms 一次，约 1s。调大延后离线清屏，调小更容易因短暂丢包清屏。
+#define PEDAL_CAL_SINGLE_FRAME_LEN    10U   // 协议规定的总字节数，含末尾 2 字节 CRC：单踏板、旧读回及按键帧；不可单独改主控值。
+#define PEDAL_CAL_TWO_STAGE_FRAME_LEN 18U   // 协议规定双段踏板帧共 18 字节，含实时 AD、三点定标值和 CRC；须与脚踏板协议一致。
+#define PEDAL_CAL_DUAL_FRAME_LEN      24U   // 协议规定双脚踏帧共 24 字节，含左右 AD、两组三点值和 CRC；改错会导致整帧校验失败。
 
 /*
- * 函数功能：让定标专用循环按指定毫秒数让出CPU。
+ * 函数功能：定标命令发送后等待指定时间，给脚踏板留出处理和回复时间。
  * 输入参数：delay_ms 为本次等待的毫秒数。
  * 返回参数：无。
  */
@@ -60,7 +60,7 @@ static uint8_t Pedal_ReadMDataCMD_Right[8] = {0xFE, 0xEF, 0xB6, 0xC1, 0xB2, 0xEE
  */
 void Pedal_StorageHValue(void)
 {
-  Uart4_SendPacket(Pedal_StorageHDataCMD, 8U);  // 末字节0x8B明确选择脚踏板第一路Flash字段。
+  Uart4_SendPacket(Pedal_StorageHDataCMD, 8U);  // 发送末字节为 0x8B 的保存命令，让脚踏板保存第一路高点。
 }
 
 /*
@@ -70,7 +70,7 @@ void Pedal_StorageHValue(void)
  */
 void Pedal_StorageLValue(void)
 {
-  Uart4_SendPacket(Pedal_StorageLDataCMD, 8U);  // 末字节0x0F明确选择脚踏板第一路Flash字段。
+  Uart4_SendPacket(Pedal_StorageLDataCMD, 8U);  // 发送末字节为 0x0F 的保存命令，让脚踏板保存第一路低点。
 }
 
 /*
@@ -80,7 +80,7 @@ void Pedal_StorageLValue(void)
  */
 void Pedal_StorageMValue(void)
 {
-  Uart4_SendPacket(Pedal_StorageMDataCMD, 8U);  // 末字节0x3D明确选择脚踏板第一路Flash字段。
+  Uart4_SendPacket(Pedal_StorageMDataCMD, 8U);  // 发送末字节为 0x3D 的保存命令，让脚踏板保存第一路中点。
 }
 
 /*
@@ -90,7 +90,7 @@ void Pedal_StorageMValue(void)
  */
 void Pedal_StorageHValue_Right(void)
 {
-  Uart4_SendPacket(Pedal_StorageHDataCMD_Right, 8U);  // 末字节0x9B选择脚踏板第二路Flash字段。
+  Uart4_SendPacket(Pedal_StorageHDataCMD_Right, 8U);  // 发送末字节为 0x9B 的命令，让脚踏板保存右路高点。
 }
 
 /*
@@ -100,7 +100,7 @@ void Pedal_StorageHValue_Right(void)
  */
 void Pedal_StorageLValue_Right(void)
 {
-  Uart4_SendPacket(Pedal_StorageLDataCMD_Right, 8U);  // 末字节0x1F选择脚踏板第二路Flash字段。
+  Uart4_SendPacket(Pedal_StorageLDataCMD_Right, 8U);  // 发送末字节为 0x1F 的命令，让脚踏板保存右路低点。
 }
 
 /*
@@ -110,7 +110,7 @@ void Pedal_StorageLValue_Right(void)
  */
 void Pedal_StorageMValue_Right(void)
 {
-  Uart4_SendPacket(Pedal_StorageMDataCMD_Right, 8U);  // 末字节0x4D选择脚踏板第二路Flash字段。
+  Uart4_SendPacket(Pedal_StorageMDataCMD_Right, 8U);  // 发送末字节为 0x4D 的命令，让脚踏板保存右路中点。
 }
 
 /*
@@ -172,20 +172,18 @@ void Pedal_ReadMValue_Right(void)
 {
   Uart4_SendPacket(Pedal_ReadMDataCMD_Right, 8U);  // 只为兼容旧板保留，新板周期帧已包含右路中点。
 }
-//============================================================================
-// 函数名称: Pedal_ReadStorageHLValue()
-// 功能描述:
-// 输　  入:
-// 输    出:
-// 函数说明: 读取脚踏高低值
-//============================================================================
+/*
+ * 函数功能：依次请求脚踏板保存的高点和低点，两条命令间留出回复时间。
+ * 输入参数：无。
+ * 返回参数：无；收到的数据由接收解析函数写入定标缓存。
+ */
 void Pedal_ReadStorageHLValue(void)
 {
-  Pedal_ReadHValue();
-	PedalTaskDelayMs(50);
+  Pedal_ReadHValue();  // 先请求单路或左路高点。
+	PedalTaskDelayMs(50);  // 等待 50ms，避免高点与低点请求紧挨着发送。
 
-  Pedal_ReadLValue();
-	PedalTaskDelayMs(50);
+  Pedal_ReadLValue();  // 再请求单路或左路低点。
+	PedalTaskDelayMs(50);  // 再留 50ms 给脚踏板处理本次命令。
 }
 
 //============================================================================
@@ -193,7 +191,7 @@ void Pedal_ReadStorageHLValue(void)
 //============================================================================
 
 /*
- * 函数功能：读取脚踏协议中的一个大端16位数值。
+ * 函数功能：把协议中高字节在前的两个字节合成一个 16 位数值。
  * 输入参数：data 指向数值的高字节。
  * 返回参数：返回组合后的16位无符号值。
  */
@@ -235,7 +233,7 @@ static void PedalCal_MarkData(uint8_t pedal_type)
 /*
  * 函数功能：解析10字节单踏板实时帧、旧双踏板实时帧和旧存储值回包。
  * 输入参数：frame 指向已经通过CRC校验的10字节完整帧。
- * 返回参数：1表示识别并消费该帧，0表示不是支持的单路协议帧。
+ * 返回参数：1 表示已识别并保存帧内数据，0 表示不支持这条单路协议帧。
  */
 static uint8_t PedalCal_ParseSingle(uint8_t *frame)
 {
@@ -335,7 +333,7 @@ static uint8_t PedalCal_ParseSingle(uint8_t *frame)
  */
 static uint8_t PedalCal_ParseKey(uint8_t *frame)
 {
-  uint8_t key_value = 0U;  // 规范化后的按键编号：1左、2中、3右。
+  uint8_t key_value = 0U;  // 页面统一使用的按键编号：1 左、2 中、3 右，0 表示未识别。
 
   if (WorkMessage.runflag_work != false)
   {
@@ -375,21 +373,21 @@ static uint8_t PedalCal_ParseKey(uint8_t *frame)
 
   if (key_value == 0U)
   {
-    return 0U;  // 未定义按键码不写页面事件，也不伪造在线数据。
+    return 0U;  // 不认识的按键码不更新页面，也不算作一次有效的在线数据。
   }
 
   PedalCalibrationData.FootPedalKeyValue = key_value;  // 保存最近一次实体按键供定标页调试显示。
   if (key_value == 1U)
   {
-    ScreenKey_LegacyEventPost(L_KEY_FOOT);  // 复用现有左键一次性事件缓存。
+    ScreenKey_LegacyEventPost(L_KEY_FOOT);  // 通知定标页左键按过一次，页面取出后会清除此事件。
   }
   else if (key_value == 2U)
   {
-    ScreenKey_LegacyEventPost(M_KEY_FOOT);  // 复用现有中键一次性事件缓存。
+    ScreenKey_LegacyEventPost(M_KEY_FOOT);  // 通知定标页中键按过一次。
   }
   else
   {
-    ScreenKey_LegacyEventPost(R_KEY_FOOT);  // 复用现有右键一次性事件缓存。
+    ScreenKey_LegacyEventPost(R_KEY_FOOT);  // 通知定标页右键按过一次。
   }
 
   PedalCalibrationData.FootPedalConnectFlag = PEDAL_CALIBRATION_CONNECTED;  // 合法按键帧证明UART4链路当前在线。
@@ -400,7 +398,7 @@ static uint8_t PedalCal_ParseKey(uint8_t *frame)
 /*
  * 函数功能：解析双段踏板、双脚踏实时帧及脚踏实体按键帧。
  * 输入参数：frame 指向已经通过CRC校验的完整帧。
- * 返回参数：1表示识别并消费该帧，0表示功能码或类型码不支持。
+ * 返回参数：1 表示已识别并处理本帧，0 表示功能或脚踏类型不支持。
  */
 static uint8_t PedalCal_ParseMulti(uint8_t *frame)
 {
@@ -504,22 +502,22 @@ static void PedalCal_ServiceOffline(uint8_t valid_frame)
        (PedalCalibrationData.FootPedalType != PEDAL_CAL_TYPE_NONE)))
   {
     PedalCal_Reset();  // 离线时清除实时值、Flash值和类型，避免页面继续显示已经拔出的脚踏。
-    PedalCalibrationData.FootPedalOffTimes = PEDAL_CAL_OFFLINE_SCANS;  // 保持饱和计数，避免离线期间反复清零再累计。
+    PedalCalibrationData.FootPedalOffTimes = PEDAL_CAL_OFFLINE_SCANS;  // 计数停在上限，离线后不反复清零和累加。
   }
 }
 
 /*
  * 函数功能：扫描UART4 DMA缓冲区并解析全部完整、CRC正确的脚踏定标帧。
- * 输入参数：无，函数直接读取UART4 DMA稳定数据快照。
- * 返回参数：无；解析结果写入PedalCalibrationData并投递脚踏实体键事件。
+ * 输入参数：无，直接取出 UART4 DMA 已收到的数据。
+ * 返回参数：无；结果写入 PedalCalibrationData，脚踏按键交给定标页处理。
  */
 void PedalRecv_Scan(void)
 {
-  uint8_t data[UART4_MAX_PACKET_SIZE] = { 0U };  // 保存本周期UART4 DMA稳定数据快照。
-  uint16_t data_len;  // DMA快照中的有效字节数。
+  uint8_t data[UART4_MAX_PACKET_SIZE] = { 0U };  // 保存本次从 UART4 DMA 取出的接收数据。
+  uint16_t data_len;  // 本次接收数据的有效字节数。
   uint16_t offset = 0U;  // 当前搜索帧头的位置。
   uint16_t frame_len;  // 当前协议帧按类型确定的完整长度。
-  uint8_t valid_frame = 0U;  // 本周期是否至少消费一帧合法脚踏数据。
+  uint8_t valid_frame = 0U;  // 非 0 表示本次至少处理过一帧有效脚踏数据，可清除离线计数。
 
   data_len = Uart4_DMARecvDataPeek(data);  // 读取脚踏串口数据，不直接复用正常业务任务的解析状态。
   while ((offset + 1U) < data_len)
@@ -539,12 +537,12 @@ void PedalRecv_Scan(void)
 
     if ((uint16_t)(data_len - offset) < frame_len)
     {
-      break;  // DMA尾部只有半帧时等待下次稳定快照，禁止越界读取。
+      break;  // 本批数据末尾不足一帧，停止本次解析，不读取缓冲区之外的数据。
     }
 
     if (PedalCal_CheckCrc(&data[offset], frame_len) == 0U)
     {
-      offset++;  // CRC错误时只移动一个字节，仍允许恢复到同一快照内的下一帧。
+      offset++;  // CRC 错误时向后一字节继续找帧头，后面仍可能有正确的数据帧。
       continue;
     }
 
@@ -558,7 +556,7 @@ void PedalRecv_Scan(void)
       valid_frame |= PedalCal_ParseMulti(&data[offset]);  // 解析双段、双脚踏或实体按键帧。
     }
 
-    offset = (uint16_t)(offset + frame_len);  // 完整帧已消费，直接跳到下一帧起点。
+    offset = (uint16_t)(offset + frame_len);  // 本帧已处理，直接从它后面开始找下一帧。
   }
 
   PedalCal_ServiceOffline(valid_frame);  // 本周期没有合法帧时推进离线计时。
@@ -586,11 +584,16 @@ void PEDALRECVTaskFunc(uint32_t event)
   /* USER CODE END PEDALRECVTaskFunc */
 }
 
+/*
+ * 函数功能：创建脚踏定标接收任务并设置 3ms 周期；启动定标页面也可自行调用 PedalRecv_Scan。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void PedalRecvTask_Init(void)
 {
   /* definition and creation of PEDALRECVTask */
-	Kernel_TaskCreate(&PEDALRECVTaskHandle, PEDALRECVTaskFunc);
-	Kernel_TaskStart(&PEDALRECVTaskHandle, KERNEL_TASK_ALWAYS, 3);
+	Kernel_TaskCreate(&PEDALRECVTaskHandle, PEDALRECVTaskFunc);  // 注册接收处理函数，供调度器调用。
+	Kernel_TaskStart(&PEDALRECVTaskHandle, KERNEL_TASK_ALWAYS, 3);  // 若使用此任务，每 3ms 扫描一次，500 次无数据约为 1.5s。
 }
 
 

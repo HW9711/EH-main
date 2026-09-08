@@ -1,7 +1,7 @@
 /**
  * @file board.h
- * @brief 硬件配置文件 - 用于统一管理所有硬件接口配置
- *        如需更改硬件接口，只需修改此文件中的配置
+ * @brief 板上引脚和硬件参数定义。
+ *        改硬件时还要核对 board_profile.h 的通道交换及 Src 中实际使用的初始化代码。
  */
 #ifndef __BOARD_H
 #define __BOARD_H
@@ -16,15 +16,15 @@ extern "C" {
  * 第一部分：串口通信接口配置 (UART)
  *============================================================================*/
 
-/* UART外设定义 - 可在此处更改串口外设和波特率 */
+/* 串口信息表，波特率单位为bit/s；实际启动配置还需核对Src/usart.c，不能只改这张表。 */
 #define BOARD_UART_LIST(XX) \
-    XX(1, USART1, 9600)     /* USART1 - 预留 */ \
-    XX(2, USART2, 9600)     /* USART2 - 预留 */ \
-    XX(3, USART3, 115200)   /* USART3 - 显示屏通信 */ \
-    XX(4, UART4, 115200)    /* UART4 - 预留 */ \
-    XX(5, UART5, 9600)       /* UART5 - 预留 */ \
-    XX(6, USART6, 115200)   /* USART6 - 预留 */ \
-    XX(7, UART7, 9600)       /* UART7 - 预留 */ \
+    XX(1, USART1, 9600)     /* USART1 - 手柄电机驱动板 */ \
+    XX(2, USART2, 9600)     /* USART2 - 外部上位机 */ \
+    XX(3, USART3, 115200)   /* USART3 - RFID读卡器 */ \
+    XX(4, UART4, 115200)    /* UART4 - 脚踏板 */ \
+    XX(5, UART5, 9600)       /* UART5 - A泵步进驱动板 */ \
+    XX(6, USART6, 115200)   /* USART6 - 显示屏 */ \
+    XX(7, UART7, 9600)       /* UART7 - B泵步进驱动板 */ \
     XX(8, UART8, 115200)     /* UART8 - B通道KSZ手柄通信 */ \
     XX(10, UART10, 115200)   /* UART10 - A通道KSZ手柄通信 */
 
@@ -208,7 +208,7 @@ extern "C" {
 #define BOARD_LED_H4_PIN           GPIO_PIN_9
 
 /*----------------- 继电器控制 -------------------*/
-#define BOARD_HAS_K1K2              0U
+#define BOARD_HAS_K1K2              0U /* 0=板上无K1/K2，相关输出宏不操作引脚；1=启用继电器引脚，仅按硬件配置修改。 */
 #define BOARD_K1_PORT              GPIOD
 #define BOARD_K1_PIN               GPIO_PIN_14
 #define BOARD_K2_PORT              GPIOD
@@ -276,7 +276,7 @@ extern "C" {
 #define BOARD_TIM10_PRESCALER      50000-1     /* 定时器10预分频 - 蜂鸣器 */
 #define BOARD_TIM10_PERIOD         5            /* 定时器10周期 */
 #define BOARD_TIM14_PRESCALER      50000-1     /* 定时器14预分频 - 系统计时 */
-#define BOARD_TIM14_PERIOD         500          /* 定时器14周期 - 1秒 */
+#define BOARD_TIM14_PERIOD         500          /* 保留的旧重装载值，当前未引用；实际值在Src/tim.c设置，单改本宏不会改变TIM14周期。 */
 
 /*============================================================================
  * 第七部分：系统时钟配置

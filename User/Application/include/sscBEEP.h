@@ -3,11 +3,12 @@
 
 #include <stdint.h>
 
-#define BEEP_MSG_KEY    1   //按键响应消息
-#define BEEP_MSG_ALARM  2   //报警消息
-#define BEEP_MSG_ALARM_TIMED 3 //限时报警消息，到期后蜂鸣任务自动退出报警
-#define BEEP_MSG_KEY_IF_IDLE 4 //空闲提示音消息，报警蜂鸣占用时静默丢弃
-#define BEEP_MSG_DOUBLE_IF_IDLE 5 //报警空闲时播放响-停-响-停四相位故障提示
+/* 以下数值是蜂鸣队列消息编号，不是时长或功能开关；发送方和蜂鸣任务必须使用同一编号。 */
+#define BEEP_MSG_KEY    1   //播放普通按键音，并结束已有报警蜂鸣和双响。
+#define BEEP_MSG_ALARM  2   //持续间歇报警；报警码为 0 时停止。
+#define BEEP_MSG_ALARM_TIMED 3 //限时的间歇报警，到期自动停止蜂鸣，不清除设备报警状态。
+#define BEEP_MSG_KEY_IF_IDLE 4 //无报警时才播放普通提示音，有报警就丢弃，不在事后补响。
+#define BEEP_MSG_DOUBLE_IF_IDLE 5 //无报警时播放响、停、响、停四步，每步 100ms。
 
 void SendKeyBeepMessage(uint8_t time);
 /*
@@ -32,8 +33,9 @@ void SendAlarmMessage(uint8_t flag);
 void SendAlarmMessageTimed(uint8_t flag, uint16_t duration_ms);
 
 /*
- * V1.8 蜂鸣器任务使用独立的 Ssc 前缀，避免在旧屏幕模块尚未移除前
- * 与旧 BeepControlTask_Init() 发生链接重名。旧任务下线后再统一清理调用面。
+ * 函数功能：创建蜂鸣消息队列，并启动每 100ms 执行一次的蜂鸣任务。
+ * 输入参数：无。
+ * 返回参数：无。
  */
 void SscBeepControlTask_Init(void);
 

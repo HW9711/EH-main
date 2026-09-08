@@ -9,25 +9,25 @@
 #include "sscBEEP.h"
 #include "screen_address.h"
 
-#define FOOT_CAL_LOOP_DELAY_MS     2U    // 标定专用循环每次等待2ms，兼顾UART4解析和看门狗刷新。
-#define FOOT_CAL_REFRESH_TICKS     50U   // 每50个循环约刷新一次Page3，避免连续写屏占满UART6。
-#define FOOT_CAL_QUERY_LOW_TICK    100U  // 单踏板识别后分时请求低点Flash值。
-#define FOOT_CAL_QUERY_HIGH_TICK   200U  // 低点请求后继续分时请求高点Flash值。
-#define FOOT_CAL_QUERY_RESET_TICK  250U  // 一轮查询结束后清零计数，约500ms开始下一轮。
+#define FOOT_CAL_LOOP_DELAY_MS     2U    // 每轮定标循环等待的毫秒数；增大会放慢收包检查、定标页刷新和看门狗刷新。
+#define FOOT_CAL_REFRESH_TICKS     50U   // 每 50 轮刷新定标页；仅循环等待约 100ms，实际还包含写屏和按键提示耗时。
+#define FOOT_CAL_QUERY_LOW_TICK    100U  // 每轮查询计数到 100 时读取单踏板低点；单位为循环次数，不是毫秒。
+#define FOOT_CAL_QUERY_HIGH_TICK   200U  // 计数到 200 时读取单踏板高点；与低点请求错开，给脚踏留出回复时间。
+#define FOOT_CAL_QUERY_RESET_TICK  250U  // 计数到 250 后开始下一轮查询；必须大于低点和高点的查询计数。
 
 /*
- * 函数功能：向Page3的一个四字节数值VP写入数据，并给屏幕串口留出发送间隔。
+ * 函数功能：向脚踏定标页指定地址写入一个 4 字节数值，随后稍等再发送下一条。
  * 输入参数：vp_address 为DWIN变量地址；value 为需要显示的无符号数值。
  * 返回参数：无。
  */
 static void FootCal_Show(uint16_t vp_address, uint32_t value)
 {
   LCD_Show_4byte_Number(vp_address, value);  // 使用现有DWIN四字节数值协议刷新指定定标字段。
-  Delay_ms(2U);  // 相邻VP写入错开2ms，避免启动阶段UART6连续帧粘连。
+  Delay_ms(2U);  // 两次数值写入之间等待 2ms，给屏幕处理上一条命令留出时间。
 }
 
 /*
- * 函数功能：按当前脚踏类型刷新Page3实时值、Flash定标值和三枚实体键调试值。
+ * 函数功能：按脚踏类型刷新定标页，显示当前采样值、已保存的定标值和三个实体键的调试值。
  * 输入参数：left_key、middle_key、right_key 为页面顶部三枚按键的0/1显示值。
  * 返回参数：无。
  */
@@ -84,7 +84,7 @@ static void FootCal_Refresh(uint8_t left_key, uint8_t middle_key, uint8_t right_
 static void FootCal_WriteKey(uint8_t key_value)
 {
   uint8_t command_sent = 0U;  // 记录本次是否实际发送写命令，用于统一保留UART4处理间隔。
-  uint8_t pedal_type = PedalCalibrationData.FootPedalType;  // 固定本次判断使用的脚踏类型快照。
+  uint8_t pedal_type = PedalCalibrationData.FootPedalType;  // 本次保存只使用这一次读到的脚踏类型。
 
   if ((key_value != KEY_STORAGEMIN) &&
       (key_value != KEY_STORAGEMAX) &&
@@ -168,7 +168,7 @@ static void FootCal_WriteKey(uint8_t key_value)
   }
 }
 /*
- * 函数功能：为不在周期帧中携带Flash值的单踏板分时发送低点和高点读取命令。
+ * 函数功能：单踏板平时不上报已保存的定标值，因此按不同计数时点主动读取低点和高点。
  * 输入参数：query_ticks 指向本轮单踏板查询计数。
  * 返回参数：无。
  */
@@ -181,7 +181,7 @@ static void FootCal_QuerySingle(uint16_t *query_ticks)
     return;
   }
 
-  (*query_ticks)++;  // 标定循环每2ms推进一次，查询命令按固定时点错开发送。
+  (*query_ticks)++;  // 每轮循环加一；循环含 2ms 等待和其它处理，查询时间不是严格的毫秒定时。
   if (*query_ticks == FOOT_CAL_QUERY_LOW_TICK)
   {
     Pedal_ReadLValue();  // 先请求单踏板低点，等待D0回包更新页面缓存。
@@ -220,7 +220,7 @@ void UI_FootPedalCalibration_Fun(void)
     PedalRecv_Scan();  // 解析脚踏10、18、24字节协议并更新定标缓存。
     Iwdg_Reset();  // 标定模式仍持续刷新硬件看门狗，避免长期停留触发复位。
 
-    key_value = ScreenKey_LegacyEventTake();  // 每个屏幕或脚踏事件只消费一次。
+    key_value = ScreenKey_LegacyEventTake();  // 每个屏幕或脚踏按键取出后立即清除，避免重复处理。
     if (key_value == L_KEY_FOOT)
     {
       left_key ^= 1U;  // 左实体键事件只切换顶部调试显示，不写Flash。

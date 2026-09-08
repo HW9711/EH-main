@@ -2,15 +2,18 @@
 #include "stm32f4xx_hal.h"
 #include "flash.h"
 
-//用户根据自己的需要设置
-#define FLASH_SIZE   1024 	 		//所选STM32的FLASH容量大小(单位为K)
+//本接口允许访问的Flash容量，按硬件和固件分区核对，不能当作扩大存储空间的开关。
+#define FLASH_SIZE   1024 	 		//单位KB，用于写入地址检查；当前限制为从Flash基地址起的1MB。
 
 //FLASH起始地址
 #define STM32_FLASH_BASE    0x08000000 	//STM32 FLASH的起始地址
 
 //======================================================================================================
-//获取操作扇区号
-//start_address：操作地址
+/*
+ * 函数功能：根据地址查找所在Flash扇区；本函数不检查地址是否有效。
+ * 输入参数：address为Flash字节地址，调用方须先检查范围。
+ * 返回参数：FLASH_SECTOR_0至FLASH_SECTOR_11中的扇区编号。
+ */
 uint32_t Flash_GetSector_Index(uint32_t address)
 {
   /* 地址低于扇区 1 起点时属于扇区 0。 */
@@ -52,7 +55,11 @@ uint32_t Flash_GetSector_Index(uint32_t address)
 
 //======================================================================================================
 //======================================================================================================
-//从指定地址开始写入指定长度的数据
+/*
+ * 函数功能：擦除从WriteAddr到WriteAddr+NumToWrite所在的全部扇区（含末地址所在扇区），再每次写4字节。
+ * 输入参数：WriteAddr为起始字节地址，pBuffer为32位数据数组，NumToWrite为字节数，应为4的倍数。
+ * 返回参数：0成功，-1地址超范围，-2擦除失败，-3写入失败；末地址刚好进入下一扇区时也会擦掉该扇区，长度为0仍会擦除。
+ */
 int8_t Flash_Write(uint32_t WriteAddr, uint32_t *pBuffer, uint16_t NumToWrite)
 {
   FLASH_EraseInitTypeDef FlashEraseInit;
@@ -77,11 +84,11 @@ int8_t Flash_Write(uint32_t WriteAddr, uint32_t *pBuffer, uint16_t NumToWrite)
   FirstSector = Flash_GetSector_Index(StartWriteAddr);
   NbOfSectors = Flash_GetSector_Index(EndWriteAddr)- FirstSector + 1;
 
-  //擦除用户区域 (用户区域指程序本身没有使用的空间，可以自定义)
+  //包括EndWriteAddr所在扇区，即使结束地址刚好等于下一扇区起点；函数不检查其中是否有其它需保留数据。
   //Fill EraseInit structure
 	FlashEraseInit.Banks = FLASH_BANK_1;  //操作的扇区块
-  FlashEraseInit.TypeErase = FLASH_TYPEERASE_SECTORS; //擦除类型：标明Flash执行页面只做擦除操作
-  FlashEraseInit.VoltageRange = FLASH_VOLTAGE_RANGE_3; //以“字”的大小进行操作（电压范围）
+  FlashEraseInit.TypeErase = FLASH_TYPEERASE_SECTORS; //按扇区擦除，不能只擦除本次写入的几个字节。
+  FlashEraseInit.VoltageRange = FLASH_VOLTAGE_RANGE_3; //选择HAL规定的供电电压档位；写入宽度由下方FLASH_TYPEPROGRAM_WORD指定。
   FlashEraseInit.Sector = FirstSector;
   FlashEraseInit.NbSectors = NbOfSectors;
 
@@ -109,7 +116,7 @@ int8_t Flash_Write(uint32_t WriteAddr, uint32_t *pBuffer, uint16_t NumToWrite)
     }
 	}
 
-  /* 给FLASH上锁，防止内容被篡改*/
+  /* 写入成功后关闭Flash写操作，防止程序误写；上方错误返回不会经过这里。 */
   HAL_FLASH_Lock();
 
 	return 0;
@@ -134,10 +141,11 @@ uint32_t STMFLASH_ReadWord(uint32_t faddr)
 }
 
 //======================================================================================================
-//从指定地址开始读出指定长度的数据
-//ReadAddr：起始地址
-//pBuffer：数据指针
-//NumToWrite：字(32位)数
+/*
+ * 函数功能：从Flash连续读取32位数据，不做地址范围检查。
+ * 输入参数：ReadAddr为起始字节地址，pBuffer为输出数组，NumToRead为32位数据个数（不是字节数）。
+ * 返回参数：无。
+ */
 void Flash_Read(uint32_t ReadAddr, uint32_t *pBuffer, uint16_t NumToRead)
 {
   uint16_t i = 0;

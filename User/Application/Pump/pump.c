@@ -19,81 +19,37 @@
 uint8_t pum_close_flag_A=0; 
 uint8_t pum_close_flag_B=0; 
 
+/*
+ * 函数功能：按任务定时基准等待指定时间，用于间隔发送两帧相同命令。
+ * 输入参数：delay_ms 为等待时间，单位 ms。
+ * 返回参数：无。
+ */
 static void PumpTaskDelayMs(uint32_t delay_ms)
 {
 	Kernel_DelayUntilMs(delay_ms);
 }
 
 /*
- * 函数功能：取得旧 A 泵直接输出入口使用的逻辑压力状态。
- * 输入参数：无。
- * 返回参数：返回 pumpMessageA；模拟串口层已把 SIM_UART_1/PE4 的 A 泵压力帧写入该结构。
+ * 函数功能：旧直发接口在压力板未就绪时输出零速；排空时不检查压力，真实超压不减速或停泵。
+ * 输入参数：runtime_msg 为对应逻辑泵状态；output_value 为旧协议待发送速度值。
+ * 返回参数：返回协议 16 位速度；压力检查启用、非排空且压力板未就绪时返回 0。
  */
-static const pumpMessage_t *PumpLegacy_PressureA(void)
+static uint32_t PumpLegacy_ApplyReadiness(const pumpMessage_t *runtime_msg, uint32_t output_value)
 {
-	/* 固定读取 pumpMessageA；当前压力线束映射为 A 泵压力传感器接 SIM_UART_1/PE4。 */
-	return &pumpMessageA;
+	uint16_t output_speed = (uint16_t)(output_value & 0xFFFFU); /* 保持旧协议速度字段的 16 位范围。 */
+
+	if (runtime_msg->timingDrainage_flag || runtime_msg->pedalDrainage_flag)
+	{
+		return output_speed; /* 定时排空和脚踏/HMI 轻排均忽略压力状态。 */
+	}
+	return PumpPressureControl_ApplyReadiness(output_speed, runtime_msg->weight_x10); /* 真实超压仍返回原速度，报警由对应 25ms 泵任务确认。 */
 }
 
 /*
- * 函数功能：取得旧 B 泵直接输出入口使用的逻辑压力状态。
- * 输入参数：无。
- * 返回参数：返回 pumpMessageB；模拟串口层已把 SIM_UART_2/PE6 的 B 泵压力帧写入该结构。
+ * 函数功能：把泵调试数据写到刀具规格显示区域，供现场查看。
+ * 输入参数：point 为调试位置编号；value 为数值；detail 为附加状态。
+ * 返回参数：无。
  */
-static const pumpMessage_t *PumpLegacy_PressureB(void)
-{
-	/* 固定读取 pumpMessageB；当前压力线束映射为 B 泵压力传感器接 SIM_UART_2/PE6。 */
-	return &pumpMessageB;
-}
-
-static uint32_t PumpLegacy_ApplyLimit(pumpMessage_t *runtime_msg,
-									 const pumpMessage_t *pressure_source,
-									 uint32_t output_value)
-{
-	/* protected_value 保存最终允许下发到泵驱动的 16 位速度/脉冲数据。 */
-	uint16_t protected_value;
-	/* weight_x10 从压力源拷贝到局部变量，保证本次限速比较使用同一次读取结果。 */
-	uint32_t weight_x10;
-	/* threshold_g 从压力源拷贝到局部变量，只作为压力帧有效性门禁；硬停点由 STOP 宏表按 protected_value 查询。 */
-	uint16_t threshold_g;
-	/* force_stop 为 1 表示压力超过硬停倍率，需要把本次输出压到 0。 */
-	uint8_t force_stop;
-
-	/*
-	 * runtime_msg 旧参数保留用于接口兼容，但压力保护现在只暂停本次输出，不清 run_flag。
-	 * 这样旧直接输出入口在压力恢复后也可以继续沿用原来的运行请求自动恢复。
-	 */
-	(void)runtime_msg;
-
-	/* 压力源为空时不能做闭环，直接保持原输出，避免空指针导致异常停机。 */
-	if (pressure_source == NULL)
-	{
-		/* 返回原始值，保持旧路径在异常配置下的行为不变。 */
-		return output_value;
-	}
-
-	/* 旧泵协议只发送 16 位速度字段，这里显式截成 16 位后再进入公共闭环算法。 */
-	protected_value = (uint16_t)(output_value & 0xFFFFU);
-	/* 读取当前压力重量，单位 0.1g，来自 CS1237 解析后的 pumpMessageA/B。 */
-	weight_x10 = pressure_source->weight_x10;
-	/* 读取当前压力阈值，单位 g，来自压力模块上报的 ThresholdG。 */
-	threshold_g = pressure_source->pressure_threshold;
-	/* 判断是否已经进入 STOP 宏表配置的停泵区间，旧直连入口也必须按当前输出速度取停止点。 */
-	force_stop = PumpPressureControl_ShouldForceStop(protected_value, weight_x10, threshold_g);
-	/* 对旧的直接输出值同样做线性限速，避免旧 UI/参数路径绕过 sscPUMPA/sscPUMPB。 */
-	protected_value = PumpPressureControl_Apply(protected_value, weight_x10, threshold_g);
-
-	/* 进入硬停泵区间时只把本次输出压为 0，不清运行标志，压力恢复后允许自动续转。 */
-	if (force_stop != 0U)
-	{
-		/* 硬停泵输出必须为 0，即使线性算法后续调整也不能重新放大。 */
-		protected_value = 0U;
-	}
-
-	/* 返回最终允许写入泵 UART 帧的速度字段。 */
-	return (uint32_t)protected_value;
-}
-
 void PumpDebugPoint(uint16_t point, uint16_t value, uint8_t detail)
 {
 	(void)value;
@@ -138,20 +94,19 @@ uint16_t PumpStartUp[25] =
 
 
 /*
- * 函数功能：经过 B 泵压力保护后下发转速，并同步刷新 B 泵输出颜色。
- * 输入参数：s 为准备下发的泵转速，0 表示停止。
+ * 函数功能：检查 B 泵压力板是否就绪并限制命令最大值，再发送速度、刷新颜色；真实超压不改速度。
+ * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_B(uint32_t s)
 {
-	/* 旧 B 泵直接输出入口也套压力保护，防止屏幕/参数路径绕过 sscPUMPB 的闭环。 */
-	s = PumpLegacy_ApplyLimit(&pumpMessageB, PumpLegacy_PressureB(), s);
+	s = PumpLegacy_ApplyReadiness(&pumpMessageB, s); /* 排空不检查压力；非排空且未就绪时输出零速，真实超压保持原速度。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{
 		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */
 	}
-	//ssc  加上标志位
-	/* 实际输出非零时把 B 泵速度区域显示为黄色，向操作者说明驱动正在转动。 */
+	// 颜色按准备下发的速度命令更新。
+	/* 非零命令显示黄色，零速显示白色；颜色不是驱动实测转速反馈。 */
 	if(s)
 	{
 			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR,0xffE0);
@@ -200,24 +155,23 @@ void Pump_SetSpeed_B(uint32_t s)
 }
 
 /*
- * 函数功能：经过 A 泵压力保护后下发转速，并同步刷新 A 泵输出颜色。
- * 输入参数：s 为准备下发的泵转速，0 表示停止。
+ * 函数功能：检查 A 泵压力板是否就绪并限制命令最大值，再发送速度、刷新颜色；真实超压不改速度。
+ * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_A(uint32_t s)
 {
- static	uint8_t repeat_data;
-	/* 旧 A 泵直接输出入口也套压力保护，防止手柄/报警停泵路径绕过 sscPUMPA 的闭环。 */
-	s = PumpLegacy_ApplyLimit(&pumpMessageA, PumpLegacy_PressureA(), s);
+ static	uint8_t repeat_data; /* 旧接口只保存上次命令的低 8 位；大于 255 的速度仍会被重复发送。 */
+	s = PumpLegacy_ApplyReadiness(&pumpMessageA, s); /* 排空不检查压力；非排空且未就绪时输出零速，真实超压保持原速度。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{
 		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */
 	}
-	//ssc  加上标志位
+	// 按上次记录的命令值判断是否需要再次发送。
 	
-	/* 非零转速只在数值变化时发送，减少重复控制帧；零速每次都允许发送，确保停泵命令不会被去重。 */
+	/* 与 8 位历史记录不同或本次为零速时发送；零速总是重发，避免漏掉停泵命令。 */
 	if((repeat_data!=s) || (s == 0U)){
-		/* 实际输出非零时显示黄色，零速时恢复白色，屏幕颜色始终跟随真实驱动状态。 */
+		/* 非零命令显示黄色，零速显示白色；颜色不证明泵已经实际转动。 */
 		if(s)
 		{
 			LCD_Show_2byte_Number(UIDP_LCD_SP_PUMP_A_OUTPUT_COLOR,0xffE0);

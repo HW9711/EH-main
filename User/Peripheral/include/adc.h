@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 
-#define ADC_CHANNEL_CNT  4
+#define ADC_CHANNEL_CNT  4 /* DMA结果数组长度；改变后必须同步ADC扫描通道配置，否则数组下标与实际采样通道可能不一致。 */
 
 //----------------- -----------------
 #define T_CHANNEL   	      4

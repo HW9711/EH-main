@@ -21,8 +21,8 @@ typedef struct
   uint8_t UIDisplay0x1318;  // A 泵区域图片状态缓存。
 } LCD_DisplayCache_t;
 
-static uint8_t s_lcd_background_page = 0;                 // 当前背景页缓存，只服务 LCD 背景页去重发送。
-static volatile LCD_DisplayCache_t s_lcd_display_cache = { 0 };  // LCD 图片显示状态缓存，写入具备调试可见性，不再依赖旧 UI 全局状态。
+static uint8_t s_lcd_background_page = 0;                 // 记住最近请求的背景页，避免反复发送同一切页命令。
+static volatile LCD_DisplayCache_t s_lcd_display_cache = { 0 };  // 记录已发送的图片状态，便于查看；它不是屏幕返回的显示确认。
 
 //============================================================================
 // 函数名称: LCD_Show_Which_Map()
@@ -32,7 +32,7 @@ static volatile LCD_DisplayCache_t s_lcd_display_cache = { 0 };  // LCD 图片�
 // 函数说明: 同一个背景页最多发两次
 //============================================================================
 /*
- * 函数功能：切换 DWIN 背景页，同一页允许补发一次后再抑制重复串口帧。
+ * 函数功能：切换屏幕背景页；切到新页后允许再发送一次，之后忽略同页请求。
  * 输入参数：MapAddr 为目标背景页编号。
  * 返回参数：无。
  */
@@ -43,10 +43,10 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
 
   static uint8_t SendCnt = 1;
 
-  /* 请求页与当前页相同时进入限次补发；新页面走下方分支重置补发次数。 */
+  /* 请求页没变就检查是否还能补发；换新页时重新允许补发一次。 */
   if (MapAddr == s_lcd_background_page)
   {
-    /* 同页仍有补发次数时允许再发一次，次数耗尽后抑制重复 UART6 帧。 */
+    /* 同页只允许补发一次，避免每次刷新都发送切页命令。 */
     if (SendCnt > 0)
 	    SendCnt--; /* 同页第一次重复请求仍补发一次，降低屏幕漏收切页帧后停在旧页面的概率。 */
 	  else
@@ -64,17 +64,17 @@ void LCD_Show_Which_Map(uint8_t MapAddr)
 }
 
 /*
- * 函数功能：强制刷新指定背景页，绕过普通 LCD_Show_Which_Map() 的同页去重。
- * 输入参数：MapAddr 为 DWIN 背景页号，主运行页固定传 0。
+ * 函数功能：立即发送指定背景页的切页命令，即使刚刚已经发送过同一页。
+ * 输入参数：MapAddr 为屏幕页号；启动、定标和主运行页号见 screen_address.h。
  * 返回参数：无。
  */
 void LCD_ForceShow_Which_Map(uint8_t MapAddr)
 {
   uint8_t dat[10] = {0x5A, 0xA5, 0x07, 0x82, 0x00, 0x84, 0x5A, 0x01}; /* DWIN 背景页切换命令，开机初始化必须完整重发。 */
 
-  s_lcd_background_page = MapAddr; /* 强制切页成功发送前同步软件缓存，后续普通切页仍按当前页去重。 */
+  s_lcd_background_page = MapAddr; /* 先记住本次请求的页号，供后续普通切页判断；此处没有等待屏幕确认。 */
   dat[8] = (MapAddr >> 8) & 0x00ff; /* 背景页号高字节，当前工程实际只使用低 8 位页号。 */
-  dat[9] = MapAddr & 0x00ff;        /* 背景页号低字节，page0 主运行页会写入 0。 */
+  dat[9] = MapAddr & 0x00ff;        /* 页号低字节，例如主运行页写入 4。 */
 
   Uart6_SendPacket(dat, 10); /* 直接走屏幕串口发送，不受同页 SendCnt 影响，避免启动页底图残留。 */
 }
@@ -107,6 +107,11 @@ void LCD_Disappear_Number(uint16_t DataAddr)
 // 输    出: 无
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：向指定图片地址写入 0xFFFF，隐藏图片并清除对应的本地显示记录。
+ * 输入参数：PicAddr 为屏幕图片地址。
+ * 返回参数：无。
+ */
 void LCD_Disappear_Picture(uint16_t PicAddr)
 {
   uint8_t dat[8] = {0x5A, 0xA5, 0x05, 0x82};
@@ -173,6 +178,11 @@ void LCD_Show_Number(uint16_t DatdAddr, uint16_t Data)
 // 输    出: 无
 // 函数说明:
 //============================================================================
+/*
+ * 函数功能：把图片编号写到指定屏幕地址，并记住部分旧屏图标的显示状态。
+ * 输入参数：PicAddr 为屏幕图片地址；PicNum 为屏幕工程中的图片编号。
+ * 返回参数：无。
+ */
 void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 {
   uint8_t dat[8]={0x5A, 0xA5, 0x05, 0x82};
@@ -185,7 +195,7 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 
   Uart6_SendPacket(dat, 8);
 
-  /* 资源号写屏后同步记录其业务显示态；这些缓存只描述已发送图片，不替代 WorkMessage 业务状态。 */
+  /* 发送后记住图片表示的状态，只用于显示记录，不修改 WorkMessage，也不代表屏幕已确认收到。 */
   switch (PicAddr)
   {
 	  case UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE :
@@ -295,7 +305,7 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum)
 	  break;
 	  case UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE :
 	  {
-	    /* 组合资源 360~365 同时编码方向和往复按钮显隐，两个缓存字段必须在同一分支同步更新。 */
+	    /* 360~365 号图片同时表示所选方向和往复按钮是否显示，因此两个记录一起更新。 */
 	    /* 资源 360 表示方向未选且往复按钮隐藏，两个缓存都清零。 */
 	    if (PicNum == 360)
 			{
@@ -437,6 +447,11 @@ static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 公共接头 EP
 //  规     格    :      φ     4  .  0   、   1  1  0   m   m   、          0    °
 // B9E6   B8F1  3A 20  A6D5  34 2E 30 A1A2  31 31 30  6D  6D  A1A2  20    30   A1E3
 //============================================================================
+/*
+ * 函数功能：拼出刀具的直径、长度和角度文字并发送到屏幕；三项都为 0 时清空文字。
+ * 输入参数：Addr 为文字地址；Length 为长度整数（mm）；Diameter 普通模式按 0.1mm 显示，原始整数模式不除以 10；Angle 为角度整数（度）。
+ * 返回参数：无。
+ */
 void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
 {
   uint8_t LengthTemp[3] = { 0 }, DiameterTemp[3] = { 0 }, AngleTemp[3] = { 0 };
@@ -446,7 +461,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   static uint16_t LengthLast = 0xff;
   static uint8_t DiameterLast = 0xff, AngleLast = 0xff;
   static uint8_t ModeLast = 0xff;
-  uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 记录本次下发是否为公共接头 EPC 原始整数格式，避免影响旧小数直径路径。 */
+  uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 1 表示公共接头直径直接显示整数，0 表示直径除以 10 后显示一位小数。 */
   uint8_t diameter_decimal_extra = 0U; /* 直径小数格式达到 10.0mm 以上时多占 1 个字符，长度和角度文本需要同步右移。 */
 
   /* 规格数值和显示模式都未变化时跳过重复写屏，避免周期刷新占用 UART6。 */
@@ -528,7 +543,7 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  {
 		  if(DiameterTemp[2] > 0U)
 		  {
-			  diameter_decimal_extra = 1U; /* Page3 直径按 0.1mm 存储，150 必须显示为 15.0，不能丢掉百位。 */
+			  diameter_decimal_extra = 1U; /* 普通模式直径按 0.1mm 解释，150 显示为 15.0，多出的字符让后面文字右移一位。 */
 			  dat[2] = 32; /* 直径从 x.y 扩展为 xx.y 后，DWIN 本帧数据长度增加 1 字节。 */
 			  dat[14] = DiameterTemp[2] + 0x30; //直径十位，150 中的 1 表示 15.0 的十位。
 			  dat[15] = DiameterTemp[1] + 0x30; //直径个位，150 中的 5 表示 15.0 的个位。
@@ -598,23 +613,28 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 void LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
 {
   s_lcd_integrated_cutter_raw_integer_mode = 1U; /* 本次下发启用公共接头 EPC 原始直径格式，直径 16 显示为 Φ16。 */
-  LCD_IntegratedCutterData_Update(Addr, Length, Diameter, Angle); /* 复用同一条 DWIN 文本组包路径，只切换直径字符格式。 */
+  LCD_IntegratedCutterData_Update(Addr, Length, Diameter, Angle); /* 仍用同一个文字发送函数，只把直径改为不带小数点的整数。 */
   s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 下发完成立即恢复旧格式，避免 PXBA/PXBB 下一次刷新误用整数直径。 */
 }
 
 //============================================================================
 // 函数名称: LCD_HostModel_Update()
-// 功能描述: 一体式(3号接口)刀具参数更新
+// 功能描述: 更新主机型号文字
 // 输　  入: Addr：字符显示地址
 //           *Str：字符串
 // 输    出: 无
 // 函数说明: 2_机型选择界面，主机型号（文字显示）
 //============================================================================
+/*
+ * 函数功能：向指定屏幕地址发送主机型号文字。
+ * 输入参数：Addr 为文字地址；Str[0] 为协议长度，后面紧跟文字字节，本函数发送 Str[0]-3 个文字字节。
+ * 返回参数：无。
+ */
 void LCD_HostModel_Update(uint32_t Addr, uint8_t *Str)
 {
   uint8_t dat[10] = {0x5A, 0xA5, 0, 0x82};
 
-  dat[2] = Str[0];  //数据长度
+  dat[2] = Str[0];  //协议长度包含命令 1 字节、地址 2 字节和后面的文字，不是以零结尾的字符串长度。
 
   dat[4] = (Addr >> 8) & 0x00ff ;
   dat[5] = Addr & 0x00ff ;

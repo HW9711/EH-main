@@ -3,13 +3,13 @@
 #include "Pubinterface.h"
 
 /*
- * 函数功能：写入当前工作报警编号，并同步维护报警有效标志。
+ * 函数功能：保存报警编号，编号非零时同时标记“有报警”；不在这里发送停机命令或刷新屏幕。
  * 输入参数：alarm_value 为需要写入的报警编号，WORK_ALARM_NONE 表示无报警。
  * 返回参数：无。
  */
 void WorkAlarm_Set(uint8_t alarm_value)
 {
-	/* 所有新报警统一写 WorkMessage，避免再通过旧报警字段分散传递。 */
+	/* 报警编号和有效标志一起更新，避免出现“有编号但未报警”的不一致状态。 */
 	WorkMessage.alarm_value = alarm_value;
 	WorkMessage.alarm_flag = (alarm_value != WORK_ALARM_NONE);
 }
@@ -31,7 +31,7 @@ void WorkAlarm_Clear(void)
  */
 void WorkAlarm_ClearIf(uint8_t alarm_value)
 {
-	/* 只清理调用方拥有的报警，避免一个模块恢复时误清另一个模块仍存在的故障。 */
+	/* 只有当前报警号与参数一致才清除，避免某个模块恢复时把其他故障一起清掉。 */
 	if ((WorkMessage.alarm_flag == true) && (WorkMessage.alarm_value == alarm_value))
 	{
 		WorkAlarm_Clear();

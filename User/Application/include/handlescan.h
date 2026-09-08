@@ -6,13 +6,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void HandlescanTaskInit(void);
-bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type); /* 分体式手柄切回手动模式时，重新从手柄 EEPROM 装载倍率、速度边界和步进。 */
-void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 分体式手柄重新进入自动识别前复位本通道 RFID 监测游标，不清当前业务参数。 */
-bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel); /* 消费校验失败手柄拔出后的关窗请求，供插拔任务在 UI 队列复位后补发关闭90号图。 */
-bool Handlescan_IsChannelPhysicallyInserted(uint8_t channel); /* 读取指定逻辑通道短接检测脚，低电平表示手柄仍物理插入。 */
-bool Handlescan_IsNavigationReady(uint8_t channel); /* 仅当指定通道完成本轮手柄识别并稳定上线时允许外部导航读写。 */
-uint32_t Handlescan_GetNavigationGeneration(uint8_t channel); /* 返回通道导航代次，短暂插拔也会递增，用于作废在途请求。 */
+void HandlescanTaskInit(void); /* 创建并启动每 10ms 检查 A/B 手柄插拔和识别状态的任务。 */
+bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type); /* 切回手动模式时，从该手柄 EEPROM 恢复倍率、转速范围和每次调速的增减量。 */
+void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 重新启用自动识别前清掉旧 RFID 结果编号和计数，保留当前刀具参数。 */
+bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel); /* 取出并清掉关窗请求；插拔任务清空屏幕队列后须重新发送关闭 90 号报警窗的消息。 */
+bool Handlescan_IsChannelPhysicallyInserted(uint8_t channel); /* 读取该通道插拔检测脚，低电平返回 true；这里只看本次电平，不保证识别已通过。 */
+bool Handlescan_IsNavigationReady(uint8_t channel); /* 该通道完成识别并处于在线阶段才返回 true，供外部导航检查是否允许读写。 */
+uint32_t Handlescan_GetNavigationGeneration(uint8_t channel); /* 返回拔出检查的变化计数；读取导航数据前后计数不同，就应放弃旧请求。 */
 
 #endif  //__HANDLESCAN_H
 

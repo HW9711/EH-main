@@ -17,36 +17,36 @@
 /*
  * 文件功能：每 30ms 按手柄型号切换 A/B 按键脚的GPIO/串口模式，并处理普通手柄实体运行键。
  * 运行入口：Userparser_Init() 调用 HandleKeyScan_Init()，任务回调只进入 HANDLEKEYTaskFunc()。
- * 关键顺序：先维护 82 号限时提示，再检查控制权，最后严格按 A 后 B 顺序处理实体键。
- * 安全约束：启动必须依次通过公共接头刀具门禁、控制权申请，再写运行状态并联动注水泵。
+ * 处理顺序：先更新引脚用途，再检查 82 号提示是否到期；其它控制方式没占用时，先处理 A 键再处理 B 键。
+ * 启动条件：只接受当前选中通道的手控按键；有报警、已运行、刀具未准备好或其它方式正在控制时都不能启动。
  */
 kernel_task_t HANDLEKEYTaskHandle;
 
 /*
- * 函数功能：把 GPIO 外部中断交给压力软串口边沿处理。
+ * 函数功能：GPIO 电平变化触发中断后，交给压力传感器的软件串口接收数据。
  * 输入参数：GPIO_Pin 为本次触发中断的 GPIO 引脚编号。
  * 返回参数：无。
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	SimUart_HandleExti(GPIO_Pin); /* 压力软串口依赖 GPIO 边沿收数，任何手柄键整理都不能跳过该转发。 */
+	SimUart_HandleExti(GPIO_Pin); /* 压力传感器靠这次电平变化开始收数据，手柄按键处理不能省掉此调用。 */
 }
 
-#define HANDLE_KEY_DEBOUNCE_COUNT 4U /* 30ms任务连续4次确认电平，约120ms去抖，避免触点抖动误启停。 */
-#define HANDLE_KEY_PRESSED_LEVEL GPIO_PIN_RESET /* 硬件默认上拉，按键按下后对应IO被拉低。 */
+#define HANDLE_KEY_DEBOUNCE_COUNT 4U /* 连续 4 次读到相同电平才确认按下或松开；每次间隔 30ms，增大后响应更慢。 */
+#define HANDLE_KEY_PRESSED_LEVEL GPIO_PIN_RESET /* 按下时为低电平（RESET），松开时上拉为高电平（SET）；须与硬件接线一致。 */
 
 typedef struct
 {
 	uint8_t low_count;		/* 连续低电平计数，用于确认按键已经稳定按下。 */
 	uint8_t high_count;		/* 连续高电平计数，用于确认按键已经稳定松开。 */
 	bool stable_pressed;	/* 去抖后的按下状态，业务层只使用这个稳定结果。 */
-	bool press_event;		/* 稳定按下沿事件，只在松开后再次按下并完成消抖时置位一个扫描周期。 */
-	bool release_event;		/* 稳定松开沿事件，LGZI 按住运行模式依靠它在松手时立即停机。 */
+	bool press_event;		/* 本轮刚确认按下时为 true，只保持这一轮；一直按住不会反复触发。 */
+	bool release_event;		/* 本轮刚确认松开时为 true，LGZI 收到它后请求停机。 */
 } HandleRunKeyDebounce_t;
 
 typedef enum
 {
-	HANDLE_RUN_KEY_PIN_MODE_UNKNOWN = 0U, /* 上电后尚未由任务确认复用状态，首次扫描必须主动配置。 */
+	HANDLE_RUN_KEY_PIN_MODE_UNKNOWN = 0U, /* 上电后尚未设置引脚用途，第一次扫描必须配置。 */
 	HANDLE_RUN_KEY_PIN_MODE_GPIO,         /* 普通手柄模式：引脚上拉输入，低电平表示按钮按下。 */
 	HANDLE_RUN_KEY_PIN_MODE_UART          /* KSZ模式：引脚切换为对应UART接收复用，不再读取GPIO电平。 */
 } HandleRunKeyPinMode_t;
@@ -69,7 +69,7 @@ static void HandleRunKey_ShowFootAlarm(void)
 	uint8_t display_value[10] = {0U}; /* UI_AIARM_ID 只读取 Value[0]，其余补零避免沿用上一条报警参数。 */
 
 	display_value[0] = WORK_ALARM_FOOT_SELECTED; /* 82 号图提示当前脚控已选中，用户应使用脚踏启动。 */
-	SendAlarmMessageTimed(WORK_ALARM_FOOT_SELECTED, ALARM_MODE_MS); /* 错模式提示只保持 ALARM_MODE_MS（当前 2000ms），不写全局报警锁存。 */
+	SendAlarmMessageTimed(WORK_ALARM_FOOT_SELECTED, ALARM_MODE_MS); /* 只提示 ALARM_MODE_MS（当前 2000ms），不把系统设为持续报警。 */
 	s_handle_foot_selected_timed_alarm_tick = HAL_GetTick(); /* 记录本次弹窗起点，后续由手柄键任务周期自动关闭。 */
 	if (WorkMessage.alarm_flag == false)
 	{
@@ -84,7 +84,7 @@ static void HandleRunKey_ShowFootAlarm(void)
 
 /*
  * 函数功能：周期维护 82 号错模式限时弹窗，达到 ALARM_MODE_MS（当前 2000ms）后自动关闭。
- * 输入参数：无，直接读取弹窗归属和 HAL 毫秒 tick。
+ * 输入参数：无；直接检查本模块是否显示过弹窗，以及经过了多少 ms。
  * 返回参数：无。
  */
 static void HandleRunKey_ServiceFootAlarm(void)
@@ -103,8 +103,8 @@ static void HandleRunKey_ServiceFootAlarm(void)
 	{
 		SendUIDSMessage(UI_AIARM_ID, false, NULL); /* 没有真实报警时关闭 82 号临时弹窗。 */
 	}
-	s_handle_foot_selected_timed_alarm_active = 0U; /* 本次临时弹窗生命周期结束，允许下一次误按重新显示。 */
-	s_handle_foot_selected_timed_alarm_tick = 0U; /* 清时间戳，避免下次比较沿用旧 tick。 */
+	s_handle_foot_selected_timed_alarm_active = 0U; /* 本次提示已结束；下次在脚控模式误按手柄键时可以再提示。 */
+	s_handle_foot_selected_timed_alarm_tick = 0U; /* 清掉上次开始时间，下次提示重新计时。 */
 }
 
 /*
@@ -114,14 +114,14 @@ static void HandleRunKey_ServiceFootAlarm(void)
  */
 static bool HandleRunKey_IsSupportedModel(uint8_t hand_model)
 {
-	return ((hand_model == PXBA_ONLINES) ||   /* 空心钻A型手柄保持原有按一次启动、再按一次停止。 */
-			(hand_model == LGZ_I_ONLINES));   /* LGZI 单按键颅骨钻允许实体键控制电机，但停止由松开沿触发。 */
+	return ((hand_model == PXBA_ONLINES) ||   /* PXBA 按一次启动，再按一次停止。 */
+			(hand_model == LGZ_I_ONLINES));   /* LGZI 按住运行，确认松开后停止。 */
 }
 
 /*
  * 函数功能：判断手柄实体键是否采用按住运行、松开停止模式。
  * 输入参数：hand_model 通道记忆中的手柄型号。
- * 返回参数：true 表示松开必须停机，false 表示保持按键翻转启停。
+ * 返回参数：true 表示确认松开就停机；false 表示按一次启动、再按一次停止。
  */
 static bool HandleRunKey_IsMomentaryModel(uint8_t hand_model)
 {
@@ -167,8 +167,8 @@ static void HandleRunKey_ResetDebounce(HandleRunKeyDebounce_t *filter)
 	filter->low_count = 0U;         /* 清除低电平累计，切回GPIO后必须重新连续确认按下。 */
 	filter->high_count = 0U;        /* 清除高电平累计，避免串口空闲高电平被当成历史松开计数。 */
 	filter->stable_pressed = false; /* 复用模式改变后不继承此前已经按下的稳定状态。 */
-	filter->press_event = false;    /* 清除一次性按下沿，禁止切换当周期误启动。 */
-	filter->release_event = false;  /* 清除一次性松开沿，禁止切换当周期误停止。 */
+	filter->press_event = false;    /* 清掉“刚按下”标志，不能把引脚用途切换当作一次按键。 */
+	filter->release_event = false;  /* 清掉“刚松开”标志，不能把引脚用途切换当作松手停机。 */
 }
 
 /*
@@ -285,7 +285,7 @@ static bool HandleRunKey_IsChannelReady(uint8_t channel)
  */
 static void HandleRunKey_ApplyHandleMode(uint8_t channel)
 {
-	WorkMessage.drivetype_work = HANDLEWORK; /* 实体按键属于手控来源，启动前必须把当前工作快照切到手控。 */
+	WorkMessage.drivetype_work = HANDLEWORK; /* 本次由手柄键启动，当前控制方式记为手控。 */
 
 	if (channel == CHANNEL_A)
 	{
@@ -302,14 +302,14 @@ static void HandleRunKey_ApplyHandleMode(uint8_t channel)
 }
 
 /*
- * 函数功能：对实体按键原始电平做去抖，输出稳定按下沿并记录稳定松开沿。
- * 输入参数：filter 对应通道的去抖状态；raw_level 本周期GPIO原始电平。
- * 返回参数：true 表示本周期产生稳定按下沿事件，false 表示本周期无新按下事件。
+ * 函数功能：连续多次读到相同电平后才确认按键变化，避免触点抖动造成反复启停。
+ * 输入参数：filter 保存该键的连续读数和已确认状态；raw_level 为本次读到的 GPIO 电平。
+ * 返回参数：true 表示本轮刚确认按下；false 表示没有新按下。刚松开的结果另存于 release_event。
  */
 static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO_PinState raw_level)
 {
-	filter->press_event = false; /* 每个30ms扫描周期先清一次性事件，防止长按期间重复翻转启停。 */
-	filter->release_event = false; /* 松开沿同样只允许保持一个扫描周期，避免LGZI松手后重复发送停止。 */
+	filter->press_event = false; /* 每轮先清“刚按下”，长按不会每 30ms 再触发一次启停。 */
+	filter->release_event = false; /* 每轮先清“刚松开”，LGZI 松手停机只处理一次。 */
 	if (raw_level == HANDLE_KEY_PRESSED_LEVEL)
 	{
 		filter->high_count = 0U; /* 本周期为低电平，清掉松开计数，避免抖动期间提前判松开。 */
@@ -321,7 +321,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 		{
 			if (filter->stable_pressed == false)
 			{
-				filter->press_event = true; /* 只有从稳定松开进入稳定按下时才产生一次翻转事件。 */
+				filter->press_event = true; /* 之前没按下，现在连续低电平已达标，本轮确认一次新按下。 */
 			}
 			filter->stable_pressed = true; /* 连续低电平达到阈值后，锁定为已按下，直到稳定松开才重新允许下一次事件。 */
 		}
@@ -337,23 +337,23 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 		{
 			if (filter->stable_pressed == true)
 			{
-				filter->release_event = true; /* 从稳定按下进入稳定松开时输出一次松开沿，供LGZI按住运行模式停机。 */
+				filter->release_event = true; /* 之前按着，现在连续高电平已达标，本轮通知 LGZI 松手停机。 */
 			}
 			filter->stable_pressed = false; /* 连续高电平达到阈值后复位按下状态，允许下一次按下重新触发。 */
 		}
 	}
 
-	return filter->press_event; /* 返回稳定按下沿事件；松开沿保存在filter->release_event中供按住运行型号使用。 */
+	return filter->press_event; /* 返回本轮是否刚按下；调用方还会读取 release_event 判断 LGZI 是否刚松开。 */
 }
 
 /*
- * 函数功能：通过手柄实体按键设置电机运行状态，并维护控制仲裁。
+ * 函数功能：处理手柄键的启动或停止请求，同时更新注水泵和当前控制方式。
  * 输入参数：enable true 表示启动电机，false 表示停止电机。
- * 返回参数：true 表示本次状态写入成功，false 表示启动时未抢到手柄控制权。
+ * 返回参数：true 表示已写入启停状态；false 表示刀具未准备好或其它控制方式正在占用，启动被拒绝。
  */
 static bool HandleRunKey_SetMotorRun(bool enable)
 {
-	/* enable 为 true 时执行完整启动门禁；停止请求无需再次检查刀具和控制权。 */
+	/* 启动前检查刀具和控制方式；停止不受这些检查限制，避免无法停机。 */
 	if (enable)
 	{
 		if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
@@ -364,7 +364,7 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 		{
 			return false; /* 其它控制来源正在占用时不抢占，实体键本周期启动无效。 */
 		}
-		Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 实体键再次按下属于新的控制源触发，允许泵任务重新按实时压力判断。 */
+		Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 这是一次新按下，清掉上次压力堵转停泵记录，再由泵任务检查当前压力是否允许运行。 */
 	}
 
 	ControlSignalMessage.handle_control_flag = enable; /* 通知公共控制信号当前由手柄实体键控制电机启停。 */
@@ -374,11 +374,11 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 	if (enable == false)
 	{
 		WorkMessage.speed_work = 0U; /* 停止时立即清实际目标速度，防止停止帧前残留上一次速度。 */
-		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 电机停稳后释放手柄控制权，允许脚踏/屏幕/上位机接管。 */
+		ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 检查软件运行状态，空闲时允许其它控制方式接管；这里不等待实测转速归零。 */
 	}
 
-	SendKeyBehMessage(HANDLEKey, enable ? HANDLEKey_motor_start : HANDLEKey_motor_stop); /* 复用原按键行为消息，保持UI和上位机状态同步链路。 */
-	return true; /* 状态写入完成，调用方可以更新实体键owner通道。 */
+	SendKeyBehMessage(HANDLEKey, enable ? HANDLEKey_motor_start : HANDLEKey_motor_stop); /* 发送手柄键启停消息，让屏幕和上位机同步显示。 */
+	return true; /* 启停状态已写入，调用方可以记录本次由哪个通道的实体键控制。 */
 }
 
 /*
@@ -405,19 +405,19 @@ static bool HandleRunKey_PrepareRunChannel(uint8_t channel)
 		WorkMessage.speed_set_work = Pubinterface_GetCurrentDefaultMotorSpeed(); /* 通道刚上线但速度未装载时，补当前方向Page4默认速度。 */
 	}
 
-	WorkMessage.speed_work = WorkMessage.speed_set_work; /* 启动前把目标速度同步到实际运行速度，无刷控制帧读取该值。 */
+	WorkMessage.speed_work = WorkMessage.speed_set_work; /* 启动前把设定值复制为待下发的目标转速；这不是电机实测转速。 */
 	return (WorkMessage.speed_work != 0U);				  /* 默认速度为0时不启动，避免下发运行标志但目标速度为空。 */
 }
 
 /*
- * 函数功能：处理单个通道实体键的启停状态机。
- * 输入参数：channel 当前处理的通道；press_event 去抖后的稳定按下沿事件；release_event 去抖后的稳定松开沿事件。
+ * 函数功能：按型号处理一个通道的手柄键：LGZI 按住运行，其它支持型号按两次分别启停。
+ * 输入参数：channel 为通道；press_event 表示本轮刚确认按下；release_event 表示本轮刚确认松开。
  * 返回参数：无。
  */
 static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release_event)
 {
 	uint8_t hand_model = HandleRunKey_GetChannelModel(channel); /* 每次处理都读取通道型号，A/B 切换或重新识别后策略立即跟随当前手柄。 */
-	bool momentary_model = HandleRunKey_IsMomentaryModel(hand_model); /* LGZI 使用按住运行模式，其它型号保持原翻转启停模式。 */
+	bool momentary_model = HandleRunKey_IsMomentaryModel(hand_model); /* LGZI 松开就停；其它支持型号需再按一次才停。 */
 
 	/* 当前通道已经由实体键启动时，本周期只处理强制停机、松开或再次按下，不重复走启动流程。 */
 	if (s_handle_run_key_owner_channel == channel)
@@ -427,22 +427,22 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 			(HandleRunKey_IsChannelReady(channel) == false))
 		{
 			HandleRunKey_SetMotorRun(false);			  /* 报警、通道离线或被切走时仍强制停止，不能等下一次按键。 */
-			s_handle_run_key_owner_channel = CHANNEL_NONE; /* 清除实体键owner，后续其它按键需要重新满足启动条件。 */
-			return; /* 安全停机已经完成，本周期不再继续处理翻转事件。 */
+			s_handle_run_key_owner_channel = CHANNEL_NONE; /* 清掉本次启动通道，下一次按键必须重新检查启动条件。 */
+			return; /* 已请求停止，本轮不再尝试重新启动。 */
 		}
 		if (momentary_model == true)
 		{
 			if (release_event == true)
 			{
 				HandleRunKey_SetMotorRun(false);			  /* LGZI 手控按钮松开后立即停止，符合按住才运行的现场动作。 */
-				s_handle_run_key_owner_channel = CHANNEL_NONE; /* 松开停止后释放owner，下一次按住需要重新走启动条件。 */
+				s_handle_run_key_owner_channel = CHANNEL_NONE; /* 松开后清掉启动通道，下一次按下重新检查启动条件。 */
 			}
-			return; /* LGZI 运行中不响应第二次按下翻转，只有松开沿或安全条件能停机。 */
+			return; /* LGZI 运行时不按“再按一次停止”处理；确认松开或上面的异常条件才请求停止。 */
 		}
 		if (press_event == true)
 		{
 			HandleRunKey_SetMotorRun(false);			  /* 同一通道第二次稳定按下时执行停止，实现按一次启动、再按一次停止。 */
-			s_handle_run_key_owner_channel = CHANNEL_NONE; /* 停止后释放实体键owner，下一次按下可重新启动任一有效通道。 */
+			s_handle_run_key_owner_channel = CHANNEL_NONE; /* 清掉启动通道；下次仍只能启动当前选中且满足条件的通道。 */
 		}
 		return; /* 本通道已经拥有控制权时，松开不处理，只有安全条件或第二次按下才停止。 */
 	}
@@ -463,7 +463,7 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 
 	if (press_event == false)
 	{
-		return; /* 没有稳定按下沿时不做动作，松开不会停止已经运行的手柄。 */
+		return; /* 没有新的按下就不启动；已由本键启动的 LGZI 松手停机已在前面处理。 */
 	}
 
 	if ((WorkMessage.runflag_work == true) ||
@@ -475,18 +475,18 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 
 	if (HandleRunKey_PrepareRunChannel(channel) == false)
 	{
-		return; /* 通道准备失败时不占用控制权，等待下个轮询周期重新判断。 */
+		return; /* 本次按下不能启动，不占用控制；条件恢复后仍需重新按键。 */
 	}
 
 	if (HandleRunKey_SetMotorRun(true) == true)
 	{
 
-		s_handle_run_key_owner_channel = channel; /* 启动成功后记录owner通道，后续按该手柄型号决定松开停止或二次按下停止。 */
+		s_handle_run_key_owner_channel = channel; /* 记住本次由哪个通道启动，后续只让该通道按型号规则停止。 */
 	}
 }
 
 /*
- * 函数功能：轮询A/B手柄实体运行键，LGZI按住运行松开停止，其它支持型号保持翻转启停。
+ * 函数功能：依次检查 A/B 运行键；LGZI 按住运行、松开停止，其它支持型号按一次启动、再按一次停止。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -504,8 +504,8 @@ static void HandleKey_ScanRunKeys(void)
 		key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 普通B手柄读取PE0，连续低电平约120ms后产生按下沿。 */
 	}
 
-	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理A，按型号选择翻转启停或松开停止。 */
-	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理B，若A已取得owner则B会被忽略。 */
+	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理 A，根据型号判断按下启动、再次按下停止或松手停止。 */
+	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理 B；如果 A 已经由实体键启动，B 的按键不会影响 A。 */
 }
 
 /*
@@ -520,9 +520,9 @@ void HANDLEKEYTaskFunc(uint32_t event)
 	HandleRunKey_ServiceFootAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
 	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 	{
-		return; /* 其它来源正在控制时不扫描启动键，但仍先完成本模块提示生命周期维护。 */
+		return; /* 脚踏、屏幕或外控正在控制时不处理手柄键；上面的引脚更新和提示到期检查仍会执行。 */
 	}
-	HandleKey_ScanRunKeys(); /* 严格先处理 A、再处理 B；A 已取得 owner 时 B 本周期不能抢占。 */
+	HandleKey_ScanRunKeys(); /* 先处理 A 再处理 B；A 由实体键启动后，本轮 B 不能再启动。 */
 }
 
 /*

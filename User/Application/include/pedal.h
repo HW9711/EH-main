@@ -5,7 +5,8 @@
 
 #include <stdint.h>
 
-#define PEDAL_CAL_TYPE_NONE       0U  // 尚未收到可识别的脚踏实时数据，定标页保持空闲显示。
+/* 以下是内部脚踏类型编号，不是开关；页面按编号决定显示及保存哪些定标点，不能单独改变某个值。 */
+#define PEDAL_CAL_TYPE_NONE       0U  // 0 表示尚未识别脚踏，定标页不允许保存定标值。
 #define PEDAL_CAL_TYPE_SINGLE     1U  // 单踏板使用左侧低点和高点两点定标。
 #define PEDAL_CAL_TYPE_TWO_STAGE  2U  // 双段踏板使用左侧低点、中点和高点三点定标。
 #define PEDAL_CAL_TYPE_DUAL       3U  // 双脚踏分别保存左右两组三点定标值。
@@ -20,10 +21,10 @@ typedef struct
   uint16_t FootPedalMemoryLValue_Right; // 双脚踏右路低点定标值。
   uint16_t FootPedalMemoryMValue_Right; // 双脚踏右路中点定标值。
   uint16_t FootPedalMemoryHValue_Right; // 双脚踏右路高点定标值。
-  uint16_t FootPedalOffTimes;           // 标定模式下连续未收到合法帧的2ms扫描次数。
+  uint16_t FootPedalOffTimes;           // 连续未收到有效帧的扫描次数；定标页约每 2ms 扫描一次，任务入口则为 3ms。
   uint8_t FootPedalType;                // 当前识别出的脚踏类型，使用 PEDAL_CAL_TYPE_* 取值。
-  uint8_t FootPedalConnectFlag;         // 合法脚踏帧到达后置1，约1秒无合法帧后清零。
-  uint8_t FootPedalKeyValue;            // 最近一次脚踏实体按键的规范化编号：1左、2中、3右。
+  uint8_t FootPedalConnectFlag;         // 有效脚踏帧到达后置 1，连续 500 次扫描无有效帧后清零。
+  uint8_t FootPedalKeyValue;            // 最近一次脚踏按键换成页面使用的编号：1 左、2 中、3 右。
 } PedalCalibrationData_t;
 
 extern PedalCalibrationData_t PedalCalibrationData;

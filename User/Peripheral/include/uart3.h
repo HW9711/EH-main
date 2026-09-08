@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define UART3_MAX_PACKET_SIZE  150
+#define UART3_MAX_PACKET_SIZE  150 /* UART3 RFID 接收缓存容量，单位：字节；增大时也要检查 RFID 任务的接收缓存。 */
 
 void Uart3_Init(void);
 

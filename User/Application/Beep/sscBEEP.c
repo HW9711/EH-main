@@ -16,9 +16,9 @@ static QueueHandle_t BeepMsgQueue = NULL;
 //蜂鸣器消息类型
 typedef struct {
     uint8_t msgType;         //消息类型: 1=按键响应, 2=报警, 3=限时报警, 4=报警空闲时按键响应, 5=报警空闲时双响
-    uint8_t keyBeepTime;     //按键蜂鸣器响应时长
-    uint8_t alarmFlag;       //报警标志位
-    uint16_t alarmHoldTicks;  //限时报警保持周期，单位为蜂鸣任务100ms周期
+    uint8_t keyBeepTime;     //按键音持续的任务周期数，每周期 100ms；0 表示不响。
+    uint8_t alarmFlag;       //报警码，0 表示停止报警蜂鸣，非 0 表示间歇蜂鸣。
+    uint16_t alarmHoldTicks;  //限时报警持续的任务周期数，每周期 100ms。
 } BeepMessage_t;
 
 //消息类型定义
@@ -35,7 +35,11 @@ void Beep_Pulse100ms(void)
     BEEP_OFF();      /* 阻塞提示结束后立即关闭，避免进入定标循环后蜂鸣器保持高电平。 */
 }
 
-//发送按键蜂鸣器消息
+/*
+ * 函数功能：发送按键音请求；此类消息会结束当前报警蜂鸣和未播完的双响。
+ * 输入参数：time 为响声持续的 100ms 周期数，0 表示不响。
+ * 返回参数：无。
+ */
  void SendKeyBeepMessage(uint8_t time)
 {
     if(BeepMsgQueue == NULL) return; /* 蜂鸣队列尚未初始化时不能投递按键音，直接返回避免访问空队列。 */
@@ -62,7 +66,7 @@ void SendKeyBeepMessageIfIdle(uint8_t time)
         return;
     }
 
-    msg.msgType = BEEP_MSG_KEY_IF_IDLE; /* 该消息不得使用会清除报警锁存的普通按键音类型。 */
+    msg.msgType = BEEP_MSG_KEY_IF_IDLE; /* 此类提示只在无报警时播放，不会像普通按键音那样清除报警蜂鸣。 */
     msg.keyBeepTime = time;             /* 保存需要播放的 100ms 周期数，本次通道提示传入 1。 */
     msg.alarmFlag = 0U;                 /* 空闲提示不携带报警码，保持现有报警来源不变。 */
     msg.alarmHoldTicks = 0U;            /* 空闲提示不创建限时报警倒计时。 */
@@ -83,10 +87,10 @@ void SendDoubleBeepMessageIfIdle(void)
         return; /* 蜂鸣任务尚未创建时不访问空队列。 */
     }
 
-    msg.msgType = BEEP_MSG_DOUBLE_IF_IDLE; /* 独立消息类型保证两声之间包含明确的停顿相位。 */
+    msg.msgType = BEEP_MSG_DOUBLE_IF_IDLE; /* 使用双响类型，让两声之间停顿 100ms。 */
     msg.keyBeepTime = 0U; /* 双响不使用普通按键音计数字段。 */
     msg.alarmFlag = 0U; /* 本提示不创建或清除任何报警码。 */
-    msg.alarmHoldTicks = 0U; /* 四个双响相位由任务内部独立计数。 */
+    msg.alarmHoldTicks = 0U; /* 响、停、响、停四步由蜂鸣任务另行计数，不用报警倒计时。 */
     (void)Kernel_QueueSend(BeepMsgQueue, &msg, 0); /* 非阻塞投递，不拉长 25ms 泵控制周期。 */
 }
 
@@ -98,7 +102,7 @@ void SendDoubleBeepMessageIfIdle(void)
  void SendAlarmMessage(uint8_t flag)
 {
     static uint8_t flag_bijiao=0; /* 记录上一次已投递的报警码，避免同一报警持续占满蜂鸣队列。 */
-    if(flag_bijiao==flag)return; /* 当前蜂鸣状态已经对应此报警码，无需重复发送相同消息。 */
+    if(flag_bijiao==flag)return; /* 与上次记录的报警码相同就不重复发送；这里只比较发送记录，不是硬件反馈。 */
     else
     {
         flag_bijiao=flag; /* 报警码发生变化时先更新缓存，包括记住 0 号退出状态，保证下一次报警仍可入队。 */
@@ -123,9 +127,9 @@ void SendDoubleBeepMessageIfIdle(void)
 
     if(BeepMsgQueue == NULL) return; /* 蜂鸣队列尚未初始化时不接收限时报警，避免向空队列写入。 */
 
-    msg.msgType = BEEP_MSG_ALARM_TIMED;                  /* 限时报警不写 WorkMessage，只控制蜂鸣任务内部报警锁存。 */
+    msg.msgType = BEEP_MSG_ALARM_TIMED;                  /* 只让蜂鸣器限时报警，不修改 WorkMessage 中的设备报警状态。 */
     msg.keyBeepTime = 0U;                                /* 报警模式下不使用普通按键蜂鸣时长。 */
-    msg.alarmFlag = flag;                                /* 保存报警码，非 0 时进入报警翻转蜂鸣。 */
+    msg.alarmFlag = flag;                                /* 保存报警码；非 0 时按“响 100ms、停 100ms”重复提示。 */
     msg.alarmHoldTicks = (uint16_t)((duration_ms + 99U) / 100U); /* 蜂鸣任务100ms执行一次，毫秒时长向上折算成任务周期。 */
     /* 非零报警即使配置时长不足 100ms，也至少保留一个任务周期，保证用户能听到提示。 */
     if ((flag != 0U) && (msg.alarmHoldTicks == 0U))
@@ -143,17 +147,17 @@ static void BeepQueue_Init(void)
 }
 
 /*
- * 函数功能：按 100ms 调度周期处理按键蜂鸣和报警蜂鸣，函数内部不阻塞其它业务软任务。
+ * 函数功能：每 100ms 取一条蜂鸣消息并更新输出，不在函数内等待响声结束。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void BeepControl(void)
 {
-static uint8_t alarmCounter = 0;     // 每个阶段的计数器 (0-9, 共10次=100ms)
+static uint8_t alarmCounter = 0;     // 报警响停标志：0 时本次打开蜂鸣器并改为 1；1 时本次关闭并改为 0。
 static uint8_t key_flag = 0;
 static uint8_t alarm_flag = 0;
 static uint16_t alarm_limited_ticks = 0U; //限时报警剩余周期，递减到0后自动关闭蜂鸣
-static uint8_t double_beep_phase = 0U; //双响剩余相位：4=响、3=停、2=响、1=停，每相位100ms
+static uint8_t double_beep_phase = 0U; //双响剩余步骤：4=响、3=停、2=响、1=停，每步 100ms，0 表示结束。
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -171,7 +175,7 @@ if(BeepMsgQueue != NULL)
             key_flag = msg.keyBeepTime;
             alarm_flag = 0;
             alarm_limited_ticks = 0U;
-            double_beep_phase = 0U; /* 明确的普通按键音结束尚未播完的双响相位。 */
+            double_beep_phase = 0U; /* 收到普通按键音后，停止尚未播完的双响。 */
         }
         /* 外控通道切换提示只能在报警空闲时播放，不得清除持续报警或限时报警。 */
         else if(msg.msgType == BEEP_MSG_KEY_IF_IDLE)
@@ -180,7 +184,7 @@ if(BeepMsgQueue != NULL)
             if(alarm_flag == 0U)
             {
                 key_flag = msg.keyBeepTime; /* 仅更新普通按键音周期数，不改报警码和报警倒计时。 */
-                double_beep_phase = 0U; /* 同一时刻只播放一种非报警提示，避免相位互相覆盖。 */
+                double_beep_phase = 0U; /* 改播普通提示音时停止双响，避免两种声音交替干扰。 */
             }
         }
         /* 泵驱动故障双响只在报警空闲时接管蜂鸣，不覆盖持续或限时报警。 */
@@ -188,9 +192,9 @@ if(BeepMsgQueue != NULL)
         {
             if(alarm_flag == 0U)
             {
-                key_flag = 0U; /* 故障双响比普通按键音优先，从第一声完整相位开始。 */
-                alarmCounter = 0U; /* 清除历史报警翻转相位，不把旧相位带入双响。 */
-                double_beep_phase = 4U; /* 创建响-停-响-停四个 100ms 相位。 */
+                key_flag = 0U; /* 停止普通按键音，从头播放故障双响。 */
+                alarmCounter = 0U; /* 清除旧报警的响停记录。 */
+                double_beep_phase = 4U; /* 开始响、停、响、停四步，每步 100ms。 */
             }
         }
         /* 持续报警由外部发送 0 才结束，因此清掉内部限时倒计时。 */
@@ -205,7 +209,7 @@ if(BeepMsgQueue != NULL)
         /* 限时报警使用消息自带倒计时，到期后由蜂鸣任务自行关闭。 */
         else if(msg.msgType == BEEP_MSG_ALARM_TIMED)
         {
-            alarm_flag = msg.alarmFlag;                   /* 限时报警进入同一个蜂鸣翻转状态，保证声音形式一致。 */
+            alarm_flag = msg.alarmFlag;                   /* 限时报警和持续报警都使用相同的间歇响声。 */
             alarm_limited_ticks = msg.alarmHoldTicks;     /* 保存倒计时，到期后本任务自己清报警蜂鸣。 */
             key_flag = 0;
             double_beep_phase = 0U;                       /* 限时报警同样高于双响提示。 */
@@ -214,31 +218,31 @@ if(BeepMsgQueue != NULL)
 }
 
 	// 按键响应模式（优先级高）
-	/* 没有报警占用时才播放按键音，保证报警蜂鸣不会被普通按键提示覆盖。 */
+	/* 按消息处理后的状态输出；普通按键消息已在上面清除报警，空闲提示消息则不会清除。 */
 	if(key_flag && !alarm_flag)
 	{
 		BEEP_ON();                                     /* 按键蜂鸣采用非阻塞计数，当前 100ms 周期打开蜂鸣器后立即返回。 */
 		key_flag--;                                    /* 每个任务周期扣减一次，time=1 时保持一个 100ms 蜂鸣周期。 */
 	}
-	/* 故障双响仅在无报警时依次输出响-停-响-停四个 100ms 相位。 */
+	/* 没有报警时按响、停、响、停四步播放故障双响，每步 100ms。 */
 	else if((double_beep_phase > 0U) && (alarm_flag == 0U))
 	{
 		if((double_beep_phase & 1U) == 0U)
 		{
-			BEEP_ON(); /* 偶数相位 4 和 2 分别输出第一声和第二声。 */
+			BEEP_ON(); /* 剩余步骤为 4 或 2 时，分别播放第一声和第二声。 */
 		}
 		else
 		{
-			BEEP_OFF(); /* 奇数相位 3 和 1 形成两声之间和结尾的停顿。 */
+			BEEP_OFF(); /* 剩余步骤为 3 或 1 时，分别停顿在两声之间和结尾。 */
 		}
-		--double_beep_phase; /* 每个 100ms 周期完成一个相位，减到 0 后回到正常关闭状态。 */
+		--double_beep_phase; /* 每 100ms 完成一步，减到 0 后结束双响。 */
 	}
 	// 报警模式
-	/* 报警有效时进入周期翻转蜂鸣，并按需要维护限时报警倒计时。 */
+	/* 有报警时每 100ms 切换一次响或停；限时报警同时扣减剩余时间。 */
 	else if(alarm_flag)
 	{
 		//ALARMdisplay();
-		/* 相位为 0 时打开蜂鸣器，下一周期再关闭，形成报警间歇声。 */
+		/* 上次未响时本次打开，下次关闭，形成间歇报警声。 */
 		if(!alarmCounter)
 		{
 			alarmCounter=1;
@@ -253,11 +257,11 @@ if(BeepMsgQueue != NULL)
 		if(alarm_limited_ticks > 0U)
 		{
 			--alarm_limited_ticks;                         /* 限时报警每 100ms 扣减一次，满足运行中插入坏手柄只响 3 秒。 */
-			/* 倒计时刚好结束时立即复位报警相位并关闭蜂鸣输出。 */
+			/* 倒计时结束后立即清除响停记录并关闭蜂鸣器。 */
 			if(alarm_limited_ticks == 0U)
 			{
 				alarm_flag = 0U;                           /* 倒计时结束后退出报警蜂鸣，不影响 WorkMessage 的真实报警状态。 */
-				alarmCounter = 0U;                         /* 清翻转相位，下一次报警从响开始。 */
+				alarmCounter = 0U;                         /* 清除响停记录，下次报警从第一声开始。 */
 				BEEP_OFF();                                /* 到期立即关闭蜂鸣，避免最后一个周期残留为高电平。 */
 			}
 		}
@@ -268,7 +272,7 @@ if(BeepMsgQueue != NULL)
 		BEEP_OFF();
 		alarmCounter = 0;
 		key_flag = 0;
-		double_beep_phase = 0U; /* 空闲态不保留已完成的双响相位。 */
+		double_beep_phase = 0U; /* 没有声音要播放时，清除剩余双响步骤。 */
 		//ALARMdisplay();
 	}
 }

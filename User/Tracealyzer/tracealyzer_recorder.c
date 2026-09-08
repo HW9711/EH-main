@@ -8,12 +8,9 @@
 #include "SEGGER_RTT.h"
 
 /*
- * Streaming 模式下默认改为“等待主机后再开始”。
- * 这样可以避免目标板在 Tracealyzer 完成 RTT 建链前就发出关键的
- * PSF 头部和对象表，导致主机侧收到字节但一直显示 0 events。
- *
- * 如需恢复旧行为，可在工程编译宏中覆盖：
- * TRACEALYZER_STREAMING_START_OPTION=TRC_START
+ * RTT模式先初始化记录器，再由业务线程调用TryStartStreaming尝试开始发送。
+ * 当前main.c未调用RecorderInit，因此默认不会开始记录。
+ * 历史名称TRACEALYZER_STREAMING_START_OPTION已没有代码读取，单独定义它不会改变启动方式。
  */
 #endif
 

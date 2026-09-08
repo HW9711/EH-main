@@ -22,45 +22,45 @@
 
 #include <string.h>
 
-#define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 外部通信任务 10ms 调度一次，用于接收 UART2 空闲包。 */
-#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳 100ms 主动上传一次，可按现场需求单独改宏。 */
-#define EXTERNAL_COMM_BATCH_PAGE_PERIOD_MS  30U    /* 导航批量操作每 30ms 处理一页，降低连续上行帧对 USB 串口接收的压力。 */
-#define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 2000U  /* 外控链路静默 2s 后只停电机和泵输出，保留外控授权，避免短时串口抖动直接退出外控。 */
-#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     10000U /* 外控链路静默 10s 后才释放外控授权并熄灭在线图标，上位机仍需按 200ms 周期下发保活。 */
-#define EXTERNAL_COMM_LOCAL_EXIT_REARM_MS          1000U /* 屏幕主动退出后要求申请帧静默 1s，防止串口中已排队的旧保活帧立即重新取得外控。 */
-#define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳发送串口开关：1 表示从 UART10 发出，0 表示从原 UART2 发出。 */
-#define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 注水泵跟随手柄开关：1 表示手柄转动时注水泵同步运行用于冷却，0 表示只允许上位机独立控制。 */
+#define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 任务间隔，单位 ms；调大后接收检查、断线处理和各项计时的响应都会变慢。 */
+#define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳上传间隔，单位 ms；调小可加快上位机状态刷新，但会增加串口发送量。 */
+#define EXTERNAL_COMM_BATCH_PAGE_PERIOD_MS  30U    /* EEPROM 批量操作的页间隔，单位 ms；调大可减轻串口负担，但整批读写会更慢。 */
+#define EXTERNAL_COMM_LINK_STOP_OUTPUT_TIMEOUT_MS 2000U  /* 外控连续未收到有效命令达到此时间就停电机和泵，单位 ms；不退出外控，调大将延后断线停机。 */
+#define EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS     10000U /* 连续未收到有效命令达到此时间就退出外控并隐藏图标，单位 ms；应大于停机超时，上位机仍按 200ms 发保活。 */
+#define EXTERNAL_COMM_LOCAL_EXIT_REARM_MS          1000U /* 屏幕退出后，连续这么多 ms 未收到申请帧才允许重新登录；调大可延长防止旧保活帧重连的等待时间。 */
+#define EXTERNAL_COMM_HEARTBEAT_USE_UART10  0U      /* 心跳串口选择：0 从 UART2 发，1 从 UART10 发；只改变心跳出口，不改变命令接收和应答串口。 */
+#define EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE 1U /* 外控手柄的注水冷却开关：1 随手柄启停注水泵，0 不建立跟随请求；不影响上位机独立启停泵。 */
 #define EXTERNAL_COMM_RX_FIFO_SIZE       (UART2_MAX_PACKET_SIZE * 4U) /* UART2 外控软件接收 FIFO 容量，保留多包粘包和半包缓存空间。 */
 #define EXTERNAL_COMM_FRAME_HEAD_SIZE    4U      /* 外部通信帧头固定 4 字节：D7 CA F8 F1。 */
 #define EXTERNAL_COMM_FRAME_LENGTH_OFFSET 5U     /* Length_H 在帧内偏移 5，Length_L 在偏移 6。 */
-#define EXTERNAL_COMM_RX_FIFO_MAX_STEPS  32U     /* 单个 10ms 周期最多处理 32 次 FIFO 状态，避免异常噪声长期占用任务。 */
-#define EXTERNAL_COMM_CONFIRM_REQUIRED_FRAMES 3U /* 首次连接必须收到三份内容一致的申请/登录帧，单帧干扰不能建立会话。 */
-#define EXTERNAL_COMM_CONFIRM_WINDOW_MS      300U /* 三帧确认总窗口为300ms，配合上位机50ms间隔通常100～150ms完成。 */
+#define EXTERNAL_COMM_RX_FIFO_MAX_STEPS  32U     /* 每周期最多解析或跳过数据 32 次；调大可更快清接收积压，也会占用更多任务时间。 */
+#define EXTERNAL_COMM_CONFIRM_REQUIRED_FRAMES 3U /* 首次连接所需的一致申请帧数量；减少会降低误连接保护，增加则需上位机发送更多登录帧。 */
+#define EXTERNAL_COMM_CONFIRM_WINDOW_MS      300U /* 收齐上述申请帧的总时限，单位 ms；超时从第一帧重计，须覆盖上位机的登录发送间隔。 */
 #define EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN 8U /* 正式协议使用8字节授权区比对；简易协议使用0字节固定身份。 */
-#define EXTERNAL_COMM_MOTOR_TELEMETRY_PERIOD_MS 50U /* 订阅后每50ms上传一份电机命令/反馈快照，不改变原100ms心跳。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_PERIOD_MS 50U /* 订阅后上传电机命令和反馈的间隔，单位 ms；调小会增加串口负担，不改变心跳周期。 */
 #define EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_CODE 0x10U /* 0x03/0x01下的信息码0x10固定表示34字节电机遥测。 */
-#define EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN 34U /* 电机遥测载荷固定34字节，所有多字节字段均为大端。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN 34U /* 电机状态数据区固定 34 字节，多字节数值高字节在前；修改需同步上位机字段表。 */
 #define EXTERNAL_COMM_MOTOR_TELEMETRY_AREA 0x01U /* 下行订阅和上行电机遥测均使用区域码0x01。 */
-#define EXTERNAL_COMM_MOTOR_FEEDBACK_VALID_TIMEOUT_MS 250U /* 超过250ms未收到CRC正确驱动回包时清反馈有效标志。 */
-#define EXTERNAL_COMM_MOTOR_TELEMETRY_DISABLE 0U /* 订阅载荷0表示关闭50ms遥测。 */
-#define EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE 1U /* 订阅载荷1表示开启50ms遥测。 */
-#define EXTERNAL_COMM_MOTOR_FLAG_FEEDBACK_VALID 0x01U /* 遥测flags bit0：驱动反馈快照仍在有效时间窗内。 */
+#define EXTERNAL_COMM_MOTOR_FEEDBACK_VALID_TIMEOUT_MS 250U /* 驱动反馈的有效时长，单位 ms；超过此时间未收到 CRC 正确回包就清有效标志，旧数值仍上传供排查。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_DISABLE 0U /* 订阅命令数据字节为 0 时，关闭电机状态定时上传。 */
+#define EXTERNAL_COMM_MOTOR_TELEMETRY_ENABLE 1U /* 订阅命令数据字节为 1 时，开启电机状态定时上传；其它值被拒绝。 */
+#define EXTERNAL_COMM_MOTOR_FLAG_FEEDBACK_VALID 0x01U /* 电机状态 flags bit0：最近一次驱动回包通过 CRC，且尚未超过有效时长。 */
 #define EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER 0x02U /* 遥测flags bit1：当前控制权属于外控。 */
 #define EXTERNAL_COMM_MOTOR_FLAG_HANDLE_ONLINE 0x04U /* 遥测flags bit2：当前选中手柄在线。 */
 #define EXTERNAL_COMM_MOTOR_FLAG_ALARM_ACTIVE 0x08U /* 遥测flags bit3：主控存在持续报警。 */
 
 #define EXTERNAL_COMM_DRIVER_PARAMETER_FUNCTION 0xE0U /* 内部调参版独占功能码；公开上位机没有该入口。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_AREA 0x01U /* 驱动参数区固定使用AreaCode 0x01。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_VERSION 0x01U /* 三工程首版参数语义协议版本。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_VERSION 0x01U /* 内部调参协议版本，主控、驱动和调参上位机必须使用相同的字段定义。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_REQUEST_LEN 16U /* 版本、请求号、操作、Bank、索引、数值和8字节内部口令。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_RESPONSE_PREFIX_LEN 8U /* 响应固定前缀后可追加最多30个16位参数。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_KEY_OFFSET 8U /* 8字节内部口令从请求载荷偏移8开始。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_KEY_OFFSET 8U /* 请求数据区偏移 8 开始存放 8 字节内部口令。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_MODBUS_LEN 8U /* 主控到驱动的维护请求固定为8字节Modbus帧。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS 0xFDU /* 驱动维护地址与正常地址1/2完全隔离。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_READ_MAX 30U /* 单次读取最多30个参数，保证驱动响应不超过65字节。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHLESS_COUNT 67U /* 无刷第一版只开放当前明确使用的0~66。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHED_COUNT 62U /* 有刷第一版只开放当前明确使用的0~61。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_VALUE_MAX 32767U /* 沿用驱动既有16位有符号参数上限，拒绝高位回绕。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHLESS_COUNT 67U /* 无刷可访问参数数目，对应索引 0～66；增加前须确认驱动也支持新增索引。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_BRUSHED_COUNT 62U /* 有刷可访问参数数目，对应索引 0～61；增加前须确认驱动也支持新增索引。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_VALUE_MAX 32767U /* 写入参数原始值上限，具体单位由参数索引决定；不能超过 16 位有符号正数范围，以免驱动把它解释成负数。 */
 
 #define EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ 0x01U /* 批量读取一个Bank中的连续参数。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_OP_WRITE 0x02U /* 单写RAM参数，保护参数立即重载。 */
@@ -73,11 +73,11 @@
 #define EXTERNAL_COMM_DRIVER_PARAMETER_BANK_BRUSHED_2 0x13U /* 有刷通道2参数Bank。 */
 
 #define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_OK 0x00U /* 驱动已完成本次读写。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_FRAME 0x01U /* 外层载荷长度、区域或版本不正确。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DENIED 0x02U /* 内部口令不匹配或没有外控所有权。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_FRAME 0x01U /* 调参请求的数据区长度、区域码或版本不正确。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DENIED 0x02U /* 内部口令不匹配，或上位机尚未取得外控控制权。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_NOT_IDLE 0x03U /* 电机、反馈转速或任一泵尚未停止。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BAD_ARGUMENT 0x04U /* 操作、Bank、索引、数量或数值越界。 */
-#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BUSY 0x05U /* 前一笔UART1维护事务尚未结束。 */
+#define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_BUSY 0x05U /* UART1 还在处理上一条调参请求，当前请求不执行。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_TIMEOUT 0x06U /* 驱动在300ms内没有返回合法帧。 */
 #define EXTERNAL_COMM_DRIVER_PARAMETER_STATUS_DRIVER_REJECTED 0x07U /* 驱动返回Modbus异常或响应字段不匹配。 */
 
@@ -97,12 +97,12 @@
 #else
 #define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 关闭 RFID 统计时恢复原心跳缓冲上限，不增加任务栈占用。 */
 #endif
-#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 心跳刀具扩展魔术字，放在泵字段之后，旧上位机可把它当尾部剩余字节忽略。 */
+#define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 刀具扩展数据的起始标记，放在泵字段之后；旧上位机可忽略这段尾部扩展。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x02U /* 刀具扩展版本2保持块长不变，倍率字段统一改为x100。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_BLOCK_LEN 20U /* 单通道刀具扩展块长度：通道/来源/规格/速度/方向/减速比共 20 字节。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT 100U /* A5 v2 的倍率单位值，100表示1.00倍直联。 */
 #define EXTERNAL_COMM_RFID_RATIO_X10_TO_X100 10U /* RFID EPC倍率由x10乘10转换为A5 v2使用的x100。 */
-#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_MAGIC 0xA6U /* RFID 链路统计扩展魔术字，固定放在心跳最后，便于上位机可靠定位。 */
+#define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_MAGIC 0xA6U /* RFID 通信统计的起始标记，这段扩展固定放在心跳末尾，供上位机识别。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_VERSION 0x02U /* 版本2在原请求/应答统计后增加在线监测完成数和确认掉线数。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_BLOCK_LEN 20U /* 单通道块：请求/有效/丢失各4字节，异常2字节，监测完成4字节，掉线2字节。 */
 #define EXTERNAL_COMM_HEARTBEAT_RFID_STATS_CHANNEL_COUNT 2U /* 每轮固定上报逻辑 A/B 两个通道，离线通道也保留累计值。 */
@@ -118,7 +118,7 @@
 #define EXTERNAL_COMM_REASON_BAD_AREA       0x02U   /* 失败原因：AreaCode 不在当前命令允许范围内。 */
 #define EXTERNAL_COMM_REASON_NO_CHANNEL     0x03U   /* 失败原因：当前没有选中 A/B 通道。 */
 #define EXTERNAL_COMM_REASON_DEVICE_FAIL    0x04U   /* 失败原因：底层设备读写失败或设备未配置。 */
-#define EXTERNAL_COMM_REASON_NOT_SUPPORT    0x05U   /* 失败原因：V1 明确禁用整区读取等大包命令。 */
+#define EXTERNAL_COMM_REASON_NOT_SUPPORT    0x05U   /* 失败原因：不支持此操作，例如外控写业务页，或公共接头尚未识别到可运行刀具。 */
 #define EXTERNAL_COMM_REASON_BUSY           0x06U   /* 失败原因：运行中、报警中或未取得外部控制权。 */
 #define EXTERNAL_COMM_REASON_TARGET_AMBIGUOUS 0x07U /* 失败原因：旧协议未携带通道且 A/B 同时在线，无法唯一确定目标。 */
 #define EXTERNAL_COMM_REASON_TARGET_CHANGED 0x08U   /* 失败原因：操作期间目标手柄离线、更换或物理总线发生变化。 */
@@ -142,10 +142,10 @@
 #define EXTERNAL_COMM_NAV_PAGE_LAST         128U    /* 导航 EEPROM 对外开放的最后一个实际页号。 */
 #define EXTERNAL_COMM_BUSINESS_PAGE_FIRST   2U      /* 业务 EEPROM 批量读取的第一个实际页号。 */
 #define EXTERNAL_COMM_BUSINESS_PAGE_LAST    11U     /* 业务 EEPROM 批量读取的最后一个实际页号。 */
-#define EXTERNAL_COMM_BATCH_READ_INFO_LEN   1U      /* 批量读载荷只包含结束页号。 */
-#define EXTERNAL_COMM_BATCH_WRITE_INFO_LEN  (AT24CS32_PAGE_DATA_SIZE + 1U) /* 批量写载荷为结束页号加 30 字节模板。 */
+#define EXTERNAL_COMM_BATCH_READ_INFO_LEN   1U      /* 批量读的数据区只有 1 字节，表示结束页号。 */
+#define EXTERNAL_COMM_BATCH_WRITE_INFO_LEN  (AT24CS32_PAGE_DATA_SIZE + 1U) /* 批量写的数据区为结束页号加 30 字节页模板。 */
 #define EXTERNAL_COMM_BATCH_COMMAND_TARGET  0xFFU   /* 批量启动失败对象，避免 0x0C 与实际 Page12 混淆。 */
-#define EXTERNAL_COMM_BATCH_FINISH_ACK_REPEAT 3U    /* 批量完成 ACK 连续发送 3 次，降低不稳定串口链路偶发丢帧造成的假超时。 */
+#define EXTERNAL_COMM_BATCH_FINISH_ACK_REPEAT 3U    /* 整批完成应答的重复发送次数；增加可降低漏收概率，但会增加串口占用，上位机须能处理重复应答。 */
 #define EXTERNAL_COMM_NAV_V2_VERSION         0x02U   /* 导航协议 V2 标识：请求必须显式携带通道和请求号。 */
 #define EXTERNAL_COMM_NAV_CHANNEL_A          0x01U   /* 导航协议通道编码：逻辑 A 通道。 */
 #define EXTERNAL_COMM_NAV_CHANNEL_B          0x02U   /* 导航协议通道编码：逻辑 B 通道。 */
@@ -177,7 +177,7 @@ typedef enum
 /* 正式协议完整帧通过CRC后，接收层按连接状态决定是否分发和刷新在线计时。 */
 typedef enum
 {
-    EXTERNAL_COMM_FORMAL_FRAME_IGNORE = 0U,       /* 静默消费本帧，不执行业务也不刷新在线状态。 */
+    EXTERNAL_COMM_FORMAL_FRAME_IGNORE = 0U,       /* 从接收缓存移除本帧，不执行、不应答，也不重置在线计时。 */
     EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY,     /* 只执行安全动作或失败应答，不刷新在线状态。 */
     EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK  /* 执行业务并刷新已确认正式协议会话。 */
 } ExternalCommFormalFrameAction_t;
@@ -198,8 +198,8 @@ typedef struct
     uint8_t channel;                                 /* 本次请求锁定的逻辑通道，1 为 A，2 为 B。 */
     uint16_t request_id;                             /* V2 请求号，所有逐页响应均原样回显；旧协议固定为 0。 */
     uint8_t use_i2c3;                                /* 目标通道映射后的物理 EEPROM 总线，0 为 I2C2，1 为 I2C3。 */
-    uint32_t navigation_generation;                  /* 请求开始时的扫描导航代次，记录短于离线消抖时间的插拔变化。 */
-    uint32_t identity_generation;                    /* 请求开始时的手柄身份代数，用 RAM 比较发现跨页插拔或换柄。 */
+    uint32_t navigation_generation;                  /* 请求开始时的扫描变化计数；计数变化说明发生过插拔，即使尚未达到离线确认时间。 */
+    uint32_t identity_generation;                    /* 请求开始时的手柄更换计数；后续页操作前比较它，发现换柄就停止本批操作。 */
     uint8_t serial_number[AT24CS32_SN_SIZE];         /* 请求开始时读取的 EEPROM 唯一序列号，用于识别中途换柄。 */
 } ExternalCommNavTarget_t;
 
@@ -213,8 +213,8 @@ typedef struct
     uint8_t nav_protocol_version;                    /* 导航批量任务协议版本；业务批量读保持为 0。 */
     uint8_t nav_channel;                             /* 导航批量任务锁定的逻辑 A/B 通道。 */
     uint16_t nav_request_id;                         /* 导航 V2 批量请求号，用于关联每页响应和最终 ACK。 */
-    uint32_t nav_navigation_generation;              /* 批量开始时锁定的扫描导航代次，任一页期间短暂插拔都会终止整批。 */
-    uint32_t nav_identity_generation;                /* 批量开始时锁定的身份代数，逐页读前只做无阻塞 RAM 预检。 */
+    uint32_t nav_navigation_generation;              /* 批量开始时的扫描变化计数；后续发现短暂插拔就终止整批。 */
+    uint32_t nav_identity_generation;                /* 批量开始时的手柄更换计数；每页读取前比较内存中的计数，不重复读取 EEPROM 序列号。 */
     uint8_t nav_serial_number[AT24CS32_SN_SIZE];     /* 导航批量开始时锁定的 EEPROM 序列号，整批结束时统一复核。 */
     uint16_t page_elapsed_ms;                        /* 距离上一次逐页处理的累计时间，用于限制批量上传速率。 */
     uint8_t page_data[AT24CS32_PAGE_DATA_SIZE];      /* 批量写共用的 30 字节导航模板；批量读不使用。 */
@@ -237,38 +237,38 @@ static uint16_t s_motor_telemetry_elapsed_ms = 0U;   /* 50ms电机遥测累计�
 static uint16_t s_motor_telemetry_sequence = 0U;     /* 每份遥测递增一次的16位序号，新订阅从0重新开始。 */
 static uint8_t s_motor_telemetry_enabled = 0U;       /* 只有正式外控会话显式订阅后置1，退出或通信超时自动清零。 */
 static uint16_t s_external_link_elapsed_ms = 0U;     /* 外控保活计时，外控期间每收到一帧合法下行命令都会清零。 */
-static uint8_t s_external_link_output_stopped = 0U;  /* 外控链路短超时停输出锁存，防止静默期间每 10ms 重复清运行状态。 */
+static uint8_t s_external_link_output_stopped = 0U;  /* 已因 2 秒断线而停机的标志；置 1 后不重复停机，收到有效命令后清零。 */
 static uint16_t s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 非外控在线图标计时，合法帧刷新后超时熄灭。 */
-static uint8_t s_external_comm_display_online = 0U;  /* 小电脑图标在线锁存，避免未收到合法外部帧时误显示在线。 */
+static uint8_t s_external_comm_display_online = 0U;  /* 已确认外部通信在线时置 1，超时或主动隐藏图标时清零。 */
 static ExternalCommProtocolSource_t s_confirmed_protocol_source = EXTERNAL_COMM_PROTOCOL_SOURCE_NONE; /* 已完成三帧确认的唯一协议来源。 */
 static ExternalCommConfirmState_t s_protocol_confirm; /* 首次连接三帧确认状态，由正式协议和简易协议共用。 */
 static volatile uint8_t s_local_exit_requested = 0U; /* 屏幕任务只置退出请求，外部通信任务负责释放状态和串口回包，避免共用发送缓存并发。 */
 static uint8_t s_local_exit_guard = 0U;              /* 屏幕退出后的旧申请帧拦截标志，1 表示暂不允许上位机重新取得控制权。 */
-static uint16_t s_local_exit_quiet_ms = 0U;          /* 退出后申请帧静默时间；旧保活每次到达都会清零，静默满 1s 后允许重新申请。 */
+static uint16_t s_local_exit_quiet_ms = 0U;          /* 屏幕退出后连续未收到申请帧的时间；收到申请就清零，满 1 秒才允许重新登录。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
 static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
 static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄校验失败时临时上传的报警码，不写入 WorkMessage。 */
 static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持时间，递减到 0 后自动上传无报警关闭上位机弹窗。 */
-static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵的请求锁存，停止 A 泵或急停时清零。 */
+static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵时置 1；独立停泵、保护停机或退出外控时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
-static uint8_t s_external_pump_b_manual_run_request = 0U; /* 上位机独立启动 B 泵的请求锁存，只用于判断小电脑图标是否应显示 40 黄色。 */
+static uint8_t s_external_pump_b_manual_run_request = 0U; /* 记录上位机是否独立请求 B 泵运行，用于简易协议启停切换和小电脑图标显示。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
 static ExternalCommRxFifo_t s_rx_fifo;               /* UART2 外控软件接收 FIFO 句柄，保存读写指针和初始化状态。 */
 static uint8_t s_rx_fifo_buf[EXTERNAL_COMM_RX_FIFO_SIZE]; /* FIFO 实际存储区，使用本文件静态数组，不依赖额外工程源文件。 */
 static uint8_t s_frame_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 从 FIFO 中临时取出的单帧缓存，交给现有协议解析器复用。 */
 static uint8_t s_tx_buf[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 所有上传帧共用发送缓存，任务内串行使用。 */
-static uint8_t s_response_suppressed = 0U;          /* 简易协议静默复用原分发时临时禁止发送旧协议 ACK/上传帧。 */
+static uint8_t s_response_suppressed = 0U;          /* 简易协议调用原命令处理函数时置 1，暂时不发正式协议的应答和状态帧。 */
 static uint8_t s_page_buf[AT24CS32_PAGE_SIZE];       /* EEPROM 页缓存，32 字节含最后 2 字节页校验。 */
 static ExternalCommEepromBatchState_t s_eeprom_batch; /* EEPROM 批量读写状态，外控任务累计到 30ms 后处理一页。 */
-static ExternalCommDriverParameterRequest_t s_driver_parameter_request; /* UART2语义请求到UART1维护响应的一对一事务状态。 */
+static ExternalCommDriverParameterRequest_t s_driver_parameter_request; /* 保存正在执行的调参请求，把 UART1 驱动结果对应回 UART2 上位机的请求号。 */
 static uint8_t s_eeprom_command_processed_this_cycle = 0U; /* 每个 10ms 周期只允许分发一条 EEPROM 命令，防止粘包连续阻塞业务任务。 */
-static const uint8_t s_driver_parameter_key[8] = {'E', 'H', 'D', 'R', 'V', '2', '6', '0'}; /* 仅内部调参版持有的操作口令；它是维护门禁而不是加密机制。 */
+static const uint8_t s_driver_parameter_key[8] = {'E', 'H', 'D', 'R', 'V', '2', '6', '0'}; /* 内部调参请求必须匹配此口令；口令按明文传输，不能当作加密保护。 */
 static const uint8_t s_external_comm_frame_head[EXTERNAL_COMM_FRAME_HEAD_SIZE] = {0xD7U, 0xCAU, 0xF8U, 0xF1U}; /* FIFO 中搜索完整帧时使用的固定帧头。 */
 
 static void ExternalComm_RefreshIdleLinkDisplay(void); /* 非外控状态下维护小电脑在线图标超时。 */
 static void ExternalComm_RefreshRunDisplay(void); /* 按外控输出请求刷新 39/40 小电脑图标。 */
-static uint8_t ExternalComm_IsEepromRuntimeIdle(void); /* 单页和批量 EEPROM 操作共用运动输出停止门禁。 */
+static uint8_t ExternalComm_IsEepromRuntimeIdle(void); /* 单页和批量 EEPROM 操作都先检查电机与泵是否已停止。 */
 
 static uint16_t ExternalComm_ReadBE16(const uint8_t *data)
 {
@@ -285,7 +285,7 @@ static void ExternalComm_WriteBE16(uint8_t *data, uint16_t value)
 }
 
 /*
- * 函数功能：把32位运行时刻或rpm按高字节在前写入协议载荷。
+ * 函数功能：把 32 位运行时刻或 rpm 转速写入协议数据区，高字节在前。
  * 输入参数：data指向至少4字节输出空间；value为待写入32位值。
  * 返回参数：无。
  */
@@ -299,7 +299,7 @@ static void ExternalComm_WriteBE32(uint8_t *data, uint32_t value)
 
 /*
  * 函数功能：按原外控协议构造并发送主动上传帧。
- * 输入参数：fun_code、area_code、info_code 为协议字段；info_area 和 info_len 为载荷。
+ * 输入参数：fun_code、area_code、info_code 为协议字段；info_area 为数据区，info_len 为其字节数。
  * 返回参数：无。
  */
 static void ExternalComm_SendFrame(uint8_t fun_code,
@@ -310,7 +310,7 @@ static void ExternalComm_SendFrame(uint8_t fun_code,
 {
     if (s_response_suppressed != 0U)
     {
-        return; /* 简易协议没有定义旧协议上行帧，静默桥接期间禁止发送。 */
+        return; /* 当前正处理简易协议命令，不向串口混发正式协议状态帧。 */
     }
     /* tx_len 接收协议层实际组出的完整帧长度。 */
     uint16_t tx_len = 0U;
@@ -332,7 +332,7 @@ static void ExternalComm_SendFrame(uint8_t fun_code,
 }
 
 /*
- * 函数功能：把内部调参请求结果封装成0xE0上行帧，回显请求号和参数语义字段。
+ * 函数功能：用 0xE0 帧返回调参结果，并原样带回请求号、操作、参数组和起始索引。
  * 输入参数：request_id为请求号；status为结果；operation、bank、index为原请求字段；data为大端参数数据；count为16位参数数量。
  * 返回参数：无。
  */
@@ -356,7 +356,7 @@ static void ExternalComm_SendDriverParameterResponse(uint16_t request_id,
 
     info[0] = EXTERNAL_COMM_DRIVER_PARAMETER_VERSION; /* offset0固定回显协议版本。 */
     ExternalComm_WriteBE16(&info[1], request_id); /* offset1~2回显请求号。 */
-    info[3] = status; /* offset3返回主控或驱动事务状态。 */
+    info[3] = status; /* offset3 返回本次调参的执行结果或失败原因。 */
     info[4] = operation; /* offset4回显操作类型。 */
     info[5] = bank; /* offset5回显参数Bank。 */
     info[6] = index; /* offset6回显读写起始索引。 */
@@ -403,13 +403,13 @@ static uint8_t ExternalComm_GetDriverParameterBankCount(uint8_t bank, uint8_t *p
 }
 
 /*
- * 函数功能：处理内部上位机的一笔驱动参数语义请求，并生成固定0xFD Modbus维护帧。
+ * 函数功能：检查内部上位机的调参请求，通过后生成地址为 0xFD 的 Modbus 命令发给驱动。
  * 输入参数：frame为已通过外层帧头、长度、帧尾、CRC和正式会话校验的0xE0下行帧。
  * 返回参数：无；参数错误立即上行状态，合法请求等待UART1异步响应。
  */
 static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
 {
-    uint16_t request_id = 0U; /* 载荷不足时使用0，避免读取越界。 */
+    uint16_t request_id = 0U; /* 请求数据不够长时保留 0，不越界读取请求号。 */
     uint8_t operation = 0U; /* 保存请求操作并用于错误响应回显。 */
     uint8_t bank = 0U; /* 保存请求Bank并用于错误响应回显。 */
     uint8_t index = 0U; /* 保存请求索引并用于错误响应回显。 */
@@ -459,7 +459,7 @@ static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
                                                  bank,
                                                  index,
                                                  NULL,
-                                                 0U); /* 内部口令和外控所有权必须同时成立，公开上位机不能偶然进入调参。 */
+                                                 0U); /* 口令正确且已取得外控控制权才允许调参，缺少任一条件都拒绝。 */
         return;
     }
 
@@ -484,7 +484,7 @@ static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
                                                  bank,
                                                  index,
                                                  NULL,
-                                                 0U); /* UART1只允许一笔维护事务，新的UI动作必须等待前一笔结束。 */
+                                                 0U); /* UART1 一次只能处理一条调参请求，上位机须等上一条结束再发送。 */
         return;
     }
 
@@ -496,11 +496,11 @@ static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
                                                  bank,
                                                  index,
                                                  NULL,
-                                                 0U); /* 只允许四个明确Bank，禁止任意寄存器透传。 */
+                                                 0U); /* 只允许已定义的四组参数，不能指定其它驱动寄存器。 */
         return;
     }
 
-    value_or_count = ExternalComm_ReadBE16(&frame->info_area[6]); /* 语义字段始终按大端16位解析。 */
+    value_or_count = ExternalComm_ReadBE16(&frame->info_area[6]); /* 偏移 6～7 按高字节在前读取：读操作表示数量，写操作表示参数值。 */
     request[0] = EXTERNAL_COMM_DRIVER_PARAMETER_ADDRESS; /* 固定维护地址0xFD。 */
     if (operation == EXTERNAL_COMM_DRIVER_PARAMETER_OP_READ)
     {
@@ -574,7 +574,7 @@ static void ExternalComm_ApplyDriverParameter(const ExternalCommFrame_t *frame)
 }
 
 /*
- * 函数功能：轮询UART1维护事务结果，校验驱动响应字段后上传给内部调参上位机。
+ * 函数功能：检查 UART1 调参请求是否结束，核对驱动回包后把结果返回内部调参上位机。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -632,19 +632,19 @@ static void ExternalComm_ServiceDriverParameter(void)
                                              s_driver_parameter_request.index,
                                              data,
                                              count); /* 每笔外层请求只产生一份最终响应。 */
-    memset(&s_driver_parameter_request, 0, sizeof(s_driver_parameter_request)); /* 完成后清理元数据，允许下一笔事务。 */
+    memset(&s_driver_parameter_request, 0, sizeof(s_driver_parameter_request)); /* 已发送最终结果，清除当前请求记录，允许接收下一条调参请求。 */
 }
 
 /*
  * 函数功能：按原外控协议构造并发送 ACK。
- * 输入参数：ack_code 为应答码；ack_info 和 ack_info_len 为可选应答载荷。
+ * 输入参数：ack_code 为应答码；ack_info 为可选应答数据，ack_info_len 为其字节数。
  * 返回参数：无。
  */
 static void ExternalComm_SendAck(uint8_t ack_code, const uint8_t *ack_info, uint16_t ack_info_len)
 {
     if (s_response_suppressed != 0U)
     {
-        return; /* 简易协议仅定义下行 6 字节指令，静默复用时不能混入原协议 ACK。 */
+        return; /* 简易协议只定义 6 字节下行指令，处理它时不发送正式协议应答。 */
     }
     /* tx_len 接收 0xDD 应答帧长度。 */
     uint16_t tx_len = 0U;
@@ -677,7 +677,7 @@ static void ExternalComm_SendExitAck(void)
 }
 
 /*
- * 函数功能：清除尚未完成的三帧连接候选，不改变已经确认的协议会话来源。
+ * 函数功能：清除尚未收齐三帧的登录记录，不改变当前已连接的协议类型。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -687,29 +687,29 @@ static void ExternalComm_ResetProtocolCandidate(void)
 }
 
 /*
- * 函数功能：清除已确认协议来源及未完成候选，用于主动退出或10秒断线后重新执行完整三帧握手。
+ * 函数功能：清除登录记录和电机状态订阅；主动退出或断线 10 秒后，再连接必须重新收齐三帧申请。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void ExternalComm_ResetProtocolSession(void)
 {
-    s_confirmed_protocol_source = EXTERNAL_COMM_PROTOCOL_SOURCE_NONE; /* 释放正式/简易协议来源锁，允许下一次重新选择协议。 */
+    s_confirmed_protocol_source = EXTERNAL_COMM_PROTOCOL_SOURCE_NONE; /* 取消当前协议选择，下次可重新通过正式或简易协议登录。 */
     s_motor_telemetry_enabled = 0U; /* 协议会话结束时立即停掉50ms主动上传，断线后不再占用RS485总线。 */
     s_motor_telemetry_elapsed_ms = 0U; /* 清除未完成周期，新会话必须重新订阅并从完整50ms开始。 */
-    s_motor_telemetry_sequence = 0U; /* 新订阅序号重新从1开始，便于上位机识别会话边界。 */
+    s_motor_telemetry_sequence = 0U; /* 下次订阅的第一份状态序号从 1 开始，便于上位机区分前后两次连接。 */
     ExternalComm_ResetProtocolCandidate(); /* 同步清掉历史一帧或两帧，禁止跨会话补成第三帧。 */
 }
 
 /*
- * 函数功能：累计同一协议来源的首次连接帧，只有300ms内连续三份一致内容才确认该协议会话。
- * 输入参数：source为正式或简易协议来源；identity指向一致性标识；identity_len为标识长度，最大8字节。
- * 返回参数：会话已经确认且来源一致时返回1；仍在累计、来源冲突或参数非法时返回0。
+ * 函数功能：首次登录时，要求同一种协议在 300ms 内收到三份内容一致的申请，收齐后才允许申请控制权。
+ * 输入参数：source 为正式或简易协议；identity 为要比较的授权数据；identity_len 为字节数，正式协议为 8，简易协议为 0。
+ * 返回参数：本协议已完成三帧确认返回 1；未收齐、另一协议已连接或参数错误返回 0。
  */
 uint8_t ExternalComm_TryConfirmProtocol(ExternalCommProtocolSource_t source,
                                         const uint8_t *identity,
                                         uint16_t identity_len)
 {
-    uint8_t same_candidate; /* 记录本帧是否与当前候选的协议来源、长度和内容完全一致。 */
+    uint8_t same_candidate; /* 本帧是否与本轮第一帧使用相同协议、相同长度和相同授权数据。 */
 
     if (((source != EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL) &&
          (source != EXTERNAL_COMM_PROTOCOL_SOURCE_SIMPLE)) ||
@@ -721,14 +721,14 @@ uint8_t ExternalComm_TryConfirmProtocol(ExternalCommProtocolSource_t source,
 
     if (s_local_exit_guard != 0U)
     {
-        s_local_exit_quiet_ms = 0U; /* 退出保护期仍收到申请，说明上位机尚未停止旧保活，重新累计1秒静默。 */
-        ExternalComm_ResetProtocolSession(); /* 保护期内任何申请都不能沿用退出前来源或候选重新连接。 */
+        s_local_exit_quiet_ms = 0U; /* 屏幕退出后又收到申请，重新等待连续 1 秒没有申请帧，避免旧保活立即重连。 */
+        ExternalComm_ResetProtocolSession(); /* 清除退出前的登录记录，不能用旧申请凑齐三帧。 */
         return 0U; /* 屏幕主动退出优先级高于协议握手，等待上位机真正停止发送后再开放申请。 */
     }
 
     if (s_confirmed_protocol_source != EXTERNAL_COMM_PROTOCOL_SOURCE_NONE)
     {
-        return (s_confirmed_protocol_source == source) ? 1U : 0U; /* 已确认后只允许同一协议续命，另一协议不能交叉取得会话。 */
+        return (s_confirmed_protocol_source == source) ? 1U : 0U; /* 已连接时只接受当前协议，另一协议不能维持或接管这次连接。 */
     }
 
     same_candidate = ((s_protocol_confirm.frame_count > 0U) &&
@@ -744,30 +744,30 @@ uint8_t ExternalComm_TryConfirmProtocol(ExternalCommProtocolSource_t source,
 
     if (same_candidate == 0U)
     {
-        ExternalComm_ResetProtocolCandidate(); /* 来源、内容或窗口不一致时丢弃旧候选，当前帧重新作为第一帧。 */
-        s_protocol_confirm.source = source; /* 锁定当前候选来源，防止正式与简易帧拼成三次确认。 */
+        ExternalComm_ResetProtocolCandidate(); /* 协议或内容不同，或已超时，就清除旧记录，把当前帧算作新一轮第一帧。 */
+        s_protocol_confirm.source = source; /* 记录本轮使用的协议，正式帧和简易帧不能混在一起凑够三次。 */
         s_protocol_confirm.frame_count = 1U; /* 当前合法申请成为本轮第一帧，尚不能点亮图标或取得控制权。 */
         s_protocol_confirm.identity_len = identity_len; /* 保存标识长度，后续两帧必须完全一致。 */
         if (identity_len > 0U)
         {
             memcpy(s_protocol_confirm.identity, identity, identity_len); /* 复制正式协议授权区，避免后续接收缓存被覆盖。 */
         }
-        return 0U; /* 第一帧只建立候选，不执行业务申请。 */
+        return 0U; /* 第一帧只保存申请内容，暂不申请控制权。 */
     }
 
     ++s_protocol_confirm.frame_count; /* 第二或第三份一致帧到达，推进确认计数。 */
     if (s_protocol_confirm.frame_count < EXTERNAL_COMM_CONFIRM_REQUIRED_FRAMES)
     {
-        return 0U; /* 第二帧仍保持静默，等待第三帧完成快速确认。 */
+        return 0U; /* 尚未收齐三帧，不执行、不应答，继续等待下一份相同申请。 */
     }
 
-    s_confirmed_protocol_source = source; /* 第三帧确认后锁定本次会话协议来源，另一协议直到退出或超时都不能续命。 */
-    ExternalComm_ResetProtocolCandidate(); /* 已完成确认，清除临时候选但保留已确认来源。 */
+    s_confirmed_protocol_source = source; /* 收齐后记住本次连接使用的协议，退出或超时前不接受另一协议。 */
+    ExternalComm_ResetProtocolCandidate(); /* 已完成登录确认，不再需要暂存第一帧内容和累计次数。 */
     return 1U; /* 调用方现在可以刷新图标并执行原控制权申请入口。 */
 }
 
 /*
- * 函数功能：按10ms任务周期维护首次连接确认窗口，超时后清除未满三帧的候选。
+ * 函数功能：每 10ms 检查首次登录是否超时，300ms 内未收齐三帧就清除这轮申请。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -775,7 +775,7 @@ static void ExternalComm_ServiceProtocolConfirmation(void)
 {
     if (s_protocol_confirm.frame_count == 0U)
     {
-        return; /* 当前没有待确认候选时不累计时间，避免无外控线时产生无意义状态变化。 */
+        return; /* 还没有收到第一帧登录申请，不需要开始计时。 */
     }
 
     if (s_protocol_confirm.elapsed_ms < EXTERNAL_COMM_CONFIRM_WINDOW_MS)
@@ -790,21 +790,26 @@ static void ExternalComm_ServiceProtocolConfirmation(void)
 }
 
 /*
- * 函数功能：隐藏屏幕外部通信图标并清除在线显示锁存，防止旧申请帧让图标退出后再次闪回。
+ * 函数功能：隐藏小电脑图标并清除在线记录，防止退出后因旧状态再次显示图标。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void ExternalComm_HideLinkIcon(void)
 {
-    ExternalComm_ResetProtocolSession(); /* 图标主动隐藏同时释放协议来源和历史候选，下一次必须重新完成三帧确认。 */
-    s_external_comm_display_online = 0U; /* 本次主动退出后撤销在线图标锁存，后续必须由新的合法连接重新点亮。 */
+    ExternalComm_ResetProtocolSession(); /* 隐藏图标时一并清除登录记录，下次连接必须重新收齐三帧。 */
+    s_external_comm_display_online = 0U; /* 清除在线记录，后续只有新的有效连接才能重新显示图标。 */
     s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS; /* 计时钉到离线值，空闲刷新不能重新显示旧图标。 */
     Pubinterface_RefreshExternalCommDisplay(false, false); /* 立即隐藏 39/40 小电脑图标，让屏幕与已释放的控制权一致。 */
 }
 
+/*
+ * 函数功能：发送失败应答，告诉上位机哪条命令失败以及失败原因。
+ * 输入参数：ack_code 为应答码；value_code 为失败的参数或命令编号；reason 为失败原因码。
+ * 返回参数：无。
+ */
 static void ExternalComm_SendFailAck(uint8_t ack_code, uint8_t value_code, uint8_t reason)
 {
-    /* 失败载荷固定 2 字节：值代号/命令代号 + 失败原因。 */
+    /* 失败数据固定 2 字节：参数/命令编号在前，失败原因在后。 */
     uint8_t info[2];
 
     /* 第 1 字节告诉外部设备哪个 AreaCode 或 FunCode 失败。 */
@@ -822,14 +827,14 @@ static void ExternalComm_SendFailAck(uint8_t ack_code, uint8_t value_code, uint8
  */
 static void ExternalComm_DisableMotorTelemetry(void)
 {
-    s_motor_telemetry_enabled = 0U; /* 先关闭发送门禁，后续任务周期不再构造电机遥测。 */
+    s_motor_telemetry_enabled = 0U; /* 清除订阅开关，后续周期不再生成电机状态帧。 */
     s_motor_telemetry_elapsed_ms = 0U; /* 丢弃尚未达到50ms的剩余周期。 */
     s_motor_telemetry_sequence = 0U; /* 下次显式订阅从序号1重新开始，帮助上位机区分会话。 */
 }
 
 /*
- * 函数功能：处理0x0D/0x01电机遥测订阅命令，载荷0关闭、1开启。
- * 输入参数：frame指向已通过正式协议CRC和三帧会话门禁的下行帧。
+ * 函数功能：处理 0x0D/0x01 电机状态订阅命令，数据字节为 0 时关闭，1 时开启。
+ * 输入参数：frame 为已通过 CRC 检查、且正式协议已完成三帧登录确认的下行帧。
  * 返回参数：无；执行结果通过原0xDD ACK返回。
  */
 static void ExternalComm_ApplyMotorTelemetrySubscription(const ExternalCommFrame_t *frame)
@@ -854,7 +859,7 @@ static void ExternalComm_ApplyMotorTelemetrySubscription(const ExternalCommFrame
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
                                  EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE,
-                                 EXTERNAL_COMM_REASON_BUSY); /* 开启遥测必须已取得外控所有权，防止只读连接长期占用50ms总线。 */
+                                 EXTERNAL_COMM_REASON_BUSY); /* 未取得外控控制权不能开启定时上传，避免只读连接持续占用串口。 */
         return;
     }
 
@@ -875,19 +880,19 @@ static void ExternalComm_ApplyMotorTelemetrySubscription(const ExternalCommFrame
 }
 
 /*
- * 函数功能：按固定34字节大端布局上传一份电机命令、驱动反馈和安全状态快照。
- * 输入参数：无，函数从电机发送任务和UART1接收任务复制一致性快照。
+ * 函数功能：上传最近一次电机命令、驱动反馈和安全标志，数据区固定 34 字节，多字节数值高字节在前。
+ * 输入参数：无；分别复制电机发送任务保存的命令和 UART1 接收任务保存的反馈，二者可能来自不同时间。
  * 返回参数：无。
  */
 static void ExternalComm_SendMotorTelemetry(void)
 {
-    uint8_t info[EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN]; /* 固定34字节载荷，未取得的快照字段保持0。 */
+    uint8_t info[EXTERNAL_COMM_MOTOR_TELEMETRY_INFO_LEN]; /* 固定 34 字节上传数据，尚未取得的命令或反馈字段填 0。 */
     MotorDriveCommandSnapshot_t command_snapshot; /* 最近一次不同UART1周期命令的私有副本。 */
     MotorUartFeedbackSnapshot_t feedback_snapshot; /* 最近一次CRC正确驱动回包的私有副本。 */
     uint32_t sample_tick = HAL_GetTick(); /* 本次主控采样时刻，供上位机和本机单调时钟对齐。 */
-    uint8_t command_valid; /* 命令任务是否已经形成至少一份有效快照。 */
+    uint8_t command_valid; /* 是否成功读到发送任务保存的完整电机命令。 */
     uint8_t feedback_valid; /* 驱动反馈是否存在且未超过250ms有效时间窗。 */
-    uint8_t flags = 0U; /* bit0反馈有效、bit1外控所有权、bit2手柄在线、bit3报警。 */
+    uint8_t flags = 0U; /* bit0 反馈有效、bit1 外控已取得控制权、bit2 当前手柄在线、bit3 存在报警。 */
 
     memset(info, 0, sizeof(info)); /* 未上电形成的命令/反馈字段固定上传0，禁止泄漏栈数据。 */
     memset(&command_snapshot, 0, sizeof(command_snapshot)); /* 复制失败时保持明确全零命令。 */
@@ -897,7 +902,7 @@ static void ExternalComm_SendMotorTelemetry(void)
     if ((feedback_valid != 0U) &&
         ((uint32_t)(sample_tick - feedback_snapshot.feedback_tick_ms) > EXTERNAL_COMM_MOTOR_FEEDBACK_VALID_TIMEOUT_MS))
     {
-        feedback_valid = 0U; /* 回包快照过旧时保留最后数值用于诊断，但清除有效标志。 */
+        feedback_valid = 0U; /* 最近回包已超过有效时长；仍上传最后数值供排查，但明确标为无效反馈。 */
     }
 
     s_motor_telemetry_sequence = (uint16_t)(s_motor_telemetry_sequence + 1U); /* 每份实际上传递增，16位自然回绕。 */
@@ -911,7 +916,7 @@ static void ExternalComm_SendMotorTelemetry(void)
         info[19] = command_snapshot.run_state; /* offset19：0停机、1运行。 */
         info[20] = command_snapshot.direction; /* offset20：实际驱动控制模式。 */
         info[21] = command_snapshot.motor_type; /* offset21：实际驱动电机类型。 */
-        ExternalComm_WriteBE32(&info[22], command_snapshot.command_speed_rpm); /* offset22~25：量化后实际下发rpm，停机为0。 */
+        ExternalComm_WriteBE32(&info[22], command_snapshot.command_speed_rpm); /* offset22～25：按驱动协议换算后的实际下发转速指令，单位 rpm，停机为 0。 */
     }
     if (feedback_snapshot.valid != 0U)
     {
@@ -928,7 +933,7 @@ static void ExternalComm_SendMotorTelemetry(void)
     }
     if (ControlArbitration_IsExternalActive())
     {
-        flags |= EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER; /* 订阅运行期通常置位，所有权异常丢失时上位机立即停止试验。 */
+        flags |= EXTERNAL_COMM_MOTOR_FLAG_EXTERNAL_OWNER; /* 通知上位机当前仍持有外控控制权；本位只报告状态，不执行启停。 */
     }
     if (((WorkMessage.channel_work == CHANNEL_A) && (WorkMessage.Channel_Aonline == true)) ||
         ((WorkMessage.channel_work == CHANNEL_B) && (WorkMessage.Channel_Bonline == true)))
@@ -949,7 +954,7 @@ static void ExternalComm_SendMotorTelemetry(void)
 }
 
 /*
- * 函数功能：维护订阅式50ms电机遥测，外控所有权丢失时自动关闭。
+ * 函数功能：订阅开启后每 50ms 上传电机状态；外控控制权已释放时自动停发。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -962,7 +967,7 @@ static void ExternalComm_ServiceMotorTelemetry(void)
 
     if (ControlArbitration_IsExternalActive() == false)
     {
-        ExternalComm_DisableMotorTelemetry(); /* 外控所有权因退出或其它路径释放后立即停发。 */
+        ExternalComm_DisableMotorTelemetry(); /* 无论因退出还是其它原因失去外控控制权，都立即关闭订阅。 */
         return;
     }
 
@@ -970,7 +975,7 @@ static void ExternalComm_ServiceMotorTelemetry(void)
     if (s_motor_telemetry_elapsed_ms >= EXTERNAL_COMM_MOTOR_TELEMETRY_PERIOD_MS)
     {
         s_motor_telemetry_elapsed_ms = 0U; /* 本次到期后重新累计下一个50ms周期。 */
-        ExternalComm_SendMotorTelemetry(); /* 使用完整私有快照构造一份34字节上传。 */
+        ExternalComm_SendMotorTelemetry(); /* 复制最近命令和反馈，生成一份 34 字节状态数据上传。 */
     }
 }
 
@@ -1151,9 +1156,9 @@ static uint8_t ExternalComm_NavChannelBusIsI2C3(uint8_t channel, uint8_t *use_i2
         return 0U; /* V2 只允许明确指定逻辑 A 或逻辑 B。 */
     }
 
-    physical_channel = BoardProfile_MapHandlePhysicalChannel(channel); /* 只在硬件访问边界应用统一 A/B 交换配置。 */
+    physical_channel = BoardProfile_MapHandlePhysicalChannel(channel); /* 按板级 A/B 交换配置，找出此逻辑通道实际连接的硬件接口。 */
     *use_i2c3 = (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_B) ? 1U : 0U; /* 原物理 B 接口对应 I2C3，原物理 A 对应 I2C2。 */
-    return 1U; /* 已得到稳定的物理总线快照。 */
+    return 1U; /* 已将指定逻辑通道换算成实际使用的 I2C 总线。 */
 }
 
 /*
@@ -1173,7 +1178,7 @@ static uint8_t ExternalComm_ReadNavSerialNumber(uint8_t use_i2c3, uint8_t *seria
     result = (use_i2c3 != 0U) ?
              AT24CS32_ReadSerialNumber_I2C3(serial_number) :
              AT24CS32_ReadSerialNumber_I2C2(serial_number); /* 序列号必须与后续页面使用同一条物理总线。 */
-    return (result == 0U) ? 1U : 0U; /* 转换为本模块统一的 1 成功、0 失败语义。 */
+    return (result == 0U) ? 1U : 0U; /* 底层用 0 表示成功，这里改成与本模块一致的 1 成功、0 失败。 */
 }
 
 /*
@@ -1183,8 +1188,8 @@ static uint8_t ExternalComm_ReadNavSerialNumber(uint8_t use_i2c3, uint8_t *seria
  */
 static uint8_t ExternalComm_ResolveLegacyNavChannel(uint8_t *channel, uint8_t *reason)
 {
-    uint8_t online_a; /* 快照 A 在线状态，保证本次判断只使用同一组状态。 */
-    uint8_t online_b; /* 快照 B 在线状态，保证本次判断只使用同一组状态。 */
+    uint8_t online_a; /* 暂存本次读取的 A 在线状态，后续分支不重复读取。 */
+    uint8_t online_b; /* 暂存本次读取的 B 在线状态，与 A 一起判断是否只有一个目标。 */
 
     if ((channel == NULL) || (reason == NULL))
     {
@@ -1236,7 +1241,7 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
         target->protocol_version = EXTERNAL_COMM_NAV_V2_VERSION; /* 标记为显式目标 V2，响应必须回显关联字段。 */
         target->channel = frame->info_area[1]; /* V2 byte1 明确指定逻辑 A/B，不读取 channel_work。 */
         target->request_id = ExternalComm_ReadBE16(&frame->info_area[2]); /* V2 byte2~3 保存请求号，用于快速连续请求关联。 */
-        *payload_offset = EXTERNAL_COMM_NAV_V2_PREFIX_LEN; /* V2 命令业务载荷位于 4 字节公共前缀之后。 */
+        *payload_offset = EXTERNAL_COMM_NAV_V2_PREFIX_LEN; /* V2 的页数据或结束页号位于 4 字节版本/通道/请求号之后。 */
     }
     else if (frame->info_len == legacy_len)
     {
@@ -1269,8 +1274,8 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
         return 0U;
     }
 
-    target->identity_generation = Handle_GetIdentityGeneration(target->channel); /* 读取一次 RAM 代数，后续跨页预检不再反复访问 SN 区。 */
-    target->navigation_generation = Handlescan_GetNavigationGeneration(target->channel); /* 在首次访问 SN 前锁定扫描代次，覆盖短于 500ms 的快速插拔。 */
+    target->identity_generation = Handle_GetIdentityGeneration(target->channel); /* 记住当前手柄更换计数，每页先比较此计数，减少反复读取序列号的耗时。 */
+    target->navigation_generation = Handlescan_GetNavigationGeneration(target->channel); /* 读取序列号前记住扫描变化计数，用于发现不足 500ms 的短暂插拔。 */
     if (ExternalComm_ReadNavSerialNumber(target->use_i2c3, target->serial_number) == 0U)
     {
         *reason = ((Handlescan_IsNavigationReady(target->channel) == false) ||
@@ -1292,9 +1297,9 @@ static uint8_t ExternalComm_CaptureNavTarget(const ExternalCommFrame_t *frame,
 }
 
 /*
- * 函数功能：通过在线状态、扫描代次、物理总线和身份代数快速确认导航目标未发生跨周期变化。
- * 输入参数：target 为请求开始时捕获的导航目标快照。
- * 返回参数：RAM 快照仍一致返回 1，离线、换柄或映射变化返回 0。
+ * 函数功能：检查手柄是否仍在线，以及插拔计数、手柄更换计数和 I2C 总线是否与请求开始时一致；不读取 EEPROM。
+ * 输入参数：target 为请求开始时保存的通道、总线和变化计数。
+ * 返回参数：全部未变返回 1；离线、重新识别、换柄或总线变化返回 0。
  */
 static uint8_t ExternalComm_IsNavTargetRamStable(const ExternalCommNavTarget_t *target)
 {
@@ -1309,12 +1314,12 @@ static uint8_t ExternalComm_IsNavTargetRamStable(const ExternalCommNavTarget_t *
     if ((ExternalComm_NavChannelBusIsI2C3(target->channel, &current_use_i2c3) == 0U) ||
         (current_use_i2c3 != target->use_i2c3))
     {
-        return 0U; /* 通道映射发生变化时不能继续沿用旧总线快照。 */
+        return 0U; /* 当前通道已对应另一条 I2C 总线，不能继续访问请求开始时的旧总线。 */
     }
 
     if (Handle_GetIdentityGeneration(target->channel) != target->identity_generation)
     {
-        return 0U; /* 插拔事件层代数已经变化，说明当前在线对象不再是请求开始时的手柄。 */
+        return 0U; /* 手柄更换计数已变化，不能再把当前手柄当作请求开始时的目标。 */
     }
     if (Handlescan_GetNavigationGeneration(target->channel) != target->navigation_generation)
     {
@@ -1322,12 +1327,12 @@ static uint8_t ExternalComm_IsNavTargetRamStable(const ExternalCommNavTarget_t *
     }
 
 
-    return 1U; /* 在线、扫描代次、总线映射和身份代数完全一致，可继续访问锁定的物理总线。 */
+    return 1U; /* 手柄在线且各项记录未变，可以继续访问请求开始时确定的 I2C 总线。 */
 }
 
 /*
  * 函数功能：在单页操作完成或整批结束时读取一次 EEPROM 序列号，确认数据仍属于请求开始时的手柄。
- * 输入参数：target 为单页请求或批量开始时捕获的导航目标快照。
+ * 输入参数：target 为单页或整批操作开始时保存的目标通道、总线、变化计数和序列号。
  * 返回参数：RAM 状态和 16 字节序列号均一致返回 1，否则返回 0。
  */
 static uint8_t ExternalComm_IsNavTargetIdentityStable(const ExternalCommNavTarget_t *target)
@@ -1416,6 +1421,11 @@ static uint8_t ExternalComm_MapAreaToPageIndex(uint8_t area_code, uint16_t *page
     return 0U;
 }
 
+/*
+ * 函数功能：把旧导航协议的页码转成驱动页下标；12～128 优先按实际页号，1～11 按导航区序号处理。
+ * 输入参数：page_code 为上位机页码；page_index 接收从 0 开始的驱动页下标。
+ * 返回参数：页码可换算返回 1，页码越界或输出指针为空返回 0。
+ */
 static uint8_t ExternalComm_MapNavPageToIndex(uint8_t page_code, uint16_t *page_index)
 {
     /* page_no 使用 EEPROM 文档里的 1 基页号。 */
@@ -1428,8 +1438,8 @@ static uint8_t ExternalComm_MapNavPageToIndex(uint8_t page_code, uint16_t *page_
     }
 
     /*
-     * 导航区按 Page12~Page128 读取。
-     * 兼容两种常见写法：直接发实际页号 12~128，或发导航页序号 1~117。
+     * 导航区为 Page12～Page128。12～128 优先解释为实际页号。
+     * 仅剩余的 1～11 会加 11 转为实际页号；12～117 不会按导航区序号处理。
      */
     if ((page_code >= 12U) && (page_code <= 128U))
     {
@@ -1438,7 +1448,7 @@ static uint8_t ExternalComm_MapNavPageToIndex(uint8_t page_code, uint16_t *page_
     }
     else if ((page_code >= 1U) && (page_code <= 117U))
     {
-        /* 上位机给导航区序号 1~117 时，映射到 Page12~Page128。 */
+        /* 前一分支已处理 12～128，到这里的合法值只有 1～11，分别对应 Page12～Page22。 */
         page_no = (uint16_t)(11U + page_code);
     }
     else
@@ -1491,7 +1501,7 @@ static void ExternalComm_SendNavFrameFail(const ExternalCommFrame_t *frame,
                                           uint8_t target_code,
                                           uint8_t reason)
 {
-    uint8_t info[EXTERNAL_COMM_NAV_V2_FAIL_ACK_LEN]; /* V2 失败载荷完整保存命令、通道、请求号、目标和原因。 */
+    uint8_t info[EXTERNAL_COMM_NAV_V2_FAIL_ACK_LEN]; /* V2 失败数据包含命令、通道、请求号、失败页和原因，便于上位机找回原请求。 */
 
     if ((frame != NULL) &&
         (frame->info_len >= EXTERNAL_COMM_NAV_V2_PREFIX_LEN) &&
@@ -1504,7 +1514,7 @@ static void ExternalComm_SendNavFrameFail(const ExternalCommFrame_t *frame,
         info[4] = frame->info_area[3]; /* 请求号低字节原样回显。 */
         info[5] = target_code; /* 标明失败发生在哪一页或哪个批量命令目标。 */
         info[6] = reason; /* 返回精确的格式、忙、设备或目标变化原因。 */
-        ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_FAILED, info, sizeof(info)); /* V2 使用扩展失败载荷。 */
+        ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_FAILED, info, sizeof(info)); /* V2 返回完整的 7 字节失败数据。 */
         return;
     }
 
@@ -1515,7 +1525,7 @@ static void ExternalComm_SendNavFrameFail(const ExternalCommFrame_t *frame,
 
 /*
  * 函数功能：使用已经捕获的导航目标发送运行期失败 ACK，保证批量任务不依赖已释放的原请求帧。
- * 输入参数：original_fun 为原功能码；target 为目标快照；target_code 为失败页；reason 为失败原因。
+ * 输入参数：original_fun 为原功能码；target 为请求开始时保存的目标信息；target_code 为失败页；reason 为失败原因。
  * 返回参数：无。
  */
 static void ExternalComm_SendNavTargetFail(uint8_t original_fun,
@@ -1539,12 +1549,12 @@ static void ExternalComm_SendNavTargetFail(uint8_t original_fun,
 
     ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
                              target_code,
-                             reason); /* 旧协议仍使用历史两字节失败载荷。 */
+                             reason); /* 旧协议仍只返回目标编号和失败原因，共 2 字节。 */
 }
 
 /*
  * 函数功能：上传导航页数据，V2 同时回显目标通道、原命令和请求号，旧协议保持原页面格式。
- * 输入参数：original_fun 为原读命令；target 为目标快照；page 为实际或旧协议回显页码；page_data 为 30 字节数据。
+ * 输入参数：original_fun 为原读命令；target 为请求开始时保存的目标信息；page 为实际或旧协议回显页码；page_data 为 30 字节数据。
  * 返回参数：无。
  */
 static void ExternalComm_SendNavReadData(uint8_t original_fun,
@@ -1579,14 +1589,14 @@ static void ExternalComm_SendNavReadData(uint8_t original_fun,
 
 /*
  * 函数功能：发送导航单页或批量逐页写成功 ACK，V2 回显完整请求关联字段。
- * 输入参数：original_fun 为原写命令；target 为目标快照；page 为写成功的实际页号。
+ * 输入参数：original_fun 为原写命令；target 为请求开始时保存的目标信息；page 为写成功的实际页号。
  * 返回参数：无。
  */
 static void ExternalComm_SendNavPageSuccess(uint8_t original_fun,
                                             const ExternalCommNavTarget_t *target,
                                             uint8_t page)
 {
-    uint8_t info[EXTERNAL_COMM_NAV_V2_PAGE_ACK_LEN]; /* V2 成功载荷保存版本、命令、通道、请求号和页号。 */
+    uint8_t info[EXTERNAL_COMM_NAV_V2_PAGE_ACK_LEN]; /* V2 成功数据保存版本、命令、通道、请求号和页号，共 6 字节。 */
 
     if ((target != NULL) && (target->protocol_version == EXTERNAL_COMM_NAV_V2_VERSION))
     {
@@ -1602,11 +1612,16 @@ static void ExternalComm_SendNavPageSuccess(uint8_t original_fun,
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK, &page, sizeof(page)); /* 旧协议继续仅回显一字节页码。 */
 }
 
+/*
+ * 函数功能：更新当前手柄的设置转速和待输出转速，并保存到当前通道对应方向的记忆值。
+ * 输入参数：speed 为转速指令，单位 rpm；它不是驱动返回的实测转速。
+ * 返回参数：无。
+ */
 static void ExternalComm_SaveCurrentSpeed(uint16_t speed)
 {
     /* 更新当前设置速度，供 UI、心跳和运行任务读取。 */
     WorkMessage.speed_set_work = speed;
-    /* 更新当前实际速度，保证外部设置后立即生效。 */
+    /* 更新后续电机控制要使用的转速指令；这里只改指令，不表示电机已达到该转速。 */
     WorkMessage.speed_work = speed;
 
     /* 当前通道是 A 时，把速度写回 A 通道记忆结构。 */
@@ -1700,10 +1715,10 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
 
         if (dir != WorkMessage.dir_work)
         {
-            return 0U; /* 外控请求与 EEPROM 默认方向或 RFID 机械刀具固定显示方向不一致时拒绝，禁止绕过本机方向门禁。 */
+            return 0U; /* 此手柄方向固定；请求与 EEPROM 或 RFID 确定的方向不同时拒绝，外控也不能改方向。 */
         }
 
-        return 1U; /* 重复设置当前固定方向属于幂等成功，不改 WorkMessage 和通道方向记忆。 */
+        return 1U; /* 请求与当前固定方向相同，直接报成功，无需改工作状态或通道记忆。 */
     }
 
     /* 更新当前工作方向。 */
@@ -1762,6 +1777,11 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
     return 1U;
 }
 
+/*
+ * 函数功能：检查外控申请数据和屏幕退出保护，再尝试取得控制权并发送结果。
+ * 输入参数：frame 为已通过协议检查的申请帧；当前只检查授权数据长度为 8 字节，不校验内容。
+ * 返回参数：成功取得或继续持有外控控制权返回 1；长度错误、退出保护中或本机正使用控制权时返回 0。
+ */
 static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
 {
     /* 外部控制申请要求 8 字节注册码，V1 只校验长度。 */
@@ -1773,10 +1793,10 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
 
     if (s_local_exit_guard != 0U)
     {
-        s_local_exit_quiet_ms = 0U; /* 仍收到申请帧说明旧 200ms 保活尚未停止，重新开始计算静默时间。 */
+        s_local_exit_quiet_ms = 0U; /* 又收到申请帧，重新计算连续未收到申请的时间，防止屏幕刚退出就重连。 */
         ExternalComm_HideLinkIcon(); /* 接收层在分发前会点亮在线图标，这里再次隐藏，避免旧保活造成屏幕闪回。 */
         ExternalComm_SendExitAck(); /* 重发退出成功应答，确保上位机即使漏收第一次回包也能退出申请成功状态。 */
-        return 0U; /* 拦截旧保活，绝不调用控制权申请函数，防止刚退出就重新取得 owner。 */
+        return 0U; /* 直接拒绝这次申请，不调用控制权申请函数，保持屏幕退出结果。 */
     }
 
     /* 外控申请必须等待当前脚踏/屏幕/手柄控制结束，不能抢停正在运行的本机来源。 */
@@ -1787,7 +1807,7 @@ static uint8_t ExternalComm_ApplyExternalAuth(const ExternalCommFrame_t *frame)
                                  EXTERNAL_COMM_REASON_BUSY);
         return 0U;
     }
-    /* 申请成功后从“已经持有外控锁”的时刻重新计算保活窗口，避免边界时序误释放。 */
+    /* 控制权申请成功后重新开始断线计时，不能沿用申请前已累计的时间。 */
     ExternalComm_NotifyLink();
     /* 返回外部控制开启成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_EXTERNAL_OK, NULL, 0U);
@@ -1822,7 +1842,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
 {
     /* value 保存外部设备下发的速度、频率或泵速度。 */
     uint16_t value;
-    /* 成功应答载荷固定为 AreaCode + 2 字节值。 */
+    /* 成功应答数据固定 3 字节：AreaCode 加 2 字节设置值。 */
     uint8_t info[3];
 
     if (ControlArbitration_IsExternalActive() == false)
@@ -1838,7 +1858,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
      * 只有“当前手柄转速”和“当前手柄往复频率”依赖 WorkMessage.channel_work。
      * A/B 泵速度写入 pumpMessageA/B.speed_work，属于独立泵状态，不能因为未选中手柄通道而拒绝。
      */
-    if (((frame->area_code == 0x01U) || (frame->area_code == 0x02U)) && /* 手柄转速和往复频率必须有当前 A/B 通道，独立泵参数不受此门禁影响。 */
+    if (((frame->area_code == 0x01U) || (frame->area_code == 0x02U)) && /* 手柄参数必须先选中 A/B 通道；设置独立泵参数不要求选中手柄。 */
         ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B)))
     {
         ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_RUN_SET_FAILED,
@@ -1935,7 +1955,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
  */
 static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
 {
-    /* 成功应答载荷为 AreaCode + 设置值。 */
+    /* 成功应答数据为 AreaCode 加 1 字节设置值。 */
     uint8_t info[2];
     /* value 保存 InforArea 第 1 字节切换值。 */
     uint8_t value;
@@ -1960,7 +1980,7 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 没有载荷的切换项按 0 处理，通道切换命令本身不依赖 value。 */
+    /* 未带数据的切换命令把 value 设为 0；A/B 通道切换只看 AreaCode，不使用 value。 */
     value = (frame->info_len > 0U) ? frame->info_area[0] : 0U;
     /* AreaCode 决定具体切换项。 */
     switch (frame->area_code)
@@ -2057,12 +2077,12 @@ static void ExternalComm_ApplySwitchSetting(const ExternalCommFrame_t *frame)
 
     /* 应答第 1 字节回显切换项 AreaCode。 */
     info[0] = frame->area_code;
-    /* 应答第 2 字节回显切换值；通道切换无载荷时为 0。 */
+    /* 应答第 2 字节返回切换值；通道切换未带数据时填 0。 */
     info[1] = value;
     /* 返回运行值设置成功。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_RUN_SET_OK, info, sizeof(info));
 
-    /* 只有有效逻辑通道从 A 切到 B 或从 B 切到 A 时才提示，初次选中和重复选择保持静默。 */
+    /* 仅 A 切 B 或 B 切 A 时发提示音；首次选中或重复选择同一通道不响。 */
     if ((((previous_channel == CHANNEL_A) && (WorkMessage.channel_work == CHANNEL_B)) ||
          ((previous_channel == CHANNEL_B) && (WorkMessage.channel_work == CHANNEL_A))) &&
         ((frame->area_code == 0x01U) || (frame->area_code == 0x02U)))
@@ -2176,13 +2196,18 @@ static void ExternalComm_ClearPumpRequests(void)
     s_external_pump_b_manual_run_request = 0U;   /* 同步清除 B 泵外控运行请求，避免退出后小电脑图标继续显示 40。 */
 }
 
+/*
+ * 函数功能：根据外控手柄和独立泵的运行请求，把小电脑图标显示为白色待机或黄色运行。
+ * 输入参数：无；调用方须先确认应显示外控在线图标。
+ * 返回参数：无。
+ */
 static void ExternalComm_RefreshRunDisplay(void)
 {
     bool external_output_active = ((ControlSignalMessage.HMI_control_flag == true) ||
                                    (s_uart5_pump_manual_run_request != 0U) ||
                                    (s_external_pump_b_manual_run_request != 0U)); /* 任一路外控输出仍在请求时，小电脑保持 40 黄色。 */
 
-    Pubinterface_RefreshExternalCommDisplay(true, external_output_active); /* owner 仍有效时保持图标显示，按输出请求选择 39 或 40。 */
+    Pubinterface_RefreshExternalCommDisplay(true, external_output_active); /* 保持在线图标显示；有运行请求用 40 黄色，否则用 39 白色，不代表已测到电机转动。 */
 }
 
 /*
@@ -2201,12 +2226,17 @@ static void ExternalComm_ClearHandleLostAlarm(void)
     }
 }
 
+/*
+ * 函数功能：执行上位机主动退出，清除登录和泵请求，停止外控输出并发送退出应答。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_ApplyHostExit(void)
 {
-    ExternalComm_ResetProtocolSession(); /* 主动退出立即释放协议来源和未完成候选，后续登录必须重新完成三帧确认。 */
-    /* 退出外控时先清除外部通信层自己的 A 泵锁存请求，避免后续刷新又把泵拉起。 */
+    ExternalComm_ResetProtocolSession(); /* 清除已登录协议和未完成的申请记录，下次登录必须重新收齐三帧。 */
+    /* 先清除外控保存的独立泵和手柄冷却请求，避免后续刷新又启动泵。 */
     ExternalComm_ClearPumpRequests();
-    /* 释放公共仲裁锁，并停止外控遗留的电机、脚踏标志和 A/B 泵输出。 */
+    /* 交还外控控制权，停止电机和 A/B 泵，并清除可能残留的脚踏运行标志。 */
     ControlArbitration_ReleaseExternalControl();
     ExternalComm_ClearHandleLostAlarm(); /* 上位机主动退出也作为故障确认入口，避免运行中拔手柄报警无法关闭。 */
     ExternalComm_SendExitAck(); /* 返回统一的退出成功应答，让上位机清除已取得控制权状态。 */
@@ -2232,15 +2262,15 @@ static void ExternalComm_ServiceLocalExit(void)
     if (s_local_exit_requested != 0U)
     {
         s_local_exit_requested = 0U; /* 当前请求已由通信任务接管，避免下个 10ms 周期重复退出和回包。 */
-        s_local_exit_guard = 1U; /* 先封锁新的申请帧，再释放 owner，堵住旧保活立即重新申请的时间窗口。 */
-        s_local_exit_quiet_ms = 0U; /* 从本次真实退出时刻开始等待申请帧静默。 */
+        s_local_exit_guard = 1U; /* 先禁止重新申请，再交还控制权，避免已排队的旧保活帧立即重连。 */
+        s_local_exit_quiet_ms = 0U; /* 从本次退出开始，计算连续未收到申请帧的时间。 */
         ExternalComm_DisableMotorTelemetry(); /* 屏幕退出外控时立即停止50ms上传，不能继续占用已经离开的上位机链路。 */
         ExternalComm_ClearPumpRequests(); /* 清除外控层保存的 A/B 泵请求，防止退出后刷新重新拉起泵。 */
         ControlArbitration_ReleaseExternalControl(); /* 停止外控电机和泵输出，并释放公共控制权。 */
         ExternalComm_ClearHandleLostAlarm(); /* 屏幕主动退出也作为手柄掉线报警的确认入口。 */
         ExternalComm_HideLinkIcon(); /* 主动退出后立即隐藏屏幕小电脑图标，不保留旧在线显示。 */
         ExternalComm_SendExitAck(); /* 主动通知上位机停止申请保活，并显示“已退出外部控制”。 */
-        return; /* 本周期已经完成退出，不在同一周期累计静默时间。 */
+        return; /* 本周期刚完成退出，下一周期再开始累计等待时间。 */
     }
 
     if (s_local_exit_guard == 0U)
@@ -2250,7 +2280,7 @@ static void ExternalComm_ServiceLocalExit(void)
 
     if (s_local_exit_quiet_ms < EXTERNAL_COMM_LOCAL_EXIT_REARM_MS)
     {
-        s_local_exit_quiet_ms = (uint16_t)(s_local_exit_quiet_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个通信任务周期累计 10ms 静默时间。 */
+        s_local_exit_quiet_ms = (uint16_t)(s_local_exit_quiet_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 连续未收到申请的时间增加 10ms；后续若收到申请会再次清零。 */
     }
 
     if (s_local_exit_quiet_ms >= EXTERNAL_COMM_LOCAL_EXIT_REARM_MS)
@@ -2269,7 +2299,7 @@ void ExternalComm_NotifyLink(void)
 {
     /* 每收到一帧合法上位机下行命令，都认为 RS485 外控链路仍然存在。 */
     s_external_link_elapsed_ms = 0U;
-    /* 链路恢复后允许下一次静默重新触发停输出动作。 */
+    /* 收到有效命令后清除断线停机标志；下次再连续超时，仍要执行停机。 */
     s_external_link_output_stopped = 0U;
     /* 合法外部帧到达后点亮小电脑在线图标，非外控状态下由独立计时负责超时熄灭。 */
     s_external_comm_display_online = 1U;
@@ -2277,11 +2307,11 @@ void ExternalComm_NotifyLink(void)
     s_external_comm_display_elapsed_ms = 0U;
     if (ControlArbitration_IsExternalActive())
     {
-        ExternalComm_RefreshRunDisplay(); /* 外控 owner 已取得时，按泵/手柄输出请求决定显示 39 还是 40。 */
+        ExternalComm_RefreshRunDisplay(); /* 已取得外控控制权，按泵/手柄运行请求显示白色 39 或黄色 40。 */
     }
     else
     {
-        Pubinterface_RefreshExternalCommDisplay(true, false); /* 只有合法帧在线但未进入外控 owner 时显示 39 白色小电脑。 */
+        Pubinterface_RefreshExternalCommDisplay(true, false); /* 已确认通信在线但尚未取得控制权，只显示白色 39 图标。 */
     }
 }
 
@@ -2320,8 +2350,8 @@ static void ExternalComm_RefreshIdleLinkDisplay(void)
 }
 
 /*
- * 函数功能：外控链路短时静默时只停止电机和 A/B 泵输出，但保留外控授权等待链路恢复。
- * 输入参数：无，函数读取并清理外部通信运行锁存状态。
+ * 函数功能：连续 2 秒未收到有效外控命令时停止电机和 A/B 泵，保留控制权，恢复通信后仍需新的启动命令。
+ * 输入参数：无；直接清除外控运行请求，不清除泵的设定流量。
  * 返回参数：无。
  */
 static void ExternalComm_StopOutputForLinkSilent(void)
@@ -2329,7 +2359,7 @@ static void ExternalComm_StopOutputForLinkSilent(void)
     ExternalComm_DisableMotorTelemetry(); /* 2秒无合法下行帧视为通信失效，先停50ms主动遥测并等待重新订阅。 */
     /* 短超时只处理安全输出，不改变 WorkMessage.hmiactive_work，避免上位机外控状态被误释放。 */
     WorkMessage.runflag_work = false;
-    /* 清零当前电机实际输出速度，驱动任务下一周期会按停止状态下发。 */
+    /* 清零电机转速指令，驱动任务下一周期按停止状态下发；这里不是清除实测转速。 */
     WorkMessage.speed_work = 0U;
     /* 清除手柄按键运行标志，避免外控恢复后沿用上一次运行沿。 */
     ControlSignalMessage.handle_control_flag = false;
@@ -2339,48 +2369,58 @@ static void ExternalComm_StopOutputForLinkSilent(void)
     ControlSignalMessage.HMIL_pump_flag = false;
     /* 清除外控 B 泵运行标志，避免泵任务继续认为外控在请求 B 泵输出。 */
     ControlSignalMessage.HMIR_pump_flag = false;
-    /* 清除外部通信层的 A 泵手动/跟随锁存请求，防止后续状态刷新再次拉起注水泵。 */
+    /* 清除外控独立泵和手柄冷却请求，防止后续状态刷新再次启动注水泵。 */
     ExternalComm_ClearPumpRequests();
     /* 停止 A 泵运行，泵任务下一周期会发送停止帧。 */
     pumpMessageA.run_flag = false;
-    /* 取消 A 泵排空计时，断线静默时不允许排空动作继续累计。 */
+    /* 取消 A 泵定时排空，断线停机后不能继续累计排空时间。 */
     pumpMessageA.timingDrainage_flag = false;
     /* 清零 A 泵排空累计时间，恢复后必须由新的上位机命令重新开始。 */
     pumpMessageA.timingDrainage_times = 0U;
     /* 短超时只关闭 A 泵输出，不清 speed_work 用户设定；退出外控后脚踏仍需按原流量联动。 */
     /* 停止 B 泵运行，保持两路泵的断线停机动作一致。 */
     pumpMessageB.run_flag = false;
-    /* 取消 B 泵排空计时，断线静默时不允许排空动作继续累计。 */
+    /* 取消 B 泵定时排空，断线停机后不能继续累计排空时间。 */
     pumpMessageB.timingDrainage_flag = false;
     /* 清零 B 泵排空累计时间，恢复后必须由新的上位机命令重新开始。 */
     pumpMessageB.timingDrainage_times = 0U;
     /* B 泵同样保留 speed_work 用户设定，停止态屏幕继续显示外控前的最终流量。 */
-    /* 静默停输出后刷新 A 泵屏幕，避免实际已停但屏幕仍显示旧速度。 */
+    /* 刷新 A 泵按钮和数值，让屏幕显示停止状态，同时保留设定流量。 */
     Pubinterface_RefreshPumpADisplay();
-    /* 静默停输出后刷新 B 泵屏幕，避免实际已停但屏幕仍显示旧速度。 */
+    /* 刷新 B 泵按钮和数值，让屏幕显示停止状态，同时保留设定流量。 */
     Pubinterface_RefreshPumpBDisplay();
-    ExternalComm_RefreshRunDisplay(); /* 短超时只停止输出不释放 owner，小电脑从 40 黄色回到 39 白色等待链路恢复。 */
+    ExternalComm_RefreshRunDisplay(); /* 本次只停机、不交还控制权，小电脑图标从黄色 40 变为白色 39。 */
 }
 
+/*
+ * 函数功能：连续 10 秒未收到有效命令时，退出外控、停止输出并隐藏在线图标。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_HandleLinkReleaseTimeout(void)
 {
-    ExternalComm_ResetProtocolSession(); /* 10秒长超时释放外控时同步释放协议来源，禁止旧保活直接恢复会话。 */
+    ExternalComm_ResetProtocolSession(); /* 清除登录记录，再次连接必须重新收齐三帧，不能靠单帧旧保活恢复外控。 */
     /* 长超时确认上位机或 RS485 已长时间离线，先清外部通信层自己的泵运行请求。 */
     ExternalComm_ClearPumpRequests();
-    /* 释放外控仲裁锁，并由公共释放函数统一停止电机、A/B 泵和外控显示标志。 */
+    /* 交还外控控制权，由公共退出函数停止电机和 A/B 泵，并清除外控显示状态。 */
     ControlArbitration_ReleaseExternalControl();
     /* 长时间没有合法外部帧后才认为链路离线，小电脑图标从在线/外控状态熄灭。 */
     Pubinterface_RefreshExternalCommDisplay(false, false);
-    /* 同步清除外部通信在线锁存，避免释放后空闲状态继续保持白色图标。 */
+    /* 清除通信在线记录，避免退出后仍显示白色小电脑图标。 */
     s_external_comm_display_online = 0U;
     /* 计时钉到阈值，下一次合法帧到来前不再重复发送离线显示。 */
     s_external_comm_display_elapsed_ms = EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS;
     /* 超时处理完成后清零计时，避免释放后的空闲状态继续重复进入本函数。 */
     s_external_link_elapsed_ms = 0U;
-    /* 外控已经释放，短超时停输出锁存也同步复位。 */
+    /* 外控已结束，清除“本次断线已停机”标志，供下次连接重新使用。 */
     s_external_link_output_stopped = 0U;
 }
 
+/*
+ * 函数功能：检查外控断线时间：2 秒停机但保留控制权，10 秒退出外控；未取得控制权时只管理在线图标。
+ * 输入参数：无；每个外控任务周期调用一次。
+ * 返回参数：无。
+ */
 static void ExternalComm_CheckLinkWatchdog(void)
 {
     /* 非外控状态下也要维护“合法外部帧在线”的白色小电脑图标，超时后自动熄灭。 */
@@ -2391,7 +2431,7 @@ static void ExternalComm_CheckLinkWatchdog(void)
     {
         /* 非外控状态下保持计时清零，下一次申请外控从完整超时时间重新开始。 */
         s_external_link_elapsed_ms = 0U;
-        /* 非外控状态下不保留短超时停输出锁存。 */
+        /* 当前不在外控状态，清除“断线已停机”记录。 */
         s_external_link_output_stopped = 0U;
         return;
     }
@@ -2399,7 +2439,7 @@ static void ExternalComm_CheckLinkWatchdog(void)
     /* 防止计数超过长释放阈值太多后溢出，达到阈值前按 10ms 任务周期累计。 */
     if (s_external_link_elapsed_ms < EXTERNAL_COMM_LINK_RELEASE_TIMEOUT_MS)
     {
-        /* 外控已激活且本周期没有合法下行帧时，累计保活静默时间。 */
+        /* 断线计时增加一个任务周期；若本周期刚收到有效命令，该计时此前已清零。 */
         s_external_link_elapsed_ms = (uint16_t)(s_external_link_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS);
     }
 
@@ -2409,7 +2449,7 @@ static void ExternalComm_CheckLinkWatchdog(void)
     {
         /* 停止电机和 A/B 泵输出，但仍允许后续合法下行帧继续使用当前外控授权。 */
         ExternalComm_StopOutputForLinkSilent();
-        /* 锁存本次短超时动作，避免静默期间反复清状态造成调试观察困难。 */
+        /* 记住本次已执行停机，持续断线期间不再每 10ms 重复清运行状态。 */
         s_external_link_output_stopped = 1U;
     }
 
@@ -2422,14 +2462,14 @@ static void ExternalComm_CheckLinkWatchdog(void)
 
 /*
  * 函数功能：急停/全停时强制停止当前手柄、电机、脚踏标志和 A/B 泵输出。
- * 输入参数：无，函数直接清理全局运行状态并释放控制仲裁。
+ * 输入参数：无；直接清除全局运行请求并交还控制权。
  * 返回参数：无。
  */
 static void ExternalComm_StopAllWork(void)
 {
     /* 清除当前手柄运行标志。 */
     WorkMessage.runflag_work = false;
-    /* 清零实际输出速度，驱动任务下一周期会发送停止。 */
+    /* 清零电机转速指令，驱动任务下一周期发送停止命令；不修改实测转速。 */
     WorkMessage.speed_work = 0U;
     /* 清除手柄按键控制标志。 */
     ControlSignalMessage.handle_control_flag = false;
@@ -2466,10 +2506,15 @@ static void ExternalComm_StopAllWork(void)
     Pubinterface_RefreshExternalCommDisplay(false, false); /* 急停/全停后外控不再保持在线提示，避免小电脑图标残留。 */
 }
 
+/*
+ * 函数功能：按配置开启或取消外控手柄的注水泵冷却请求，并保留独立启动的 A 泵请求。
+ * 输入参数：enable 非 0 表示开启跟随，0 表示取消；编译开关关闭时始终取消跟随。
+ * 返回参数：无。
+ */
 static void ExternalComm_SetUart5InjectPumpFollow(uint8_t enable)
 {
 #if (EXTERNAL_COMM_UART5_INJECT_PUMP_FOLLOW_HANDLE_ENABLE == 1U)
-    s_uart5_inject_pump_follow_run_request = (enable != 0U) ? 1U : 0U; /* 锁存上位机手柄启停带来的冷却请求，实际 A/B 目标由公共函数按泵类型和通道选择。 */
+    s_uart5_inject_pump_follow_run_request = (enable != 0U) ? 1U : 0U; /* 记录手柄是否请求冷却，具体启动 A 泵还是 B 泵由公共函数按泵类型和手柄通道选择。 */
     Pubinterface_SetHandleInjectionPumpRun(enable != 0U);              /* 外控手柄启动/停止复用本地手柄的 A/B 注水泵跟随规则，支持 B 唯一注水泵和双注水泵按通道对应。 */
     ExternalComm_RefreshUart5PumpRunState();                           /* 重新合并 A 泵独立调试请求，避免外控停止手柄时误清仍由上位机独立启动的 A 泵。 */
 #else
@@ -2586,7 +2631,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
     }
     else
     {
-        s_external_pump_b_manual_run_request = 0U; /* 停止后清除 B 泵外控输出锁存。 */
+        s_external_pump_b_manual_run_request = 0U; /* 已收到独立停止 B 泵命令，清除此前保存的运行请求。 */
         pumpMessageB.run_flag = false; /* 泵任务下一周期发送 B 泵停止帧。 */
         pumpMessageB.timingDrainage_flag = false; /* 同时退出可能残留的定时排空状态。 */
         pumpMessageB.pedalDrainage_flag = false; /* 停止 B 泵时同步结束轻排状态，防止下次普通启动误旁路压力。 */
@@ -2623,7 +2668,7 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
         }
 
         Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 新启动命令允许重新尝试压力闭环运行。 */
-        WorkMessage.speed_work = WorkMessage.speed_set_work; /* 实际输出速度恢复为当前设定速度。 */
+        WorkMessage.speed_work = WorkMessage.speed_set_work; /* 启动时把当前设置转速作为待下发的转速指令。 */
         WorkMessage.runflag_work = true; /* 驱动任务下一周期发送电机启动帧。 */
         ControlSignalMessage.HMI_control_flag = true; /* 标记本次运行来自外部控制。 */
         ExternalComm_SetUart5InjectPumpFollow(1U); /* 按公共 A/B 选择规则启动手柄冷却注水泵。 */
@@ -2631,7 +2676,7 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
     else
     {
         WorkMessage.runflag_work = false; /* 停止当前手柄电机。 */
-        WorkMessage.speed_work = 0U; /* 清零实际输出速度，保留设定速度供下次启动。 */
+        WorkMessage.speed_work = 0U; /* 停止时把转速指令设为 0，保留设置值供下次启动使用。 */
         ControlSignalMessage.HMI_control_flag = false; /* 结束外控手柄运行来源。 */
         ExternalComm_SetUart5InjectPumpFollow(0U); /* 停止由手柄联动启动的注水泵。 */
         ExternalComm_ClearHandleLostAlarm(); /* 上位机停止等价于确认并退出掉线故障。 */
@@ -2714,7 +2759,7 @@ static void ExternalComm_ApplyControlCommand(const ExternalCommFrame_t *frame)
         return; /* 具体动作已发送对应失败应答，统一入口不重复回包。 */
     }
 
-    info[0] = frame->area_code; /* 成功载荷回显原控制编号。 */
+    info[0] = frame->area_code; /* 成功应答带回原控制编号，让上位机知道哪项动作已执行。 */
     ExternalComm_SendAck(EXTERNAL_COMM_ACK_CONTROL_OK, info, sizeof(info)); /* 保持原控制成功应答格式。 */
 }
 
@@ -2736,7 +2781,7 @@ static uint8_t ExternalComm_IsEepromBatchActive(void)
  */
 static void ExternalComm_SendEepromBusy(uint8_t command_code)
 {
-    /* EEPROM 批量状态只能由外控任务串行推进，新命令不得覆盖当前页和总线快照。 */
+    /* 一次只能执行一批 EEPROM 操作，拒绝新命令，防止覆盖正在处理的页号和已选总线。 */
     ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
                              command_code,
                              EXTERNAL_COMM_REASON_BUSY);
@@ -2788,14 +2833,14 @@ static void ExternalComm_ReadBusinessPage(const ExternalCommFrame_t *frame)
 
 /*
  * 函数功能：读取指定手柄的单页导航数据，并在返回数据前确认目标 EEPROM 未因快速插拔而变化。
- * 输入参数：frame 为 0x08 导航单页读命令；旧协议不带载荷，V2 载荷携带通道和请求号。
+ * 输入参数：frame 为 0x08 导航单页读命令；旧协议数据区为空，V2 带版本、通道和请求号。
  * 返回参数：无；成功上传页数据，失败发送可与原请求关联的 EEPROM 失败 ACK。
  */
 static void ExternalComm_ReadNavPage(const ExternalCommFrame_t *frame)
 {
     ExternalCommNavTarget_t target; /* 保存本次读取锁定的通道、总线、请求号和 EEPROM 序列号。 */
     uint16_t page_index; /* AT24CS32 驱动使用的 0 基页下标。 */
-    uint16_t payload_offset; /* 单页读没有业务载荷，仅用于复用统一目标解析入口。 */
+    uint16_t payload_offset; /* 接收目标解析函数返回的数据起点；单页读取没有附加页数据，不使用此值。 */
     uint8_t reason; /* 保存目标解析失败的精确协议原因。 */
     uint8_t read_success; /* 保存页面 I2C 读取结果，目标复核通过后才决定是否上传。 */
 
@@ -2811,7 +2856,7 @@ static void ExternalComm_ReadNavPage(const ExternalCommFrame_t *frame)
     {
         ExternalComm_SendNavFrameFail(frame,
                                       frame->area_code,
-                                      EXTERNAL_COMM_REASON_BUSY); /* 任一运动输出运行时拒绝阻塞式单页读取，保护泵和电机任务节拍。 */
+                                      EXTERNAL_COMM_REASON_BUSY); /* 电机或泵仍在运行/排空时不读页，避免 EEPROM 等待拖慢控制任务。 */
         return;
     }
 
@@ -2915,7 +2960,7 @@ static void ExternalComm_WriteNavPage(const ExternalCommFrame_t *frame)
     {
         ExternalComm_SendNavFrameFail(frame,
                                       frame->area_code,
-                                      EXTERNAL_COMM_REASON_BUSY); /* 任一运动输出运行时拒绝阻塞式写页，避免写周期拖慢实时控制。 */
+                                      EXTERNAL_COMM_REASON_BUSY); /* 电机或泵仍在运行/排空时不写页，避免 EEPROM 写入等待拖慢控制任务。 */
         return;
     }
 
@@ -2980,7 +3025,7 @@ static void ExternalComm_WriteNavPage(const ExternalCommFrame_t *frame)
  */
 static uint8_t ExternalComm_IsValidNavBatchRange(uint8_t start_page, uint8_t end_page)
 {
-    /* 批量协议只接受实际页号，不兼容单页命令的 1..117 导航序号，避免重叠区出现歧义。 */
+    /* 批量操作只接受实际页号，不做旧单页命令的加 11 换算，避免读写错页。 */
     return ((start_page >= EXTERNAL_COMM_NAV_PAGE_FIRST) &&
             (end_page <= EXTERNAL_COMM_NAV_PAGE_LAST) &&
             (start_page <= end_page)) ? 1U : 0U;
@@ -2989,7 +3034,7 @@ static uint8_t ExternalComm_IsValidNavBatchRange(uint8_t start_page, uint8_t end
 /*
  * 函数功能：判断当前运行状态是否允许执行单页或批量 EEPROM 操作。
  * 输入参数：无。
- * 返回参数：手柄与 A/B 泵均停止时返回 1，任一输出正在运行时返回 0。
+ * 返回参数：手柄运行标志和 A/B 泵运行、排空标志都为 0 时返回 1，否则返回 0；此处不检查实测转速。
  */
 static uint8_t ExternalComm_IsEepromRuntimeIdle(void)
 {
@@ -3011,7 +3056,7 @@ static uint8_t ExternalComm_IsEepromRuntimeIdle(void)
         return 0U;
     }
 
-    return 1U; /* 所有运动输出均停止，允许每周期处理一个 EEPROM 页。 */
+    return 1U; /* 各项运行标志都已清除，可以进行 EEPROM 页操作；不等同于已测得所有电机停稳。 */
 }
 
 /*
@@ -3039,8 +3084,8 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
     uint8_t end_page; /* 保存本批结束实际页号。 */
     uint8_t reason; /* 保存协议解析或目标捕获失败原因。 */
     uint16_t payload_offset; /* 指向结束页字段；V2 比旧协议多 4 字节公共前缀。 */
-    uint16_t legacy_len; /* 当前批量操作对应的旧协议精确载荷长度。 */
-    uint16_t v2_len; /* 当前批量操作对应的 V2 精确载荷长度。 */
+    uint16_t legacy_len; /* 当前读/写命令要求的旧协议数据区字节数，必须正好匹配。 */
+    uint16_t v2_len; /* 当前读/写命令要求的 V2 数据区字节数，包含 4 字节公共前缀。 */
 
     /* 已有批量操作时拒绝覆盖状态，普通保活和控制命令仍可继续处理。 */
     if (ExternalComm_IsEepromBatchActive() != 0U)
@@ -3057,7 +3102,7 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
                  EXTERNAL_COMM_BATCH_WRITE_INFO_LEN; /* 保持旧协议 1 字节读范围或 31 字节写模板格式。 */
     v2_len = (operation == EXTERNAL_COMM_EEPROM_BATCH_READ_NAV) ?
              EXTERNAL_COMM_NAV_V2_BATCH_READ_LEN :
-             EXTERNAL_COMM_NAV_V2_BATCH_WRITE_LEN; /* V2 在旧载荷前增加版本、通道和请求号。 */
+             EXTERNAL_COMM_NAV_V2_BATCH_WRITE_LEN; /* V2 在旧格式数据之前增加版本、通道和请求号。 */
 
     /* 批量写会改变当前手柄 EEPROM，未取得外控权时禁止启动。 */
     if ((operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV) &&
@@ -3074,7 +3119,7 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
     {
         ExternalComm_SendNavFrameFail(frame,
                                       EXTERNAL_COMM_BATCH_COMMAND_TARGET,
-                                      EXTERNAL_COMM_REASON_BUSY); /* 运动输出未停止时不启动阻塞式 EEPROM 访问。 */
+                                      EXTERNAL_COMM_REASON_BUSY); /* 电机或泵仍有运行/排空标志时，不启动这批 EEPROM 操作。 */
         return;
     }
 
@@ -3091,7 +3136,7 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
         return;
     }
 
-    end_page = frame->info_area[payload_offset]; /* 公共前缀之后的首字节固定为包含式结束页。 */
+    end_page = frame->info_area[payload_offset]; /* 公共前缀之后第一个字节是结束页号，这一页也要处理。 */
     /* 批量范围必须使用 Page12..Page128 的实际页号，并保持从小到大。 */
     if (ExternalComm_IsValidNavBatchRange(frame->area_code, end_page) == 0U)
     {
@@ -3110,9 +3155,9 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
     s_eeprom_batch.start_page = frame->area_code;
     /* 第一页就是 AreaCode 指定的起始实际页号。 */
     s_eeprom_batch.current_page = frame->area_code;
-    /* 保存包含式结束页号。 */
+    /* 保存结束页号，处理范围包含这一页。 */
     s_eeprom_batch.end_page = end_page;
-    /* 保存总线快照，后续页面不再读取 WorkMessage.channel_work。 */
+    /* 记住本批使用的 I2C 总线；中途切换当前手柄时，后续页仍访问本批原目标。 */
     s_eeprom_batch.use_i2c3 = target.use_i2c3;
     /* 保存协议版本，服务函数据此选择旧响应或带关联字段的 V2 响应。 */
     s_eeprom_batch.nav_protocol_version = target.protocol_version;
@@ -3120,13 +3165,13 @@ static void ExternalComm_StartNavBatch(const ExternalCommFrame_t *frame,
     s_eeprom_batch.nav_channel = target.channel;
     /* 保存 V2 请求号，让每页数据、逐页写 ACK 和最终 ACK 都能回到同一请求。 */
     s_eeprom_batch.nav_request_id = target.request_id;
-    /* 保存启动时的身份代数，后续每页访问前先用 RAM 状态快速识别插拔或换柄。 */
+    /* 记住启动时的手柄更换计数，每页操作前比较内存记录，发现换柄就停止。 */
     s_eeprom_batch.nav_identity_generation = target.identity_generation;
     /* 保存启动时的唯一序列号，整批结束前统一复核一次，避免每页重复阻塞访问 SN 区。 */
     memcpy(s_eeprom_batch.nav_serial_number,
            target.serial_number,
            AT24CS32_SN_SIZE);
-    s_eeprom_batch.nav_navigation_generation = target.navigation_generation; /* 保存扫描导航代次，使短暂插拔也能中断后续页面。 */
+    s_eeprom_batch.nav_navigation_generation = target.navigation_generation; /* 记住扫描变化计数，发现短暂插拔也要停止后续页操作。 */
     /* 批量写结束页之后的 30 字节是每个导航页共用的数据模板。 */
     if (operation == EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV)
     {
@@ -3154,7 +3199,7 @@ static void ExternalComm_StartBusinessBatch(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 0x06 只携带一个结束页字节，避免外部设备借额外载荷混淆业务页读取语义。 */
+    /* 0x06 数据区必须正好 1 字节，只表示结束页号；缺少或多出字节都拒绝。 */
     if (frame->info_len != EXTERNAL_COMM_BATCH_READ_INFO_LEN)
     {
         ExternalComm_SendBatchStartFail(EXTERNAL_COMM_REASON_BAD_LENGTH);
@@ -3185,7 +3230,7 @@ static void ExternalComm_StartBusinessBatch(const ExternalCommFrame_t *frame)
         return;
     }
 
-    /* 清除上一批的页号、节拍和模板，保证本批从起始页干净开始。 */
+    /* 清除上一批页号、间隔计时和写入模板，让本批从指定起始页开始。 */
     memset(&s_eeprom_batch, 0, sizeof(s_eeprom_batch));
     /* 标记为业务只读批量，服务函数据此选择 0x06 完成应答。 */
     s_eeprom_batch.operation = EXTERNAL_COMM_EEPROM_BATCH_READ_BUSINESS;
@@ -3193,15 +3238,15 @@ static void ExternalComm_StartBusinessBatch(const ExternalCommFrame_t *frame)
     s_eeprom_batch.start_page = frame->area_code;
     /* 第一轮服务从请求指定的起始页开始。 */
     s_eeprom_batch.current_page = frame->area_code;
-    /* 保存包含式结束页号，Page10/Page11 空页也必须处理。 */
+    /* 保存结束页号，范围包含该页；即使 Page10/Page11 为空也要读取。 */
     s_eeprom_batch.end_page = end_page;
     /* 后续各页始终使用同一物理总线。 */
     s_eeprom_batch.use_i2c3 = use_i2c3;
 }
 
 /*
- * 函数功能：从跨周期批量状态恢复导航目标快照和原导航功能码。
- * 输入参数：target 为目标快照输出；original_fun 为 0x09 或 0x0C 功能码输出。
+ * 函数功能：取回批量操作开始时保存的目标信息，让后续周期继续检查同一手柄并正确应答。
+ * 输入参数：target 接收原目标信息；original_fun 接收 0x09 或 0x0C 功能码。
  * 返回参数：当前为导航批量任务且参数有效返回 1，业务批量或参数无效返回 0。
  */
 static uint8_t ExternalComm_LoadNavBatchTarget(ExternalCommNavTarget_t *target,
@@ -3230,12 +3275,12 @@ static uint8_t ExternalComm_LoadNavBatchTarget(ExternalCommNavTarget_t *target,
     target->channel = s_eeprom_batch.nav_channel; /* 恢复任务启动时锁定的逻辑通道。 */
     target->request_id = s_eeprom_batch.nav_request_id; /* 恢复 V2 请求号。 */
     target->use_i2c3 = s_eeprom_batch.use_i2c3; /* 恢复任务启动时锁定的物理总线。 */
-    target->identity_generation = s_eeprom_batch.nav_identity_generation; /* 恢复启动时身份代数，供每页无阻塞预检。 */
+    target->identity_generation = s_eeprom_batch.nav_identity_generation; /* 取回启动时的手柄更换计数，每页检查时无需访问 EEPROM。 */
     memcpy(target->serial_number,
            s_eeprom_batch.nav_serial_number,
            AT24CS32_SN_SIZE); /* 恢复任务启动时的 EEPROM 唯一序列号。 */
-    target->navigation_generation = s_eeprom_batch.nav_navigation_generation; /* 恢复批量开始时扫描代次，逐页检查快速插拔。 */
-    return 1U; /* 已重建可用于逐页前后复核和回包关联的目标快照。 */
+    target->navigation_generation = s_eeprom_batch.nav_navigation_generation; /* 取回启动时的扫描变化计数，用于发现短暂插拔。 */
+    return 1U; /* 已取回原目标信息，后续可检查是否换柄，并在应答中带回原请求号。 */
 }
 
 /*
@@ -3246,8 +3291,8 @@ static uint8_t ExternalComm_LoadNavBatchTarget(ExternalCommNavTarget_t *target,
 static void ExternalComm_FinishEepromBatch(void)
 {
     ExternalCommNavTarget_t target; /* 导航批量完成时恢复请求通道和请求号。 */
-    uint8_t ack_info[EXTERNAL_COMM_NAV_V2_BATCH_ACK_LEN]; /* 容纳 V2 最大 7 字节完成载荷。 */
-    uint8_t ack_info_len; /* 保存旧协议 3 字节或 V2 7 字节的实际载荷长度。 */
+    uint8_t ack_info[EXTERNAL_COMM_NAV_V2_BATCH_ACK_LEN]; /* 完成应答的数据缓存，最大容纳 V2 的 7 字节。 */
+    uint8_t ack_info_len; /* 本次应答数据字节数：旧协议为 3，V2 为 7。 */
     uint8_t original_fun; /* 保存业务批量 0x06 或导航批量 0x09/0x0C 功能码。 */
     uint8_t repeat_index; /* 同一完成应答的发送序号，固定重复 3 次降低偶发丢帧影响。 */
 
@@ -3255,8 +3300,8 @@ static void ExternalComm_FinishEepromBatch(void)
     {
         original_fun = EXTERNAL_COMM_DOWN_READ_ALL; /* 业务页范围批量读取完成时回显 0x06。 */
         ack_info[0] = original_fun; /* 旧完成格式 byte0 是原批量功能码。 */
-        ack_info[1] = s_eeprom_batch.start_page; /* 旧完成格式 byte1 是包含式起始页。 */
-        ack_info[2] = s_eeprom_batch.end_page; /* 旧完成格式 byte2 是包含式结束页。 */
+        ack_info[1] = s_eeprom_batch.start_page; /* 旧完成格式 byte1 是本批处理的第一页。 */
+        ack_info[2] = s_eeprom_batch.end_page; /* 旧完成格式 byte2 是本批处理的最后一页。 */
         ack_info_len = 3U; /* 业务批量协议不增加导航关联字段。 */
     }
     else
@@ -3270,7 +3315,7 @@ static void ExternalComm_FinishEepromBatch(void)
             ExternalComm_SendNavTargetFail(original_fun,
                                            &target,
                                            failed_page,
-                                           EXTERNAL_COMM_REASON_TARGET_CHANGED); /* SN、在线态或身份代数变化时通知外部设备丢弃本批结果。 */
+                                           EXTERNAL_COMM_REASON_TARGET_CHANGED); /* 序列号、在线状态或更换计数不一致，通知上位机本批结果不能确认属于原手柄。 */
             return;
         }
 
@@ -3280,9 +3325,9 @@ static void ExternalComm_FinishEepromBatch(void)
             ack_info[1] = original_fun; /* 回显导航批量读 0x09 或批量写 0x0C。 */
             ack_info[2] = target.channel; /* 回显整个批次锁定的逻辑通道。 */
             ExternalComm_WriteBE16(&ack_info[3], target.request_id); /* 回显整个批次锁定的 16 位请求号。 */
-            ack_info[5] = s_eeprom_batch.start_page; /* 回显本批包含式起始实际页。 */
-            ack_info[6] = s_eeprom_batch.end_page; /* 回显本批包含式结束实际页。 */
-            ack_info_len = EXTERNAL_COMM_NAV_V2_BATCH_ACK_LEN; /* V2 完成载荷固定 7 字节。 */
+            ack_info[5] = s_eeprom_batch.start_page; /* 返回本批处理的第一个实际页号。 */
+            ack_info[6] = s_eeprom_batch.end_page; /* 返回本批处理的最后一个实际页号。 */
+            ack_info_len = EXTERNAL_COMM_NAV_V2_BATCH_ACK_LEN; /* V2 完成应答的数据区固定为 7 字节。 */
         }
         else
         {
@@ -3300,12 +3345,12 @@ static void ExternalComm_FinishEepromBatch(void)
     {
         ExternalComm_SendAck(EXTERNAL_COMM_ACK_MEMORY_OK,
                              ack_info,
-                             ack_info_len); /* 复用 EEPROM 成功码，按协议版本发送对应完成载荷。 */
+                             ack_info_len); /* 使用 EEPROM 成功码，按旧协议或 V2 格式发送完成数据。 */
     }
 }
 
 /*
- * 函数功能：按限定发送节拍推进一页业务或导航 EEPROM 批量操作，并保证单周期最多发送一个批量结果帧。
+ * 函数功能：到达页间隔后处理一页 EEPROM 并发送结果；所有页处理完后另发整批完成应答，该应答会重复发送三次。
  * 输入参数：无。
  * 返回参数：本周期发送了批量页结果或最终应答时返回 1，否则返回 0。
  */
@@ -3500,7 +3545,7 @@ static uint8_t ExternalComm_ServiceEepromBatch(void)
 static void ExternalComm_ReadSoftwareVersion(const ExternalCommFrame_t *frame)
 {
     uint8_t payload[MAINBOARD_SW_VERSION_PAYLOAD_SIZE]; /* byte0 为读取/校验状态，byte1~32 为主控板 EEPROM Page1 原始记录。 */
-    uint16_t payload_len = 0U; /* 实际上传载荷长度，当前固定为 33 字节。 */
+    uint16_t payload_len = 0U; /* 上传数据字节数，当前为 1 字节状态加 32 字节版本记录，共 33 字节。 */
 
     if ((frame->area_code != EXTERNAL_COMM_AREA_NONE) || (frame->info_len != 0U))
     {
@@ -3525,6 +3570,11 @@ static void ExternalComm_ReadSoftwareVersion(const ExternalCommFrame_t *frame)
                            payload_len); /* 上传主控软件版本记录；状态非 0 时上位机显示具体 EEPROM/Page1 问题。 */
 }
 
+/*
+ * 函数功能：按正式协议功能码调用参数设置、启停、EEPROM、订阅或退出处理函数。
+ * 输入参数：frame 为已检查完整性和登录条件的帧，或简易协议在内部构造的命令。
+ * 返回参数：无；各命令自行发送执行结果，不支持的功能码返回失败应答。
+ */
 static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
 {
     /* V1 只处理外部设备下发帧，忽略本机上传帧或其他方向码。 */
@@ -3558,7 +3608,7 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
             ExternalComm_ReadBusinessPage(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_ALL:
-            /* 业务页范围批量读取由主控按 30ms 节拍逐页返回，空页同样上传原始 FF。 */
+            /* 登记业务页读取范围，后续每累计 30ms 处理一页，全 FF 的空页也原样上传。 */
             ExternalComm_StartBusinessBatch(frame);
             break;
         case EXTERNAL_COMM_DOWN_WRITE_PAGE:
@@ -3574,11 +3624,11 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
             ExternalComm_WriteNavPage(frame);
             break;
         case EXTERNAL_COMM_DOWN_READ_NAV_BATCH:
-            /* 批量读请求只登记范围，任务随后按 30ms 节拍读取并返回一页。 */
+            /* 这里只保存批量读取范围，后续任务每累计 30ms 读取并返回一页。 */
             ExternalComm_StartNavBatch(frame, EXTERNAL_COMM_EEPROM_BATCH_READ_NAV);
             break;
         case EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH:
-            /* 批量写请求只登记范围和模板，任务随后按 30ms 节拍写入并确认一页。 */
+            /* 这里只保存范围和模板，后续任务每累计 30ms 写入一页并发送该页结果。 */
             ExternalComm_StartNavBatch(frame, EXTERNAL_COMM_EEPROM_BATCH_WRITE_NAV);
             break;
         case EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE:
@@ -3611,8 +3661,8 @@ static void ExternalComm_DispatchFrame(const ExternalCommFrame_t *frame)
 }
 
 /*
- * 函数功能：静默复用原外控协议业务分发，不向 UART2 发送原协议 ACK。
- * 输入参数：fun_code、area_code 为原协议分发字段；info_area 和 info_len 为可选载荷。
+ * 函数功能：把内部命令交给原外控处理函数执行，但不向 UART2 发送正式协议应答。
+ * 输入参数：fun_code、area_code 为原协议命令字段；info_area 为可选命令数据，info_len 为其字节数。
  * 返回参数：无。
  */
 void ExternalComm_RunSilent(uint8_t fun_code,
@@ -3621,29 +3671,29 @@ void ExternalComm_RunSilent(uint8_t fun_code,
                             uint16_t info_len)
 {
     ExternalCommFrame_t frame; /* 在任务内部构造原协议业务帧，只复用已经验证的安全分发。 */
-    uint8_t previous_suppressed; /* 保存进入前的静默状态，允许后续嵌套调用安全恢复。 */
+    uint8_t previous_suppressed; /* 保存调用前是否允许发送应答，执行完后恢复，不影响后续正式协议通信。 */
 
     if ((info_len > EXTERNAL_COMM_MAX_INFO_SIZE) ||
         ((info_len > 0U) && (info_area == NULL)))
     {
-        return; /* 载荷越界或长度非零但指针为空时拒绝分发，避免复制越界。 */
+        return; /* 数据超过缓存容量，或要求复制数据却没有数据指针，直接拒绝，防止越界访问。 */
     }
 
     memset(&frame, 0, sizeof(frame)); /* 清零未使用字段，避免业务分发读取未初始化数据。 */
     frame.tran_code = EXTERNAL_COMM_TRAN_DOWNLOAD; /* 原分发只接受外部设备下行方向。 */
-    frame.length = (uint16_t)(EXTERNAL_COMM_FRAME_FIXED_SIZE + info_len); /* 保持帧元数据与载荷长度一致。 */
+    frame.length = (uint16_t)(EXTERNAL_COMM_FRAME_FIXED_SIZE + info_len); /* 整帧长度等于固定字段字节数加命令数据字节数。 */
     frame.fun_code = fun_code; /* 使用适配层指定的原协议功能码。 */
     frame.area_code = area_code; /* 使用适配层指定的原协议动作区域码。 */
     frame.info_code = EXTERNAL_COMM_INFO_NONE; /* 原下行控制入口要求信息码固定为 FF。 */
-    frame.info_len = info_len; /* 把可选载荷长度交给原业务校验。 */
+    frame.info_len = info_len; /* 原命令处理函数仍按实际数据字节数检查参数是否足够。 */
     if (info_len > 0U)
     {
-        memcpy(frame.info_area, info_area, info_len); /* 只复制已校验范围内的内部适配载荷。 */
+        memcpy(frame.info_area, info_area, info_len); /* 已检查长度和指针，可以把命令数据复制到本地帧。 */
     }
 
     previous_suppressed = s_response_suppressed; /* 保存旧值，避免改变原协议后续正常回包。 */
     s_response_suppressed = 1U; /* 本次分发只执行状态机，不向简易协议设备发送旧格式 ACK。 */
-    ExternalComm_DispatchFrame(&frame); /* 复用 owner、报警、在线、压力和联动泵安全门禁。 */
+    ExternalComm_DispatchFrame(&frame); /* 仍调用原外控命令处理函数，控制权、报警、在线状态和泵保护检查都不省略。 */
     s_response_suppressed = previous_suppressed; /* 分发结束立即恢复原协议发送能力。 */
 }
 
@@ -3656,15 +3706,20 @@ uint8_t ExternalComm_PumpRunRequested(uint8_t pump_channel)
 {
     if (pump_channel == CHANNEL_A)
     {
-        return (s_uart5_pump_manual_run_request != 0U) ? 1U : 0U; /* A 泵返回原外控独立请求锁存。 */
+        return (s_uart5_pump_manual_run_request != 0U) ? 1U : 0U; /* 返回上位机是否独立请求 A 泵运行，不包含手柄冷却请求。 */
     }
     if (pump_channel == CHANNEL_B)
     {
-        return (s_external_pump_b_manual_run_request != 0U) ? 1U : 0U; /* B 泵返回原外控独立请求锁存。 */
+        return (s_external_pump_b_manual_run_request != 0U) ? 1U : 0U; /* 返回上位机是否独立请求 B 泵运行，不表示已收到驱动转速反馈。 */
     }
     return 0U; /* 非 A/B 通道没有对应外控泵请求。 */
 }
 
+/*
+ * 函数功能：在心跳数据末尾追加 1 字节，并更新已写入长度；空间不足时不写入。
+ * 输入参数：info_area 为容量不小于心跳上限的缓存；info_len 为当前字节数；value 为待追加值。
+ * 返回参数：无。
+ */
 static void ExternalComm_HeartbeatAppendU8(uint8_t *info_area, uint16_t *info_len, uint8_t value)
 {
     /* info_area 指向本次心跳 InforArea 缓冲，由调用方保证容量为 EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN。 */
@@ -3679,14 +3734,19 @@ static void ExternalComm_HeartbeatAppendU8(uint8_t *info_area, uint16_t *info_le
     {
         /* 写入一个单字节状态、类型或代号字段。 */
         info_area[*info_len] = value;
-        /* 记录心跳载荷已经增加 1 字节。 */
+        /* 已写入 1 字节，下一字段从后一个位置开始。 */
         *info_len = (uint16_t)(*info_len + 1U);
     }
 }
 
+/*
+ * 函数功能：在心跳数据末尾追加 16 位数值，高字节在前；空间不足时不写入。
+ * 输入参数：info_area 为容量不小于心跳上限的缓存；info_len 为当前字节数；value 为待追加值。
+ * 返回参数：无。
+ */
 static void ExternalComm_HeartbeatAppendBE16(uint8_t *info_area, uint16_t *info_len, uint16_t value)
 {
-    /* info_area 指向心跳载荷缓冲，info_len 指向当前已经写入的字节数。 */
+    /* 缓存和长度指针都必须有效，缺少任一指针都不能追加数据。 */
     if ((info_area == NULL) || (info_len == NULL))
     {
         /* 防御空指针，保持心跳任务不会因异常参数越界。 */
@@ -3698,14 +3758,14 @@ static void ExternalComm_HeartbeatAppendBE16(uint8_t *info_area, uint16_t *info_
     {
         /* 按协议大端顺序写入速度、电流或泵速度。 */
         ExternalComm_WriteBE16(&info_area[*info_len], value);
-        /* 记录心跳载荷已经增加 2 字节。 */
+        /* 已写入 2 字节，下一字段从其后开始。 */
         *info_len = (uint16_t)(*info_len + 2U);
     }
 }
 
 /*
  * 函数功能：按大端格式向心跳 InforArea 追加 32 位字段。
- * 输入参数：info_area 为心跳载荷缓冲区，info_len 为当前已写入长度，value 为需要追加的 32 位值。
+ * 输入参数：info_area 为心跳数据缓存，info_len 为当前已写入字节数，value 为需要追加的 32 位值。
  * 返回参数：无。
  */
 static void ExternalComm_HeartbeatAppendDWordBE(uint8_t *info_area, uint16_t *info_len, uint32_t value)
@@ -3792,6 +3852,11 @@ static void ExternalComm_AppendPumpPressure(uint8_t *info_area,
     *info_len = (uint16_t)(*info_len + 1U);
 }
 
+/*
+ * 函数功能：把脚踏控制使能标志转换成心跳在线状态。
+ * 输入参数：无。
+ * 返回参数：jt_enable_flag 为 true 时返回 0x01 在线，否则返回 0xFF 离线。
+ */
 static uint8_t ExternalComm_FootPedalOnlineStatus(void)
 {
     /* 脚踏在线状态以 sscFOOT 写入的新控制使能为准，不再读取旧脚踏连接字段。 */
@@ -3801,7 +3866,7 @@ static uint8_t ExternalComm_FootPedalOnlineStatus(void)
         return EXTERNAL_COMM_STATUS_ONLINE;
     }
 
-    /* 两个连接字段都不是 Connect 时，心跳上报脚踏掉线。 */
+    /* 脚踏控制未使能，心跳按离线上报，不读取历史连接字段。 */
     return EXTERNAL_COMM_STATUS_OFFLINE;
 }
 
@@ -3918,15 +3983,15 @@ static uint8_t ExternalComm_GetHandleToolSource(uint8_t hand_model)
 /*
  * 函数功能：把 RFID 标签中的 k rpm 速度字节转换成工程内部速度单位。
  * 输入参数：speed_k 为 RFID 标签保存的速度字节，例如 10 表示 10000 rpm。
- * 返回参数：转换后的 16 位速度值，超过 16 位上限时钳位。
+ * 返回参数：转换后的 rpm 数值；超过 16 位范围时返回 65535。
  */
 static uint16_t ExternalComm_RfidSpeedToWorkSpeed(uint8_t speed_k)
 {
-    uint32_t speed = (uint32_t)speed_k * 1000UL; /* RFID 标签按 k rpm 保存速度，心跳兜底显示要和 handlescan 正式解析后的单位一致。 */
+    uint32_t speed = (uint32_t)speed_k * 1000UL; /* 标签中的 1 表示 1000 rpm，乘 1000 后与扫描任务保存的转速单位一致。 */
 
     if (speed > 0xFFFFUL)
     {
-        speed = 0xFFFFUL; /* 心跳扩展速度字段只有 16 位，异常大值钳位后再上报，避免高位截断。 */
+        speed = 0xFFFFUL; /* 心跳速度字段只有 16 位，超过范围时限制为 65535，避免截掉高位后变成小数值。 */
     }
 
     return (uint16_t)speed; /* 返回可直接写入心跳 16 位速度字段的值。 */
@@ -3958,7 +4023,7 @@ static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t r
         return ((uint32_t)ratio_x100 << 16); /* 高4位为F表示增速，x100倍率写入高16位。 */
     }
 
-    return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 未知方向不能混入A5 v2倍率语义，按1.00倍保护。 */
+    return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 齿轮比高 4 位既不是 0 也不是 F，无法判断增速或减速，按 1.00 倍上报。 */
 }
 
 /*
@@ -3984,7 +4049,7 @@ static uint8_t ExternalComm_RfidDirectionToHeartbeat(uint8_t raw_direction)
 /*
  * 函数功能：判断 RFID 缓存结果是否匹配当前通道和当前手柄基座类型。
  * 输入参数：channel 为 A/B 通道，handle_model 为 EEPROM Page2 识别出的基座类型，rfid_result 为 RFID 最新缓存。
- * 返回参数：true 表示可以作为心跳兜底刀具块，false 表示来源或通道不匹配。
+ * 返回参数：true 表示此 RFID 结果可用于心跳刀具数据，false 表示结果无效、来源或通道不匹配。
  */
 static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
                                                  uint8_t handle_model,
@@ -4008,7 +4073,7 @@ static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
                       (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)); /* 公共接头和 PXBA/PXBB 当前只接受 EPC 12 字节标签。 */
     }
 
-    return false; /* 普通不可拆手柄仍走 EEPROM Page3，不使用 RFID 缓存兜底。 */
+    return false; /* 普通不可拆手柄使用 EEPROM Page3，不能用 RFID 缓存代替。 */
 }
 
 /*
@@ -4018,7 +4083,7 @@ static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
  */
 static uint8_t ExternalComm_RecognizeHasBase(const ChannelrecognizeMessage_t *recognize)
 {
-    /* 识别缓存为空时不能作为心跳兜底来源。 */
+    /* 没有识别缓存时，无法据此提前显示手柄在线。 */
     if (recognize == NULL)
     {
         return 0U;
@@ -4049,7 +4114,7 @@ static uint8_t ExternalComm_HeartbeatResolveOnline(uint8_t work_online, const Ch
         return 1U;
     }
 
-    /* 插拔事件仍在队列中时，用扫描层已校验通过的基座做显示兜底。 */
+    /* 工作状态尚未更新时，若扫描任务已确认基座类型，心跳也可先显示在线。 */
     return ExternalComm_RecognizeHasBase(recognize);
 }
 
@@ -4233,8 +4298,8 @@ static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
                                                 const ChannelMemoryMessage_t *memory,
                                                 const ChannelrecognizeMessage_t *recognize)
 {
-    bool is_rfid_source; /* true 表示该通道刀具信息来自 RFID，不能按普通 EEPROM 完整规格强过滤。 */
-    uint8_t handle_model; /* 保存心跳解析出的基座型号，允许 MemoryMsg 尚未装载时使用扫描缓存兜底。 */
+    bool is_rfid_source; /* true 表示刀具来自 RFID，只要求已识别刀具类型，不要求直径和长度都非零。 */
+    uint8_t handle_model; /* 本次要上报的基座型号；MemoryMsg 未更新时可从扫描缓存读取。 */
 
     /* 通道离线时不能上报历史刀具信息，避免上位机显示已拔出的刀具头。 */
     if (online == 0U)
@@ -4265,9 +4330,9 @@ static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
 }
 
 /*
- * 函数功能：在扫描层尚未消费 RFID 结果时，从 RFID 最新缓存取心跳兜底数据。
+ * 函数功能：尝试从最近 RFID 结果补充心跳刀具数据；扫描任务必须已确认刀具类型，不能用缓存显示已移除刀具。
  * 输入参数：online 为通道在线状态，channel 为 A/B 通道，memory/recognize 为通道记忆和扫描缓存，rfid_result 保存取出的结果。
- * 返回参数：true 表示 rfid_result 可直接拼心跳刀具块，false 表示不能兜底。
+ * 返回参数：true 表示取得了可上报的 RFID 结果；false 表示当前条件不允许上报。
  */
 static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
                                                   uint8_t channel,
@@ -4289,17 +4354,17 @@ static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
 
     if ((recognize == NULL) || (recognize->tool_type == 0U))
     {
-        return false; /* 扫描层已清刀具或尚未确认刀具时，禁止用 RFID 原始缓存兜底复活旧刀具显示。 */
+        return false; /* 扫描任务尚未确认刀具，或已清除刀具类型，不能用旧 RFID 缓存重新显示刀具。 */
     }
 
     memset(rfid_result, 0, sizeof(*rfid_result)); /* 先清空输出结构，保证失败路径不会残留上一次数据。 */
-    handle_model = ExternalComm_ResolveHandleModel(memory, recognize); /* 取当前通道基座类型，支持 MemoryMsg 未装载时用扫描缓存兜底。 */
+    handle_model = ExternalComm_ResolveHandleModel(memory, recognize); /* 获取当前基座类型；通道记忆未更新时改读扫描缓存。 */
     if (Rfid_CopyLastResult(channel, rfid_result) == false)
     {
         return false; /* RFID 任务还没有读到该通道有效标签，上位机继续显示等待 RFID。 */
     }
 
-    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 只有通道和 EPC 来源都匹配时才允许兜底上报。 */
+    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 结果必须来自当前通道的有效 12 字节 EPC，不能借用另一通道的数据。 */
 }
 
 /*
@@ -4407,7 +4472,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     }
     use_recognize_tool_fields = (bool)((recognize->tool_type != 0U) &&
                                        ((memory->tool_type == 0U) ||
-                                        (memory->tool_reduction_ratio == 0U))); /* RFID 已解析而通道记忆未装载时，刀具参数用扫描缓存兜底。 */
+                                        (memory->tool_reduction_ratio == 0U))); /* 扫描任务已确认刀具，但通道记忆缺少刀具类型或倍率时，改用扫描结果。 */
     default_speed = ExternalComm_ToolDefaultSpeed(memory); /* 默认优先使用已装载的通道记忆速度。 */
     default_flow = memory->default_injection_flow; /* 默认优先使用已装载的通道记忆流量。 */
     direction = ExternalComm_HeartbeatToolDirection(memory->dir); /* 默认优先使用已装载的通道记忆方向。 */
@@ -4417,7 +4482,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
         default_speed = ExternalComm_HeartbeatDefaultSpeed(recognize); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认速度先给上位机显示。 */
         default_flow = recognize->default_injection_flow; /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的泵流量先给上位机显示。 */
         direction = ExternalComm_HeartbeatToolDirection(recognize->run_direction); /* 队列尚未装载 MemoryMsg 时，用 RFID 解析出的默认方向先给上位机显示。 */
-        reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((uint32_t)recognize->meioticratio * EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT); /* 完整倍率优先；旧整数镜像乘100后再按A5 v2上报。 */
+        reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((uint32_t)recognize->meioticratio * EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT); /* 优先用完整倍率字段；该字段为 0 时，把旧整数字段乘 100 转成 A5 v2 所需单位。 */
     }
 
     /* block byte0：通道号，1 为 A，2 为 B。 */
@@ -4448,7 +4513,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
 
 /*
  * 函数功能：在旧心跳字段末尾追加 A/B 刀具扩展信息。
- * 输入参数：info_area 为心跳载荷缓冲区，info_len 为当前已写入长度。
+ * 输入参数：info_area 为心跳数据缓存，info_len 为当前已写入字节数。
  * 返回参数：无。
  */
 static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *info_len)
@@ -4456,12 +4521,12 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     uint8_t count = 0U; /* 本轮实际要追加的通道数量。 */
     bool append_a;      /* A 通道刀具信息是否有效。 */
     bool append_b;      /* B 通道刀具信息是否有效。 */
-    bool append_a_rfid; /* A 通道扫描缓存未完成时，是否可以用 RFID 最新结果兜底。 */
-    bool append_b_rfid; /* B 通道扫描缓存未完成时，是否可以用 RFID 最新结果兜底。 */
+    bool append_a_rfid; /* A 常规刀具数据不可用时，是否通过检查取得了最新 RFID 结果。 */
+    bool append_b_rfid; /* B 常规刀具数据不可用时，是否通过检查取得了最新 RFID 结果。 */
     uint8_t online_a;   /* A 通道心跳在线状态，避免同一轮重复解析造成前后不一致。 */
     uint8_t online_b;   /* B 通道心跳在线状态，避免同一轮重复解析造成前后不一致。 */
-    RfidToolResult_t rfid_a_result; /* A 通道 RFID 兜底结果，只用于本轮心跳显示。 */
-    RfidToolResult_t rfid_b_result; /* B 通道 RFID 兜底结果，只用于本轮心跳显示。 */
+    RfidToolResult_t rfid_a_result; /* 备用的 A 通道 RFID 结果，只用于本轮心跳，不写回运行状态。 */
+    RfidToolResult_t rfid_b_result; /* 备用的 B 通道 RFID 结果，只用于本轮心跳，不写回运行状态。 */
 
     /* 参数无效时不追加扩展，保持旧心跳字段可正常发送。 */
     if ((info_area == NULL) || (info_len == NULL))
@@ -4471,19 +4536,19 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
 
     online_a = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已识别但事件未装载时，也允许上位机先显示在线。 */
     online_b = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已识别但事件未装载时，也允许上位机先显示在线。 */
-    /* 先判断 A 通道是否在线且已完成刀具识别，插拔事件排队期间允许扫描缓存兜底。 */
+    /* 检查 A 通道是否在线且刀具数据齐全；通道记忆未更新时可读扫描缓存。 */
     append_a = ExternalComm_HeartbeatToolInfoValid(online_a, &MemoryMsgA, &ChannelrecognizeMessageA);
-    /* 再判断 B 通道是否在线且已完成刀具识别，插拔事件排队期间允许扫描缓存兜底。 */
+    /* 按相同规则检查 B 通道，不借用 A 通道的识别结果。 */
     append_b = ExternalComm_HeartbeatToolInfoValid(online_b, &MemoryMsgB, &ChannelrecognizeMessageB);
-    append_a_rfid = (append_a == false) ? ExternalComm_HeartbeatGetRfidFallback(online_a, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA, &rfid_a_result) : false; /* 扫描层未写入 tool_type 时，用已解析 RFID 原始缓存兜底上报 A 刀具。 */
-    append_b_rfid = (append_b == false) ? ExternalComm_HeartbeatGetRfidFallback(online_b, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB, &rfid_b_result) : false; /* 扫描层未写入 tool_type 时，用已解析 RFID 原始缓存兜底上报 B 刀具。 */
+    append_a_rfid = (append_a == false) ? ExternalComm_HeartbeatGetRfidFallback(online_a, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA, &rfid_a_result) : false; /* 常规 A 数据不可用时再检查 RFID 结果；tool_type 为 0 时仍拒绝上报。 */
+    append_b_rfid = (append_b == false) ? ExternalComm_HeartbeatGetRfidFallback(online_b, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB, &rfid_b_result) : false; /* 常规 B 数据不可用时再检查 RFID 结果；tool_type 为 0 时仍拒绝上报。 */
 
     /* 按有效通道数量计算扩展块 count。 */
     if ((append_a != false) || (append_a_rfid != false))
     {
         ++count;
     }
-    if ((append_b != false) || (append_b_rfid != false)) /* B 有扫描结果或 RFID 兜底结果时，心跳扩展块数量加一。 */
+    if ((append_b != false) || (append_b_rfid != false)) /* B 的常规数据或备用 RFID 结果可用时，增加一个通道数据块。 */
     {
         ++count;
     }
@@ -4500,7 +4565,7 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
         return;
     }
 
-    /* 扩展头 byte0：魔术字 A5。 */
+    /* 扩展头 byte0：固定标记 A5，告诉上位机后面是刀具扩展数据。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC);
     /* 扩展头 byte1：版本号2，20字节块长度不变，仅倍率单位升级为x100。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION);
@@ -4514,7 +4579,7 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     }
     else if (append_a_rfid != false)
     {
-        ExternalComm_AppendRfidToolBlock(info_area, info_len, CHANNEL_A, &rfid_a_result); /* A 扫描层消费延迟时，只为上位机显示追加 RFID 刀具块。 */
+        ExternalComm_AppendRfidToolBlock(info_area, info_len, CHANNEL_A, &rfid_a_result); /* A 的备用 RFID 结果已通过检查，只用于本轮上位机显示。 */
     }
 
     /* B 通道有效时再追加 B 块。 */
@@ -4524,14 +4589,14 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     }
     else if (append_b_rfid != false)
     {
-        ExternalComm_AppendRfidToolBlock(info_area, info_len, CHANNEL_B, &rfid_b_result); /* B 扫描层消费延迟时，只为上位机显示追加 RFID 刀具块。 */
+        ExternalComm_AppendRfidToolBlock(info_area, info_len, CHANNEL_B, &rfid_b_result); /* B 的备用 RFID 结果已通过检查，只用于本轮上位机显示。 */
     }
 }
 
 #if (RFID_LINK_STATS_ENABLE == 1U)
 /*
  * 函数功能：向心跳末尾追加一个逻辑通道的 RFID 请求应答和确认掉线统计块。
- * 输入参数：info_area/info_len 为心跳缓存和当前长度；statistics 为统计快照，调用顺序固定为A后B。
+ * 输入参数：info_area/info_len 为心跳缓存和当前长度；statistics 为已复制的统计数据，调用顺序固定为 A 后 B。
  * 返回参数：无。
  */
 static void ExternalComm_AppendRfidStatisticsBlock(uint8_t *info_area,
@@ -4560,13 +4625,13 @@ static void ExternalComm_AppendRfidStatisticsBlock(uint8_t *info_area,
 
 /*
  * 函数功能：把主控累计的 A/B RFID 链路统计作为 A6 扩展追加到心跳最末尾。
- * 输入参数：info_area 为心跳载荷；info_len 为当前已经写入的载荷长度。
+ * 输入参数：info_area 为心跳数据缓存；info_len 为当前已经写入的字节数。
  * 返回参数：无。
  */
 static void ExternalComm_HeartbeatAppendRfidStatistics(uint8_t *info_area, uint16_t *info_len)
 {
-    RfidLinkStatistics_t statistics_a; /* 保存 A 通道本轮上报的一致统计快照。 */
-    RfidLinkStatistics_t statistics_b; /* 保存 B 通道本轮上报的一致统计快照。 */
+    RfidLinkStatistics_t statistics_a; /* 一次复制 A 通道统计数据，本轮拆分字节时不再重复读取计数。 */
+    RfidLinkStatistics_t statistics_b; /* 一次复制 B 通道统计数据，防止同一计数的高低字节来自不同次读取。 */
     const uint16_t extension_len = (uint16_t)(3U +
                                    (EXTERNAL_COMM_HEARTBEAT_RFID_STATS_CHANNEL_COUNT *
                                     EXTERNAL_COMM_HEARTBEAT_RFID_STATS_BLOCK_LEN)); /* A6头3字节加两个20字节固定顺序通道块。 */
@@ -4577,7 +4642,7 @@ static void ExternalComm_HeartbeatAppendRfidStatistics(uint8_t *info_area, uint1
         return;
     }
 
-    /* 必须一次容纳完整 A/B 扩展，空间不足时不写魔术字，避免生成残缺协议。 */
+    /* 剩余空间必须放得下 A/B 全部统计；不足时连起始标记也不写，避免上位机收到半段数据。 */
     if ((uint16_t)(*info_len + extension_len) > EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN)
     {
         return;
@@ -4624,6 +4689,11 @@ static void ExternalComm_HeartbeatAppendHandle(uint8_t *info_area,
     }
 }
 
+/*
+ * 函数功能：追加泵在线状态；在线时再追加泵类型、显示流量和压力数据，离线时只写 0xFF。
+ * 输入参数：info_area/info_len 为心跳缓存及当前字节数；pump_message 为 A 或 B 泵状态。
+ * 返回参数：无。
+ */
 static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
                                              uint16_t *info_len,
                                              const pumpMessage_t *pump_message)
@@ -4644,7 +4714,7 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
     /* 泵在线时才继续追加泵类型、泵速度和 CS1237 压力扩展字段，离线时省略这些字段。 */
     if (pump_message->online_flag)
     {
-        uint16_t display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 运行态上报压力闭环后的实际输出速度，停止态仍保留设定速度。 */
+        uint16_t display_speed = Pubinterface_GetPumpDisplaySpeed(pump_message); /* 运行时取压力控制调整后的输出设定值，停止时保留用户设置值；不是传感器测得的流量。 */
 
         /* 泵类型当前来自 CS1237 DeviceCode，协议线上按 1 字节设备类型码上传。 */
         ExternalComm_HeartbeatAppendU8(info_area, info_len, (uint8_t)(pump_message->type & 0xFFU));
@@ -4655,6 +4725,11 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
     }
 }
 
+/*
+ * 函数功能：整理 A/B 手柄、脚踏、泵和可选刀具/RFID 统计，生成 0xAA 心跳并从配置的串口发送。
+ * 输入参数：无；状态字段来自当前内存，电机转速和泵流量字段是控制设定值，电流和压力来自反馈。
+ * 返回参数：无。
+ */
 static void ExternalComm_SendHeartbeat(void)
 {
     /* heartbeat_info 保存新版心跳 InforArea，字段会随在线/运行状态动态增减。 */
@@ -4665,13 +4740,13 @@ static void ExternalComm_SendHeartbeat(void)
     uint8_t run_status;
     /* tx_len 接收心跳完整帧长度。 */
     uint16_t tx_len = 0U;
-    uint8_t handle_a_online; /* A 通道心跳在线位，允许插拔事件排队时使用扫描层兜底。 */
-    uint8_t handle_b_online; /* B 通道心跳在线位，允许插拔事件排队时使用扫描层兜底。 */
+    uint8_t handle_a_online; /* A 心跳在线标志；工作状态未更新时可依据已确认的扫描结果。 */
+    uint8_t handle_b_online; /* B 心跳在线标志；工作状态未更新时可依据已确认的扫描结果。 */
     uint8_t handle_a_raw_major; /* A 通道心跳原始主类型，优先 MemoryMsg，必要时来自扫描缓存。 */
     uint8_t handle_a_raw_minor; /* A 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
     uint8_t handle_b_raw_major; /* B 通道心跳原始主类型，优先 MemoryMsg，必要时来自扫描缓存。 */
     uint8_t handle_b_raw_minor; /* B 通道心跳原始子类型，优先 MemoryMsg，必要时来自扫描缓存。 */
-    uint8_t pump_run_bitmap;    /* 泵运行位图：bit0 表示 A 泵正在输出，bit1 表示 B 泵正在输出。 */
+    uint8_t pump_run_bitmap;    /* 泵输出标志：bit0 为 A、bit1 为 B，按在线/运行标志及输出设定值判断，不是实测转动反馈。 */
 
     handle_a_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
     handle_b_online = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已被扫描确认但事件尚未装载时，也让上位机先看到在线。 */
@@ -4703,7 +4778,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
-        /* 当前通道手柄工作速度，单位为 WorkMessage.speed_work 实际 rpm，2 字节大端；上位机可直接按 rpm 显示。 */
+        /* 当前手柄转速指令，单位 rpm，2 字节高字节在前；不是驱动实测转速。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
         /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);
@@ -4716,19 +4791,19 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendPump(heartbeat_info, &heartbeat_len, &pumpMessageB);
     /* 初始化泵运行位图，避免未运行泵仍因设定速度非 0 被上位机误判为运动。 */
     pump_run_bitmap = 0U;
-    /* A 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
+    /* A 泵在线、有运行或定时排空请求，且输出设定值大于 0 时，报告正在下发非零输出。 */
     if ((pumpMessageA.online_flag != false) &&
         ((pumpMessageA.run_flag != false) || (pumpMessageA.timingDrainage_flag != false)) &&
         (pumpMessageA.speed_output > 0U))
     {
-        pump_run_bitmap |= 0x01U; /* A 泵运行位按实际闭环输出置位，压力停泵保持 run_flag 时也不会误报正在转。 */
+        pump_run_bitmap |= 0x01U; /* 置 A 输出标志；压力控制把输出降为 0 时，即使 run_flag 保留也不会置位。 */
     }
-    /* B 泵只有在线且 run_flag 置位时才认为正在输出，用于压力日志区分静止/运动。 */
+    /* B 泵使用相同条件：在线、有运行或排空请求，并且输出设定值大于 0。 */
     if ((pumpMessageB.online_flag != false) &&
         ((pumpMessageB.run_flag != false) || (pumpMessageB.timingDrainage_flag != false)) &&
         (pumpMessageB.speed_output > 0U))
     {
-        pump_run_bitmap |= 0x02U; /* B 泵同样以上一周期实际输出速度为准，保证上位机状态和真实下发一致。 */
+        pump_run_bitmap |= 0x02U; /* 置 B 输出标志，依据泵任务最近更新的输出设定值，不只看用户设置流量。 */
     }
     /* 在 A/B 泵压力字段之后追加运行位图，旧上位机最多忽略该字节，新上位机用于压力日志导出。 */
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);
@@ -4853,11 +4928,16 @@ static uint16_t ExternalComm_RxFifoSkip(uint16_t skip_len)
     return actual_len;
 }
 
+/*
+ * 函数功能：复制接收缓存中的一段数据，不移动读指针，也不移除原数据。
+ * 输入参数：skip_count 为相对当前读位置的偏移；data 为输出缓存；data_len 为要复制的字节数。
+ * 返回参数：复制完成返回 1；指针为空、长度为 0 或接收数据不足时返回 0。
+ */
 static uint8_t ExternalComm_RxFifoPeek(uint16_t skip_count, uint8_t *data, uint16_t data_len)
 {
     /* full 是 FIFO 当前已有数据，必须覆盖 skip_count 和目标读取长度。 */
     uint16_t full = ExternalComm_RxFifoFull();
-    /* index 是本次窥探使用的临时读索引，不会改变真实读指针。 */
+    /* index 只记录本次复制位置，读取过程中不改变接收缓存的实际读指针。 */
     uint16_t index;
     /* copied 是已经复制到目标缓冲的字节数。 */
     uint16_t copied = 0U;
@@ -4868,13 +4948,13 @@ static uint8_t ExternalComm_RxFifoPeek(uint16_t skip_count, uint8_t *data, uint1
         return 0U;
     }
 
-    /* FIFO 中数据不足时不能窥探，调用者应等待下一包补齐。 */
+    /* 缓存尚未包含所需的全部字节，先返回，等待下一包补齐后再读。 */
     if (full < (uint16_t)(skip_count + data_len))
     {
         return 0U;
     }
 
-    /* 从真实读指针加偏移位置开始读，支持前面已经有噪声但暂不消费的场景。 */
+    /* 从读指针后 skip_count 字节开始复制，前面即使有噪声也暂不移除。 */
     index = (uint16_t)(s_rx_fifo.read_index + skip_count);
     /* 偏移跨越尾部时回绕。 */
     if (index >= EXTERNAL_COMM_RX_FIFO_SIZE)
@@ -4901,6 +4981,11 @@ static uint8_t ExternalComm_RxFifoPeek(uint16_t skip_count, uint8_t *data, uint1
     return 1U;
 }
 
+/*
+ * 函数功能：在接收缓存中查找指定字节序列，用于定位正式协议帧头，不移除缓存数据。
+ * 输入参数：pattern/pattern_len 为要查找的字节及长度；start_offset 为起始偏移；found_offset 接收找到的位置。
+ * 返回参数：找到返回 1；未找到、数据不足或参数错误返回 0。
+ */
 static uint8_t ExternalComm_RxFifoFind(const uint8_t *pattern,
                                        uint16_t pattern_len,
                                        uint16_t start_offset,
@@ -4908,11 +4993,11 @@ static uint8_t ExternalComm_RxFifoFind(const uint8_t *pattern,
 {
     /* full 是可搜索数据长度，搜索范围不能超过当前 FIFO 已有数据。 */
     uint16_t full = ExternalComm_RxFifoFull();
-    /* offset 是当前候选匹配起点。 */
+    /* offset 是本次尝试匹配帧头的缓存位置。 */
     uint16_t offset;
     /* idx 是模式串内部比较下标。 */
     uint16_t idx;
-    /* byte 保存从 FIFO 中窥探出的单字节。 */
+    /* byte 暂存从缓存复制出的一个字节，供帧头比较使用。 */
     uint8_t byte;
 
     /* 参数不完整时不能搜索。 */
@@ -4929,13 +5014,13 @@ static uint8_t ExternalComm_RxFifoFind(const uint8_t *pattern,
 
     /* 默认输出 0，避免调用者在失败路径读到旧值。 */
     *found_offset = 0U;
-    /* 逐个候选偏移查找帧头 D7 CA F8 F1。 */
+    /* 从 start_offset 开始逐字节向后找，比较是否为完整的 D7 CA F8 F1 帧头。 */
     for (offset = start_offset; offset <= (uint16_t)(full - pattern_len); ++offset)
     {
         /* 先假设当前偏移匹配，遇到任何字节不等就跳出。 */
         for (idx = 0U; idx < pattern_len; ++idx)
         {
-            /* 从 FIFO 当前候选位置窥探一个字节，不移动真实读指针。 */
+            /* 读取当前要比较的一个字节，但不移动接收缓存读指针。 */
             if (ExternalComm_RxFifoPeek((uint16_t)(offset + idx), &byte, 1U) == 0U)
             {
                 return 0U;
@@ -4958,6 +5043,11 @@ static uint8_t ExternalComm_RxFifoFind(const uint8_t *pattern,
     return 0U;
 }
 
+/*
+ * 函数功能：把本次 DMA 接收数据追加到软件缓存；空间不足时丢弃旧缓存，再保留本次数据。
+ * 输入参数：data 为本次接收数据；data_len 为字节数。
+ * 返回参数：无。
+ */
 static void ExternalComm_WriteRxChunk(const uint8_t *data, uint16_t data_len)
 {
     /* written 保存本次实际写入 FIFO 的字节数，用于判断是否发生接收拥塞。 */
@@ -4978,7 +5068,7 @@ static void ExternalComm_WriteRxChunk(const uint8_t *data, uint16_t data_len)
 
     /* 先尝试把整个 DMA 空闲包追加到软件 FIFO，保留粘包和半包。 */
     written = ExternalComm_RxFifoWrite(data, data_len);
-    /* FIFO 空间足够时直接返回，后续由 ExternalComm_ProcessRxFifo() 按帧消费。 */
+    /* 本次数据已完整存入，后续由 ExternalComm_ProcessRxFifo() 逐帧解析和移除。 */
     if (written == data_len)
     {
         return;
@@ -5041,7 +5131,7 @@ static uint8_t ExternalComm_IsKnownDownlinkFunction(uint8_t fun_code)
 }
 
 /*
- * 函数功能：校验正式协议首次外控申请是否符合三帧确认所需的固定字段和8字节身份内容。
+ * 函数功能：检查是否为正式协议登录申请：固定字段正确且授权数据为 8 字节；本函数不比较授权数据内容。
  * 输入参数：frame指向已经通过帧头、长度、帧尾和CRC校验的完整正式协议帧。
  * 返回参数：满足固定下行申请格式返回1，否则返回0。
  */
@@ -5056,13 +5146,13 @@ static uint8_t ExternalComm_IsFormalApplyCandidate(const ExternalCommFrame_t *fr
             (frame->fun_code == EXTERNAL_COMM_DOWN_APPLY_CONTROL) &&
             (frame->area_code == EXTERNAL_COMM_AREA_NONE) &&
             (frame->info_code == EXTERNAL_COMM_INFO_NONE) &&
-            (frame->info_len == EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN)) ? 1U : 0U; /* 三帧必须具有完全相同的申请字段和8字节授权区。 */
+            (frame->info_len == EXTERNAL_COMM_CONFIRM_IDENTITY_MAX_LEN)) ? 1U : 0U; /* 此处只检查申请格式；三帧授权内容是否一致由后续确认函数比较。 */
 }
 
 /*
  * 函数功能：判断正式协议帧是否为未连接状态也允许执行的全局急停。
  * 输入参数：frame指向已经通过完整协议校验的正式帧。
- * 返回参数：严格匹配0x04/0xFF且无载荷的下行急停返回1，否则返回0。
+ * 返回参数：功能码 0x04、区域码 0xFF、数据区为空且其它固定字段正确时返回 1，否则返回 0。
  */
 static uint8_t ExternalComm_IsFormalEmergencyStop(const ExternalCommFrame_t *frame)
 {
@@ -5079,7 +5169,7 @@ static uint8_t ExternalComm_IsFormalEmergencyStop(const ExternalCommFrame_t *fra
 }
 
 /*
- * 函数功能：在业务分发前根据帧方向、三帧确认、协议来源和急停例外决定正式帧处理方式。
+ * 函数功能：先检查命令方向和登录状态，再决定忽略、仅执行，还是执行并重置断线计时；全局急停不要求先登录。
  * 输入参数：frame指向已经通过帧头、长度、帧尾和CRC校验的正式协议帧。
  * 返回参数：返回忽略、只分发或分发并刷新链路三种动作。
  */
@@ -5112,28 +5202,28 @@ static ExternalCommFormalFrameAction_t ExternalComm_ClassifyFormalFrame(const Ex
                                             frame->info_area,
                                             frame->info_len) != 0U)
         {
-            return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 第三帧或已确认同源保活可以进入原申请及控制权仲裁。 */
+            return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 已收齐三帧，或当前已使用正式协议连接，可以继续检查并申请控制权。 */
         }
-        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 第一、第二帧保持静默，不回ACK、不显示图标、不取得owner。 */
+        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 尚未收齐三帧，不应答、不显示图标，也不申请控制权。 */
     }
 
     if (s_confirmed_protocol_source != EXTERNAL_COMM_PROTOCOL_SOURCE_FORMAL)
     {
-        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 未确认或简易协议会话期间，非急停正式命令全部静默拒绝。 */
+        return EXTERNAL_COMM_FORMAL_FRAME_IGNORE; /* 尚未登录，或当前使用简易协议时，忽略正式协议非急停命令，不执行也不应答。 */
     }
 
     if (ExternalComm_IsKnownDownlinkFunction(frame->fun_code) != 0U)
     {
-        return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 已确认正式会话的已知下行命令执行并刷新2秒/10秒看门狗。 */
+        return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK; /* 正式协议已登录且功能码已定义，执行命令并重新开始 2 秒停机、10 秒退出计时。 */
     }
 
     return EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_ONLY; /* 未知功能仍返回原失败ACK，但不能借此刷新在线状态。 */
 }
 
 /*
- * 函数功能：从共用 UART2 FIFO 中选择最早的旧协议或简易协议候选帧并处理一步。
+ * 函数功能：从 UART2 接收缓存中找最早的正式或简易帧，处理一帧或跳过一段无效数据。
  * 输入参数：无，直接访问本任务私有 FIFO。
- * 返回参数：消费或跳过数据返回 1；半帧、无数据或 EEPROM 命令需要留到下一周期时返回 0。
+ * 返回参数：返回 1 表示本周期可以继续检查下一帧；返回 0 表示先暂停，可能在等待更多数据或下一周期 EEPROM 处理机会。
  */
 static uint8_t ExternalComm_ProcessRxFifoFrame(void)
 {
@@ -5157,7 +5247,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     ExternalCommParseResult_t parse_result;
     /* is_eeprom_command 标记当前合法帧是否需要占用本周期唯一 EEPROM 命令额度。 */
     uint8_t is_eeprom_command;
-    /* frame_action 保存严格连接门禁对当前正式帧给出的处理方式。 */
+    /* frame_action 保存方向和登录检查结果，决定是否执行命令、是否重置断线计时。 */
     ExternalCommFormalFrameAction_t frame_action;
 
     /* FIFO 尚未初始化时没有可处理数据。 */
@@ -5173,7 +5263,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         return 0U;
     }
 
-    /* 两种协议只在共用 FIFO 边界比较帧头，具体简易协议解析仍完全留在独立文件。 */
+    /* 先分别查找两种协议的帧头；简易协议的具体格式检查仍由独立模块完成。 */
     legacy_head_found = ExternalComm_RxFifoFind(s_external_comm_frame_head,
                                                 EXTERNAL_COMM_FRAME_HEAD_SIZE,
                                                 0U,
@@ -5182,13 +5272,13 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
                                    ExternalComm_RxFifoPeek,
                                    &simple_head_offset);
 
-    /* 简易帧头比旧协议更早时优先处理，避免旧协议载荷内偶然字节被跨帧误识别。 */
+    /* 两种帧头都找到时，先处理位置靠前的帧，避免把一帧内部的数据当成另一帧起点。 */
     if ((simple_probe != EXT_SIMPLE_PROBE_NOT_FOUND) &&
         ((legacy_head_found == 0U) || (simple_head_offset < head_offset)))
     {
         if (simple_head_offset > 0U)
         {
-            (void)ExternalComm_RxFifoSkip(simple_head_offset); /* 只清掉简易帧头前的噪声，候选帧保持完整。 */
+            (void)ExternalComm_RxFifoSkip(simple_head_offset); /* 只移除简易帧头前的噪声，保留待检查的完整帧。 */
         }
 
         if (simple_probe == EXT_SIMPLE_PROBE_INCOMPLETE)
@@ -5200,12 +5290,12 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
                                     s_frame_buf,
                                     EXTERNAL_COMM_SIMPLE_FRAME_SIZE) == 0U)
         {
-            return 0U; /* FIFO 数据不足时不移动读指针，防止半帧被提前消费。 */
+            return 0U; /* 字节不够时保留原数据和读位置，等待后续数据补齐。 */
         }
 
         if (ExtSimple_HandleFrame(s_frame_buf, EXTERNAL_COMM_SIMPLE_FRAME_SIZE) != 0U)
         {
-            (void)ExternalComm_RxFifoSkip(EXTERNAL_COMM_SIMPLE_FRAME_SIZE); /* 合法结构固定消费 6 字节。 */
+            (void)ExternalComm_RxFifoSkip(EXTERNAL_COMM_SIMPLE_FRAME_SIZE); /* 帧格式完整且已处理，从缓存移除这 6 字节。 */
         }
         else
         {
@@ -5226,7 +5316,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         return 0U;
     }
 
-    /* 帧头前有噪声或旧坏帧残留时先跳过，保证 FIFO 读指针正对候选帧头。 */
+    /* 先移除正式帧头前的噪声或坏帧残留，让读指针指向待检查帧的开头。 */
     if (head_offset > 0U)
     {
         (void)ExternalComm_RxFifoSkip(head_offset);
@@ -5240,7 +5330,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         return 0U;
     }
 
-    /* 只窥探 Length 两个字节，不移动读指针，避免半帧被提前消费。 */
+    /* 先复制 Length 的两个字节判断整帧长度，暂不移除缓存中的任何数据。 */
     if (ExternalComm_RxFifoPeek(EXTERNAL_COMM_FRAME_LENGTH_OFFSET,
                                 length_bytes,
                                 sizeof(length_bytes)) == 0U)
@@ -5263,7 +5353,7 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         return 0U;
     }
 
-    /* 把候选整帧取到线性缓存中，继续复用已经验证过的协议解析和 CRC 校验逻辑。 */
+    /* 将待检查的整帧复制到连续数组，再交给原协议函数检查帧尾和 CRC。 */
     if (ExternalComm_RxFifoPeek(0U, s_frame_buf, frame_len) == 0U)
     {
         return 0U;
@@ -5276,15 +5366,15 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         frame_action = ExternalComm_ClassifyFormalFrame(&frame); /* CRC通过后再校验方向、三帧会话来源和未连接急停例外。 */
         if (frame_action == EXTERNAL_COMM_FORMAL_FRAME_IGNORE)
         {
-            (void)ExternalComm_RxFifoSkip(frame_len); /* 上传回灌、未满三帧和未确认业务帧均完整消费，避免同一帧反复参与确认。 */
-            return 1U; /* 静默忽略本帧，不点图标、不回ACK、不占用EEPROM额度。 */
+            (void)ExternalComm_RxFifoSkip(frame_len); /* 不执行的完整帧也要从缓存移除，避免同一份登录帧被重复计数。 */
+            return 1U; /* 忽略本帧，不点亮图标、不应答，也不占用本周期 EEPROM 命令次数。 */
         }
 
-        is_eeprom_command = ExternalComm_IsEepromCommand(frame.fun_code); /* 只对经过连接门禁且准备分发的EEPROM帧执行限流。 */
+        is_eeprom_command = ExternalComm_IsEepromCommand(frame.fun_code); /* 只有登录检查通过并准备执行的 EEPROM 命令，才计入每周期最多一条的限制。 */
         if ((is_eeprom_command != 0U) &&
             (s_eeprom_command_processed_this_cycle != 0U))
         {
-            return 0U; /* 本周期已有 EEPROM 命令时保留整帧，下一个 10ms 周期再消费，避免连续阻塞共享任务。 */
+            return 0U; /* 本周期已处理过 EEPROM 命令，保留本帧到下个 10ms 周期，避免连续读写拖慢其它任务。 */
         }
 
         if (is_eeprom_command != 0U)
@@ -5294,26 +5384,31 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
 
         if (frame_action == EXTERNAL_COMM_FORMAL_FRAME_DISPATCH_AND_LINK)
         {
-            ExternalComm_NotifyLink(); /* 只有三帧确认后的同源已知下行命令才刷新图标和2秒/10秒链路计时。 */
+            ExternalComm_NotifyLink(); /* 当前正式协议连接允许此帧保持在线，刷新图标并清零断线计时。 */
         }
-        /* 消费当前完整帧，后续循环会继续处理同一 FIFO 里的下一帧。 */
+        /* 从缓存移除当前完整帧，下一轮循环从后面的新帧开始。 */
         (void)ExternalComm_RxFifoSkip(frame_len);
         /* 按 FunCode 分发下行命令，业务层仍然只看到一帧完整协议数据。 */
         ExternalComm_DispatchFrame(&frame);
         return 1U;
     }
 
-    /* 候选帧 CRC 或帧尾不合法时只跳过帧头首字节，尽量保住后续可能粘连的合法帧。 */
+    /* 帧尾或 CRC 错误时只移除开头 1 字节，再重新找帧头，尽量保留后面可能完整的帧。 */
     (void)ExternalComm_RxFifoSkip(1U);
     return 1U;
 }
 
+/*
+ * 函数功能：连续处理缓存中已收全的帧，达到次数上限、数据不足或 EEPROM 需等待时结束本轮。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_ProcessRxFifo(void)
 {
     /* step_count 限制单次任务处理次数，避免异常噪声导致 10ms 任务被长期占用。 */
     uint16_t step_count = 0U;
 
-    /* 只要本轮处理有推进，就继续尝试吐出下一帧，实现一包多帧连续分发。 */
+    /* 每处理完一帧或跳过一段错误数据，就继续检查下一帧，但不能超过本周期次数上限。 */
     while (step_count < EXTERNAL_COMM_RX_FIFO_MAX_STEPS)
     {
         /* 返回 0 表示暂无完整帧，或下一条 EEPROM 命令需留到下个 10ms 周期，本周期处理结束。 */
@@ -5321,17 +5416,22 @@ static void ExternalComm_ProcessRxFifo(void)
         {
             break;
         }
-        /* 每成功消费或跳过一段异常数据，都累计一次循环次数。 */
+        /* 成功处理一帧或跳过无效数据后，已用处理次数增加 1。 */
         ++step_count;
     }
 }
 
+/*
+ * 函数功能：取出 UART2 本次 DMA 接收数据并加入软件缓存，再处理缓存中的完整帧。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void ExternalComm_ProcessReceive(void)
 {
     /* recv_len 保存 UART2 DMA 空闲包长度。 */
     uint16_t recv_len;
 
-    /* 从 UART2 DMA 缓存取出一包已经静默稳定的数据。 */
+    /* 取出 UART2 检测到接收空闲后保存的一包数据；它可能包含多帧，也可能只是一帧的一部分。 */
     recv_len = Uart2_DMARecvDataPeek(s_rx_buf);
     /* 有新空闲包时先追加到软件 FIFO，不在 DMA 临时包里直接只解析第一帧。 */
     if (recv_len > 0U)
@@ -5344,6 +5444,11 @@ static void ExternalComm_ProcessReceive(void)
     ExternalComm_ProcessRxFifo();
 }
 
+/*
+ * 函数功能：周期处理屏幕退出、串口命令、断线保护、EEPROM 批量操作，以及报警和心跳上传。
+ * 输入参数：event 为调度器事件值，当前未使用。
+ * 返回参数：无。
+ */
 static void ExternalCommTaskFunc(uint32_t event)
 {
     uint8_t batch_frame_sent; /* 记录本周期批量服务是否已占用 UART2，避免紧接着叠加心跳帧。 */
@@ -5363,7 +5468,7 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 每 10ms 检查一次 UART2 是否收到完整空闲包。 */
     ExternalComm_ProcessReceive();
 
-    /* 轮询驱动参数维护事务最终结果；无事务时立即返回，不增加UART2负载。 */
+    /* 检查驱动调参是否已有最终结果；没有正在等待的请求时不上传数据。 */
     ExternalComm_ServiceDriverParameter();
 
     /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
@@ -5382,7 +5487,7 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
     ExternalComm_SendAlarmInfoIfChanged();
 
-    /* 显式订阅后独立按50ms上传电机命令/反馈快照；未订阅时该服务不构造任何帧。 */
+    /* 订阅开启时每 50ms 上传最近电机命令和反馈；未订阅时不生成状态帧。 */
     ExternalComm_ServiceMotorTelemetry();
 
     /* 累加心跳计时，任务周期由 EXTERNAL_COMM_TASK_PERIOD_MS 定义。 */
@@ -5398,9 +5503,14 @@ static void ExternalCommTaskFunc(uint32_t event)
     }
 }
 
+/*
+ * 函数功能：清除外控登录记录，准备 UART2 接收缓存，并创建每 10ms 执行的外控任务。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 void ExternalComm_Init(void)
 {
-    /* 上电初始化显式清除协议来源和候选，保证正式/简易协议都必须从第一帧开始确认。 */
+    /* 清除已登录协议和未完成的申请计数，两种协议都必须重新收齐三帧才能连接。 */
     ExternalComm_ResetProtocolSession();
     /* 初始化外控 RX FIFO，保证任务第一次运行前已经准备好接收粘包/半包数据。 */
     ExternalComm_RxFifoInit();

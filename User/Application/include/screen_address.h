@@ -1,6 +1,9 @@
 #ifndef SCREEN_ADDRESS_H
 #define SCREEN_ADDRESS_H
 
+/* 屏幕地址表：VP 用来写数值或图片编号，SP 用来改控件属性（如颜色、显示地址）。
+ * 这些十六进制值必须与屏幕工程一致，不是主控内存地址；改屏幕资源时需同步检查。
+ */
 /* 启动页页号：上电等待期固定停留在 EX8 启动页，避免屏幕复位后沿用上一次背景页。 */
 #define UIDP_LCD_PAGE_STARTUP 0U
 /* 脚踏定标页页号：启动页专用入口触发后进入该页面，正常业务任务尚未创建。 */
@@ -39,7 +42,9 @@
 #define UIDP_LCD_VP_CONTROL_TOUCH 0x1415U
 /* 外部控制VP：用于显示外部控制或预值通信状态图标。 */
 #define UIDP_LCD_VP_CONTROL_EXTERNAL 0x1416U
-/* 屏幕安装镜像时开启 A/B 泵显示交换：1=逻辑 A 写到屏幕 B 位，0=保持原始 A/B 位置。 */
+/* A/B 泵的屏幕位置交换开关：0=不交换，1=交换两侧显示及触摸按键。
+ * 只改变屏幕位置，不交换泵驱动串口、压力传感器或实际 A/B 泵。修改后需重新编译主控。
+ */
 #ifndef UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE
 #define UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE 0U
 #endif
@@ -55,13 +60,13 @@
 #else
 #define UIDP_LCD_VP_PUMP_B_TYPE 0x1418U /* 镜像关闭：逻辑 B 泵类型写到原 B 泵位置。 */
 #endif
-/* A泵档位区VP：用于刷新A泵蓝色流量可视化档位。 */
+/* A 泵档位图片区地址：用蓝色格数表示流量设置大小。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_A_GEAR_AREA 0x1420U /* 镜像开启：逻辑 A 泵档位写到屏幕 B 泵档位区。 */
 #else
 #define UIDP_LCD_VP_PUMP_A_GEAR_AREA 0x1419U /* 镜像关闭：逻辑 A 泵档位写到原 A 泵档位区。 */
 #endif
-/* B泵档位区VP：用于刷新B泵蓝色流量可视化档位。 */
+/* B 泵档位图片区地址：用蓝色格数表示流量设置大小。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_B_GEAR_AREA 0x1419U /* 镜像开启：逻辑 B 泵档位写到屏幕 A 泵档位区。 */
 #else
@@ -73,51 +78,51 @@
 #else
 #define UIDP_LCD_VP_PUMP_A_PLUS 0x1421U /* 镜像关闭：逻辑 A 泵加号写到原 A 泵加号位。 */
 #endif
-/* B泵启停VP：当前代码用于刷新B泵启停按钮，后续地址校正时统一从此宏调整。 */
+/* B 泵启停按钮的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_B_BUTTON 0x1427U /* 镜像开启：逻辑 B 泵启停按钮写到屏幕 A 泵按钮位。 */
 #else
 #define UIDP_LCD_VP_PUMP_B_BUTTON 0x1428U /* 镜像关闭：逻辑 B 泵启停按钮写到原 B 泵按钮位。 */
 #endif
-/* B泵加号VP：当前代码用于刷新B泵上调按钮，后续地址校正时统一从此宏调整。 */
+/* B 泵加号按钮的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_B_PLUS 0x1421U /* 镜像开启：逻辑 B 泵加号写到屏幕 A 泵加号位。 */
 #else
 #define UIDP_LCD_VP_PUMP_B_PLUS 0x1422U /* 镜像关闭：逻辑 B 泵加号写到原 B 泵加号位。 */
 #endif
-/* A泵减号VP：当前代码用于刷新A泵下调按钮，后续地址校正时统一从此宏调整。 */
+/* A 泵减号按钮的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_A_MINUS 0x1424U /* 镜像开启：逻辑 A 泵减号写到屏幕 B 泵减号位。 */
 #else
 #define UIDP_LCD_VP_PUMP_A_MINUS 0x1423U /* 镜像关闭：逻辑 A 泵减号写到原 A 泵减号位。 */
 #endif
-/* B泵减号VP：当前代码用于刷新B泵下调按钮，后续地址校正时统一从此宏调整。 */
+/* B 泵减号按钮的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_B_MINUS 0x1423U /* 镜像开启：逻辑 B 泵减号写到屏幕 A 泵减号位。 */
 #else
 #define UIDP_LCD_VP_PUMP_B_MINUS 0x1424U /* 镜像关闭：逻辑 B 泵减号写到原 B 泵减号位。 */
 #endif
-/* A泵单位VP：当前代码用于刷新A泵流量单位，后续地址校正时统一从此宏调整。 */
+/* A 泵流量单位的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_A_UNIT 0x1426U /* 镜像开启：逻辑 A 泵单位写到屏幕 B 泵单位位。 */
 #else
 #define UIDP_LCD_VP_PUMP_A_UNIT 0x1425U /* 镜像关闭：逻辑 A 泵单位写到原 A 泵单位位。 */
 #endif
-/* B泵单位VP：当前代码用于刷新B泵流量单位，后续地址校正时统一从此宏调整。 */
+/* B 泵流量单位的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_B_UNIT 0x1425U /* 镜像开启：逻辑 B 泵单位写到屏幕 A 泵单位位。 */
 #else
 #define UIDP_LCD_VP_PUMP_B_UNIT 0x1426U /* 镜像关闭：逻辑 B 泵单位写到原 B 泵单位位。 */
 #endif
-/* 报警提示VP：当前代码用于刷新报警提示图片，后续地址校正时统一从此宏调整。 */
+/* 报警提示图片的地址，图片编号由报警类型决定。 */
 #define UIDP_LCD_VP_ALARM_TIP 0x1429U
-/* A泵启停旧VP：当前代码仍写入A泵启停按钮的历史地址，暂不在本轮修正。 */
+/* A 泵启停按钮的图片地址。 */
 #if (UIDP_PUMP_DISPLAY_AB_MIRROR_SWAP_ENABLE == 1U)
 #define UIDP_LCD_VP_PUMP_A_BUTTON 0x1428U /* 镜像开启：逻辑 A 泵启停按钮写到屏幕 B 泵按钮位。 */
 #else
 #define UIDP_LCD_VP_PUMP_A_BUTTON 0x1427U /* 镜像关闭：逻辑 A 泵启停按钮写到原 A 泵按钮位。 */
 #endif
-/* 主运行页触控工作 VP：用于 0x5520 保活触发的触控运行显示。 */
+/* 主运行页触控工作区地址：显示触控界面；屏幕持续发送 0x5520 表示用户仍在按住运行。 */
 #define UIDP_LCD_VP_TOUCH_WORK 0x1430U
 /* 转速数值VP：用于写入主电机转速数值。 */
 #define UIDP_LCD_VP_SPEED_VALUE 0x3420U
@@ -151,11 +156,11 @@
 #define UIDP_LCD_VP_PEDAL_LEFT_AD_VALUE 0x3730U
 /* 脚踏标定右实时AD值VP：用于显示右侧脚踏实时采样值。 */
 #define UIDP_LCD_VP_PEDAL_RIGHT_AD_VALUE 0x3760U
-/* 脚踏标定低位系数VP：用于显示标定页面底部低位系数。 */
+/* 脚踏定标页左实体键调试值地址：每收到一次有效按键就在 0 和 1 之间切换。 */
 #define UIDP_LCD_VP_PEDAL_LOW_KEY_VALUE 0x3700U
-/* 脚踏标定中位系数VP：用于显示标定页面底部中位系数。 */
+/* 脚踏定标页中实体键调试值地址：每收到一次有效按键就在 0 和 1 之间切换。 */
 #define UIDP_LCD_VP_PEDAL_MID_KEY_VALUE 0x3710U
-/* 脚踏标定高位系数VP：用于显示标定页面底部高位系数。 */
+/* 脚踏定标页右实体键调试值地址：每收到一次有效按键就在 0 和 1 之间切换。 */
 #define UIDP_LCD_VP_PEDAL_HIGH_KEY_VALUE 0x3720U
 /* 刀具规格文本VP：用于写入刀具长度、直径和角度文本。 */
 #define UIDP_LCD_VP_TOOL_SPEC_TEXT 0x4200U
@@ -192,29 +197,29 @@
 #define UIDP_LCD_SP_PUMP_B_OUTPUT_COLOR 0x9553U /* 镜像关闭：逻辑 B 泵输出颜色保持原 B 泵颜色控件。 */
 #endif
 
-/* 旧屏A手柄缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏 A 手柄地址：LCD 用它记录已发送的图标状态，不是新屏 A 手柄地址。 */
 #define UIDP_LCD_LEGACY_VP_HANDLE_A_CACHE 0x1500U
-/* 旧屏B手柄缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏 B 手柄地址：LCD 用它记录已发送的图标状态，不是新屏 B 手柄地址。 */
 #define UIDP_LCD_LEGACY_VP_HANDLE_B_CACHE 0x1501U
-/* 旧屏A泵区域缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏 A 泵区域地址：LCD 用它记录该区域的图标显示状态。 */
 #define UIDP_LCD_LEGACY_VP_PUMP_A_CACHE 0x1502U
-/* 旧屏B泵区域缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏 B 泵区域地址：LCD 用它记录该区域的图标显示状态。 */
 #define UIDP_LCD_LEGACY_VP_PUMP_B_CACHE 0x1506U
-/* 旧屏转速栏缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏转速栏地址：LCD 用它记录转速栏是否显示、是否可用。 */
 #define UIDP_LCD_LEGACY_VP_SPEED_AREA_CACHE 0x1600U
-/* 旧屏频率或档位栏缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏频率或档位栏地址：LCD 用它记录栏目的可用状态或所选档位。 */
 #define UIDP_LCD_LEGACY_VP_FREQ_GEAR_CACHE 0x1601U
-/* 旧屏方向组合缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏方向组合图地址：LCD 用它记录所选方向及往复按钮是否显示。 */
 #define UIDP_LCD_LEGACY_VP_DIRECTION_GROUP_CACHE 0x1602U
-/* 旧屏往复角度缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏往复角度地址：LCD 用它记录角度图片是否显示。 */
 #define UIDP_LCD_LEGACY_VP_OSC_ANGLE_CACHE 0x1606U
 /* 旧屏正转方向缓存VP：已停用分支保留宏名，方便后续追溯历史地址。 */
 #define UIDP_LCD_LEGACY_VP_DIR_FORWARD_CACHE 0x1310U
 /* 旧屏往复方向缓存VP：已停用分支保留宏名，方便后续追溯历史地址。 */
 #define UIDP_LCD_LEGACY_VP_DIR_OSC_CACHE 0x1311U
-/* 旧屏脚控模式缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏脚控图标地址：LCD 用它记录禁用、可选或选中状态。 */
 #define UIDP_LCD_LEGACY_VP_CONTROL_FOOT_CACHE 0x1312U
-/* 旧屏手控模式缓存VP：LCD底层图片状态缓存使用，保留历史地址语义不参与本轮新屏校正。 */
+/* 旧屏手控图标地址：LCD 用它记录禁用、可选或选中状态。 */
 #define UIDP_LCD_LEGACY_VP_CONTROL_HANDLE_CACHE 0x1313U
 /* 旧屏反转方向缓存VP：已停用分支保留宏名，方便后续追溯历史地址。 */
 #define UIDP_LCD_LEGACY_VP_DIR_REVERSE_CACHE 0x1316U

@@ -9,13 +9,22 @@ static const uint8_t s_external_comm_head[4] = {0xD7U, 0xCAU, 0xF8U, 0xF1U};
 /* 固定 4 字节帧尾，对应协议文档中的 BF C6 BC C4。 */
 static const uint8_t s_external_comm_tail[4] = {0xBFU, 0xC6U, 0xBCU, 0xC4U};
 
-/* 协议里的 16 位字段均按高字节在前处理，和示例 0x0B 0xB8 = 3000 保持一致。 */
+/*
+ * 函数功能：把高字节在前的两个字节合成 16 位数值，例如 0x0B 0xB8 得到 3000。
+ * 输入参数：data 指向至少 2 字节的数据。
+ * 返回参数：合成后的 16 位数值。
+ */
 static uint16_t ExternalComm_ReadBE16(const uint8_t *data)
 {
     /* data[0] 是高字节，左移 8 位后与低字节合成 16 位数值。 */
     return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
 
+/*
+ * 函数功能：把 16 位数值拆成两个字节，高字节写在前面。
+ * 输入参数：data 指向至少 2 字节的输出空间；value 为待写入数值。
+ * 返回参数：无。
+ */
 static void ExternalComm_WriteBE16(uint8_t *data, uint16_t value)
 {
     /* 先写高字节，保证 Length 和 CRC 在串口线上按协议顺序发送。 */
@@ -24,12 +33,17 @@ static void ExternalComm_WriteBE16(uint8_t *data, uint16_t value)
     data[1] = (uint8_t)(value & 0xFFU);
 }
 
+/*
+ * 函数功能：逐字节比较接收内容与固定帧头或帧尾。
+ * 输入参数：data 为待检查数据；pattern 为固定字节；len 为比较字节数，两处数据都必须足够长。
+ * 返回参数：全部相同返回 1，任一字节不同返回 0。
+ */
 static uint8_t ExternalComm_MatchBytes(const uint8_t *data, const uint8_t *pattern, uint16_t len)
 {
     /* i 逐字节扫描，用于比较帧头和帧尾固定字节。 */
     uint16_t i;
 
-    /* len 由调用方传入，当前只用于 4 字节帧头/帧尾，也保留通用性。 */
+    /* 只比较调用方指定的 len 字节，当前帧头和帧尾都使用 4 字节。 */
     for (i = 0U; i < len; ++i)
     {
         /* 任意一个字节不同就认为匹配失败，解析器继续找下一个帧头。 */
@@ -43,11 +57,16 @@ static uint8_t ExternalComm_MatchBytes(const uint8_t *data, const uint8_t *patte
     return 1U;
 }
 
+/*
+ * 函数功能：在接收数据中找到帧头，检查整帧长度、帧尾和 CRC，再取出命令字段。
+ * 输入参数：data 为接收数据；data_len 为字节数；frame 接收解析结果。
+ * 返回参数：成功返回 EXTERNAL_COMM_PARSE_OK；失败返回帧未收全、长度错误、帧尾错误等原因。
+ */
 ExternalCommParseResult_t ExternalCommProtocol_Parse(const uint8_t *data,
                                                      uint16_t data_len,
                                                      ExternalCommFrame_t *frame)
 {
-    /* start 是接收缓存中的候选帧头偏移。 */
+    /* start 是当前检查的帧头位置，从缓存开头逐字节向后查找。 */
     uint16_t start;
     /* frame_len 来自协议 Length 字段，V1 按整帧长度处理。 */
     uint16_t frame_len;
@@ -83,13 +102,13 @@ ExternalCommParseResult_t ExternalCommProtocol_Parse(const uint8_t *data,
             continue;
         }
 
-        /* 找到帧头后，剩余字节仍不足固定帧长，保留“不完整”语义。 */
+        /* 已找到帧头，但剩余数据不足最短 16 字节，通知调用方等待后续数据。 */
         if ((uint16_t)(data_len - start) < EXTERNAL_COMM_FRAME_FIXED_SIZE)
         {
             return EXTERNAL_COMM_PARSE_INCOMPLETE;
         }
 
-        /* 将候选帧起点固化，后续字段偏移均相对帧头计算。 */
+        /* 记住帧头位置，后面按协议中的字节偏移读取字段。 */
         frame_buf = &data[start];
         /* Length_H/Length_L 位于帧偏移 5/6，按大端读出。 */
         frame_len = ExternalComm_ReadBE16(&frame_buf[5]);
@@ -115,7 +134,7 @@ ExternalCommParseResult_t ExternalCommProtocol_Parse(const uint8_t *data,
         info_len = (uint16_t)(frame_len - EXTERNAL_COMM_FRAME_FIXED_SIZE);
         /* CRC 位于 InforArea 后面，固定字段到 InforArea 起点是 10 字节。 */
         crc_pos = (uint16_t)(10U + info_len);
-        /* V1 占位规则：CRC 覆盖 TranCode、Length、FunCode、AreaCode、InforCode、InforArea。 */
+        /* CRC 从 TranCode 算到 InforArea 末尾，包含 Length、FunCode、AreaCode 和 InforCode，不包含帧头、CRC 和帧尾。 */
         calc_crc = Common_Crc16((uint8_t *)&frame_buf[4], (uint16_t)(6U + info_len));
         /* 帧内 CRC 同样按高字节在前读取。 */
         recv_crc = ExternalComm_ReadBE16(&frame_buf[crc_pos]);
@@ -135,9 +154,9 @@ ExternalCommParseResult_t ExternalCommProtocol_Parse(const uint8_t *data,
         frame->area_code = frame_buf[8];
         /* 信息码字段，当前下行要求为 0xFF。 */
         frame->info_code = frame_buf[9];
-        /* 保存载荷长度，业务层按长度校验参数宽度。 */
+        /* 保存 InforArea 的字节数，命令处理函数据此检查参数是否收全。 */
         frame->info_len = info_len;
-        /* 有载荷时才复制，避免 0 长度 memcpy 在不同库实现下产生歧义。 */
+        /* InforArea 非空时才复制，空数据区不需要调用 memcpy。 */
         if (info_len > 0U)
         {
             /* 只复制 InforArea，不把 CRC 和帧尾带给业务层。 */
@@ -152,6 +171,11 @@ ExternalCommParseResult_t ExternalCommProtocol_Parse(const uint8_t *data,
     return EXTERNAL_COMM_PARSE_NOT_FOUND;
 }
 
+/*
+ * 函数功能：按正式协议生成完整发送帧，Length 为整帧字节数，CRC 高字节在前。
+ * 输入参数：tran_code/fun_code/area_code/info_code 为协议字段；info_area/info_len 为数据及字节数；out_buf/out_size 为输出缓存及容量；out_len 接收帧长。
+ * 返回参数：成功返回 EXTERNAL_COMM_BUILD_OK；指针错误或缓存不足返回对应错误码。
+ */
 ExternalCommBuildResult_t ExternalCommProtocol_BuildFrame(uint8_t tran_code,
                                                           uint8_t fun_code,
                                                           uint8_t area_code,
@@ -169,7 +193,7 @@ ExternalCommBuildResult_t ExternalCommProtocol_BuildFrame(uint8_t tran_code,
     /* crc_pos 是 CRC16_H 写入位置。 */
     uint16_t crc_pos;
 
-    /* 输出缓存、输出长度指针必须有效；有载荷时载荷指针也必须有效。 */
+    /* 输出缓存和长度指针不能为空；info_len 非零时，输入数据指针也不能为空。 */
     if ((out_buf == NULL) || (out_len == NULL) ||
         ((info_len > 0U) && (info_area == NULL)))
     {
@@ -203,7 +227,7 @@ ExternalCommBuildResult_t ExternalCommProtocol_BuildFrame(uint8_t tran_code,
     /* 写入信息码。 */
     out_buf[9] = info_code;
 
-    /* 有 InforArea 时把业务载荷复制到固定字段之后。 */
+    /* InforArea 非空时，从帧偏移 10 开始复制命令数据。 */
     if (info_len > 0U)
     {
         memcpy(&out_buf[10], info_area, info_len);
@@ -224,6 +248,11 @@ ExternalCommBuildResult_t ExternalCommProtocol_BuildFrame(uint8_t tran_code,
     return EXTERNAL_COMM_BUILD_OK;
 }
 
+/*
+ * 函数功能：生成 0xDD 命令应答帧，把执行结果码写入 InforCode。
+ * 输入参数：ack_code 为结果码；ack_info/ack_info_len 为应答数据及字节数；out_buf/out_size 为输出缓存及容量；out_len 接收帧长。
+ * 返回参数：成功返回 EXTERNAL_COMM_BUILD_OK，否则返回指针错误或空间不足的错误码。
+ */
 ExternalCommBuildResult_t ExternalCommProtocol_BuildAck(uint8_t ack_code,
                                                         const uint8_t *ack_info,
                                                         uint16_t ack_info_len,
@@ -243,13 +272,18 @@ ExternalCommBuildResult_t ExternalCommProtocol_BuildAck(uint8_t ack_code,
                                            out_len);
 }
 
+/*
+ * 函数功能：生成 0xAA 心跳帧，发送调用方已经整理好的在线和运行状态。
+ * 输入参数：heartbeat_info/heartbeat_info_len 为心跳数据及字节数；out_buf/out_size 为输出缓存及容量；out_len 接收帧长。
+ * 返回参数：成功返回 EXTERNAL_COMM_BUILD_OK；心跳数据为空、指针错误或空间不足时返回错误码。
+ */
 ExternalCommBuildResult_t ExternalCommProtocol_BuildHeartbeat(const uint8_t *heartbeat_info,
                                                               uint16_t heartbeat_info_len,
                                                               uint8_t *out_buf,
                                                               uint16_t out_size,
                                                               uint16_t *out_len)
 {
-    /* 心跳至少要带在线状态字段，空载荷说明调用方没有完成状态采集。 */
+    /* 心跳至少要包含在线状态；调用方没有提供数据时不生成空心跳帧。 */
     if ((heartbeat_info == NULL) || (heartbeat_info_len == 0U))
     {
         /* 返回参数错误，避免 UART2 发出字段缺失的 0xAA 帧。 */

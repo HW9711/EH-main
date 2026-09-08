@@ -10,7 +10,7 @@
  */
 void HandleKeyScan_Init(void);
 
-#define HANDLE_RUN_KEY_A_STATUS()  Bsp_GpioRead(BOARD_RES_HANDLE_RUN_KEY_A_PORT, BOARD_RES_HANDLE_RUN_KEY_A_PIN) /* GPIO模式读取A通道PE2实体键，低电平表示按下。 */
-#define HANDLE_RUN_KEY_B_STATUS()  Bsp_GpioRead(BOARD_RES_HANDLE_RUN_KEY_B_PORT, BOARD_RES_HANDLE_RUN_KEY_B_PIN) /* GPIO模式读取B通道PE0实体键，低电平表示按下。 */
+#define HANDLE_RUN_KEY_A_STATUS()  Bsp_GpioRead(BOARD_RES_HANDLE_RUN_KEY_A_PORT, BOARD_RES_HANDLE_RUN_KEY_A_PIN) /* 读取 A 键当前电平：RESET 为按下，SET 为松开；仅 GPIO 模式使用，仍需连续确认。 */
+#define HANDLE_RUN_KEY_B_STATUS()  Bsp_GpioRead(BOARD_RES_HANDLE_RUN_KEY_B_PORT, BOARD_RES_HANDLE_RUN_KEY_B_PIN) /* 读取 B 键当前电平：RESET 为按下，SET 为松开；仅 GPIO 模式使用，仍需连续确认。 */
 
 #endif  //__HANDLEKEY_H

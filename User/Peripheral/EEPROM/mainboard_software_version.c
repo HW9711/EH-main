@@ -5,15 +5,15 @@
 #define MAINBOARD_SW_VERSION_PAGE1_ADDR        0x0000U     /* 主控板 AT24C32 Page1 起始地址，固定只存软件版本记录。 */
 #define MAINBOARD_SW_VERSION_FORMAT            0x01U       /* Page1 软件版本记录格式版本。 */
 #define MAINBOARD_SW_VERSION_CRC32_ALGO        0x01U       /* 代码区校验算法编号：1 表示标准 CRC32。 */
-#define MAINBOARD_SW_VERSION_MAGIC0            'S'         /* Page1 byte0：软件版本记录魔术字 S。 */
-#define MAINBOARD_SW_VERSION_MAGIC1            'W'         /* Page1 byte1：软件版本记录魔术字 W。 */
-#define MAINBOARD_SW_VERSION_MAGIC2            'V'         /* Page1 byte2：软件版本记录魔术字 V。 */
-#define MAINBOARD_SW_VERSION_MAGIC3            '1'         /* Page1 byte3：软件版本记录魔术字 1。 */
+#define MAINBOARD_SW_VERSION_MAGIC0            'S'         /* Page1第0字节：固定标记SWV1的第1个字符，不是可调业务参数。 */
+#define MAINBOARD_SW_VERSION_MAGIC1            'W'         /* Page1第1字节：固定标记的第2个字符。 */
+#define MAINBOARD_SW_VERSION_MAGIC2            'V'         /* Page1第2字节：固定标记的第3个字符。 */
+#define MAINBOARD_SW_VERSION_MAGIC3            '1'         /* Page1第3字节：固定标记的第4个字符。 */
 #define MAINBOARD_SW_VERSION_PAGE_DATA_SIZE    30U         /* Page1 前 30 字节参与页和，后 2 字节存页和。 */
 #define MAINBOARD_SW_VERSION_HEX_MARKER_TEXT   "MBSWVER1"  /* HEX 内固定版本标记，上位机通过它从固件镜像中提取大版本号。 */
 
 static uint8_t s_mainboard_sw_version_record[MAINBOARD_SW_VERSION_RECORD_SIZE]; /* 最近一次构造或读取的 Page1 软件版本记录缓存。 */
-static const char s_mainboard_sw_version_hex_marker[] = MAINBOARD_SW_VERSION_HEX_MARKER_TEXT MAINBOARD_SW_VERSION_BASE_TEXT; /* 版本标记和大版本字符串一起进入 Flash，保证 HEX 解析和设备 Page1 同源。 */
+static const char s_mainboard_sw_version_hex_marker[] = MAINBOARD_SW_VERSION_HEX_MARKER_TEXT MAINBOARD_SW_VERSION_BASE_TEXT; /* 把版本标记和版本号一起存入Flash，HEX文件和EEPROM记录都使用这里的版本号。 */
 
 /*
  * 函数功能：按大端格式写入 32 位字段，保证地址、长度和 CRC 在 EEPROM 中直接可读。
@@ -109,10 +109,10 @@ static void SwVersion_BuildRecord(uint8_t *record)
   uint32_t crc32; /* 当前 256KB 代码区 CRC32。 */
 
   memset(record, 0, MAINBOARD_SW_VERSION_RECORD_SIZE); /* 先清零，保证保留字段和短版本字符串尾部稳定。 */
-  record[0] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC0; /* byte0 写入魔术字 S，标记该页属于软件版本记录。 */
-  record[1] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC1; /* byte1 写入魔术字 W。 */
-  record[2] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC2; /* byte2 写入魔术字 V。 */
-  record[3] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC3; /* byte3 写入魔术字 1。 */
+  record[0] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC0; /* 第0字节写S，与后3字节组成固定标记SWV1。 */
+  record[1] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC1; /* 第1字节写W。 */
+  record[2] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC2; /* 第2字节写V。 */
+  record[3] = (uint8_t)MAINBOARD_SW_VERSION_MAGIC3; /* 第3字节写1。 */
   record[4] = MAINBOARD_SW_VERSION_FORMAT; /* byte4 写入记录格式版本，后续扩字段时可区分。 */
 
   version_len = (strlen(version_text) > MAINBOARD_SW_VERSION_TEXT_SIZE) ?
@@ -154,13 +154,13 @@ static MainboardSoftwareVersionStatus_t SwVersion_ValidateRecord(const uint8_t *
     return MAINBOARD_SW_VERSION_STATUS_PAGE_SUM_FAIL; /* 页和失败时不再信任后续字段。 */
   }
 
-  /* 任一魔术字节不一致都说明 Page1 不是本软件版本记录，禁止继续按当前格式解析。 */
+  /* 开头4字节必须是SWV1，否则不能继续按软件版本记录读取。 */
   if ((record[0] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC0) ||
       (record[1] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC1) ||
       (record[2] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC2) ||
       (record[3] != (uint8_t)MAINBOARD_SW_VERSION_MAGIC3))
   {
-    return MAINBOARD_SW_VERSION_STATUS_MAGIC_FAIL; /* 魔术字不匹配说明 Page1 不是主控软件版本记录。 */
+    return MAINBOARD_SW_VERSION_STATUS_MAGIC_FAIL; /* 固定标记不符，报告记录类型错误。 */
   }
 
   /* 格式号、CRC 算法或代码区范围任一不匹配时，上位机不能用该记录比较当前固件。 */
@@ -204,7 +204,7 @@ uint8_t MainboardSoftwareVersion_Sync(void)
 
   if (IIC_AT24C32_ReadBytes(MAINBOARD_SW_VERSION_PAGE1_ADDR, stored_record, MAINBOARD_SW_VERSION_RECORD_SIZE) == 0U)
   {
-    return MAINBOARD_SW_VERSION_STATUS_EEPROM_WRITE_FAIL; /* 写后无法读回，不能确认 Page1 已经落盘。 */
+    return MAINBOARD_SW_VERSION_STATUS_EEPROM_WRITE_FAIL; /* 写后无法读回，不能确认EEPROM已经保存新记录。 */
   }
 
   if (memcmp(stored_record, current_record, MAINBOARD_SW_VERSION_RECORD_SIZE) != 0)
@@ -216,7 +216,7 @@ uint8_t MainboardSoftwareVersion_Sync(void)
 }
 
 /*
- * 函数功能：读取主控板 AT24C32 Page1 并组织外部通信软件版本载荷。
+ * 函数功能：先更新EEPROM版本记录，再读出Page1，拼成发给上位机的版本数据。
  * 输入参数：payload 为输出缓存，payload_size 为缓存大小，payload_len 返回实际载荷长度。
  * 返回参数：1 表示已生成载荷，0 表示参数非法。
  */

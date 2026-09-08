@@ -29,9 +29,11 @@
 I2C_HandleTypeDef hi2c2;
 I2C_HandleTypeDef hi2c3;
 
-/*============================================================================
- * I2C2外设初始化
- *============================================================================*/
+/*
+ * 函数功能：按bsp_i2c_bus.h配置I2C2，HAL回调负责设置对应引脚和时钟。
+ * 输入参数：无。
+ * 返回参数：无；初始化失败进入Error_Handler。
+ */
 void MX_I2C2_Init(void)
 {
     hi2c2.Instance             = I2C2;
@@ -44,16 +46,18 @@ void MX_I2C2_Init(void)
     hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c2.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
 
-    /* I2C2 初始化失败会使 A 通道手柄总线不可用，必须进入统一错误处理。 */
+    /* I2C2初始化失败后不能继续访问该接口手柄；屏幕A/B归属由接口交换配置决定。 */
     if (HAL_I2C_Init(&hi2c2) != HAL_OK)
     {
         Error_Handler();
     }
 }
 
-/*============================================================================
- * I2C3外设初始化
- *============================================================================*/
+/*
+ * 函数功能：按bsp_i2c_bus.h配置I2C3，使用与I2C2不同的硬件引脚。
+ * 输入参数：无。
+ * 返回参数：无；初始化失败进入Error_Handler。
+ */
 void MX_I2C3_Init(void)
 {
     hi2c3.Instance             = I2C3;
@@ -66,7 +70,7 @@ void MX_I2C3_Init(void)
     hi2c3.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c3.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
 
-    /* I2C3 初始化失败会使 B 通道手柄总线不可用，必须进入统一错误处理。 */
+    /* I2C3初始化失败后不能继续访问该接口手柄，按统一错误流程处理。 */
     if (HAL_I2C_Init(&hi2c3) != HAL_OK)
     {
         Error_Handler();
