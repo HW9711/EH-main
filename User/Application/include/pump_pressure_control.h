@@ -37,17 +37,17 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 300U
 
 /* 不超过第 1 标定流量时的报警阈值，单位 g，当前 100；调大后更晚报警，调小后更易报警，仅影响提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_50_G 100U
-/* 第 2 标定流量的报警阈值，单位 g，当前 180；参与相邻区间计算，须不低于前一点，仅影响提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_110_G 180U
-/* 第 3 标定流量的报警阈值，单位 g，当前 210；参与相邻区间计算，须不低于前一点，仅影响提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_140_G 210U
-/* 第 4 标定流量的报警阈值，单位 g，当前 240；参与相邻区间计算，须不低于前一点，仅影响提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_200_G 240U
-/* 第 5 标定流量的报警阈值，单位 g，当前 280；参与相邻区间计算，须不低于前一点，仅影响提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_260_G 280U
+#define PUMP_PRESSURE_CONTROL_ALARM_50_G 130U
+/* 第 2 标定流量的报警阈值，单位 g，当前 210；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_110_G 210U
+/* 第 3 标定流量的报警阈值，单位 g，当前 240；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_140_G 240U
+/* 第 4 标定流量的报警阈值，单位 g，当前 270；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_200_G 270U
+/* 第 5 标定流量的报警阈值，单位 g，当前 310；参与相邻区间计算，须不低于前一点，仅影响提示。 */
+#define PUMP_PRESSURE_CONTROL_ALARM_260_G 310U
 /* 最高标定流量及以上的报警阈值，单位 g，当前 300；须不低于前一点，调大后更晚提示，调小后更易提示。 */
-#define PUMP_PRESSURE_CONTROL_ALARM_300_G 300U
+#define PUMP_PRESSURE_CONTROL_ALARM_300_G 360U
 
 /* 压力连续达到或超过报警线多久才提示，单位 ms；当前 1000，增大会延后提示，减小会更容易响应短时压力升高。 */
 #define PUMP_PRESSURE_ALARM_CONFIRM_MS 1000U
