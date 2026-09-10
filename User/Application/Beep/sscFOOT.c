@@ -485,12 +485,22 @@ static void Foot_StopPumpBInjection(void)
 }
 
 /*
- * 函数功能：脚踏不满足启动条件时，清掉本周期的电机和开泵请求。
+ * 函数功能：脚踏不满足启动条件时停止电机，只撤销脚踏实际控制的注水泵，保留独立灌注请求。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void Foot_ClearRunRequestAfterGateFail(void)
 {
+    bool stop_pump_a=(s_double_left_gently_pump_channel==CHANNEL_A||s_double_right_gently_pump_channel==CHANNEL_A); /* 清归属前保存双脚踏实际使用的 A 泵，即使轻踩标志已清掉也不能漏停。 */
+    bool stop_pump_b=(s_double_left_gently_pump_channel==CHANNEL_B||s_double_right_gently_pump_channel==CHANNEL_B); /* 保存左右任一侧使用的 B 泵，两侧共用同一泵时只停止一次。 */
+
+    if(s_double_left_gently_pump_channel==CHANNEL_NONE&&s_double_right_gently_pump_channel==CHANNEL_NONE&&
+       (ControlSignalMessage.jtL_gentlypump_flag||ControlSignalMessage.jtR_gentlypump_flag)) /* 双段踏板没有双脚踏通道记录，必须有轻踩开泵标志才按其原选择顺序清理。 */
+    {
+        stop_pump_a=(pumpMessageA.type==INJECTWATER); /* 双段踏板轻踩原本优先开启 A 注水泵，不把独立灌注泵纳入停止范围。 */
+        stop_pump_b=(!stop_pump_a&&pumpMessageB.type==INJECTWATER); /* 只有 A 不是注水泵时才选择 B，避免误停未被轻踩选中的另一注水泵。 */
+    }
+
     Foot_LatchMotorStopUntilRelease();              /* 本次启动被拒绝后必须先松脚，不能踩住等待自动启动。 */
     Foot_StopHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_NONE); /* 撤销左右脚踏此前发出的手柄联动开泵请求，不依赖 jt 标志是否还在。 */
     WorkMessage.runflag_work=false;                 /* 撤销电机运行请求，防止缺刀具等检查失败后仍发出启动帧。 */
@@ -500,12 +510,15 @@ static void Foot_ClearRunRequestAfterGateFail(void)
     s_double_left_gently_pump_channel=CHANNEL_NONE; /* 本次启动失败，清掉左脚轻踩使用的泵记录。 */
     s_double_right_gently_pump_channel=CHANNEL_NONE; /* 清右侧实际泵记录，避免松脚时误停后续其它来源启动的泵。 */
     ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT); /* 电机已停止时取消脚踏对电机的占用，让其他控制方式可以使用。 */
-    if(ControlSignalMessage.jtL_gentlypump_flag||ControlSignalMessage.jtR_gentlypump_flag)
+    ControlSignalMessage.jtL_gentlypump_flag=false; /* 启动被拒绝后取消左脚轻踩状态，实际停止对象使用清理前保存的选择。 */
+    ControlSignalMessage.jtR_gentlypump_flag=false; /* 同步取消右脚轻踩状态，保持原先两侧都必须重新建立请求的保护。 */
+    if(stop_pump_a&&pumpMessageA.type==INJECTWATER) /* 只停止脚踏选中过且当前仍为注水泵的 A，类型已变化时不撤销新的灌注请求。 */
     {
-        ControlSignalMessage.jtL_gentlypump_flag=false; /* 取消左脚轻踩开泵请求，缺刀具报警后不能保持开泵。 */
-        ControlSignalMessage.jtR_gentlypump_flag=false; /* 右脚轻踩开泵请求也取消，两侧都保持停止。 */
-        Foot_StopPumpAInjection();                      /* 启动失败时取消 A 泵运行，不能让轻踩阶段开启的泵继续转。 */
-        Foot_StopPumpBInjection();                      /* B 注水泵若已被轻踩阶段打开，也必须和手柄运行一起撤销。 */
+        Foot_StopPumpAInjection(); /* 撤销 A 的脚踏开泵及排空状态，泵任务下周期发送零速。 */
+    }
+    if(stop_pump_b&&pumpMessageB.type==INJECTWATER) /* B 使用同样的归属和类型检查，支持 A 灌注/B 注水的互换配置。 */
+    {
+        Foot_StopPumpBInjection(); /* 撤销实际由脚踏启动的 B，不影响独立运行的另一台泵。 */
     }
 }
 
