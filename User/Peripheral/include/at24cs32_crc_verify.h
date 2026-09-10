@@ -62,7 +62,8 @@ typedef enum
     AT24CS32_CRC_STATUS_PAGE1_CHECKSUM_FAILED,
     AT24CS32_CRC_STATUS_SN_READ_FAILED,
     AT24CS32_CRC_STATUS_DATA_READ_FAILED,
-    AT24CS32_CRC_STATUS_CRC_MISMATCH
+    AT24CS32_CRC_STATUS_CRC_MISMATCH,
+    AT24CS32_CRC_STATUS_PENDING /* 分步认证尚未完成，不计失败、不发布手柄上线。 */
 } AT24CS32_CRC_Status;
 
 typedef struct
@@ -71,6 +72,19 @@ typedef struct
     uint8_t stored_auth[AT24CS32_AUTH_RESULT_SIZE];
     uint8_t calculated_auth[AT24CS32_AUTH_RESULT_SIZE];
 } AT24CS32_CRC_Result;
+
+/* A/B分别保存一份认证快照，分周期读取不能共用旧同步接口的静态缓存。 */
+typedef struct
+{
+    uint8_t step; /* 0读Page1、1读SN、2~8读Page2~8；新一轮认证必须归零。 */
+    uint8_t verified; /* 全部页和及四组CRC通过后才置1，业务装载不能使用半成品。 */
+    uint16_t crc[4]; /* 保存SN及已读页面的四组累计CRC，算法与同步认证一致。 */
+    AT24CS32_CRC_Result result; /* 本轮SN、存储认证值和计算结果，通道间不交叉。 */
+    uint8_t pages[AT24CS32_AUTH_DATA_LENGTH]; /* 保存本轮已认证的Page2~8，上线装载不再重复读总线。 */
+} AT24CS32_CRC_StepContext;
+
+/* 每次最多读取一页或SN；use_i2c3为0选I2C2、1选I2C3，PENDING时下轮继续。 */
+AT24CS32_CRC_Status AT24CS32_VerifyCrcStep(uint8_t use_i2c3, AT24CS32_CRC_StepContext *context);
 
 /*
  * 根据函数名选择I2C2或I2C3，不需要先修改全局总线变量；调用方仍须避免同时使用公共认证缓存。

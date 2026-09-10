@@ -46,6 +46,70 @@ static uint16_t At24_Crc16(const uint8_t *data, uint32_t len, uint16_t init, uin
     return crc;
 }
 
+/*
+ * 函数功能：每次只读取一个认证块，完整校验通过后发布本通道的业务页快照。
+ * 输入参数：use_i2c3为0选I2C2、1选I2C3；context由调用方独占，新一轮将step归零。
+ * 返回参数：PENDING表示下周期继续；OK表示全部通过；其它值保持原认证错误含义。
+ */
+AT24CS32_CRC_Status AT24CS32_VerifyCrcStep(uint8_t use_i2c3, AT24CS32_CRC_StepContext *context)
+{
+    static const uint16_t initial[4] = {AT24CS32_CRC16_INIT_1, AT24CS32_CRC16_INIT_2, AT24CS32_CRC16_INIT_3, AT24CS32_CRC16_INIT_4}; /* 四组初值沿用原认证协议。 */
+    static const uint16_t polynomial[4] = {AT24CS32_CRC16_POLY_1, AT24CS32_CRC16_POLY_2, AT24CS32_CRC16_POLY_3, AT24CS32_CRC16_POLY_4}; /* 四组多项式顺序不能改变。 */
+    uint8_t page1[AT24CS32_PAGE_SIZE]; /* Page1只在本次调用中读取，其认证值另存到通道上下文。 */
+    uint8_t *block; /* 当前参与累计CRC的SN或业务页，不指向另一通道。 */
+    uint16_t length; /* 本轮CRC输入长度，SN为16字节、业务页为32字节。 */
+    uint8_t index; /* 遍历原协议的四组CRC。 */
+
+    if ((context == NULL) || (use_i2c3 > 1U) || (context->step > AT24CS32_AUTH_PAGE_COUNT + 1U)) {
+        return AT24CS32_CRC_STATUS_BAD_PARAM; /* 非法或已完成上下文必须由调用方重新初始化，禁止越界读页。 */
+    }
+    if (context->step == 0U) {
+        context->verified = 0U; /* 先撤销上轮快照资格，任何读取失败都不能沿用旧认证结果。 */
+        memset(&context->result, 0, sizeof(context->result)); /* 新一轮SN和结果从空状态开始。 */
+        if (At24_ReadRawPage(use_i2c3, AT24CS32_AUTH_PAGE1_INDEX, page1) == 0U) {
+            return AT24CS32_CRC_STATUS_PAGE1_READ_FAILED; /* Page1读失败沿用原错误码及上层重试。 */
+        }
+        if (AT24CS32_VerifyPageChecksum(page1) == 0U) {
+            return AT24CS32_CRC_STATUS_PAGE1_CHECKSUM_FAILED; /* 页和失败不能进入后续认证。 */
+        }
+        memcpy(context->result.stored_auth, page1, AT24CS32_AUTH_RESULT_SIZE); /* 保存本通道Page1认证值。 */
+        memcpy(context->crc, initial, sizeof(initial)); /* 四组CRC从各自协议初值开始累计。 */
+        context->step = 1U; /* 下轮再读取SN，释放公共业务锁给泵通信。 */
+        return AT24CS32_CRC_STATUS_PENDING; /* 分步等待不消耗认证失败次数。 */
+    }
+    if (context->step == 1U) {
+        if ((use_i2c3 ? AT24CS32_ReadSerialNumber_I2C3(context->result.sn) :
+                       AT24CS32_ReadSerialNumber_I2C2(context->result.sn)) != 0U) {
+            return AT24CS32_CRC_STATUS_SN_READ_FAILED; /* SN接口以0表示成功，失败时不能累计CRC。 */
+        }
+        block = context->result.sn; /* 原协议先将SN作为认证输入。 */
+        length = AT24CS32_SN_SIZE; /* 仅处理真实16字节SN。 */
+    } else {
+        block = &context->pages[(context->step - 2U) * AT24CS32_PAGE_SIZE]; /* 第2步对应Page2，快照偏移从0开始。 */
+        if ((use_i2c3 ? AT24CS32_ReadPage_I2C3(context->step - 1U, block) :
+                       AT24CS32_ReadPage_I2C2(context->step - 1U, block)) == 0U) {
+            return AT24CS32_CRC_STATUS_DATA_READ_FAILED; /* 任一页读取或页和失败立即拒绝整轮快照。 */
+        }
+        length = AT24CS32_PAGE_SIZE; /* 页尾两字节也参与CRC，与旧认证输入完全一致。 */
+    }
+    for (index = 0U; index < 4U; ++index) {
+        context->crc[index] = At24_Crc16(block, length, context->crc[index], polynomial[index]); /* 接续上一块CRC，不在页面边界重新使用初值。 */
+    }
+    ++context->step; /* 当前块完整读取并累计后才推进，下一周期不会跳页。 */
+    if (context->step <= AT24CS32_AUTH_PAGE_COUNT + 1U) {
+        return AT24CS32_CRC_STATUS_PENDING; /* 尚未读完Page8时保持认证中，不允许业务上线。 */
+    }
+    for (index = 0U; index < 4U; ++index) {
+        context->result.calculated_auth[index * 2U] = (uint8_t)(context->crc[index] >> 8); /* 每组CRC高字节在前。 */
+        context->result.calculated_auth[index * 2U + 1U] = (uint8_t)context->crc[index]; /* 低字节紧随，保持原八字节认证布局。 */
+    }
+    if (memcmp(context->result.stored_auth, context->result.calculated_auth, AT24CS32_AUTH_RESULT_SIZE) != 0) {
+        return AT24CS32_CRC_STATUS_CRC_MISMATCH; /* 四组中任一结果不符都拒绝，不能发布半可信参数。 */
+    }
+    context->verified = 1U; /* 所有认证条件同时通过后，才允许本轮业务装载复用快照。 */
+    return AT24CS32_CRC_STATUS_OK; /* 上层下一周期进入参数装载，不继续占用本轮锁。 */
+}
+
 /* 按总线读取 Page2~Page8（共7页，224字节），每页读取时都会做页和校验 */
 static uint8_t At24_ReadAuthPages(uint8_t use_i2c3, uint8_t *out_buf)
 {

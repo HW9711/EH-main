@@ -223,7 +223,7 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
 }
 
 /*
- * 函数功能：向屏幕显示任务投递一个区域刷新消息。
+ * 函数功能：非阻塞投递区域刷新消息，避免持有公共业务锁时等待显示消费者而拖延泵通信。
  * 输入参数：areaId 为显示区域编号；enable_flag 为该区域启用状态；Value 为空或指向至少 10 字节参数，本函数固定复制 10 字节。
  * 返回参数：无。
  */
@@ -248,7 +248,7 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 	{
 		return;//同一区域、同一开关状态和同一参数不重复入队，降低屏幕串口刷新压力。
 	}
-    if(Kernel_QueueSend(UIDPMsgQueue, &msg, 10) == pdPASS)
+    if(Kernel_QueueSend(UIDPMsgQueue, &msg, 0U) == pdPASS) /* 调用方和显示消费者共用业务锁，满队列不能原地等待；保持原失败返回及后续补刷机制。 */
 	{
 		s_uidp_last_msg = msg;//只在投递成功后更新去重缓存，避免队列满时吞掉下一次有效刷新。
 		s_uidp_last_valid = 1U;//标记去重缓存已建立，后续重复 UI 消息才允许被过滤。

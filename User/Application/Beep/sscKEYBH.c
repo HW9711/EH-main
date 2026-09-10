@@ -10,8 +10,6 @@
   kernel_task_t    KeyBehaviorsHandle;
 QueueHandle_t KeyBehivQueue = NULL;
 
-#define KEYBEH_PLUG_EVENT_WAIT_TICKS pdMS_TO_TICKS(60U) /* 插拔和 RFID 刷新消息在队列满时最多等待 60ms；增大可多等空位但会拖慢调用任务。普通按键不等待。 */
-
 typedef struct
 {
 	uint8_t control_type;//脚踏key,显示屏key,外部通讯key，手控key
@@ -23,15 +21,14 @@ static void KeyBehivQueue_Init(void)
     KeyBehivQueue = Kernel_QueueCreate(20, sizeof(KeyBehMessage_t), "KeyBehivQueue");
 }
 /*
- * 函数功能：把一条按键或插拔消息放入队列，返回是否放入成功。
+ * 函数功能：非阻塞投递按键或插拔消息；持有公共业务锁时不能等待同样需要该锁的消费者。
  * 输入参数：control_type 为事件来源类型；control_key 为该来源下的具体按键或插拔事件值。
- * 返回参数：true 表示事件已经成功进入队列；false 表示队列尚未创建或等待期内仍无法入队。
+ * 返回参数：true表示成功入队；false表示未创建或已满，关键拔出仍由扫描状态机保留重试。
  */
 bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
 	// static uint8_t control_types=0;
 	// static uint8_t control_keys=0;
-	TickType_t wait_ticks = 0U; /* 普通按键仍保持非阻塞，避免脚踏/屏幕高频按键拖慢控制任务。 */
 	// if(control_types==control_type&&control_keys==control_key)return;
 	// else
 	// {
@@ -43,11 +40,7 @@ bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
 	msg.queued_tick_ms = HAL_GetTick(); /* 普通按键只记录时间；触控按住信号取出时会检查是否已过 420ms。 */
-	if (control_type == PLUGunPLUG)
-	{
-		wait_ticks = KEYBEH_PLUG_EVENT_WAIT_TICKS; /* 插拔/RFID 刷新必须尽量入队，否则 MemoryMsg 和心跳会停在旧状态。 */
-	}
-	return (Kernel_QueueSend(KeyBehivQueue, &msg, wait_ticks) == pdPASS); /* 把真实入队结果交回扫描状态机，防止关键拔出事件因队列满而静默丢失。 */
+	return (Kernel_QueueSend(KeyBehivQueue, &msg, 0U) == pdPASS); /* 消费者也需要公共锁，满队列等待不能腾出空位；立即交回结果并让出调度机会。 */
 }
 /*
  * 函数功能：按脚踏按键编号执行泵控制、开口定位或手柄切换。

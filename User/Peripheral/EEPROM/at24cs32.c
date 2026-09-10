@@ -1,8 +1,9 @@
 #include "at24cs32.h"
 #include <string.h>
 
-/* 单次HAL I2C读写/应答等待的超时时间，单位ms；调大可能延长手柄识别任务等待，调小可能使正常读写超时。 */
+/* 写入及写前应答等待沿用100ms预算，不改变EEPROM写周期和写失败重试行为。 */
 #define AT24CS32_I2C_TIMEOUT_MS        100U
+#define AT24CS32_READ_TIMEOUT_MS     10U /* 只读探测与读取共享10ms请求预算；HAL内部BUSY等待仍有独立25ms上限，不能视为整函数严格10ms。 */
 /* 连续读取一次最多传输的字节数；64字节读完再读下一块，不是EEPROM的物理页大小。 */
 #define AT24CS32_READ_CHUNK_SIZE       64U
 /* 读写前最多检查EEPROM应答的次数；调大可能延长未连接手柄的等待时间。 */
@@ -138,10 +139,20 @@ static uint16_t At24_PageAddr(uint16_t page_index)
     return (uint16_t)(page_index * AT24CS32_PAGE_SIZE);
 }
 
-/* 封装 16 位字地址读接口 */
+/*
+ * 函数功能：在短只读预算内读取EEPROM；异常恢复总线后立即返回，后续重试交给调用方的新周期。
+ * 输入参数：hi2c为总线，dev_addr为器件地址，mem_addr为16位字地址，buf/len为接收缓存及长度。
+ * 返回参数：1表示本次完整读取成功；0表示失败，不在同一调用中重复阻塞读取。
+ */
 static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
 {
     HAL_StatusTypeDef hal_status;
+    uint32_t started = HAL_GetTick(); /* 应答探测和正式读取共用起点，不能各自重新获取10ms预算。 */
+    uint32_t elapsed; /* 无符号差值支持毫秒计数回绕。 */
+
+    if ((hi2c == NULL) || (buf == NULL) || (len == 0U)) {
+        return 0U; /* 参数无效时不访问硬件，避免短预算分支解引用空句柄。 */
+    }
 
     /*
      * 每次发起 EEPROM 读取前，先记录“调用前的 I2C 状态”。
@@ -157,60 +168,32 @@ static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t
     s_at24cs32_last_debug.i2c_state_before = (hi2c != NULL) ? (uint32_t)HAL_I2C_GetState(hi2c) : 0U;
     s_at24cs32_last_debug.i2c_state_after = 0U;
 
-    /*
-     * 第一步先做设备 ready 探测，而不是直接调用 Mem_Read。
-     * 这样如果器件尚未 ready，或者总线在这里就已经 Busy，
-     * 可以先尝试做一次恢复，避免把真正的读操作浪费掉。
-     */
-    hal_status = At24_WaitReady(hi2c, dev_addr);
-    /* 设备未就绪时先判断是否属于可恢复故障，不能直接进入正式读取。 */
+    hal_status = HAL_I2C_IsDeviceReady(hi2c, dev_addr, 1U, AT24CS32_READ_TIMEOUT_MS); /* 只读每轮只探测一次，失败由扫描状态机下轮重试；写前探测仍保持原三次。 */
     if (hal_status != HAL_OK) {
-        /* BUSY/TIMEOUT 类故障才复位总线，普通器件未应答保持原失败状态。 */
+        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status); /* 恢复前保存本次真实故障，避免HAL初始化清除错误证据。 */
         if (At24_NeedsRecovery(hi2c, hal_status) != 0U) {
-            At24_RecoverBus(hi2c);
-            hal_status = At24_WaitReady(hi2c, dev_addr);
+            At24_RecoverBus(hi2c); /* 本轮只恢复总线，不立即再次探测或读页，给泵通信让出执行机会。 */
         }
-
-        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
-        /* 恢复后仍未就绪时结束本次读，避免把无效缓存当成 EEPROM 数据。 */
-        if (hal_status != HAL_OK) {
-            return 0U;
-        }
+        return 0U; /* 本次失败仍交给原有认证限次重试和报警规则，不将恢复动作冒充读成功。 */
     }
 
-    /*
-     * 设备 ready 后再执行真正的 EEPROM 读取。
-     * 如果这里仍然遇到 BUSY/TIMEOUT，再做一次软恢复和单次重试。
-     * 这样既能提升现场容错，又不会因为无限重试把问题掩盖掉。
-     */
+    elapsed = (uint32_t)(HAL_GetTick() - started); /* 检查应答阶段已经占用的墙钟时间。 */
+    if (elapsed >= AT24CS32_READ_TIMEOUT_MS) {
+        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, HAL_TIMEOUT); /* 应答虽完成但预算已耗尽，本轮不再发起新读取。 */
+        return 0U; /* 设备已经应答，不额外复位总线，等待上层下一轮重新读取。 */
+    }
     hal_status = HAL_I2C_Mem_Read(hi2c,
                                   dev_addr,
                                   mem_addr,
                                   I2C_MEMADD_SIZE_16BIT,
                                   buf,
                                   len,
-                                  AT24CS32_I2C_TIMEOUT_MS);
+                                  AT24CS32_READ_TIMEOUT_MS - elapsed); /* 正式读取只使用剩余预算，不再独占100ms。 */
 
-    /* 正式读取发生可恢复故障时只做一次软恢复和重试，避免任务被无限阻塞。 */
+    At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status); /* 完整记录读取结果；总线恢复不能覆盖本次错误证据。 */
     if ((hal_status != HAL_OK) && (At24_NeedsRecovery(hi2c, hal_status) != 0U)) {
-        At24_RecoverBus(hi2c);
-
-        /* 恢复后器件重新应答才执行第二次读取，否则保留 BUSY 失败状态。 */
-        if (At24_WaitReady(hi2c, dev_addr) == HAL_OK) {
-            hal_status = HAL_I2C_Mem_Read(hi2c,
-                                          dev_addr,
-                                          mem_addr,
-                                          I2C_MEMADD_SIZE_16BIT,
-                                          buf,
-                                          len,
-                                          AT24CS32_I2C_TIMEOUT_MS);
-        } else {
-            hal_status = HAL_BUSY;
-        }
+        At24_RecoverBus(hi2c); /* 保留总线恢复能力，但本轮不再追加第二次读操作。 */
     }
-
-    /* 无论最终成功还是失败，都把本次访问的真实结果完整回填到调试结构体里 */
-    At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status);
 
     /* HAL 最终返回成功时向上层报告有效数据，其它状态统一报告失败。 */
     if (hal_status == HAL_OK) {

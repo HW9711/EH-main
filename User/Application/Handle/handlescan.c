@@ -24,6 +24,7 @@
 #include "at24cs32_crc_verify.h"
 
 kernel_task_t HANDLESCANTaskHandle;
+static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认证I2C访问；A/B轮换，其余插拔采样仍每10ms执行。 */
 
 /*
  * A/B 手柄插拔检测引脚。低电平表示插着手柄，高电平表示可能已拔出。
@@ -224,6 +225,7 @@ typedef struct
 typedef struct
 {
     HandlescanStage stage;                                  /* 当前扫描阶段，静态零值对应空闲态。 */
+    AT24CS32_CRC_StepContext verify_context;                  /* 本通道逐页认证进度及快照，A/B交错调度时不共享中间数据。 */
     volatile uint32_t navigation_generation;                /* 进入拔出确认时加 1；外部导航读取前后比较此数，不同就放弃旧读取。 */
     HandlescanDebounce debounce;                             /* 插入和拔出去抖计数，单位都是 10ms 扫描周期。 */
     uint8_t offline_event_required;                          /* 已发布过本通道上线事件后置 1；只有离线事件成功入队才清零，防止短接毛刺或队列满造成永久假在线。 */
@@ -2582,9 +2584,9 @@ static uint8_t Handlescan_MapVerifyStatusToAlarm(uint8_t channel, AT24CS32_CRC_S
 }
 
 /*
- * 函数功能：按通道选择 EEPROM CRC 认证总线。
+ * 函数功能：按通道选择EEPROM总线，每轮只推进一个认证块，让泵任务及时取得业务锁。
  * 输入参数：binding 为固定通道绑定；result 保存底层认证明细。
- * 返回参数：返回原 AT24CS32 认证状态，不改变错误码含义。
+ * 返回参数：PENDING表示下轮继续，其它值保持原AT24CS32认证结果含义。
  */
 static AT24CS32_CRC_Status Handlescan_VerifyEeprom(const HandlescanChannelBinding *binding,
                                                    AT24CS32_CRC_Result *result)
@@ -2592,18 +2594,15 @@ static AT24CS32_CRC_Status Handlescan_VerifyEeprom(const HandlescanChannelBindin
     /* 只把逻辑通道换算成物理接口，认证结果仍写回原逻辑A/B上下文。 */
     uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
 
-    /* 原物理A接口连接I2C2，交换开启后逻辑B会进入此分支。 */
-    if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A)
-    {
-        return AT24CS32_VerifyCrc_I2C2(result);
-    }
-
-    /* 原物理B接口连接I2C3，交换开启后逻辑A会进入此分支。 */
-    return AT24CS32_VerifyCrc_I2C3(result);
+    AT24CS32_CRC_Status status = AT24CS32_VerifyCrcStep(
+        (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A) ? 0U : 1U,
+        &binding->context->verify_context); /* 物理映射不变，中间进度只保存在本逻辑通道。 */
+    *result = binding->context->verify_context.result; /* 保留原调用方的认证明细，不再依赖共享静态缓存。 */
+    return status; /* 未完成与失败分开，PENDING不能触发重试或报警。 */
 }
 
 /*
- * 函数功能：按通道从 EEPROM 连续读取指定字节。
+ * 函数功能：初次上线装载复用本轮认证快照，其它场景按通道从EEPROM读取指定字节。
  * 输入参数：binding 为固定通道绑定；addr/len 为 EEPROM 地址和长度；data 为接收缓存。
  * 返回参数：原样返回底层读取结果，1 表示成功，0 表示失败。
  */
@@ -2614,6 +2613,15 @@ static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *bindin
 {
     /* 连续读取必须与短接检测使用同一套物理映射，避免读到另一侧手柄。 */
     uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
+
+    if (((binding->context->stage == HANDLESCAN_STAGE_READ_INFO) ||
+         (binding->context->stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL)) &&
+        (binding->context->verify_context.verified != 0U) && (data != NULL) && (len != 0U) &&
+        (addr >= AT24CS32_AUTH_DATA_START_ADDR) &&
+        ((uint32_t)addr + len <= AT24CS32_AUTH_DATA_START_ADDR + AT24CS32_AUTH_DATA_LENGTH)) {
+        memcpy(data, &binding->context->verify_context.pages[addr - AT24CS32_AUTH_DATA_START_ADDR], len); /* 初次装载只使用本轮CRC通过的Page2~8，避免在公共锁内重复读取。 */
+        return 1U; /* 认证未通过或非初次装载时不进入快照路径。 */
+    }
 
     /* 原物理A接口的EEPROM固定挂在I2C2。 */
     if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A)
@@ -2626,7 +2634,7 @@ static uint8_t Handlescan_ReadEepromBytes(const HandlescanChannelBinding *bindin
 }
 
 /*
- * 函数功能：按通道读取并校验一整页 EEPROM 数据。
+ * 函数功能：初次上线装载使用已认证的整页快照，其它场景按通道读取并校验EEPROM页。
  * 输入参数：binding 指定通道；page_index 为从 0 开始的页号；page_buf 接收整页数据。
  * 返回参数：原样返回底层页读取结果，1 表示成功，0 表示失败。
 
@@ -2636,6 +2644,15 @@ Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding,
                           uint16_t page_index, uint8_t *page_buf) {
   /* 整页读取沿用统一物理映射，逻辑消息和页面数据归属不发生交换。 */
   uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(binding->channel);
+
+  if (((binding->context->stage == HANDLESCAN_STAGE_READ_INFO) ||
+       (binding->context->stage == HANDLESCAN_STAGE_WAIT_RFID_TOOL)) &&
+      (binding->context->verify_context.verified != 0U) && (page_buf != NULL) &&
+      (page_index >= AT24CS32_AUTH_PAGE_START_INDEX) &&
+      (page_index < AT24CS32_AUTH_PAGE_START_INDEX + AT24CS32_AUTH_PAGE_COUNT)) {
+    memcpy(page_buf, &binding->context->verify_context.pages[(page_index - AT24CS32_AUTH_PAGE_START_INDEX) * AT24CS32_PAGE_SIZE], AT24CS32_PAGE_SIZE); /* Page4/Page6已逐页校验且整体认证通过，直接装载同一快照。 */
+    return 1U; /* RFID后续刷新及手动重载仍走下面的实际总线读取。 */
+  }
 
   /* 原物理A接口的EEPROM页固定从I2C2读取。 */
   if (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A) {
@@ -2790,7 +2807,7 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
 
 
 /*
- * 函数功能：确认插入电平稳定，等待接口稳定后校验 EEPROM；失败时按设定间隔重试。
+ * 函数功能：确认插入稳定后轮换执行逐页认证；未完成时让出调度，失败仍按原间隔重试。
  * 输入参数：binding 指定 A/B 通道的引脚、EEPROM 和扫描进度。
  * 返回参数：true 表示本轮应结束；false 表示可继续处理后续阶段。校验成功时会进入读取信息阶段。
  */
@@ -2802,6 +2819,12 @@ Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
       verify_result; /* 保存底层 CRC 认证明细，便于现场定位 EEPROM 失败页。 */
   AT24CS32_CRC_Status
       verify_status; /* 保存本轮认证结果，原错误码和报警映射保持不变。 */
+
+  if ((context->stage != HANDLESCAN_STAGE_VERIFY) &&
+      (context->stage != HANDLESCAN_STAGE_READ_INFO)) {
+    context->verify_context.step = 0U; /* 新插入、失败等待或RFID重认证都从Page1重新开始，不能续用半轮数据。 */
+    context->verify_context.verified = 0U; /* 仅完整认证后的READ_INFO阶段有权复用本轮业务页。 */
+  }
 
   if (context->stage == HANDLESCAN_STAGE_IDLE) {
     context->debounce.in_debounce_ticks =
@@ -2859,9 +2882,15 @@ Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
   }
 
   if (context->stage == HANDLESCAN_STAGE_VERIFY) {
+    if (binding->channel != s_verify_channel) {
+      return true; /* 本轮认证总线留给另一侧，避免双路I2C异常等待叠加；不改变插拔去抖计数。 */
+    }
     AT24CS32_ClearLastDebugInfo(); /* 认证前先清掉上一轮底层 I2C 调试信息。 */
     verify_status = Handlescan_VerifyEeprom(
         binding, &verify_result); /* 按逻辑绑定和统一物理映射选择对应I2C总线完成EEPROM认证。 */
+    if (verify_status == AT24CS32_CRC_STATUS_PENDING) {
+      return true; /* 本轮已读取一页或SN，立即让出公共业务锁，不计失败、不继续装载业务页。 */
+    }
     Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_VERIFY_STATUS,
                           (uint8_t)verify_status); /* 输出当前认证结果码。 */
 
@@ -2878,10 +2907,10 @@ Handlescan_ProcessInsertAndVerify(const HandlescanChannelBinding *binding) {
 
     context->stage =
         HANDLESCAN_STAGE_READ_INFO; /* 认证通过后，进入信息区读取阶段。 */
+    return true; /* 参数装载放到下一轮，避免末页认证与双通道上线刷新叠加占锁。 */
   }
 
-  return false; /* VERIFY 成功会切到 READ_INFO，允许本周期继续读取，保持原时序。
-                 */
+  return false; /* 已处于READ_INFO时使用认证快照装载；其它阶段交给后续状态处理。 */
 }
 
 /*
@@ -3527,7 +3556,7 @@ void HandlescanB_Fun_SSC(void)
 
 
 /*
- * 函数功能：先检查 A 手柄，再检查 B 手柄，最后处理临时报警到期关闭。
+ * 函数功能：每10ms检查A/B插拔，每轮只给一侧认证页读取机会，最后处理临时报警到期关闭。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -3535,6 +3564,7 @@ void Handlescan_Fun(void)
 {
     HandlescanA_Fun_SSC();
     HandlescanB_Fun_SSC();
+    s_verify_channel = (s_verify_channel == CHANNEL_A) ? CHANNEL_B : CHANNEL_A; /* 下轮交换认证机会，单侧故障不能连续占用双侧的读页预算。 */
     Handlescan_UpdateTransientScreenAlarm();                 /* 维护运行中另一路坏手柄的 3 秒屏幕临时提示。 */
 }
 
