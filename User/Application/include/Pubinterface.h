@@ -68,7 +68,7 @@
 #define ALARM_SOCKET_MS        2000U //公共接头未识别到 RFID 刀具，限时蜂鸣和上位机报警保持 2 秒
 #define ALARM_SOCKET_REPEAT_MS 1000U //缺刀具提示两次触发至少间隔 1 秒；调小会增加重复提示次数
 #define ALARM_UNPLUG_MS        2000U //手控运行时拔出手柄，屏幕、蜂鸣和上位机临时提示保持 2 秒
-#define ALARM_PRESSURE_MS      2000U //压力超限时，89 号弹窗和蜂鸣保持 2 秒；此报警不停止泵或手柄
+#define ALARM_PRESSURE_MS      2000U //压力超限时89号弹窗保持2秒；蜂鸣单独播放两声，不停止泵或手柄
 
 
 #define PLANER      1U//刨头

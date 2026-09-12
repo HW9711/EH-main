@@ -491,7 +491,7 @@ static void Foot_StopPumpBInjection(void)
  */
 static void Foot_ClearRunRequestAfterGateFail(void)
 {
-    bool stop_pump_a=(s_double_left_gently_pump_channel==CHANNEL_A||s_double_right_gently_pump_channel==CHANNEL_A); /* 清归属前保存双脚踏实际使用的 A 泵，即使轻踩标志已清掉也不能漏停。 */
+    bool stop_pump_a=(s_double_left_gently_pump_channel==CHANNEL_A||s_double_right_gently_pump_channel==CHANNEL_A); /* 清除记录前，先记住左脚或右脚是否选中过A泵；后面据此停泵，不依赖轻踩标志。 */
     bool stop_pump_b=(s_double_left_gently_pump_channel==CHANNEL_B||s_double_right_gently_pump_channel==CHANNEL_B); /* 保存左右任一侧使用的 B 泵，两侧共用同一泵时只停止一次。 */
 
     if(s_double_left_gently_pump_channel==CHANNEL_NONE&&s_double_right_gently_pump_channel==CHANNEL_NONE&&
@@ -505,9 +505,9 @@ static void Foot_ClearRunRequestAfterGateFail(void)
     Foot_StopHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_NONE); /* 撤销左右脚踏此前发出的手柄联动开泵请求，不依赖 jt 标志是否还在。 */
     WorkMessage.runflag_work=false;                 /* 撤销电机运行请求，防止缺刀具等检查失败后仍发出启动帧。 */
     WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免屏幕或驱动继续沿用本周期脚踏比例速度。 */
-    ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行标志，避免启动失败后松脚处理仍按已启动执行。 */
+    ControlSignalMessage.jtL_control_flag=false;    /* 本次启动检查未通过，清除左脚运行请求，避免松脚时按已经启动处理。 */
     ControlSignalMessage.jtR_control_flag=false;    /* 清右脚踏运行标志，双脚踏任一侧失败都不能留下运行来源。 */
-    s_double_left_gently_pump_channel=CHANNEL_NONE; /* 本次启动失败，清掉左脚轻踩使用的泵记录。 */
+    s_double_left_gently_pump_channel=CHANNEL_NONE; /* 本次启动被拒绝，清掉左脚轻踩使用的泵记录。 */
     s_double_right_gently_pump_channel=CHANNEL_NONE; /* 清右侧实际泵记录，避免松脚时误停后续其它来源启动的泵。 */
     ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT); /* 电机已停止时取消脚踏对电机的占用，让其他控制方式可以使用。 */
     ControlSignalMessage.jtL_gentlypump_flag=false; /* 启动被拒绝后取消左脚轻踩状态，实际停止对象使用清理前保存的选择。 */
@@ -516,7 +516,7 @@ static void Foot_ClearRunRequestAfterGateFail(void)
     {
         Foot_StopPumpAInjection(); /* 撤销 A 的脚踏开泵及排空状态，泵任务下周期发送零速。 */
     }
-    if(stop_pump_b&&pumpMessageB.type==INJECTWATER) /* B 使用同样的归属和类型检查，支持 A 灌注/B 注水的互换配置。 */
+    if(stop_pump_b&&pumpMessageB.type==INJECTWATER) /* 只有脚踏选中过B泵且B仍是注水泵时才停止，不能误停独立运行的灌注泵。 */
     {
         Foot_StopPumpBInjection(); /* 撤销实际由脚踏启动的 B，不影响独立运行的另一台泵。 */
     }

@@ -223,7 +223,7 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
 }
 
 /*
- * 函数功能：非阻塞投递区域刷新消息，避免持有公共业务锁时等待显示消费者而拖延泵通信。
+ * 函数功能：把指定屏幕区域的刷新消息放进队列；队列满就结束本次发送，不等待显示任务腾出空位。
  * 输入参数：areaId 为显示区域编号；enable_flag 为该区域启用状态；Value 为空或指向至少 10 字节参数，本函数固定复制 10 字节。
  * 返回参数：无。
  */
@@ -248,7 +248,7 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 	{
 		return;//同一区域、同一开关状态和同一参数不重复入队，降低屏幕串口刷新压力。
 	}
-    if(Kernel_QueueSend(UIDPMsgQueue, &msg, 0U) == pdPASS) /* 调用方和显示消费者共用业务锁，满队列不能原地等待；保持原失败返回及后续补刷机制。 */
+    if(Kernel_QueueSend(UIDPMsgQueue, &msg, 0U) == pdPASS) /* 显示任务也要取得同一把业务锁，因此队列满时不能等待；发送失败不更新去重记录，下次相同刷新仍可尝试。 */
 	{
 		s_uidp_last_msg = msg;//只在投递成功后更新去重缓存，避免队列满时吞掉下一次有效刷新。
 		s_uidp_last_valid = 1U;//标记去重缓存已建立，后续重复 UI 消息才允许被过滤。
@@ -421,7 +421,7 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 		}
 		else if(control_type==3)//触控模式。
 		{
-			light_flag?LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U):LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U);//触控入口使用 36~38 资源组
+			light_flag?LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,38U):LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH,37U);//触控按钮使用图片编号36到38。
 		}
 		else if(control_type==4)///外部控制
 		{
@@ -442,15 +442,15 @@ void UICONTROLDP(bool enable_flag,uint8_t control_type, bool light_flag)
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);//触控按钮默认白色可选态，按下进入触控后才显示黄色
 			LCD_Disappear_Picture(UIDP_LCD_VP_CONTROL_EXTERNAL);//外部通信未接入时隐藏小电脑图标，避免误显示为在线
 		}
-		else if(control_type == 1U) /* 只禁用脚控入口时，不改写其它控制方式图标。 */
+		else if(control_type == 1U) /* 只禁用脚控按钮，不改变手控和触控按钮的显示。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_FOOT, 30U);
 		}
-		else if(control_type == 2U) /* 只禁用手控入口时，把手控按钮恢复为未选状态。 */
+		else if(control_type == 2U) /* 禁用手控按钮，并显示为未选中状态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_HANDLE, 33U);
 		}
-		else if(control_type == 3U) /* 只禁用触控入口时，把触控按钮恢复为暗态。 */
+		else if(control_type == 3U) /* 禁用触控按钮，并显示为灰暗状态。 */
 		{
 			LCD_Show_Picture(UIDP_LCD_VP_CONTROL_TOUCH, 36U);
 		}
@@ -715,7 +715,7 @@ void UIMANUALBUTTONDP(bool enable_flag,bool PAO_flag,uint8_t auto_identify_flag,
 }
 
 /*
- * 函数功能：刷新开口定位入口。
+ * 函数功能：根据当前刀具是否支持开口定位，显示或隐藏屏幕上的开口定位按钮。
  * 输入参数：enable_flag 表示当前刀具是否需要显示开口定位。
  * 返回参数：无。
  */
@@ -742,7 +742,7 @@ void UIDP_ForceNoHandleDisplay(void)
 	UIHANDLEDP(false, 0U, 2U, 0U);		   /* B 通道写无手柄图标，保证最后一个手柄拔出后两侧状态一致。 */
 	UITOOLSPECDP(false, 0U, 0U, 0U, 0U);	   /* 隐藏刀具规格，避免 EEPROM 规格在无手柄状态下残留。 */
 	UIMANUALBUTTONDP(false, false, 0U, 0U); /* 隐藏自动识别、手动磨/刨和识别结果区域。 */
-	UIORALDP(false);						   /* 隐藏开口定位入口，避免无手柄时保留旧刀具能力入口。 */
+	UIORALDP(false);						   /* 隐藏开口定位按钮，避免拔掉手柄后仍显示上一个刀具的操作按钮。 */
 }
 
 /*
@@ -971,7 +971,7 @@ static void UIDP_DrawPumpDisplaySnapshot(uint8_t pump_area_id, uint8_t button_ar
 }
 
 /*
- * 函数功能：显示或隐藏触控/外部控制弹窗入口。
+ * 函数功能：显示或隐藏触控、外控提示窗口，并更新窗口中的运行状态。
  * 输入参数：enable_flag 表示是否显示弹窗；run_flag 表示触控控制是否已经启动运行。
  * 返回参数：无。
  */

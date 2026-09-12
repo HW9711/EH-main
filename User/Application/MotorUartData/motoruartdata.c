@@ -54,7 +54,7 @@ static uint8_t s_motor_uart_picture_pending = 0U; /* 驱动报警建立后等待
 static uint8_t s_motor_uart_pending_picture_value = MOTOR_ALARM_PICTURE_NONE; /* 保存本次待显示的84/86/87或91~99图片号。 */
 static uint32_t s_motor_uart_picture_start_tick = 0U; /* 保存驱动报警图片延迟起点，不参与故障保护和报警退出计时。 */
 static MotorUartFeedbackSnapshot_t s_motor_uart_feedback_snapshot; /* 保存最近一包 CRC 正确的速度、电流和错误码，三者必须来自同一包。 */
-static volatile uint32_t s_motor_uart_feedback_version = 0U; /* 偶数表示快照稳定，奇数表示UART1接收任务正在更新。 */
+static volatile uint32_t s_motor_uart_feedback_version = 0U; /* 偶数表示反馈记录可以读取，奇数表示UART1接收任务正在修改记录。 */
 
 typedef enum
 {
@@ -394,12 +394,12 @@ static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
 
 	if (frame == NULL)
 	{
-		return; /* 空指针不能形成有效反馈，保留上一份一致性快照。 */
+		return; /* 未提供回包数据时不更新记录，保留上次完整的反馈数据。 */
 	}
 
 	speed_field = (uint16_t)(((uint16_t)frame[4] << 8U) | frame[5]); /* 先按驱动大端字段还原16位速度。 */
 	++s_motor_uart_feedback_version; /* 发布奇数版本，外部通信任务不得在字段写入中复制。 */
-	__DMB(); /* 保证写入中标志先于快照字段可见。 */
+	__DMB(); /* 先写入奇数版本，再修改反馈字段，让其它任务知道数据正在更新。 */
 	s_motor_uart_feedback_snapshot.sequence = (uint16_t)(s_motor_uart_feedback_snapshot.sequence + 1U); /* 每份CRC正确回包递增，16位自然回绕。 */
 	s_motor_uart_feedback_snapshot.feedback_tick_ms = HAL_GetTick(); /* 记录本帧CRC确认完成时的主控单调毫秒时钟。 */
 	s_motor_uart_feedback_snapshot.speed_rpm = (uint32_t)speed_field * 10U; /* 把驱动私有“rpm/10”换算成上位机统一使用的rpm。 */
@@ -407,13 +407,13 @@ static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
 	s_motor_uart_feedback_snapshot.raw_error = frame[7]; /* 保留驱动原始Err，不能用主控报警码替代诊断依据。 */
 	s_motor_uart_feedback_snapshot.valid = 1U; /* 所有字段写完后标记已有有效反馈。 */
 	__DMB(); /* 保证字段先于最终偶数版本发布。 */
-	++s_motor_uart_feedback_version; /* 写入完成，读取方可以复制整份快照。 */
+	++s_motor_uart_feedback_version; /* 写完后恢复偶数版本，其它任务才可复制这份反馈记录。 */
 }
 
 /*
  * 函数功能：读取最近一次有效驱动反馈，读取途中发生更新时重试，避免混用两次回包。
- * 输入参数：snapshot指向调用方提供的快照缓存。
- * 返回参数：快照有效且复制成功返回1，否则返回0。
+ * 输入参数：snapshot指向接收反馈记录的结构体，复制后调用方只读取自己的这份数据。
+ * 返回参数：已有有效反馈记录且复制期间未被修改时返回1，否则返回0。
  */
 uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
 {
@@ -440,11 +440,11 @@ uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot)
 		version_after = s_motor_uart_feedback_version;
 		if ((version_before == version_after) && ((version_after & 1U) == 0U))
 		{
-			return (snapshot->valid != 0U) ? 1U : 0U; /* 版本稳定时返回快照有效位。 */
+			return (snapshot->valid != 0U) ? 1U : 0U; /* 复制期间未发生更新，再用valid判断是否已有有效反馈记录。 */
 		}
 	}
 
-	memset(snapshot, 0, sizeof(*snapshot)); /* 多次并发冲突时返回全零无效值，避免上传混合快照。 */
+	memset(snapshot, 0, sizeof(*snapshot)); /* 连续三次都遇到数据更新时清空输出并返回失败，避免上传混用不同回包的数据。 */
 	return 0U;
 }
 
@@ -460,7 +460,7 @@ bool MotorUart_IsRecentFeedbackMoving(void)
 
 	if (MotorUart_CopyFeedbackSnapshot(&feedback_snapshot) == 0U)
 	{
-		return (WorkMessage.driver_speed_feedback != 0U); /* 快照碰到接收任务写入时按旧非零值保持“忙”，避免瞬时并发导致提前释放控制权。 */
+		return (WorkMessage.driver_speed_feedback != 0U); /* 未能复制到有效反馈时，按此前保存的速度判断；旧速度非零就仍视为转动，避免提前允许切换控制方式。 */
 	}
 
 	feedback_age_ms = (uint32_t)(HAL_GetTick() - feedback_snapshot.feedback_tick_ms); /* 计算距最后有效回包过去了多久，不修改保存的反馈值。 */
@@ -691,7 +691,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
 			{
 				Common_CopyData(&dat[i], dat1, 12);    //复制完整 12 字节反馈，包含末尾两字节 CRC。
-				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC正确后先形成速度、电流、Err同源快照，供50ms遥测一致读取。 */
+				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC通过后，将本帧的速度、电流和Err一起保存，供50ms上报任务读取，避免混用不同回包。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是当前模式ADC滤波实际电流 * 100：无刷为AllCur、有刷为CurLPF，单位0.01A，只上传给上位机显示。 */
 					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */

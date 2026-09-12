@@ -322,7 +322,7 @@ static void Pump_HandleGearKey(uint8_t key_value)
 }
 
 /*
- * 函数功能：按驱动就绪门禁处理泵启停/排空；失败时屏幕泵键仅申请独立重定位，成功后须再次按键启动。
+ * 函数功能：处理泵启停和排空按键。驱动未就绪时拒绝启动；定位失败后按屏幕泵键只重新定位，成功后仍须再按一次才能运行。
  * 输入参数：key_value 为泵启停键值，pump_owner 为该键对应的控制权来源。
  * 返回参数：无。
  */
@@ -353,9 +353,9 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					if (key_value == SCREENKey_APUMP_control)
 					{
-						(void)PumpBehavior_RequestRealign(PUMP_BEHAVIOR_CHANNEL_A); /* 仅失败时登记零速校准，定位中按键不会重置次数或打断定位。 */
+						(void)PumpBehavior_RequestRealign(PUMP_BEHAVIOR_CHANNEL_A); /* 仅定位失败时申请重新定位，不启动泵；正在定位时按键无效。 */
 					}
-					Pubinterface_RefreshPumpADisplay(); /* 保持停止显示；青色定位、红色失败由周期任务按真实回包刷新。 */
+					Pubinterface_RefreshPumpADisplay(); /* 本次不启动A泵；周期任务根据驱动反馈更新青色定位或红色失败状态。 */
 					return; /* 本次按键不保存任何运行/排空请求，完成后必须有新的启动动作。 */
 				}
 				/* HMI 启泵先申请外控权限；本地脚踏和屏幕只控制泵，不占用手柄电机的控制权限。 */

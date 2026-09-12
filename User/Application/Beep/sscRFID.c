@@ -1096,13 +1096,13 @@ bool Rfid_CopyLastResult(uint8_t channel, RfidToolResult_t *result)
         return false; /* 通道无效，不存在有效 RFID 结果。 */
     }
 
-    *result = s_last_result[index]; /* 复制缓存快照，避免调用方直接操作内部缓存。 */
+    *result = s_last_result[index]; /* 复制一份当前缓存给调用方，避免调用方修改内部保存的RFID结果。 */
     return result->valid; /* 只有校验通过的历史结果才算有效。 */
 }
 
 /*
  * 函数功能：复制指定业务通道的 RFID 请求/应答累计统计。
- * 输入参数：channel 为 A/B 通道；statistics 为调用方提供的统计快照缓存。
+ * 输入参数：channel 为 A/B 通道；statistics为接收统计结果的结构体，复制后调用方读取自己的这份数据。
  * 返回参数：统计开关已启用且通道有效时返回 true，否则清空输出并返回 false。
  */
 bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics)
@@ -1111,7 +1111,7 @@ bool Rfid_CopyLinkStatistics(uint8_t channel, RfidLinkStatistics_t *statistics)
     uint8_t index; /* 保存业务通道对应的统计数组下标。 */
 #endif
 
-    /* 输出为空时不能写入统计快照。 */
+    /* 未提供接收统计结果的结构体时直接返回，不访问空指针。 */
     if (statistics == NULL)
     {
         return false;

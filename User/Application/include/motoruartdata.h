@@ -50,8 +50,8 @@ void MotorUartData_Init(void);
 
 /*
  * 函数功能：读取最近一次有效驱动反馈，读取途中发生更新时重试，避免混用新旧数据。
- * 输入参数：snapshot 指向调用方提供的快照缓存。
- * 返回参数：快照有效且复制成功返回1，否则返回0。
+ * 输入参数：snapshot指向接收反馈记录的结构体，复制后调用方读取自己的这份数据。
+ * 返回参数：已有有效反馈记录且复制期间未被修改时返回1，否则返回0。
  */
 uint8_t MotorUart_CopyFeedbackSnapshot(MotorUartFeedbackSnapshot_t *snapshot);
 

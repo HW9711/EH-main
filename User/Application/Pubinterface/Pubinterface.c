@@ -41,6 +41,8 @@ static uint8_t s_screen_external_exit_pending = 0U;
 static uint32_t s_screen_external_exit_first_tick = 0U;
 /* 压力超限提示所用报警编号；只触发限时蜂鸣和 89 号弹窗，不停止泵或手柄，不可当作流量配置修改。 */
 #define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_PUMP_PRESSURE_BLOCKED
+/* 压力蜂鸣按100ms响、100ms停执行四步，正常播放两声；与2秒弹窗时长分开设置。 */
+#define PUMP_PRESSURE_BEEP_MS 400U
 /* 1 表示公共接头缺刀具提示尚未结束；用于定时关闭提示，并限制重复提示频率。 */
 static uint8_t s_common_socket_tool_missing_alarm_active = 0U;
 /* 公共接头缺刀具提示是否实际占用了屏幕报警区，只有占用过才允许到期清屏。 */
@@ -1621,7 +1623,7 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 		}
 	}
 
-	s_handle_pump_fault_stop_latched = 1U;        /* 锁存驱动故障停机原因，连续脚踏/触控保活不能自动重新拉起手柄。 */
+	s_handle_pump_fault_stop_latched = 1U;        /* 置1记录泵故障导致的手柄停机；脚踏一直踩着或触控持续发运行帧时，禁止自动重启。 */
 	WorkMessage.runflag_work = false;                 /* 立即撤销手柄运行命令，驱动任务下一周期发送停止帧。 */
 	WorkMessage.speed_work = 0U;                       /* 同步清零实际目标速度，保证停机帧和状态显示一致。 */
 	/* 驱动故障停机不清 touchactive_work，触控松开后的超时逻辑需要该状态来调用 SetHandleInjectionPumpRun(false) 清锁存。 */
@@ -1632,12 +1634,12 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 	ControlSignalMessage.jtL_gentlypump_flag = false; /* 清除左轻排联动标志，避免停手柄时遗留旧泵联动。 */
 	ControlSignalMessage.jtR_gentlypump_flag = false; /* 清除右轻排联动标志，保证 B 通道脚踏场景也能停净。 */
 	ControlSignalMessage.HMI_gentlypump_flag = false; /* 清除外控轻排标志，避免外控状态继续保持泵输出。 */
-	StopInjectionPumps(cooling_mask); /* 停止本次冷却目标和历史跟随目标，保证注水泵实际输出归零。 */
+	StopInjectionPumps(cooling_mask); /* 撤销当前选中及此前跟随手柄的注水泵运行请求，由泵任务发送零速命令。 */
 	Pubinterface_RefreshControlModeDisplay();         /* 控制来源运行态已被清理，立即刷新主运行页脚控/手控/触控图标。 */
 }
 
 /*
- * 函数功能：A/B 泵持续超压确认后，仅启动限时蜂鸣和 89 号压力弹窗。
+ * 函数功能：A/B泵首次确认超压或间隔10秒仍超压时，蜂鸣两声并显示2秒的89号弹窗。
  * 输入参数：pump_channel 为压力超限的逻辑通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。
  */
@@ -1648,7 +1650,7 @@ void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel)
 		return; /* 非法通道不能产生压力提示，避免错误调用占用报警区。 */
 	}
 
-	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, ALARM_PRESSURE_MS); /* 只投递限时蜂鸣，不设置全局报警和停机锁存。 */
+	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 四个100ms响停步骤播放两声，不设置全局报警或停止泵。 */
 	RaisePressureAlarm(); /* 只显示 89 号提示，不清泵或手柄运行标志，不改变速度和外控请求。 */
 }
 
@@ -1673,7 +1675,7 @@ void Pubinterface_ServicePumpDriverFaultHold(uint8_t pump_channel)
 }
 
 /*
- * 函数功能：新的控制源启动沿清除注水泵驱动故障联动停机锁存；保留旧接口名供已有调用方使用。
+ * 函数功能：调用方确认松开或重新触发启动后，清除泵故障留下的手柄停机标志；泵驱动是否可运行仍另行检查。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1683,9 +1685,9 @@ void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void)
 }
 
 /*
- * 函数功能：查询注水泵驱动故障联动停机锁存；保留旧压力接口名，压力报警本身不建立锁存。
+ * 函数功能：查询手柄是否因注水泵故障而被禁止再次启动。函数沿用旧的Pressure名称，压力报警本身不设置此标志。
  * 输入参数：无。
- * 返回参数：true 表示驱动故障联动停机后尚未释放控制源，false 表示允许新的启动沿重新尝试运行。
+ * 返回参数：true表示泵故障停机标志尚未清除；false表示该标志未阻止启动，不代表其它启动条件均已满足。
  */
 bool Pubinterface_IsPressureBlockStopLatched(void)
 {
@@ -1730,14 +1732,14 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 	if (enable && ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U) &&
 		(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U))
 	{
-		HandlePumpDriverFaultStop(CHANNEL_A); /* A冷却泵定位或失联时同时撤销手柄请求，沿用真实释放锁，不能踩住等待自动启动。 */
-		return; /* 此处不发故障双响：BUSY只是未就绪，真实保护由泵反馈解析提示。 */
+		HandlePumpDriverFaultStop(CHANNEL_A); /* A冷却泵未就绪时撤销手柄和泵的运行请求；必须松开后重新操作，不能一直踩着等定位完成。 */
+		return; /* 驱动忙于定位不等于驱动故障，这里不发故障双响；故障提示由泵反馈处理。 */
 	}
 	if (enable && ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_B) != 0U) &&
 		(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U))
 	{
-		HandlePumpDriverFaultStop(CHANNEL_B); /* B目标同样在写run_flag之前拒绝，不能把冷却泵请求缓存到定位完成。 */
-		return; /* 保留驱动有界校准，不发送非零速度打断它。 */
+		HandlePumpDriverFaultStop(CHANNEL_B); /* B冷却泵未就绪时拒绝本次运行，不保留启动请求等待定位完成。 */
+		return; /* 直接返回，不发送非零速度命令，避免打断驱动正在进行的定位。 */
 	}
 
 	if (enable == false)

@@ -5,7 +5,8 @@
 #include "queue.h"
 #include <string.h>
 #include "sscBEEP.h"
-#include "pump_behavior_core.h" /* 泵标定期间屏蔽普通提示，结果由蜂鸣任务合并消费；安全报警仍独立播放。 */
+#include "work_alarm.h" /* 用压力报警码识别两声提示，其它报警仍沿用原响停节奏。 */
+#include "pump_behavior_core.h" /* 泵驱动定位时不播普通按键音；两泵定位都结束后统一提示，报警蜂鸣仍可播放。 */
 #include "board.h"
 #include "delay.h"
 
@@ -33,7 +34,7 @@ void Beep_Pulse100ms(void)
 {
     if (PumpBehavior_IsAlignmentBusy() != 0U)
     {
-        return; /* 已进入泵标定时不播放直接按键音，避免绕过蜂鸣任务的静音规则。 */
+        return; /* 有泵正在定位，直接结束本次按键提示，不打开蜂鸣器。 */
     }
     BEEP_ON();       /* 启动页GPIO已经初始化，可直接打开蜂鸣器而不依赖尚未创建的消息队列。 */
     Delay_ms(100U);  /* 保持与老工程按键反馈一致的100ms响声。 */
@@ -41,7 +42,7 @@ void Beep_Pulse100ms(void)
 }
 
 /*
- * 函数功能：非泵标定期发送按键音请求；原普通按键行为不变，标定期间丢弃且结束后不补响。
+ * 函数功能：请求播放普通按键音；泵正在定位时忽略本次提示，定位结束后也不补播。
  * 输入参数：time 为响声持续的 100ms 周期数，0 表示不响。
  * 返回参数：无。
  */
@@ -49,7 +50,7 @@ void Beep_Pulse100ms(void)
 {
     if (PumpBehavior_IsAlignmentBusy() != 0U)
     {
-        return; /* 标定中连接、切页及普通按键提示均不入队，不能在READY之后挤成多声。 */
+        return; /* 泵定位时不把连接、切页或按键提示放进队列，避免定位结束后连续播放积压的声音。 */
     }
     if(BeepMsgQueue == NULL) return; /* 蜂鸣队列尚未初始化时不能投递按键音，直接返回避免访问空队列。 */
     BeepMessage_t msg;
@@ -61,7 +62,7 @@ void Beep_Pulse100ms(void)
 }
 
 /*
- * 函数功能：非泵标定期向蜂鸣任务发送仅在报警空闲时播放的普通提示音。
+ * 函数功能：请求播放不打断报警的提示音；泵定位、报警或定位结果音播放期间不响。
  * 输入参数：time 为提示音保持的蜂鸣任务周期数，每周期 100ms。
  * 返回参数：无。
  */
@@ -71,7 +72,7 @@ void SendKeyBeepMessageIfIdle(uint8_t time)
 
     if (PumpBehavior_IsAlignmentBusy() != 0U)
     {
-        return; /* 标定等待及自动补试均静音，不排队保留普通操作音。 */
+        return; /* 有泵正在等待或执行定位，本次普通提示直接丢弃，不留到以后播放。 */
     }
 
     /* 蜂鸣队列尚未初始化时不能投递提示音，直接返回避免访问空队列。 */
@@ -88,7 +89,7 @@ void SendKeyBeepMessageIfIdle(uint8_t time)
 }
 
 /*
- * 函数功能：蜂鸣任务没有报警占用时播放两声 100ms 故障提示音。
+ * 函数功能：请求播放两声100ms故障提示音；若有报警、泵定位或定位结果音，蜂鸣任务会忽略本次请求。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -115,11 +116,11 @@ void SendDoubleBeepMessageIfIdle(void)
  */
  void SendAlarmMessage(uint8_t flag)
 {
-    static uint8_t flag_bijiao=0; /* 记录上一次已投递的报警码，避免同一报警持续占满蜂鸣队列。 */
+    static uint8_t flag_bijiao=0; /* 记录上一次尝试发送的报警码，相同码不再入队；此记录不表示消息一定投递成功。 */
     if(flag_bijiao==flag)return; /* 与上次记录的报警码相同就不重复发送；这里只比较发送记录，不是硬件反馈。 */
     else
     {
-        flag_bijiao=flag; /* 报警码发生变化时先更新缓存，包括记住 0 号退出状态，保证下一次报警仍可入队。 */
+        flag_bijiao=flag; /* 先记住本次报警码，包括0号停止；下次码不同才再次尝试入队。 */
     }
     if(BeepMsgQueue == NULL) return; /* 蜂鸣队列尚未初始化时无法更新报警状态，保持当前硬件输出不变。 */
     BeepMessage_t msg;
@@ -161,7 +162,7 @@ static void BeepQueue_Init(void)
 }
 
 /*
- * 函数功能：每100ms处理报警、普通消息与泵标定合并结果；标定中普通声音静音，安全报警优先。
+ * 函数功能：每100ms取一条蜂鸣消息并更新响停；定位时忽略普通提示，定位结果音可被报警打断。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -172,9 +173,9 @@ static uint8_t key_flag = 0;
 static uint8_t alarm_flag = 0;
 static uint16_t alarm_limited_ticks = 0U; //限时报警剩余周期，递减到0后自动关闭蜂鸣
 static uint8_t double_beep_phase = 0U; //双响剩余步骤：4=响、3=停、2=响、1=停，每步 100ms，0 表示结束。
-static uint8_t alignment_beep_phase = 0U; /* 标定结果专用步骤：成功从2开始、失败从4开始，普通消息不得截断这一组声音。 */
-uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 使用两路当前状态，任一路尚在标定时都不能提前播放结果。 */
-uint8_t alignment_result; /* 本周期最多消费一组两路合并结果，不占用可能拥塞的普通蜂鸣队列。 */
+static uint8_t alignment_beep_phase = 0U; /* 定位结果响停步骤：成功2到0响一声；失败4到0响两声，每步100ms；普通按键不能打断。 */
+uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 本周期是否还有泵正在定位；A/B都结束后才能播放定位结果。 */
+uint8_t alignment_result; /* 本周期读取的定位结果：0不响、1单响、2双响；结果不经过普通蜂鸣队列。 */
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -185,7 +186,7 @@ if(BeepMsgQueue != NULL)
     /* 只有本周期实际收到新消息时才切换蜂鸣模式，队列为空时继续执行原状态。 */
     if(Kernel_QueueReceive(BeepMsgQueue, &msg, 0) == pdTRUE)
     {
-        /* 普通按键音优先结束旧报警缓存，并按消息中的周期数短响。 */
+        /* 没有泵定位或定位结果音时，普通按键消息清掉旧报警蜂鸣，再按指定时长短响。 */
         if((msg.msgType == BEEP_MSG_KEY) && (alignment_busy == 0U) && (alignment_beep_phase == 0U))
         {
             // 按键响应消息：keyBeepTime不为0表示需要按键蜂鸣
@@ -197,14 +198,14 @@ if(BeepMsgQueue != NULL)
         /* 外控通道切换提示只能在报警空闲时播放，不得清除持续报警或限时报警。 */
         else if(msg.msgType == BEEP_MSG_KEY_IF_IDLE)
         {
-            /* 报警蜂鸣占用时静默忽略提示；报警结束后不补响，避免产生与操作时点不一致的声音。 */
+            /* 有报警、泵定位或定位结果音时忽略这条提示，之后不补播。 */
             if((alarm_flag == 0U) && (alignment_busy == 0U) && (alignment_beep_phase == 0U))
             {
                 key_flag = msg.keyBeepTime; /* 仅更新普通按键音周期数，不改报警码和报警倒计时。 */
                 double_beep_phase = 0U; /* 改播普通提示音时停止双响，避免两种声音交替干扰。 */
             }
         }
-        /* 泵驱动故障双响只在报警空闲时接管蜂鸣，不覆盖持续或限时报警。 */
+        /* 普通故障双响仅在没有报警、泵定位及定位结果音时播放。 */
         else if(msg.msgType == BEEP_MSG_DOUBLE_IF_IDLE)
         {
             if((alarm_flag == 0U) && (alignment_busy == 0U) && (alignment_beep_phase == 0U))
@@ -222,35 +223,39 @@ if(BeepMsgQueue != NULL)
             alarm_limited_ticks = 0U;                     /* 普通报警保持到外部发送 0，不使用内部倒计时。 */
             key_flag = 0;
             double_beep_phase = 0U;                       /* 报警优先级高于双响，到达后立即结束双响。 */
-            alignment_beep_phase = 0U;                    /* 真正报警立即抢占标定结果，不为凑齐提示次数延迟安全声音。 */
+            alignment_beep_phase = 0U;                    /* 收到报警消息就结束定位结果音，立即按新报警状态处理。 */
         }
         /* 限时报警使用消息自带倒计时，到期后由蜂鸣任务自行关闭。 */
         else if(msg.msgType == BEEP_MSG_ALARM_TIMED)
         {
             alarm_flag = msg.alarmFlag;                   /* 限时报警和持续报警都使用相同的间歇响声。 */
             alarm_limited_ticks = msg.alarmHoldTicks;     /* 保存倒计时，到期后本任务自己清报警蜂鸣。 */
+            if (msg.alarmFlag == WORK_ALARM_PUMP_PRESSURE_BLOCKED) /* 压力提示每次都从响声开始，不能继承其它报警的停顿阶段。 */
+            {
+                alarmCounter = 0U; /* 配合400ms限时播放响、停、响、停，保证正常情况下为两声100ms提示。 */
+            }
             key_flag = 0;
             double_beep_phase = 0U;                       /* 限时报警同样高于双响提示。 */
-            alignment_beep_phase = 0U;                    /* 限时安全报警也可打断结果提示，结束后不补播过期结果。 */
+            alignment_beep_phase = 0U;                    /* 限时报警同样打断定位结果音，报警结束后不补播被打断的声音。 */
         }
     }
 }
 
 	if (alignment_busy != 0U)
 	{
-		key_flag = 0U; /* 已排队或已开始的普通提示在标定期也结束，不能仅靠发送入口过滤。 */
-		double_beep_phase = 0U; /* 普通低优先级双响不穿插到标定过程；报警状态不在此清除。 */
-		alignment_beep_phase = 0U; /* 新标定开始即停止上一组结果音，不把旧成功误当本轮成功。 */
+		key_flag = 0U; /* 泵开始定位后清掉正在播放的按键音，之前已排队的普通提示也不能继续响。 */
+		double_beep_phase = 0U; /* 定位时停止普通双响，但不清除报警蜂鸣状态。 */
+		alignment_beep_phase = 0U; /* 新一轮定位开始时结束上一轮结果音，避免把旧成功提示听成本轮成功。 */
 	}
-	alignment_result = PumpBehavior_TakeAlignmentBeepResult(); /* 仍忙时返回0且保留结果；两路结束后只消费一次。 */
+	alignment_result = PumpBehavior_TakeAlignmentBeepResult(); /* 两路都结束后读取定位结果并清零；仍有泵在定位时返回0，结果留待以后读取。 */
 	if ((alignment_result != 0U) && (alarm_flag == 0U))
 	{
 		key_flag = 0U; /* 结果音优先于普通按键，成功的一声不与旧提示拼接。 */
-		double_beep_phase = 0U; /* 标定失败已合并为一组，不能再叠加普通双响。 */
+		double_beep_phase = 0U; /* 本次定位失败已经安排双响，先清掉普通双响步骤，避免重复响四声。 */
 		alignment_beep_phase = (alignment_result == 2U) ? 4U : 2U; /* 成功响停两步，失败响停响停四步，每步100ms。 */
 	}
 
-	/* 标定结果独立计数，播放期间普通队列消息不能截断第二声或延长第一声。 */
+	/* 定位结果使用独立响停步骤，普通按键消息不能改变这一组声音的次数和长度。 */
 	if ((alignment_beep_phase > 0U) && (alarm_flag == 0U))
 	{
 		if ((alignment_beep_phase & 1U) == 0U)
@@ -261,13 +266,13 @@ if(BeepMsgQueue != NULL)
 		{
 			BEEP_OFF(); /* 奇数步骤保留100ms间隔，保证单响与双响可分辨。 */
 		}
-		--alignment_beep_phase; /* 本组完成后恢复原普通提示行为，重复READY/FAILED不再触发。 */
+		--alignment_beep_phase; /* 每周期完成一步，减到0后结束本组声音，后续可重新播放普通提示。 */
 	}
-	// 按键响应模式（优先级高）
+	// 没有定位结果音和报警时，播放普通按键音。
 	/* 按消息处理后的状态输出；普通按键消息已在上面清除报警，空闲提示消息则不会清除。 */
 	else if(key_flag && !alarm_flag)
 	{
-		BEEP_ON();                                     /* 按键蜂鸣采用非阻塞计数，当前 100ms 周期打开蜂鸣器后立即返回。 */
+		BEEP_ON();                                     /* 本周期打开蜂鸣器，不在这里延时等待；持续时间由下面的计数和后续任务周期决定。 */
 		key_flag--;                                    /* 每个任务周期扣减一次，time=1 时保持一个 100ms 蜂鸣周期。 */
 	}
 	/* 没有报警时按响、停、响、停四步播放故障双响，每步 100ms。 */

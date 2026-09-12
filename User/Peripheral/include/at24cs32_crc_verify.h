@@ -73,14 +73,14 @@ typedef struct
     uint8_t calculated_auth[AT24CS32_AUTH_RESULT_SIZE];
 } AT24CS32_CRC_Result;
 
-/* A/B分别保存一份认证快照，分周期读取不能共用旧同步接口的静态缓存。 */
+/* A/B通道各自保存认证进度和页数据，交替读取时不会覆盖另一通道的数据。 */
 typedef struct
 {
     uint8_t step; /* 0读Page1、1读SN、2~8读Page2~8；新一轮认证必须归零。 */
-    uint8_t verified; /* 全部页和及四组CRC通过后才置1，业务装载不能使用半成品。 */
+    uint8_t verified; /* 所有页的校验和及四组CRC全部通过时置1；为0时禁止使用这些参数初始化手柄。 */
     uint16_t crc[4]; /* 保存SN及已读页面的四组累计CRC，算法与同步认证一致。 */
     AT24CS32_CRC_Result result; /* 本轮SN、存储认证值和计算结果，通道间不交叉。 */
-    uint8_t pages[AT24CS32_AUTH_DATA_LENGTH]; /* 保存本轮已认证的Page2~8，上线装载不再重复读总线。 */
+    uint8_t pages[AT24CS32_AUTH_DATA_LENGTH]; /* 保存本轮读取的Page2~Page8；认证通过后直接用这些数据初始化手柄，不再重读EEPROM。 */
 } AT24CS32_CRC_StepContext;
 
 /* 每次最多读取一页或SN；use_i2c3为0选I2C2、1选I2C3，PENDING时下轮继续。 */

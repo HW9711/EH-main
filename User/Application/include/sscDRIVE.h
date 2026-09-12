@@ -48,7 +48,7 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel);//通道，
 
 /*
  * 函数功能：读取电机请求和已发送命令的记录，读取途中发生更新时重试，避免混用新旧数据。
- * 输入参数：snapshot 指向调用方提供的快照缓存。
- * 返回参数：快照有效且复制成功返回1，否则返回0。
+ * 输入参数：snapshot指向接收命令记录的结构体，复制后调用方读取自己的这份数据。
+ * 返回参数：已有有效命令记录且复制期间未被修改时返回1，否则返回0。
  */
 uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot);

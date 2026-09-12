@@ -54,7 +54,7 @@ RunInformMessage_t;
 static RunInformMessage_t msg;
 static MotorDriveCommandSnapshot_t s_motor_drive_command_snapshot; /* 保存最近一次实际改变并送入UART1的周期电机命令。 */
 static uint8_t s_motor_drive_last_command[motor_frem_length]; /* 保存上一份11字节周期命令，用于排除每50ms重复保活帧。 */
-static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚无历史命令，首份启动或停止帧必须形成快照。 */
+static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚未保存命令；首次生成启动或停止帧时必须保存一份记录。 */
 static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示数据可读，奇数表示正在更新；读取前后比较此值，避免混用两次命令。 */
 static volatile uint8_t s_tool_position_guard_active = 0U; /* 1 表示已发出定位命令，暂不重发空闲停止帧，给驱动留出完成定位的时间。 */
 static volatile uint32_t s_tool_position_guard_until_ms = 0U; /* 保存定位保护截止时刻，配合有符号差值兼容HAL毫秒计数回绕。 */
@@ -335,7 +335,7 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
 
     if (command == NULL)
     {
-        return; /* 内部调用参数异常时不改变历史快照，避免遥测出现半更新字段。 */
+        return; /* 没有提供命令数据时保留上次记录，避免上位机读到只更新一部分的字段。 */
     }
 
     evaluated_tick_ms = HAL_GetTick(); /* 记录本周期完成启停判断的毫秒时刻。 */
@@ -346,7 +346,7 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
     }
 
     ++s_motor_drive_snapshot_version; /* 先把版本改成奇数，外部通信任务会等待本次写入结束。 */
-    __DMB(); /* 保证版本奇数先于后续快照字段对另一个任务可见。 */
+    __DMB(); /* 确保先写入奇数版本，再更新命令字段，让其它任务知道数据正在修改。 */
     s_motor_drive_command_snapshot.evaluated_tick_ms = evaluated_tick_ms; /* 每个周期都刷新，断点可确认输出任务仍在调度。 */
     s_motor_drive_command_snapshot.source_speed_rpm = source_speed_rpm; /* 保存倍率和补偿前的原始速度，直接定位零速RUN来源。 */
     s_motor_drive_command_snapshot.requested_run_state = requested_run_state; /* 保存业务层提出的RUN/STOP，不用反推实际UART帧。 */
@@ -363,16 +363,16 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
         s_motor_drive_command_snapshot.run_state = run_state; /* 启动帧写1，周期停止帧和零速重装帧写0。 */
         s_motor_drive_command_snapshot.direction = command[1]; /* 直接保存实际帧byte1，包含机械方向换算后的控制模式。 */
         s_motor_drive_command_snapshot.motor_type = command[3]; /* 直接保存实际帧byte3，反映板级A/B映射和有刷/无刷类型。 */
-        s_motor_drive_command_snapshot.valid = 1U; /* 第一份真实UART1周期命令形成后开放快照读取。 */
+        s_motor_drive_command_snapshot.valid = 1U; /* 已生成并保存一份UART1命令，之后允许其它任务读取这份记录。 */
     }
     __DMB(); /* 保证所有字段完成后才发布最终偶数版本。 */
-    ++s_motor_drive_snapshot_version; /* 写入结束恢复偶数版本，读取方可一次性复制整份快照。 */
+    ++s_motor_drive_snapshot_version; /* 写完后将版本恢复为偶数，其它任务才可复制这份命令记录。 */
 }
 
 /*
  * 函数功能：读取电机请求和命令记录，读取途中发生更新时重试，避免混用新旧数据。
- * 输入参数：snapshot指向调用方提供的快照缓存。
- * 返回参数：快照有效且复制成功返回1，否则返回0。
+ * 输入参数：snapshot指向接收命令记录的结构体，复制后调用方只读取自己的这份数据。
+ * 返回参数：已有有效命令记录且复制期间未被修改时返回1，否则返回0。
  */
 uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot)
 {
@@ -393,17 +393,17 @@ uint8_t MotorDrive_CopyCommandSnapshot(MotorDriveCommandSnapshot_t *snapshot)
             continue; /* 写入窗口通常只有数个指令周期，下一次循环直接重试。 */
         }
 
-        __DMB(); /* 版本检查完成后再读取快照字段。 */
+        __DMB(); /* 先检查版本是否允许读取，再读取命令字段，不能交换这两个操作的顺序。 */
         *snapshot = s_motor_drive_command_snapshot; /* 结构体一次复制到调用方私有缓存，后续组包不再读取共享状态。 */
         __DMB(); /* 字段复制结束后再复核版本。 */
         version_after = s_motor_drive_snapshot_version;
         if ((version_before == version_after) && ((version_after & 1U) == 0U))
         {
-            return (snapshot->valid != 0U) ? 1U : 0U; /* 稳定版本下返回快照自身有效标志。 */
+            return (snapshot->valid != 0U) ? 1U : 0U; /* 复制期间未发生更新，再用valid判断是否已有有效命令记录。 */
         }
     }
 
-    memset(snapshot, 0, sizeof(*snapshot)); /* 三次均撞上写入时返回明确无效快照，禁止上传混合字段。 */
+    memset(snapshot, 0, sizeof(*snapshot)); /* 连续三次都遇到数据更新时清空输出并返回失败，避免上传混用新旧值的数据。 */
     return 0U;
 }
 
@@ -468,7 +468,7 @@ static void MotorStart(uint32_t command_speed_rpm,
                                          1U, drive_type, source_speed_rpm, 0U); /* 发送成功后才发布重装 STOP，失败时保持原状态以便下周期继续重装。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
-    transmit_status = Uart1_SendPacket(motor_startcode, motor_frem_length); /* 非零 RUN 发送完成后再更新公开快照。 */
+    transmit_status = Uart1_SendPacket(motor_startcode, motor_frem_length); /* 非零速度的RUN命令发送后，再保存供上位机读取的命令记录。 */
     if (transmit_status == HAL_OK)
     {
         MotorDrive_RecordCommandSnapshot(motor_startcode, WorkMessage.channel_work, 1U, command_speed_rpm,

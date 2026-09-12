@@ -36,11 +36,11 @@ static uint16_t PumpPressure_Interpolate(uint16_t target_speed,
 }
 
 /*
- * 函数功能：根据目标业务流量查询主控压力报警阈值，相邻标定点之间线性插值。
+ * 函数功能：查询原压力报警曲线，供灌注、抽吸以及未覆盖的注水手柄或流量继续使用。
  * 输入参数：target_speed 为目标业务流量，注水和灌注单位为 ml/min。
  * 返回参数：返回 g 单位报警阈值；抽吸泵传入 0~15 的内部设定，因此使用最低标定阈值。
  */
-static uint16_t PumpPressure_AlarmThreshold(uint16_t target_speed)
+static uint16_t PumpPressure_LegacyAlarmThreshold(uint16_t target_speed)
 {
     if (target_speed <= PUMP_PRESSURE_CONTROL_SPEED_50_ML_MIN)
     {
@@ -93,6 +93,56 @@ static uint16_t PumpPressure_AlarmThreshold(uint16_t target_speed)
     }
     return PUMP_PRESSURE_CONTROL_ALARM_300_G; /* 超过最高标定流量时沿用 300 ml/min 报警值。 */
 }
+
+/* 四列依次为20、30、50、70mL/min；不改动原灌注曲线的流量点。 */
+static const uint16_t s_injection_flow_points[PUMP_PRESSURE_INJECT_POINT_COUNT] =
+{
+    PUMP_PRESSURE_INJECT_FLOW_20, /* 第一列为20mL/min实测点。 */
+    PUMP_PRESSURE_INJECT_FLOW_30, /* 第二列为30mL/min实测点。 */
+    PUMP_PRESSURE_INJECT_FLOW_50, /* 第三列为50mL/min实测点。 */
+    PUMP_PRESSURE_INJECT_FLOW_70  /* 第四列为70mL/min实测点。 */
+};
+
+/* 行号为注水曲线编号减1；每行四列均为g单位报警阈值，便于单独调整手柄组。 */
+static const uint16_t s_injection_alarm_g[PUMP_PRESSURE_PROFILE_INJECT_COMMON][PUMP_PRESSURE_INJECT_POINT_COUNT] =
+{
+    {PUMP_PRESSURE_INJECT_EM_20_G, PUMP_PRESSURE_INJECT_EM_30_G, PUMP_PRESSURE_INJECT_EM_50_G, PUMP_PRESSURE_INJECT_EM_70_G}, /* EM系列。 */
+    {PUMP_PRESSURE_INJECT_PX_20_G, PUMP_PRESSURE_INJECT_PX_30_G, PUMP_PRESSURE_INJECT_PX_50_G, PUMP_PRESSURE_INJECT_PX_70_G}, /* PX分体系列。 */
+    {PUMP_PRESSURE_INJECT_TM_20_G, PUMP_PRESSURE_INJECT_TM_30_G, PUMP_PRESSURE_INJECT_TM_50_G, PUMP_PRESSURE_INJECT_TM_70_G}, /* TM系列。 */
+    {PUMP_PRESSURE_INJECT_PXY_20_G, PUMP_PRESSURE_INJECT_PXY_30_G, PUMP_PRESSURE_INJECT_PXY_50_G, PUMP_PRESSURE_INJECT_PXY_70_G}, /* PXY一体系列。 */
+    {PUMP_PRESSURE_INJECT_COMMON_20_G, PUMP_PRESSURE_INJECT_COMMON_30_G, PUMP_PRESSURE_INJECT_COMMON_50_G, PUMP_PRESSURE_INJECT_COMMON_70_G} /* 公共接头和DHYTM。 */
+};
+
+/*
+ * 函数功能：在已测试的20~70mL/min内按注水手柄组取阈值，相邻流量点之间线性插值。
+ * 输入参数：target_speed为目标流量，单位mL/min；pressure_profile为PUMP_PRESSURE_PROFILE_*曲线编号。
+ * 返回参数：g单位报警阈值；原曲线编号、非法编号或未测试流量均返回原曲线结果。
+ */
+static uint16_t PumpPressure_AlarmThreshold(uint16_t target_speed, uint8_t pressure_profile)
+{
+    const uint16_t *alarm_points; /* 指向本手柄组的四个报警值，只读，不修改配置表。 */
+    uint8_t point; /* 指向插值区间的右端流量点，左端为point-1。 */
+
+    if ((pressure_profile < PUMP_PRESSURE_PROFILE_INJECT_EM) ||
+        (pressure_profile > PUMP_PRESSURE_PROFILE_INJECT_COMMON) ||
+        (target_speed < PUMP_PRESSURE_INJECT_FLOW_20) ||
+        (target_speed > PUMP_PRESSURE_INJECT_FLOW_70))
+    {
+        return PumpPressure_LegacyAlarmThreshold(target_speed); /* 灌注及未覆盖条件原样查旧表，不外推新阈值。 */
+    }
+
+    alarm_points = s_injection_alarm_g[pressure_profile - PUMP_PRESSURE_PROFILE_INJECT_EM]; /* 五个有效编号已检查，可安全选取对应手柄行。 */
+    for (point = 1U; point < PUMP_PRESSURE_INJECT_POINT_COUNT; ++point) /* 从20~30区间开始，依次查找当前流量所在区间。 */
+    {
+        if (target_speed <= s_injection_flow_points[point]) /* 当前流量未超过右端时，用这一对相邻实测点。 */
+        {
+            return PumpPressure_Interpolate(target_speed,
+                                            s_injection_flow_points[point - 1U], s_injection_flow_points[point],
+                                            alarm_points[point - 1U], alarm_points[point]); /* 保持原整数四舍五入方法，避免中间流量跳档。 */
+        }
+    }
+    return alarm_points[PUMP_PRESSURE_INJECT_POINT_COUNT - 1U]; /* 有效范围已限制到70，正常路径在循环内返回；保留明确的最终返回值。 */
+}
 #endif
 
 /*
@@ -106,13 +156,14 @@ void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state)
 }
 
 /*
- * 函数功能：用新压力帧确认持续超限，产生一次报警事件，并在压力稳定回落后重新允许报警。
- * 输入参数：state 为单路状态；target_speed 为目标流量；weight_x10 单位 0.1g；threshold_g 为压力帧有效性字段；
+ * 函数功能：用新压力帧确认超限；首次提示后每隔10秒仍超限就重报，压力稳定回落后结束本次报警。
+ * 输入参数：state 为单路状态；target_speed 为目标流量；pressure_profile为注水手柄曲线编号；weight_x10单位0.1g；threshold_g为压力帧有效性字段；
  *           sequence 为压力帧序号；now_ms 为本周期 HAL 毫秒时刻。
- * 返回参数：新确认的一次超限返回 1，其余返回 0；本函数不控制泵和手柄启停。
+ * 返回参数：首次确认超限或到达重复提示条件时返回1，其余返回0；本函数不控制泵和手柄启停。
  */
 uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t target_speed,
+                                        uint8_t pressure_profile,
                                         uint32_t weight_x10,
                                         uint16_t threshold_g,
                                         uint8_t sequence,
@@ -120,6 +171,7 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
 {
 #if (PUMP_PRESSURE_CONTROL_ENABLE == 0U)
     (void)target_speed; /* 报警关闭时不根据目标流量建立新事件。 */
+    (void)pressure_profile; /* 总开关关闭时不使用任何手柄阈值曲线。 */
     (void)weight_x10; /* 报警关闭时忽略压力读数。 */
     (void)threshold_g; /* 报警关闭时不使用有效性字段。 */
     (void)sequence; /* 报警关闭时不记录帧序号。 */
@@ -127,6 +179,7 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
     PumpPressureControl_ResetAlarm(state); /* 清掉本通道旧报警记录，避免重新启用后继承旧事件。 */
     return 0U; /* 总开关关闭时不产生报警提示。 */
 #else
+    uint16_t alarm_threshold_g; /* 本次按泵用途、手柄组和流量选出的报警线，单位g。 */
     uint32_t alarm_x10; /* 当前业务流量对应的报警阈值，统一换为 0.1g 比较。 */
     uint32_t recover_x10; /* 报警阈值减回差后的恢复阈值，防止临界压力反复提示。 */
     uint32_t confirm_ms; /* 根据当前是否已报警，选择超限或恢复的确认时长。 */
@@ -139,13 +192,16 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
         return 0U; /* 6000 是未完成标定的特殊值，不按真实超压报警。 */
     }
 
+    alarm_threshold_g = PumpPressure_AlarmThreshold(target_speed, pressure_profile); /* 仅更换报警阈值来源，后续仍直接比较原压力帧。 */
     if ((state->target_speed != target_speed) ||
+        (state->alarm_threshold_g != alarm_threshold_g) ||
         ((state->sequence_valid != 0U) &&
          ((uint32_t)(now_ms - state->last_sample_tick_ms) >= PUMP_PRESSURE_ALARM_MAX_SAMPLE_GAP_MS)))
     {
-        state->timing_active = 0U; /* 流量变化或断帧后重新确认，不把不同阈值或旧读数累计成连续事件。 */
+        state->timing_active = 0U; /* 流量、手柄报警线变化或断帧后重新确认，不把不同阈值下的样本累计成连续事件。 */
     }
     state->target_speed = target_speed; /* 记录本次阈值对应的流量，已报警标志仍等压力回落才解除。 */
+    state->alarm_threshold_g = alarm_threshold_g; /* 保存实际报警线供下一周期比较，不清已报警状态或最近提示时间。 */
 
     if ((state->sequence_valid != 0U) && (state->last_sequence == sequence))
     {
@@ -155,9 +211,18 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
     state->sequence_valid = 1U; /* 记录已经读取过有效帧，首次序号为 0 也不会被丢弃。 */
     state->last_sample_tick_ms = now_ms; /* 保存本次新样本时刻，后续识别采样间断。 */
 
-    alarm_x10 = (uint32_t)PumpPressure_AlarmThreshold(target_speed) * 10U; /* 宏值单位 g，压力板数据单位 0.1g。 */
+    alarm_x10 = (uint32_t)alarm_threshold_g * 10U; /* 把本次所选g单位阈值换成0.1g，原1秒确认、20g回差和10秒重复规则不变。 */
     recover_x10 = (uint32_t)PUMP_PRESSURE_ALARM_HYSTERESIS_G * 10U; /* 把恢复线与报警线的差值从 g 换成 0.1g。 */
     recover_x10 = (alarm_x10 > recover_x10) ? (alarm_x10 - recover_x10) : 0U; /* 防止误配大回差造成无符号下溢。 */
+
+    /* 已经提示过且本帧仍达到报警线时，距上次提示满10秒就再次通知；旧帧已在上面排除。 */
+    if ((state->alarm_active != 0U) && (weight_x10 >= alarm_x10) &&
+        ((uint32_t)(now_ms - state->last_alarm_tick_ms) >= PUMP_PRESSURE_ALARM_REPEAT_MS))
+    {
+        state->last_alarm_tick_ms = now_ms; /* 本次重报作为下一轮10秒等待的起点，避免每个任务周期都提示。 */
+        state->timing_active = 0U; /* 压力再次超限，取消此前尚未完成的低压恢复计时。 */
+        return 1U; /* 请求重新显示2秒弹窗并蜂鸣两声，不修改任何运行输出。 */
+    }
 
     if (state->alarm_active == 0U)
     {
@@ -188,8 +253,9 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
     state->timing_active = 0U; /* 当前确认完成，下一次压力变化重新开始计时。 */
     if (state->alarm_active == 0U)
     {
-        state->alarm_active = 1U; /* 记住本次已经提示，压力持续偏高时不再重复弹窗和蜂鸣。 */
-        return 1U; /* 仅首次确认超限时通知上层弹窗和蜂鸣。 */
+        state->alarm_active = 1U; /* 记录首次超压已经确认，之后检查恢复条件和10秒重复提示。 */
+        state->last_alarm_tick_ms = now_ms; /* 从首次提示时开始计时，不从第一次超限样本开始计时。 */
+        return 1U; /* 首次持续超限确认完成，通知上层弹窗和蜂鸣。 */
     }
     state->alarm_active = 0U; /* 压力已稳定回落，允许下一次独立超压事件重新报警。 */
     return 0U; /* 恢复只更新报警记录，不操作泵或手柄运行状态。 */

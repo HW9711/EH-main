@@ -2200,7 +2200,7 @@ static void ExternalComm_ClearPumpRequests(void)
 {
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_A); /* 明确全停必须停止A定位，不能只发送仍授权校准的普通零速。 */
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_B); /* B使用独立取消槽，丢帧时由本泵任务持续确认停止。 */
-    s_pump_driver_wait_stop_mask = 0U; /* 明确全停已释放被拒的外控启动，后续仍需新的READY和新启动帧。 */
+    s_pump_driver_wait_stop_mask = 0U; /* 收到全部停止命令后，清除A/B等待停止标志；之后重新启动时仍须检查驱动已就绪。 */
     s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
     s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
     s_external_pump_b_manual_run_request = 0U;   /* 同步清除 B 泵外控运行请求，避免退出后小电脑图标继续显示 40。 */
@@ -2595,7 +2595,7 @@ static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
     {
         if ((PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U) || ((s_pump_driver_wait_stop_mask & 0x01U) != 0U))
         {
-            s_pump_driver_wait_stop_mask |= 0x01U; /* 外控在定位中启动后必须先发A停止，READY到达不能让旧重复启动自动生效。 */
+            s_pump_driver_wait_stop_mask |= 0x01U; /* A泵未就绪或仍在等待停止时拒绝启动，并要求先收到A停止命令；驱动后来就绪也不自动启动。 */
             ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code, EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 使用既有失败应答，不伪报已经启泵。 */
             return false; /* 不写手动运行请求，不通过外控路径申请重定位。 */
         }
@@ -2611,7 +2611,7 @@ static bool ExternalComm_ApplyPumpAControl(uint8_t area_code)
     }
     else
     {
-        s_pump_driver_wait_stop_mask &= (uint8_t)~0x01U; /* 显式A停止是被拒启动的释放边界，后续还须新READY和新启动命令。 */
+        s_pump_driver_wait_stop_mask &= (uint8_t)~0x01U; /* 收到A停止命令后清除此标志；下次收到A启动命令时仍须检查驱动已就绪。 */
         ExternalComm_SetUart5PumpManualRun(0U); /* 只清除 A 泵独立运行请求，仍有冷却跟随时泵继续运行。 */
     }
 
@@ -2631,7 +2631,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
     {
         if ((PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U) || ((s_pump_driver_wait_stop_mask & 0x02U) != 0U))
         {
-            s_pump_driver_wait_stop_mask |= 0x02U; /* B提前启动被拒后只由显式B停止解除，不受A停止或READY回包影响。 */
+            s_pump_driver_wait_stop_mask |= 0x02U; /* B启动被拒后置位等待停止标志；仅收到B停止或全部停止命令才清除，驱动就绪不会自动清除。 */
             ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code, EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 向上位机明确反馈未执行，不缓存泵启动。 */
             return false;
         }
@@ -2654,7 +2654,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
     }
     else
     {
-        s_pump_driver_wait_stop_mask &= (uint8_t)~0x02U; /* 只有显式B停止才解除旧启动拒绝锁，下一条启动仍需驱动READY。 */
+        s_pump_driver_wait_stop_mask &= (uint8_t)~0x02U; /* 收到B停止命令后清除此标志；下次收到B启动命令时仍须检查驱动已就绪。 */
         s_external_pump_b_manual_run_request = 0U; /* 已收到独立停止 B 泵命令，清除此前保存的运行请求。 */
         pumpMessageB.run_flag = false; /* 泵任务下一周期发送 B 泵停止帧。 */
         pumpMessageB.timingDrainage_flag = false; /* 同时退出可能残留的定时排空状态。 */

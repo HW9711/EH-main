@@ -1,9 +1,9 @@
 #include "at24cs32.h"
 #include <string.h>
 
-/* 写入及写前应答等待沿用100ms预算，不改变EEPROM写周期和写失败重试行为。 */
+/* 写操作及写前应答探测仍使用100ms超时参数，不改变原有写入重试。 */
 #define AT24CS32_I2C_TIMEOUT_MS        100U
-#define AT24CS32_READ_TIMEOUT_MS     10U /* 只读探测与读取共享10ms请求预算；HAL内部BUSY等待仍有独立25ms上限，不能视为整函数严格10ms。 */
+#define AT24CS32_READ_TIMEOUT_MS     10U /* 应答探测和读取共用10ms超时时间；HAL内部还可能等待总线忙状态最多25ms，因此整个函数可能超过10ms。 */
 /* 连续读取一次最多传输的字节数；64字节读完再读下一块，不是EEPROM的物理页大小。 */
 #define AT24CS32_READ_CHUNK_SIZE       64U
 /* 读写前最多检查EEPROM应答的次数；调大可能延长未连接手柄的等待时间。 */
@@ -140,18 +140,18 @@ static uint16_t At24_PageAddr(uint16_t page_index)
 }
 
 /*
- * 函数功能：在短只读预算内读取EEPROM；异常恢复总线后立即返回，后续重试交给调用方的新周期。
+ * 函数功能：读取EEPROM时缩短应答探测和读取等待；失败后恢复总线并返回，由调用方以后重试。
  * 输入参数：hi2c为总线，dev_addr为器件地址，mem_addr为16位字地址，buf/len为接收缓存及长度。
  * 返回参数：1表示本次完整读取成功；0表示失败，不在同一调用中重复阻塞读取。
  */
 static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t mem_addr, uint8_t *buf, uint16_t len)
 {
     HAL_StatusTypeDef hal_status;
-    uint32_t started = HAL_GetTick(); /* 应答探测和正式读取共用起点，不能各自重新获取10ms预算。 */
+    uint32_t started = HAL_GetTick(); /* 记录本次开始时间，后面的应答探测和数据读取共同使用这10ms。 */
     uint32_t elapsed; /* 无符号差值支持毫秒计数回绕。 */
 
     if ((hi2c == NULL) || (buf == NULL) || (len == 0U)) {
-        return 0U; /* 参数无效时不访问硬件，避免短预算分支解引用空句柄。 */
+        return 0U; /* 参数无效时不访问硬件，避免访问空指针。 */
     }
 
     /*
@@ -179,7 +179,7 @@ static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t
 
     elapsed = (uint32_t)(HAL_GetTick() - started); /* 检查应答阶段已经占用的墙钟时间。 */
     if (elapsed >= AT24CS32_READ_TIMEOUT_MS) {
-        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, HAL_TIMEOUT); /* 应答虽完成但预算已耗尽，本轮不再发起新读取。 */
+        At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, HAL_TIMEOUT); /* 应答探测已用完允许的等待时间，本次直接返回，不再读取数据。 */
         return 0U; /* 设备已经应答，不额外复位总线，等待上层下一轮重新读取。 */
     }
     hal_status = HAL_I2C_Mem_Read(hi2c,
@@ -188,7 +188,7 @@ static uint8_t At24_MemRead(I2C_HandleTypeDef *hi2c, uint16_t dev_addr, uint16_t
                                   I2C_MEMADD_SIZE_16BIT,
                                   buf,
                                   len,
-                                  AT24CS32_READ_TIMEOUT_MS - elapsed); /* 正式读取只使用剩余预算，不再独占100ms。 */
+                                  AT24CS32_READ_TIMEOUT_MS - elapsed); /* 将应答探测剩余的毫秒数传给数据读取，避免继续等待100ms。 */
 
     At24_UpdateDebug(hi2c, AT24CS32_DEBUG_OP_READ, dev_addr, mem_addr, len, hal_status); /* 完整记录读取结果；总线恢复不能覆盖本次错误证据。 */
     if ((hal_status != HAL_OK) && (At24_NeedsRecovery(hi2c, hal_status) != 0U)) {

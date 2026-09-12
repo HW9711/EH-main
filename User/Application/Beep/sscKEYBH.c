@@ -21,9 +21,9 @@ static void KeyBehivQueue_Init(void)
     KeyBehivQueue = Kernel_QueueCreate(20, sizeof(KeyBehMessage_t), "KeyBehivQueue");
 }
 /*
- * 函数功能：非阻塞投递按键或插拔消息；持有公共业务锁时不能等待同样需要该锁的消费者。
+ * 函数功能：把按键或插拔消息放进队列；队列满就立即返回失败，不在当前业务任务里等待。
  * 输入参数：control_type 为事件来源类型；control_key 为该来源下的具体按键或插拔事件值。
- * 返回参数：true表示成功入队；false表示未创建或已满，关键拔出仍由扫描状态机保留重试。
+ * 返回参数：true表示消息已入队；false表示队列未创建或已满，手柄扫描任务会保留必须发送的拔出消息并重试。
  */
 bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
@@ -40,7 +40,7 @@ bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
 	msg.queued_tick_ms = HAL_GetTick(); /* 普通按键只记录时间；触控按住信号取出时会检查是否已过 420ms。 */
-	return (Kernel_QueueSend(KeyBehivQueue, &msg, 0U) == pdPASS); /* 消费者也需要公共锁，满队列等待不能腾出空位；立即交回结果并让出调度机会。 */
+	return (Kernel_QueueSend(KeyBehivQueue, &msg, 0U) == pdPASS); /* 处理队列的任务也要取得同一把业务锁；当前任务等待会挡住它，因此队列满时直接返回失败。 */
 }
 /*
  * 函数功能：按脚踏按键编号执行泵控制、开口定位或手柄切换。
@@ -279,7 +279,7 @@ void KeyBehaviors()
 	{
 		uint8_t control_type=msg.control_type; /* 记录消息来自脚踏、手柄、屏幕还是插拔，后面据此检查和处理。 */
 		uint8_t control_key=msg.control_key; /* 当前队列项的业务按键值，保持与来源类型一一对应。 */
-		uint32_t queued_age_ms=(uint32_t)(HAL_GetTick()-msg.queued_tick_ms); /* 每条事件按自己的入队时刻判定，后续新保活不能掩盖旧消息积压。 */
+		uint32_t queued_age_ms=(uint32_t)(HAL_GetTick()-msg.queued_tick_ms); /* 按这条触控按住消息的入队时间判断是否过期，不能用后到的新消息时间代替。 */
 		if((control_type==SCREENKey) &&
 		   (control_key==SCREENKey_TouchKeepAlive) &&
 		   ((queued_age_ms>=SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS) ||
