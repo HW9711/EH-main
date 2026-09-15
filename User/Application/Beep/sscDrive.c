@@ -128,15 +128,28 @@ static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type, u
 }
 
 /*
- * 函数功能：把屏幕显示方向转换为当前RFID机械刀具需要的实际电机方向。
- * 输入参数：hand_model为当前Page2基座型号；display_direction为屏幕方向；raw_tool_type为EPC byte0原始刀具型号。
+ * 函数功能：按分体手柄手动刀具模式或RFID机械刀具规则，把屏幕方向转换为实际电机方向。
+ * 输入参数：hand_model为当前Page2基座型号；display_direction为屏幕方向；raw_tool_type为EPC byte0原始刀具型号；auto_identify为0表示手动选刀，非0表示RFID自动识别。
  * 返回参数：写入驱动控制模式的ZZDIR/FZDIR/OSCDIR；不修改屏幕和通道记忆。
  */
-static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t display_direction, uint8_t raw_tool_type)
+static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t display_direction, uint8_t raw_tool_type, uint8_t auto_identify)
 {
     bool rfid_tool_handle = ((hand_model == PXBA_ONLINES) ||
                              (hand_model == PXBB_ONLINES) ||
                              (hand_model == COMMON_SOCKET_ONLINES)); /* 只有公共接头/PXB 手柄读取的 RFID 刀具码，才按 0x03~0x06 的方向规则处理。 */
+
+    if(((hand_model == PXBA_ONLINES) || (hand_model == PXBB_ONLINES)) && (auto_identify == 0U))
+    {
+        if(display_direction == ZZDIR)
+        {
+            return FZDIR; /* 分体手柄手动选刀时，屏幕正转对应实际电机反转，不改显示和通道记忆。 */
+        }
+        if(display_direction == FZDIR)
+        {
+            return ZZDIR; /* 分体手柄手动选刀时，屏幕反转对应实际电机正转，不叠加旧RFID型号的反向规则。 */
+        }
+        return display_direction; /* 手动刨刀往复仍执行往复，只互换单向正反转。 */
+    }
 
     if (rfid_tool_handle == false)
     {
@@ -590,7 +603,7 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type); /* RFID机械刀具先按原始型号转换方向，EEPROM手柄继续使用屏幕方向。 */
+        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify); /* 分体手柄手动选刀互换实际正反转，自动识别继续按RFID刀具换算，屏幕方向保持原值。 */
         if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM屏幕固定显示反转，但内部反旋机械结构要求电机始终正转。 */
         {
             effective_dir_work=ZZDIR; /* 只覆盖本次驱动帧方向，不回写屏幕和通道记忆，确保界面仍固定显示反转。 */

@@ -157,7 +157,7 @@ static void Foot_StopMotorAtReleaseBoundary(void)
 }
 
 /*
- * 函数功能：双脚踏一侧退出电机运行区时，只有电机由这一侧启动才要求停机。
+ * 函数功能：双脚踏一侧退出电机运行区时，只有电机由这一侧启动才撤销电机和该侧手柄联动泵请求。
  * 输入参数：source 为 FOOT_MOTOR_SOURCE_LEFT 或 FOOT_MOTOR_SOURCE_RIGHT。
  * 返回参数：无。
  */
@@ -168,6 +168,7 @@ static void Foot_StopDoubleMotorAtReleaseBoundary(uint8_t source)
         return; /* 电机由另一侧启动或本来已停，本侧松脚不改手柄运行状态。 */
     }
 
+    Foot_StopHandleInjectionPumpFollow(source); /* 松开的启动侧同时撤销自己开启的手柄联动泵，避免后续切换提前返回而漏停。 */
     Foot_LatchMotorStopUntilRelease(); /* 启动电机的那侧退出运行区后先停机，两侧都退出运行区才允许再次启动。 */
     if((WorkMessage.drivetype_work==JTWORK) || ControlArbitration_IsOwner(CONTROL_OWNER_FOOT))
     {
@@ -1045,13 +1046,19 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
 }
 
 /*
- * 函数功能：按双脚踏左右侧的固定优先级启动实际注水泵，并保存本侧泵通道。
+ * 函数功能：仅允许当前选中且已完成切换后松脚的双脚踏侧按固定优先级开注水泵，并保存实际泵通道。
  * 输入参数：right_pedal 为 false 时处理左脚 A 优先，为 true 时处理右脚 B 优先。
  * 返回参数：无。
  */
 static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
 {
     uint8_t pump_channel = CHANNEL_NONE; /* 本次真正启动的泵通道，无注水泵时保持 NONE。 */
+    uint8_t pedal_channel = right_pedal ? CHANNEL_B : CHANNEL_A; /* 左脚对应A手柄、右脚对应B手柄，不按泵的回退通道判断切换资格。 */
+
+    if((WorkMessage.channel_work != pedal_channel) || Foot_DoublePedalIsWaitingRelease(pedal_channel))
+    {
+        return; /* 未选中本侧或切换后尚未松脚时不发开泵请求，深踩切通道经过轻踩区也不会使泵短暂转动。 */
+    }
 
     if(right_pedal)
     {
@@ -1497,8 +1504,10 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                             if((switch_before_channel != CHANNEL_A) && (WorkMessage.channel_work == CHANNEL_A))
                             {
                                 SendKeyBeepMessage(1U); /* 双脚踏左踏板跨通道切换 A 手柄成功，蜂鸣一次给操作者确认。 */
+                                Foot_RequireDoublePedalRelease(CHANNEL_A); /* 确实切到A后才要求左脚先松开，切换被拒绝时不留下错误等待通道。 */
+                                Foot_StopDoublePedalGentlyPump(false); /* 切换成功后清除左侧旧轻踩请求，重新松脚前不允许开泵。 */
+                                Foot_StopDoublePedalGentlyPump(true); /* 清除右侧原通道轻踩请求，两侧共享泵时也在最后一个请求撤销后停泵。 */
                             }
-                            Foot_RequireDoublePedalRelease(CHANNEL_A);
                             ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                             return FOOT_CONTROL_FLOW_RETURN_TASK;
 
@@ -1678,8 +1687,10 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                             if((switch_before_channel != CHANNEL_B) && (WorkMessage.channel_work == CHANNEL_B))
                             {
                                 SendKeyBeepMessage(1U); /* 双脚踏右踏板跨通道切换 B 手柄成功，蜂鸣一次给操作者确认。 */
+                                Foot_RequireDoublePedalRelease(CHANNEL_B); /* 确实切到B后才要求右脚先松开，切换被拒绝时不留下错误等待通道。 */
+                                Foot_StopDoublePedalGentlyPump(false); /* 切换成功后停止左侧原通道轻踩请求，不让旧注水泵继续运行。 */
+                                Foot_StopDoublePedalGentlyPump(true); /* 清除右侧旧轻踩请求，切换后须松脚再踩才能重新开泵。 */
                             }
-                            Foot_RequireDoublePedalRelease(CHANNEL_B);
                             ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_FOOT);
                             return FOOT_CONTROL_FLOW_RETURN_TASK;
                         }
@@ -1763,9 +1774,9 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
 }
 
 /*
- * 函数功能：先处理左踏板，再处理右踏板；左侧要求退出时，不再处理右侧。
+ * 函数功能：先撤销松脚或未选中侧的轻踩泵请求，再检查实际启动侧松脚停机，最后处理启动和通道切换。
  * 输入参数：msg 指向当前保存的双踏板左右定标参数。
- * 返回参数：结束本周期或立即退出任务；只有左侧正常完成时才进入右侧。
+ * 返回参数：结束本周期或立即退出任务；左侧提前退出只跳过右侧业务，不会跳过启动侧松脚停机检查。
  */
 static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
 {
@@ -1774,6 +1785,26 @@ static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
     if (msg == NULL)
     {
         return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 无双踏板参数时保持停机并结束本周期。 */
+    }
+
+    if((WorkMessage.channel_work != CHANNEL_A) || Foot_DoublePedalIsWaitingRelease(CHANNEL_A) ||
+       Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left))
+    {
+        Foot_StopDoublePedalGentlyPump(false); /* 左脚已松、未选中A或切换后待松脚时，提前撤销左侧轻踩请求，不能被右侧切换提前返回跳过。 */
+    }
+    if((WorkMessage.channel_work != CHANNEL_B) || Foot_DoublePedalIsWaitingRelease(CHANNEL_B) ||
+       Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
+    {
+        Foot_StopDoublePedalGentlyPump(true); /* 右脚松开即撤销右侧轻踩请求，左侧切换等待不能再让原通道注水泵保持运行。 */
+    }
+
+    if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left))
+    {
+        Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_LEFT); /* 左脚已退出电机区时先检查是否由左脚启动，右脚持续运行不受影响。 */
+    }
+    if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->MValue_Right))
+    {
+        Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_RIGHT); /* 右脚松开先撤销右侧运行请求，不能等左脚切换分支执行完才处理。 */
     }
 
     if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left) &&

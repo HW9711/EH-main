@@ -665,18 +665,90 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
 }
 
 /*
- * 函数功能：按两类泵统一的 /1.51 基础比例换算 UART 速度，并对 200ml/min 以上流量应用实测补偿。
- * 输入参数：pump_flow 为压力处理后的注水泵或灌注泵业务流量。
- * 返回参数：200 及以下返回 /1.51 截断结果；200 以上返回按实测曲线反算并四舍五入后的 UART 速度。
+ * 函数功能：按原六泵测试及本轮A/B高流量复测，分段反算注水和灌注所需的UART速度。
+ * 输入参数：pump_flow为压力处理后的目标流量，单位mL/min；201～300使用本轮高流量修正，200及以下保持原换算。
+ * 返回参数：四舍五入后的UART整数速度；0仍返回0，未测范围沿用7ee5705原换算。
  */
 static uint16_t PumpBehavior_ConvertWaterFlowToUart(uint16_t pump_flow)
 {
+    /* 《流量测试记录》每档六泵各测1分钟，测试固件为7ee5705。
+     * 第一列是六个实测流量之和，即平均流量的6倍，保留小数而不使用浮点数。
+     * 第二列是该次测试实际发送的UART速度，已包含旧版高流量补偿；查表后不能再次补偿。
+     * 六泵共用此表，不按主机编号区分；接手柄后的流量仍需另行实测。
+     */
+    static const uint16_t calibration[][2] =
+    {
+        {17U, 2U},     /* 原设定4mL/min：六泵实测合计17，原命令2。 */
+        {60U, 6U},     /* 原设定10mL/min：六泵实测合计60，原命令6。 */
+        {99U, 10U},    /* 原设定16mL/min：六泵实测合计99，原命令10。 */
+        {149U, 15U},   /* 原设定24mL/min：六泵实测合计149，原命令15。 */
+        {188U, 19U},   /* 原设定30mL/min：六泵实测合计188，原命令19。 */
+        {256U, 26U},   /* 原设定40mL/min：六泵实测合计256，原命令26。 */
+        {324U, 33U},   /* 原设定50mL/min：六泵实测合计324，原命令33。 */
+        {383U, 39U},   /* 原设定60mL/min：六泵实测合计383，原命令39。 */
+        {450U, 46U},   /* 原设定70mL/min：六泵实测合计450，原命令46。 */
+        {653U, 66U},   /* 原设定100mL/min：六泵实测合计653，原命令66。 */
+        {978U, 99U},   /* 原设定150mL/min：六泵实测合计978，原命令99。 */
+        {1265U, 132U}, /* 原设定200mL/min：六泵实测合计1265，原命令132。 */
+        {1407U, 150U}, /* 原设定220mL/min：六泵实测合计1407，原命令150。 */
+        {1547U, 168U}, /* 原设定240mL/min：六泵实测合计1547，原命令168。 */
+        {1674U, 185U}, /* 原设定260mL/min：六泵实测合计1674，原命令185。 */
+        {1910U, 221U}  /* 原设定300mL/min：六泵实测合计1910，原命令221。 */
+    };
+    uint32_t flow_x6; /* 目标流量乘6后与实测合计比较，不先截断六泵平均值。 */
+    uint32_t flow_span; /* 相邻两档实测合计之差；表按递增顺序排列，插值分母大于0。 */
+    uint32_t uart_numerator; /* 目标在本区间内增加的流量乘命令差，用32位保存中间乘积。 */
+    uint8_t point; /* 插值区间右端点；从1开始，左端点为point-1。 */
     uint32_t corrected_flow_x3; /* 保存补偿后等效流量的 3 倍值，避免 4/3 补偿过程提前丢失小数。 */
-    const uint32_t uart_divisor_x3 = 151U * 3U; /* 两类泵统一使用 /1.51；乘 3 后与 corrected_flow_x3 的倍率对应。 */
+    const uint32_t uart_divisor_x3 = 151U * 3U; /* 仅供未测范围沿用旧公式，不能再次用于已查表的结果。 */
 
+    /* 本轮测试使用当前插值版固件，A/B平均实测为212.5、230.5、249、284mL/min。
+     * 200档未新增实测，保留当前命令125作为衔接点；低流量继续使用下方原表。
+     * 第一列为平均流量的2倍，第二列为本轮测试时实际发送的UART整数速度。
+     */
+    static const uint16_t high_calibration[][2] =
+    {
+        {400U, 125U}, /* 200mL/min衔接点：沿用当前命令，不作为新增实测数据。 */
+        {425U, 139U}, /* 设定220：A泵211、B泵214，平均212.5，对应当前命令139。 */
+        {461U, 154U}, /* 设定240：A泵227、B泵234，平均230.5，对应当前命令154。 */
+        {498U, 170U}, /* 设定260：A泵245、B泵253，平均249，对应当前命令170。 */
+        {568U, 204U}  /* 设定300：A泵281、B泵287，平均284，对应当前命令204。 */
+    };
+    uint32_t flow_x2; /* 高流量目标乘2后与A/B平均实测比较，保留0.5mL/min精度。 */
+
+    if ((pump_flow > 200U) && (pump_flow <= 300U)) /* 仅本轮高流量使用新表，200及以下保持已有换算。 */
+    {
+        flow_x2 = (uint32_t)pump_flow * 2U; /* 目标与高流量表使用相同倍率。 */
+        for (point = 1U; point < ((sizeof(high_calibration) / sizeof(high_calibration[0])) - 1U); ++point) /* 最多选择最后一段，供284以上外推。 */
+        {
+            if (flow_x2 <= high_calibration[point][0]) /* 找到包含目标的区间后停止搜索。 */
+            {
+                break; /* 使用本档与上一档的实测斜率反算UART速度。 */
+            }
+        }
+        flow_span = (uint32_t)high_calibration[point][0] - high_calibration[point - 1U][0]; /* 各段流量递增，分母始终大于0。 */
+        uart_numerator = (flow_x2 - high_calibration[point - 1U][0]) * (high_calibration[point][1] - high_calibration[point - 1U][1]); /* 按本段斜率求增加的命令；284～300沿最后一段外推，需复测。 */
+        return (uint16_t)(high_calibration[point - 1U][1] + ((uart_numerator + (flow_span / 2U)) / flow_span)); /* 四舍五入后直接返回，不再叠加旧表补偿。 */
+    }
+
+    if ((pump_flow >= 4U) && (pump_flow <= 300U)) /* 只修正实测覆盖的设定范围，不外推低流量或更高流量。 */
+    {
+        flow_x6 = (uint32_t)pump_flow * 6U; /* 目标与六泵实测合计使用相同倍率。 */
+        for (point = 1U; point < (sizeof(calibration) / sizeof(calibration[0])); ++point) /* 依次找出目标所在的相邻实测区间。 */
+        {
+            if (flow_x6 <= calibration[point][0]) /* 上一档低于目标，本档达到目标，按两档之间的流量比例反算速度。 */
+            {
+                flow_span = (uint32_t)calibration[point][0] - calibration[point - 1U][0]; /* 实测合计严格递增，不会除以0。 */
+                uart_numerator = (flow_x6 - calibration[point - 1U][0]) * (calibration[point][1] - calibration[point - 1U][1]); /* 求相对左端应增加的命令量分子。 */
+                return (uint16_t)(calibration[point - 1U][1] + ((uart_numerator + (flow_span / 2U)) / flow_span)); /* 四舍五入到最近整数命令，直接返回，避免重复套用旧补偿。 */
+            }
+        }
+    }
+
+    /* 正常4～300目标均已在表内返回；未测范围保留旧换算，零流量仍发送零速。 */
     if (pump_flow <= 200U)
     {
-        return (uint16_t)(((uint32_t)pump_flow * 100U) / 151U); /* 低流量统一按 /1.51 截断，注水泵与灌注泵发送相同速度。 */
+        return (uint16_t)(((uint32_t)pump_flow * 100U) / 151U); /* 未测低流量继续按 /1.51 截断，不凭本次数据改变0～3档。 */
     }
 
     corrected_flow_x3 = ((uint32_t)pump_flow * 4U) - 200U; /* 实测拟合为实际值=3/4设定值+50，反算得到等效流量=(4设定值-200)/3。 */
@@ -723,7 +795,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 排空不读取压力，并清旧确认时间，退出排空后重新判断持续超限。 */
             }
-            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 注水泵按统一 /1.51 基础比例换算，并在 200 以上叠加实测补偿。 */
+            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 注水及排空按目标流量查实测表，仅修正速度，不改变排空计时。 */
             break;
 
         case POURWATER:
@@ -732,8 +804,8 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 灌注同样只产生压力报警，保持设定流量和高流量补偿。 */
-            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注泵调用同一函数，确保基础比例和高流量补偿均与注水泵一致。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 灌注仍按目标流量判断压力，不能用修正后的UART命令代替流量。 */
+            uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 
         default:
