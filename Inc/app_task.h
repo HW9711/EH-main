@@ -24,6 +24,9 @@ typedef struct task_s
     bool oneShot;
     bool start;
     bool threadCreated;
+    uint8_t watchdog_id;              /* 看门狗任务表编号，0表示非关键任务；创建时登记，运行期间不改变。 */
+    volatile bool watchdog_completed; /* 完整执行过回调后置true；不能在创建、取锁或中断里置位。 */
+    volatile uint32_t watchdog_tick;  /* 最近一次回调完成时的HAL毫秒数，允许计数回绕。 */
     const char *name;
     /*
      * 每个任务的管理信息和栈直接放在该结构体中，创建线程时不再向FreeRTOS申请堆内存。

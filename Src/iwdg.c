@@ -38,8 +38,8 @@ void MX_IWDG_Init(void)
 
   /* USER CODE END IWDG_Init 1 */
   hiwdg.Instance = IWDG;
-  hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
-  hiwdg.Init.Reload = 4000;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_32; /* LSI分频32；独立于主时钟，处理器卡住仍计时。 */
+  hiwdg.Init.Reload = 4000; /* 32kHz标称LSI下约4.001秒；实际受LSI偏差影响，不等于电机停机时限。 */
   if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
   {
     Error_Handler();

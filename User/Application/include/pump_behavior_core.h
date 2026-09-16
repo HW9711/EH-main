@@ -5,6 +5,9 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 
+/* 开机下发两泵零速，cancel_alignment为1时同时取消定位；不访问任务队列或刷新屏幕。 */
+void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment);
+
 /* PumpBehaviorChannel_t 只表示逻辑 A/B 通道，不能用它推断物理 UART 或压力传感器接线。 */
 typedef enum
 {

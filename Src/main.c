@@ -85,14 +85,14 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  Iwdg_Init(); /* HAL时基可用后立即启用IWDG，后续时钟配置或外设初始化卡死也能复位。 */
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  Iwdg_BootStage(IWDG_STAGE_PERIPHERALS); /* 系统时钟已配置完成，开始限制外设初始化的总用时。 */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -110,8 +110,7 @@ int main(void)
   MX_UART9_Init(); /* 双串口RFID模式启用UART9，固定供逻辑B侧RFID使用。 */
 #endif
   MX_UART10_Init();
-  /* Keep IWDG disabled to match the current reference firmware behavior. */
-  /* MX_IWDG_Init(); */
+  /* IWDG已在HAL_Init后开启，此处不能再次初始化或绕过启动步骤检查喂狗。 */
   MX_TIM7_Init();
   MX_TIM10_Init();
   MX_TIM14_Init();
@@ -125,8 +124,10 @@ int main(void)
   /* USER CODE END 2 */
   /* Call init function for freertos objects (in freertos.c) */
   MX_FREERTOS_Init();
+  IwdgTaskInit(); /* 业务任务和公共锁已创建，再创建不使用公共锁的独立看门狗线程。 */
   /* Start scheduler */
   vTaskStartScheduler();
+  Iwdg_ForceReset(IWDG_FAULT_INIT, 0U); /* 调度器启动失败而返回时立即记录并复位，不能留在空循环。 */
 
 
   /* We should never get here as control is now taken by the scheduler */
@@ -232,6 +233,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+  Iwdg_ForceReset(IWDG_FAULT_INIT, 0U); /* 外设初始化错误不调用业务锁或串口，保存原因后直接复位。 */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)

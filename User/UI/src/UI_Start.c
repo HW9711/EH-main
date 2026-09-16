@@ -20,7 +20,7 @@
  */
 void UI_Start_Fun(void)
 {
-  uint8_t TimeCnt = 0U; /* 每 20 次 2ms 循环喂狗一次，启动等待期间保持看门狗在线。 */
+  uint8_t TimeCnt = 0U; /* 每20次循环检查一次启动页进度，实际喂狗仍由看门狗模块限制间隔和总时限。 */
   uint8_t key_value = KEY_NONE; /* 启动页一次性事件读取后立即清空，避免同一次触摸重复进入。 */
   uint8_t calibration_press_count = 0U; /* 只在本次约4秒启动窗口内累计定标按钮点击次数。 */
   uint16_t DelayTime = 2000U; /* 2000 次乘 2ms 形成约 4 秒启动页入口窗口。 */
@@ -50,11 +50,11 @@ void UI_Start_Fun(void)
 
     if (++TimeCnt < 20U)
     {
-      continue; /* 未到约 40ms 喂狗间隔时继续等待，避免每 2ms 都访问看门狗。 */
+      continue; /* 未到约40ms进度检查间隔时继续处理启动页。 */
     }
 
-    TimeCnt = 0U; /* 开始下一轮约 40ms 喂狗计数。 */
-    Iwdg_Reset(); /* 启动页或等待入口期间持续喂狗，防止被误判为主程序卡死。 */
+    TimeCnt = 0U; /* 开始下一轮约40ms进度检查计数。 */
+    Iwdg_BootPoll(); /* 本轮屏幕处理已返回；检查启动页总时限，不能无限延长启动等待。 */
   }
 }
 

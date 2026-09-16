@@ -210,6 +210,7 @@ void UI_FootPedalCalibration_Fun(void)
   uint16_t refresh_ticks = 0U;  // 控制Page3刷新频率，避免每2ms连续写屏。
   uint16_t query_ticks = 0U;  // 控制单踏板低点和高点读取命令的分时发送。
 
+  Iwdg_EnterCalibration(); /* 从启动页明确转入定标检查，允许长期停留但必须持续完成整轮处理。 */
   PedalCal_Reset();  // 进入标定模式前清空历史类型和值，必须由当前脚踏合法帧重新识别。
   FootCal_Refresh(0U, 0U, 0U);  // 首次进入Page3立即把所有数值VP清零，避免显示屏保留上次数据。
 
@@ -218,7 +219,6 @@ void UI_FootPedalCalibration_Fun(void)
     Delay_ms(FOOT_CAL_LOOP_DELAY_MS);  // 保持标定循环节拍并让UART DMA接收新数据。
     ScreenKey_Scan();  // 解析Page3触控保存键和启动阶段屏幕事件。
     PedalRecv_Scan();  // 解析脚踏10、18、24字节协议并更新定标缓存。
-    Iwdg_Reset();  // 标定模式仍持续刷新硬件看门狗，避免长期停留触发复位。
 
     key_value = ScreenKey_LegacyEventTake();  // 每个屏幕或脚踏按键取出后立即清除，避免重复处理。
     if (key_value == L_KEY_FOOT)
@@ -246,5 +246,6 @@ void UI_FootPedalCalibration_Fun(void)
       refresh_ticks = 0U;  // 一轮显示完成后重新计数。
       FootCal_Refresh(left_key, middle_key, right_key);  // 页面只显示脚踏合法回包确认的实时值和Flash值。
     }
+    Iwdg_CalibrationCycleComplete(); /* 解析、保存和显示全部返回后才报告完成，任一步卡住都不能喂狗。 */
   }
 }

@@ -31,6 +31,7 @@
 #include "external_comm_task.h"
 #include "screenkey.h"
 #include "pump.h"
+#include "pump_behavior_core.h" /* 开机直接下发两台泵的停止帧，不依赖尚未启动的泵任务。 */
 #include "soft_uart.h"
 #include "handlekey.h"
 #include "Pubinterface.h"
@@ -66,14 +67,15 @@ static void Userparser_PubinterfaceInit(void)
  */
 void Userparser_Init(void)
 {
-  Iwdg_Reset();
 
   //1.GPIO
   Board_GPIOConfiguration(); /* 先配置业务引脚和中断，后续总线读写才能使用正确的引脚状态。 */
+  Iwdg_BootStage(IWDG_STAGE_EEPROM); /* 外设及GPIO已经准备好，开始限制EEPROM初始化总用时。 */
 
   //2.IIC、1-@Wire
   EEPROM_AT24CXX_Init();
   (void)MainboardSoftwareVersion_Sync();  //主控板 AT24C32 Page1 只保存软件版本；同步失败不阻塞原有主控启动流程
+  Iwdg_BootStage(IWDG_STAGE_OUTPUT_STOP); /* EEPROM步骤已返回，开始准备串口及开机停止输出。 */
 
   //3.UART
   Uart1_Init();  //手柄电机驱动通信，包含无刷和有刷类型。
@@ -90,26 +92,26 @@ void Userparser_Init(void)
 
 	//4.分体按键
 	//............	
-  Iwdg_Reset();
 
   LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);     //清除新屏报警显示区，旧屏提示接口不再参与开机流程
 
-  Motor_ErrorEmergencyStop_Ctrl();  //开机先发送电机停止命令，避免驱动板保留上次运行状态。
+  PumpBehaviorCore_StopOnStartup(Iwdg_WasAbnormalReset()); /* 两泵先发零速；异常重启还取消驱动定位，普通上电保留原定位过程。 */
+  Motor_ErrorEmergencyStop_Ctrl(); /* 向两个物理电机通道按支持类型发送零速帧，不依赖上次手柄记忆。 */
 
   //设置启动页状态，允许后续通过界面进入脚踏定标。
+  Iwdg_BootStage(IWDG_STAGE_STARTUP_PAGE); /* 开机停止命令已下发，进入有总时限的启动页等待。 */
   UI_Start_Fun();//初始化启动页和脚踏定标入口。
-  Iwdg_Reset();
+  Iwdg_BootStage(IWDG_STAGE_SETTLE); /* 启动页正常结束后再进入固定2秒等待，不能靠通用延时喂狗。 */
   Delay_ms(500);
-	Iwdg_Reset();
 	Delay_ms(500);
   Delay_ms(500);
   Delay_ms(500);
   Userparser_PubinterfaceInit();
+	Iwdg_BootStage(IWDG_STAGE_RFID); /* 运行请求和通道记忆已重新初始化，再准备射频模块。 */
 	SscRadioFreq_Init();  //按单/双串口硬件模式初始化两侧RFID模块，旧模式由R200-K8依次选通。
-  Iwdg_Reset();
+  Iwdg_BootStage(IWDG_STAGE_TASKS); /* 射频初始化返回，接下来检查业务任务创建进度。 */
 	
 	//ssc任务初始化开始
-	IwdgTaskInit();
 	LEDTaskInit(); 
 	SscBeepControlTask_Init();
 	SscKeyBehaviorTask_Init();

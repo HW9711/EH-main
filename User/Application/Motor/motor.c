@@ -6,6 +6,7 @@
 #include "data.h"
 #include "common.h"
 #include "board.h"
+#include "iwdg.h" /* 开机停止帧发送失败时不能继续启动业务。 */
 
 #define MOTOR_CONTROL_FRAME_DATA_LENGTH 9U /* 手柄驱动控制帧前 9 字节为业务数据，末 2 字节保存 CRC16。 */
 
@@ -132,48 +133,27 @@ void BrushedMotor_Run(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint16_t Spe
 //零速帧示例字段：AA 01 00 01 00 00 02 00 00，末尾两字节根据这些字段计算 CRC。
 
 /*
- * 函数功能：向 UART1 固定发送物理通道 1 的四组零速帧，依次为正转无霍尔、正转有霍尔、反转有霍尔、反转无霍尔。
- * 输入参数：MotorNum、Mode、Freq、Mode1 均为保留参数，当前不使用；不能靠传入 MotorNum=2 停止通道 2。
- * 返回参数：无。
+ * 函数功能：向指定物理电机通道发送一帧CRC正确的零速命令，供开机覆盖不同驱动类型。
+ * 输入参数：MotorNum为物理通道1或2；Mode为方向1到3；Freq为协议往复频率；Mode1为1无霍尔、2有霍尔、3有刷。
+ * 返回参数：无；参数不合法不发送，串口发送失败时复位并保持禁止业务启动。
  */
-void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t Mode1)  
+void BrushlessMotor_Stop(uint8_t MotorNum, uint8_t Mode, uint8_t Freq, uint8_t Mode1)
 {
-	uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
-	//uint8_t dat[12] = {0xAA, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0};
-//	if ((MotorNum > 5) || (Mode > 6) || (Freq > 100))
-//		return ;
-
-//	dat[1] = Mode;
-//	dat[2] = Freq;
-//	dat[3] = MotorNum;
-//	dat[6] = Mode1;
-//	dat[7] = 0;
-//	dat[8] = 0;
-	
-//  MotorCRC = Common_Crc16(dat, 9);
-//	dat[9] =  (MotorCRC & 0x00FF);
-//	dat[10] = ((MotorCRC & 0xFF00) >> 8);
-	
-	Motor_UpdateControlFrameCrc(dat); /* 第一帧按正转、无霍尔字段生成对应 CRC。 */
-	/* 先发送正转、无霍尔停止帧，覆盖当前驱动若处于无霍尔正转的情况。 */
-	Uart1_SendPacket(dat, 11);
-	dat[6]=0x02;
-	Motor_UpdateControlFrameCrc(dat); /* 闭环类型切换到有霍尔后必须重算 CRC，不能沿用上一帧校验值。 */
-	/* 两帧之间保留 5ms，给驱动板完整接收和处理上一帧的时间。 */
-	Delay_ms(5);
-	/* 再发送正转、有霍尔停止帧，不能依赖主控保存的闭环类型。 */
-	Uart1_SendPacket(dat, 11);
-	Delay_ms(5);
-	dat[1] = 0x02;
-	Motor_UpdateControlFrameCrc(dat); /* 方向切换到反转后重算 CRC，保证第三帧仍可被驱动接受。 */
-		/* 切到反转模式并发送有霍尔停止帧，覆盖驱动当前处于反转的情况。 */
-		Uart1_SendPacket(dat, 11);
-		Delay_ms(5);
-			dat[6]=0x01;
-				Motor_UpdateControlFrameCrc(dat); /* 最后一帧恢复无霍尔字段后再次重算 CRC。 */
-				/* 最后发送通道 1 的反转、无霍尔零速帧，完成这四组固定命令。 */
-				Uart1_SendPacket(dat, 11);
-	
+    uint8_t dat[11] = {0xAAU, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U}; /* 速度和保护电流均清零，只组装停止命令。 */
+    if ((MotorNum < 1U) || (MotorNum > 2U) || (Mode < 1U) || (Mode > 3U) ||
+        (Mode1 < 1U) || (Mode1 > 3U))
+    {
+        return; /* 无效通道或类型不能被默认为物理通道1，避免发错对象。 */
+    }
+    dat[1] = Mode; /* 停止帧使用调用者要求的方向。 */
+    dat[2] = Freq; /* 保留该停止帧对应的往复频率字段。 */
+    dat[3] = MotorNum; /* 明确写入物理通道，传入2时必须发给通道2。 */
+    dat[6] = Mode1; /* 明确覆盖无霍尔、有霍尔或有刷驱动类型。 */
+    Motor_UpdateControlFrameCrc(dat); /* 通道和类型改变后重新生成CRC。 */
+    if (Uart1_SendPacket(dat, sizeof(dat)) != HAL_OK)
+    {
+        Iwdg_ForceReset(IWDG_FAULT_INIT, 0U); /* 开机停止帧未发完时不继续启动正常业务。 */
+    }
 }
 
 //============================================================================
@@ -244,29 +224,26 @@ void BrushlessMotor_SetPosition(uint8_t MotorNum, uint8_t Type, uint16_t NUM)
 }
 
 /*
- * 函数功能：保留旧急停调用顺序，连续调用六次停止接口。
- * 输入参数：无。
- * 返回参数：无。注意被调用函数当前忽略参数，因此实际重复发送通道 1 的四组零速帧，并未按这里的参数分别停两路。
+ * 函数功能：开机时向两个物理电机通道按无霍尔、有霍尔、有刷类型分别发送正反转零速帧。
+ * 输入参数：无，不依赖主控上次保存的手柄类型、通道或运行方向。
+ * 返回参数：无；只确认串口发送完成，实际停转仍由驱动反馈及失联停机保证。
  */
 void Motor_ErrorEmergencyStop_Ctrl(void)
 {
-	//保留旧参数“通道 1、无霍尔”；实际帧由 BrushlessMotor_Stop 的固定序列决定。
-  BrushlessMotor_Stop(1, 1, 0, 1);
-
-	//保留旧参数“通道 1、有刷”；当前停止接口不使用该模式参数。
-	BrushlessMotor_Stop(1, 1, 0, 3);
-
-	//保留旧参数“通道 1、有霍尔”；再次发送同一组固定零速帧。
-  BrushlessMotor_Stop(1, 1, 0, 2);
-
-	//保留旧参数“通道 2、无霍尔”；当前停止接口不使用通道参数，实际仍发通道 1。
-  BrushlessMotor_Stop(2, 1, 0, 1);
-
-	//保留旧参数“通道 2、有刷”；当前停止接口不使用通道和模式参数。
-	BrushlessMotor_Stop(2, 1, 0, 3);
-
-	//保留旧参数“通道 2、有霍尔”；实际仍重复通道 1 的固定零速帧。
-  BrushlessMotor_Stop(2, 1, 0, 2);
+    uint8_t channel; /* 物理电机通道1和2都必须收到停止命令。 */
+    uint8_t mode; /* 遍历无霍尔、有霍尔和有刷三种协议类型。 */
+    uint8_t direction; /* 覆盖正转和反转两种合法零速帧。 */
+    for (channel = 1U; channel <= 2U; ++channel)
+    {
+        for (mode = 1U; mode <= 3U; ++mode)
+        {
+            for (direction = 1U; direction <= 2U; ++direction)
+            {
+                BrushlessMotor_Stop(channel, direction, 0U, mode); /* 每帧速度固定为零，不能把上次运行参数带入开机。 */
+                Delay_ms(5U); /* 保留驱动接收分帧间隔；延时函数不再喂狗。 */
+            }
+        }
+    }
 }
 
 

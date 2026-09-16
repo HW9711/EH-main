@@ -11,6 +11,7 @@
 #include "handle_control.h"
 #include "handlescan.h"
 #include "kernel_scheduler.h"
+#include "iwdg.h" /* 异常重启后先收到明确停止，再允许新的外控运动命令。 */
 #include "mainboard_software_version.h"
 #include "motoruartdata.h"
 #include "Pubinterface.h"
@@ -22,6 +23,8 @@
 #include "uart2.h"
 
 #include <string.h>
+
+static uint8_t s_external_restart_stop_required = 0U; /* 异常重启置1，明确停止或主动退出后清零；登录和保活不能清除。 */
 
 #define EXTERNAL_COMM_TASK_PERIOD_MS        10U     /* 任务间隔，单位 ms；调大后接收检查、断线处理和各项计时的响应都会变慢。 */
 #define EXTERNAL_COMM_HEARTBEAT_PERIOD_MS   100U   /* 心跳上传间隔，单位 ms；调小可加快上位机状态刷新，但会增加串口发送量。 */
@@ -2243,6 +2246,7 @@ static void ExternalComm_ClearHandleLostAlarm(void)
  */
 static void ExternalComm_ApplyHostExit(void)
 {
+    s_external_restart_stop_required = 0U; /* 上位机明确退出已确认停止，下一次登录后的新操作可以恢复原控制流程。 */
     ExternalComm_ResetProtocolSession(); /* 清除已登录协议和未完成的申请记录，下次登录必须重新收齐三帧。 */
     /* 先清除外控保存的独立泵和手柄冷却请求，避免后续刷新又启动泵。 */
     ExternalComm_ClearPumpRequests();
@@ -2736,6 +2740,19 @@ static bool ExternalComm_ApplyToolPositionControl(uint8_t area_code)
  */
 static bool ExternalComm_ExecuteControlCommand(uint8_t area_code)
 {
+    if ((area_code == 0x02U) || (area_code == 0x04U) ||
+        (area_code == 0x06U) || (area_code == 0xFFU))
+    {
+        s_external_restart_stop_required = 0U; /* 收到明确的泵停止、手柄停止或全停后，才接受后续新的运动命令。 */
+    }
+    else if ((s_external_restart_stop_required != 0U) &&
+             ((area_code == 0x01U) || (area_code == 0x03U) ||
+              (area_code == 0x05U) || (area_code == 0x07U) || (area_code == 0x08U)))
+    {
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code,
+                                 EXTERNAL_COMM_REASON_BUSY); /* 沿用现有失败应答，登录、保活和重复启动不能解除重启后的停止要求。 */
+        return false; /* 不写电机、泵或定位请求；必须先收到明确停止，再重新操作。 */
+    }
     switch (area_code)
     {
         case 0x01U:
@@ -5534,6 +5551,7 @@ static void ExternalCommTaskFunc(uint32_t event)
  */
 void ExternalComm_Init(void)
 {
+    s_external_restart_stop_required = Iwdg_WasAbnormalReset(); /* 异常重启后丢弃旧运动意图，普通上电保持原外控操作流程。 */
     /* 清除已登录协议和未完成的申请计数，两种协议都必须重新收齐三帧才能连接。 */
     ExternalComm_ResetProtocolSession();
     /* 初始化外控 RX FIFO，保证任务第一次运行前已经准备好接收粘包/半包数据。 */

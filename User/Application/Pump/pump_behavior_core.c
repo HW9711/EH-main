@@ -882,7 +882,22 @@ static void PumpBehavior_SendFrame(const PumpBehaviorBinding_t *binding,
     frame[4] = (uint8_t)(crc & 0x00FFU);            /* 驱动协议第 5 字节固定发送 CRC 低字节。 */
     frame[5] = (uint8_t)((crc >> 8U) & 0x00FFU);    /* 驱动协议第 6 字节固定发送 CRC 高字节。 */
 
-    binding->send_packet(frame, 6U); /* 每 25ms 发一帧，使驱动持续收到有效命令，避免触发 100ms 通信超时。 */
+    binding->send_packet(frame, 6U); /* 周期任务每25ms发送；开机停止也复用同一CRC和物理串口映射。 */
+}
+
+/*
+ * 函数功能：正常业务和定标循环开始前向两泵发送停止帧，异常重启时还取消正在执行的定位。
+ * 输入参数：cancel_alignment为1时发送0x03零速取消帧，为0时发送普通零速并保留上电定位。
+ * 返回参数：无；下发零速不等于已经收到停转反馈，驱动失联停机仍须单独验证。
+ */
+void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment)
+{
+    uint32_t channel; /* 逐一覆盖逻辑A/B，物理UART继续使用工程已有映射。 */
+    for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
+    {
+        PumpBehavior_SendFrame(&s_pump_binding[channel], 0U, 0U,
+                               (cancel_alignment != 0U) ? PUMP_DRIVER_CANCEL_COMMAND : 0U); /* 开机停止只能携带零速，不能继承任何旧泵请求。 */
+    }
 }
 
 /*

@@ -8,6 +8,7 @@
 #include "stm32f4xx_hal.h"
 
 #include "kernel_scheduler.h"
+#include "iwdg.h" /* 异常重启后实体键必须先稳定松开，不能把持续按住当成新启动。 */
 #include "datahand.h"
 #include "Pubinterface.h"
 #include "sscBEEP.h"
@@ -42,6 +43,7 @@ typedef struct
 	bool stable_pressed;	/* 去抖后的按下状态，业务层只使用这个稳定结果。 */
 	bool press_event;		/* 本轮刚确认按下时为 true，只保持这一轮；一直按住不会反复触发。 */
 	bool release_event;		/* 本轮刚确认松开时为 true，LGZI 收到它后请求停机。 */
+    bool restart_release_ready; /* 异常重启后为false；稳定高电平后置true，才允许产生新的按下事件。 */
 } HandleRunKeyDebounce_t;
 
 typedef enum
@@ -51,8 +53,8 @@ typedef enum
 	HANDLE_RUN_KEY_PIN_MODE_UART          /* KSZ模式：引脚切换为对应UART接收复用，不再读取GPIO电平。 */
 } HandleRunKeyPinMode_t;
 
-static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false, false}; /* A通道实体键去抖状态。 */
-static HandleRunKeyDebounce_t s_handle_run_key_b_filter = {0U, 0U, false, false, false}; /* B通道实体键去抖状态。 */
+static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false, false, false}; /* A通道实体键去抖及重启松手确认。 */
+static HandleRunKeyDebounce_t s_handle_run_key_b_filter = {0U, 0U, false, false, false, false}; /* B通道实体键去抖及重启松手确认。 */
 static HandleRunKeyPinMode_t s_handle_run_key_a_pin_mode = HANDLE_RUN_KEY_PIN_MODE_UNKNOWN; /* A通道PE2当前复用状态。 */
 static HandleRunKeyPinMode_t s_handle_run_key_b_pin_mode = HANDLE_RUN_KEY_PIN_MODE_UNKNOWN; /* B通道PE0当前复用状态。 */
 static uint8_t s_handle_run_key_owner_channel = CHANNEL_NONE;			   /* 当前由实体键启动的通道，防止另一通道松开误停。 */
@@ -169,6 +171,7 @@ static void HandleRunKey_ResetDebounce(HandleRunKeyDebounce_t *filter)
 	filter->stable_pressed = false; /* 复用模式改变后不继承此前已经按下的稳定状态。 */
 	filter->press_event = false;    /* 清掉“刚按下”标志，不能把引脚用途切换当作一次按键。 */
 	filter->release_event = false;  /* 清掉“刚松开”标志，不能把引脚用途切换当作松手停机。 */
+    filter->restart_release_ready = (Iwdg_WasAbnormalReset() == 0U); /* 普通上电保持原按键行为；异常重启必须先确认本键已松开。 */
 }
 
 /*
@@ -321,7 +324,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 		{
 			if (filter->stable_pressed == false)
 			{
-				filter->press_event = true; /* 之前没按下，现在连续低电平已达标，本轮确认一次新按下。 */
+				filter->press_event = filter->restart_release_ready; /* 异常重启后一直按住时不产生启动事件，必须先经过稳定松开。 */
 			}
 			filter->stable_pressed = true; /* 连续低电平达到阈值后，锁定为已按下，直到稳定松开才重新允许下一次事件。 */
 		}
@@ -335,6 +338,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 		}
 		if (filter->high_count >= HANDLE_KEY_DEBOUNCE_COUNT)
 		{
+            filter->restart_release_ready = true; /* 已连续确认高电平，下一次新按下可以按原规则处理。 */
 			if (filter->stable_pressed == true)
 			{
 				filter->release_event = true; /* 之前按着，现在连续高电平已达标，本轮通知 LGZI 松手停机。 */

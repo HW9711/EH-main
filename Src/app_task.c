@@ -1,4 +1,5 @@
 #include "app_task.h"
+#include "iwdg.h" /* 只在业务回调完整返回后记录执行进度，由独立线程统一检查。 */
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -348,7 +349,9 @@ static void AppTaskRuntimeGate(task_t *task)
     }
 
     AppTaskTrace_RecordBoundary(task, true);
+    Iwdg_TaskEnter(task->watchdog_id); /* 已取得公共锁，记录即将执行的任务；此处不能报告完成。 */
     task->func(0U);
+    Iwdg_TaskComplete(task); /* 回调正常返回才更新时间，卡在回调或等锁时记录不会推进。 */
     AppTaskTrace_RecordBoundary(task, false);
 
     if (task->oneShot)
@@ -394,6 +397,11 @@ static void AppTaskWorker(void *argument)
     }
 }
 
+/*
+ * 函数功能：创建静态业务线程并按完整回调名登记看门狗检查，创建本身不算业务完成。
+ * 输入参数：task为静态任务对象；name为完整任务名；func为每周期执行的业务回调。
+ * 返回参数：true表示创建成功，false表示参数错误、对象重复或线程创建失败。
+ */
 int app_task_create_named(task_t *task, const char *name, cbFunc func)
 {
     task_t *current;
@@ -411,6 +419,9 @@ int app_task_create_named(task_t *task, const char *name, cbFunc func)
     task->oneShot = true;
     task->start = false;
     task->threadCreated = false;
+    task->watchdog_id = 0U; /* 创建成功并匹配固定任务表后才分配关键任务编号。 */
+    task->watchdog_completed = false; /* 未执行过回调不能被当作健康任务。 */
+    task->watchdog_tick = 0U; /* 完成标志为false时该毫秒值无效，不能拿创建时刻代替执行记录。 */
     task->name = name;
     task->threadHandle = NULL;
     task->traceBeginHandle = 0U;
@@ -471,6 +482,7 @@ int app_task_create_named(task_t *task, const char *name, cbFunc func)
         return false;
     }
 
+    task->watchdog_id = Iwdg_RegisterTask(task); /* 使用未被RTOS截断的回调全名登记，缺失任务仍会在启动检查中报错。 */
     AppTaskTrace_RegisterTaskName(task);
     AppTaskTrace_RecordCreate(task);
     return true;

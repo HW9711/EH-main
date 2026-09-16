@@ -25,6 +25,7 @@
  */
 
 #include "sscFOOT.h"
+#include "iwdg.h" /* 看门狗或软件复位后，脚踏电机和轻踩开泵都必须先确认松脚。 */
 #include "data.h"
 #include "kernel_scheduler.h"
 #include "FreeRTOS.h"
@@ -73,6 +74,8 @@ static bool s_common_socket_missing_wait_release = false; /* 公共接头缺刀�
 static volatile bool s_foot_runtime_frame_valid = false; /* 只有收到完整且 CRC 正确的实时帧才为 true；为 false 时不能沿用旧踩踏值启动。 */
 static volatile bool s_foot_motor_stop_latched = true; /* 上电默认禁止脚踏起机，必须先观察到真实松脚再允许新的踩下周期。 */
 static bool s_foot_motor_release_ready = false; /* 停机后已检测到松脚时为 true；必须先满足此条件，下次踩下才能启动。 */
+static bool s_foot_restart_release_required = false; /* 异常重启时置true，已连接脚踏连续三轮完全松开后清除。 */
+static uint8_t s_foot_restart_release_ticks = 0U; /* 重启后完整松脚计数，每25ms一次；任一侧踩着即清零。 */
 static uint8_t s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 记录真正启动电机的踏板侧，未踩的另一侧释放不能误停当前运行。 */
 static uint8_t s_foot_handle_pump_source = FOOT_MOTOR_SOURCE_NONE; /* 记住哪侧脚踏启动了手柄联动泵；即使异常处理先清了 jtL/jtR，松脚时仍能找到要停的泵。 */
 
@@ -868,6 +871,52 @@ static bool Foot_BlockRunIfPressureStopLatched(void)
 static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
 {
     return ((uint32_t)ad_value <= ((uint32_t)low_value + (uint32_t)JT_threshold)); /* AD 不超过基准值加 20 才算已退出该区间，供松脚和退出电机区的检查共用。 */
+}
+
+/*
+ * 函数功能：异常重启后同时拦住深踩电机和轻踩泵，直到当前脚踏连续三轮完全松开。
+ * 输入参数：msg为已收到的脚踏连接和定标信息；仅在本轮实时AD有效时调用。
+ * 返回参数：true表示本周期仍禁止脚踏动作；false表示可执行原脚踏逻辑。
+ */
+static bool Foot_BlockRestartUntilReleased(const FootMessage_t *msg)
+{
+    bool released = false; /* 未识别类型或未连接都不能当作真实松脚。 */
+    if (!s_foot_restart_release_required)
+    {
+        return false; /* 普通上电或已经完成松脚确认时，原单/双脚踏逻辑继续执行。 */
+    }
+    Foot_LatchMotorStopUntilRelease(); /* 重启后未松脚时不允许保留任何深踩启动资格。 */
+    if (msg->connect_flag)
+    {
+        switch (msg->pedalType)
+        {
+            case 1U:
+                released = Foot_IsPedalReleased(jt_adcvalue, msg->LValue_Left); /* 单踏板必须回到低点附近。 */
+                break;
+            case 2U:
+                released = Foot_IsPedalReleased(jtb_adcvalue, msg->LValue_Left); /* 双段踏板停在轻踩区仍不算松开。 */
+                break;
+            case 3U:
+                released = Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left) &&
+                           Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right); /* 双脚踏必须两侧同时完全松开。 */
+                break;
+            default:
+                break; /* 未识别的踏板保持禁止启动。 */
+        }
+    }
+    if (released)
+    {
+        if (++s_foot_restart_release_ticks >= FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS)
+        {
+            s_foot_restart_release_required = false; /* 连续三轮松脚后，下一周期才能接受新的轻踩或深踩。 */
+            Foot_MarkMotorReleased(); /* 保存已松脚记录，后续仍由原启动检查判断能否运行。 */
+        }
+    }
+    else
+    {
+        s_foot_restart_release_ticks = 0U; /* 任一侧还踩着就重新等待连续松脚确认。 */
+    }
+    return true; /* 本轮用于确认松脚，不在同一轮中产生电机或泵运行请求。 */
 }
 
 /*
@@ -1849,10 +1898,15 @@ void FootControlTask(uint32_t event)
 
     if(s_foot_runtime_frame_valid == false)
     {
+        s_foot_restart_release_ticks = 0U; /* 实时帧失效打断连续松脚确认，不能拼接失联前后的释放记录。 */
         Foot_StopRunOnRealtimeTimeout(); /* 没有可信实时AD时持续保持脚踏输出为停止，防止旧高值在下一周期重新起机。 */
         return; /* 等到新的完整且 CRC 正确的实时帧后再处理踩踏，本周期不能按旧值调速。 */
     }
 
+    if (Foot_BlockRestartUntilReleased(&msg))
+    {
+        return; /* 异常重启后尚未确认松脚，不能进入轻踩开泵、深踩启动或切通道分支。 */
+    }
     if (Foot_BlockDriverAlarmRun(&msg))
     {
         return; /* 驱动故障后还没松脚，前面已要求停机，本周期不能再启动。 */
@@ -2296,6 +2350,8 @@ void Foot_ParseDataS(uint32_t event)
  */
 void SscFootControlTask_Init(void)
 {
+    s_foot_restart_release_required = (Iwdg_WasAbnormalReset() != 0U); /* 只对异常重启增加完全松脚确认，普通启动保留原行为。 */
+    s_foot_restart_release_ticks = 0U; /* 重启前的松脚记录不能用于本次启动。 */
     //初始化消息队列
     Foot_Queue_Init();
      //创建任务

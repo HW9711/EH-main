@@ -10,6 +10,7 @@
 #include "sscBEEP.h"
 
 #include "kernel_scheduler.h"
+#include "iwdg.h" /* 异常重启后先等待旧触控长按信号结束。 */
 
 kernel_task_t SCREENKEYTaskHandle;
 
@@ -25,6 +26,8 @@ static volatile uint8_t s_touch_keepalive_accepted_valid = 0U;
 static uint8_t s_touch_alarm_release_required = 0U;
 /* 报警后用于判断是否松手：收到 0x5520 就清零，一直收不到才逐渐数到松手确认值。 */
 static uint8_t s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS;
+static uint8_t s_touch_restart_release_required = 0U; /* 异常重启置1，连续420ms无原始按住信号后清零；切模式不能直接清除。 */
+static uint32_t s_touch_restart_keepalive_tick = 0U; /* 重启后最近原始按住帧的HAL毫秒数，用于确认手指已离开。 */
 
 /*
  * 函数功能：保存启动页或脚踏定标页的一次性旧按键事件。
@@ -348,6 +351,12 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
     uint8_t beep_enable = 1U; /* 默认所有有效触控按键响一声，给操作者明确反馈。 */
     if (screen_key == SCREENKey_TouchKeepAlive) /* 处理按住信号前，先确认报警后已松手。 */
     {
+      if (s_touch_restart_release_required != 0U)
+      {
+        s_touch_restart_keepalive_tick = HAL_GetTick(); /* 即使图标暂不可用，持续收到旧长按仍说明尚未松手。 */
+        ScreenKey_InvalidateTouchKeepAlive(); /* 重启前的按住信号不能重新进入运行队列。 */
+        return; /* 只记录仍在长按，必须先有420ms无信号再接受下一次按压。 */
+      }
       if (ScreenKey_BlockAlarmKeepAlive() != 0U) /* 报警期间或报警后仍在长按时，当前保活帧必须静默丢弃。 */
       {
         return; /* 报警后仍在长按时不执行、不蜂鸣；必须松手后重新按下。 */
@@ -651,6 +660,11 @@ void SCREENKEYTaskFunc(uint32_t event)
   /* Infinite loop */
 	
   ScreenKey_Scan();
+  if ((s_touch_restart_release_required != 0U) &&
+      ((uint32_t)(HAL_GetTick() - s_touch_restart_keepalive_tick) >= SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS))
+  {
+    s_touch_restart_release_required = 0U; /* 已确认旧长按结束，后续新按压恢复原有触控启动检查。 */
+  }
   ScreenKey_ServiceKeepAlive();
   /* USER CODE END SCREENKEYTaskFunc */
 }
@@ -662,6 +676,8 @@ void SCREENKEYTaskFunc(uint32_t event)
  */
 void ScreenKey_ScanInit(void)
 {
+  s_touch_restart_release_required = Iwdg_WasAbnormalReset(); /* 异常重启后不允许持续旧0x5520直接拉起电机。 */
+  s_touch_restart_keepalive_tick = HAL_GetTick(); /* 从正常扫描任务准备完成时开始确认松手间隔。 */
   /* definition and creation of SCREENKEYTask */
 	Kernel_TaskCreate(&SCREENKEYTaskHandle, SCREENKEYTaskFunc);
 	Kernel_TaskStart(&SCREENKEYTaskHandle, KERNEL_TASK_ALWAYS, 30);

@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "soft_uart.h"
+#include "iwdg.h" /* 处理器异常直接记录并复位，不在异常处理里等待业务通信。 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -104,7 +105,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  Iwdg_ForceReset(IWDG_FAULT_HARD, 0U); /* 保留HardFault原因，避免处理器永久停在异常空循环。 */
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -119,7 +120,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  Iwdg_ForceReset(IWDG_FAULT_MEMORY, 0U); /* 内存异常后不再执行业务，保存原因并复位。 */
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -134,7 +135,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  Iwdg_ForceReset(IWDG_FAULT_BUS, 0U); /* 总线异常时不尝试串口或EEPROM恢复，直接记录并复位。 */
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -149,7 +150,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  Iwdg_ForceReset(IWDG_FAULT_USAGE, 0U); /* 非法指令等异常后保存原因并复位，不能继续原运行请求。 */
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

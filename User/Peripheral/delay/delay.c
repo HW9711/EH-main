@@ -3,7 +3,6 @@
 
 #include "stm32f4xx_hal.h"
 #include "delay.h"
-#include "iwdg.h"
 
 extern TIM_HandleTypeDef htim7;
 
@@ -25,7 +24,7 @@ void Delay_us(uint16_t cnt)
 }
 
 /*
- * 函数功能：重复执行喂狗和990us等待，得到近似毫秒延时。
+ * 函数功能：重复执行990us等待，得到近似毫秒延时；业务是否完成由调用者返回后检查。
  * 输入参数：cnt为重复次数，约等于毫秒数；实际时间还包含调用开销和中断耗时。
  * 返回参数：无。
  */
@@ -34,7 +33,7 @@ void Delay_ms(uint16_t cnt)
   uint16_t i;
   for(i = 0; i < cnt; i++)
   {
-    Iwdg_Reset();
+    /* 延时不能喂狗，防止反复调用延时的故障代码掩盖关键任务卡住。 */
     Delay_us(990);
   }
 }
