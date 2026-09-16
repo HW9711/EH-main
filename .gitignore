@@ -1,0 +1,24 @@
+# Local documentation, reports and temporary work files
+/docs/
+/output/
+/tmp/
+/.reasonix/
+/.codex/gpt56-sol-pro-consult/conversation-bindings/
+/findings.md
+/progress.md
+/task_plan.md
+
+# Generated EIDE build files
+/EIDE/build/
+
+# Root build output; retain the existing build entry and linker script
+/build/*
+!/build/MainCtrlF413MXOs/
+/build/MainCtrlF413MXOs/*
+!/build/MainCtrlF413MXOs/builder.params
+!/build/MainCtrlF413MXOs/MainCtrlF413MXOs.sct
+
+# Generated Keil output; retain the existing linker script
+/MDK-ARM/MainCtrlF413MXOs/*
+!/MDK-ARM/MainCtrlF413MXOs/MainCtrlF413MXOs.sct
+/MDK-ARM/*.uvguix.*
