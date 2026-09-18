@@ -25,6 +25,7 @@
  */
 
 #include "sscFOOT.h"
+#include "diagnostic.h" /* 独立诊断开关及只读副本接口。 */
 #include "iwdg.h" /* 看门狗或软件复位后，脚踏电机和轻踩开泵都必须先确认松脚。 */
 #include "data.h"
 #include "kernel_scheduler.h"
@@ -189,20 +190,24 @@ static bool Foot_TryAuthorizeMotorRun(uint8_t source)
 {
     if((source != FOOT_MOTOR_SOURCE_LEFT) && (source != FOOT_MOTOR_SOURCE_RIGHT))
     {
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 1U, s_foot_motor_active_source, s_foot_motor_release_ready); /* 记录无效踏板侧拒绝。 */
         return false; /* 不是左侧或右侧编号时，不能启动手柄。 */
     }
     if(s_foot_motor_stop_latched == false)
     {
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 2U, s_foot_motor_active_source, (s_foot_motor_active_source == source)); /* 区分同侧继续运行和另一侧被拒绝。 */
         return (s_foot_motor_active_source == source); /* 持续踩踏时只允许原启动侧调速；切到另一侧之前必须先松脚。 */
     }
     if(s_foot_motor_release_ready == false)
     {
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 3U, s_foot_motor_active_source, 0U); /* 记录尚未松脚，不能重复起机。 */
         return false; /* 上电、通信中断或启动检查失败后还没松脚，不能直接按旧踩踏值重启。 */
     }
 
     s_foot_motor_release_ready = false; /* 本次松脚记录只用一次，下次停机后仍需再次松脚。 */
     s_foot_motor_stop_latched = false; /* 取消强制停机，手柄驱动任务可以执行本次运行请求。 */
     s_foot_motor_active_source = source; /* 保存实际启动侧，双脚踏未活动一侧的释放分支不得误停本侧。 */
+    DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 4U, WorkMessage.channel_work, 1U); /* 记录本次批准的踏板侧和逻辑通道。 */
     return true;
 }
 
@@ -1022,6 +1027,7 @@ static uint8_t s_single_release_debounce_ticks = 0U; /* 记录单踏板连续处
  */
 static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
 {
+    DIAG_FOOT_CONFIG(msg); /* 记录控制任务真正取出的定标参数，不用解析层的新值替代。 */
     if (msg == NULL)
     {
         return; /* 队列消息无效时不改任何脚踏、电机或界面状态。 */
@@ -1106,6 +1112,7 @@ static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
 
     if((WorkMessage.channel_work != pedal_channel) || Foot_DoublePedalIsWaitingRelease(pedal_channel))
     {
+        DIAG_EVENT(DIAG_EVENT_DRAIN, pedal_channel, 0U, WorkMessage.channel_work, s_double_pedal_release_before_run_channel); /* 记录轻踩被拒绝时的选中通道和待松脚通道。 */
         return; /* 未选中本侧或切换后尚未松脚时不发开泵请求，深踩切通道经过轻踩区也不会使泵短暂转动。 */
     }
 
@@ -1145,6 +1152,8 @@ static void Foot_StartDoublePedalGentlyPump(bool right_pedal)
             ControlSignalMessage.jtL_gentlypump_flag=false; /* A/B 都不是注水泵，清掉左脚轻踩开泵标志。 */
         }
     }
+    DIAG_EVENT(DIAG_EVENT_DRAIN, pedal_channel, 1U, pump_channel, WorkMessage.channel_work); /* 记录实际选择的泵，区分A/B回退与当前手柄通道。 */
+    DIAG_CHECKPOINT(); /* 同一周期紧接着深踩切换时，仍保留此前的轻踩请求。 */
 }
 
 /*
@@ -1172,6 +1181,7 @@ static void Foot_StopDoublePedalGentlyPump(bool right_pedal)
         other_channel = s_double_right_gently_pump_channel; /* 右脚若仍使用同一泵则继续保持输出。 */
     }
 
+    DIAG_EVENT(DIAG_EVENT_DRAIN, right_pedal ? CHANNEL_B : CHANNEL_A, 2U, released_channel, other_channel); /* 松开本侧时保存两侧实际使用泵的记录，相同泵仍由另一侧保持。 */
     if(released_channel==other_channel)
     {
         return; /* 两侧共同使用同一台注水泵时，只释放本侧记录，等待另一侧也松开。 */
@@ -1888,6 +1898,7 @@ void FootControlTask(uint32_t event)
         {
             Foot_HandleConnectionUpdate(&msg); /* 外控占用时仍更新脚踏在线状态和图标，但下方行程控制继续被直接跳过。 */
         }
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, 0U, 5U, WorkMessage.channel_work, 0U); /* 其它控制方式正在占用电机，记录原因 5；本轮不处理脚踏启停和切通道。 */
         return; /* 连接状态更新后立即退出，脚踏不得在外控期间启动电机、泵或切换通道。 */
     }
 
@@ -1900,15 +1911,18 @@ void FootControlTask(uint32_t event)
     {
         s_foot_restart_release_ticks = 0U; /* 实时帧失效打断连续松脚确认，不能拼接失联前后的释放记录。 */
         Foot_StopRunOnRealtimeTimeout(); /* 没有可信实时AD时持续保持脚踏输出为停止，防止旧高值在下一周期重新起机。 */
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, 0U, 6U, WorkMessage.channel_work, 0U); /* 实时踩踏数据已失效，记录原因 6；已请求停止脚踏输出，等待新的有效实时帧。 */
         return; /* 等到新的完整且 CRC 正确的实时帧后再处理踩踏，本周期不能按旧值调速。 */
     }
 
     if (Foot_BlockRestartUntilReleased(&msg))
     {
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, 0U, 7U, WorkMessage.channel_work, 0U); /* 异常重启后尚未确认完全松脚，记录原因 7；本轮不接受轻踩、启动或切通道。 */
         return; /* 异常重启后尚未确认松脚，不能进入轻踩开泵、深踩启动或切通道分支。 */
     }
     if (Foot_BlockDriverAlarmRun(&msg))
     {
+        DIAG_EVENT(DIAG_EVENT_FOOT_GATE, 0U, 8U, WorkMessage.channel_work, 0U); /* 驱动故障后的启动检查未通过，记录原因 8；本轮不接受新的脚踏启动。 */
         return; /* 驱动故障后还没松脚，前面已要求停机，本周期不能再启动。 */
     }
     if (msg.connect_flag == true) /* 脚踏在线时才按踏板类型处理动作；离线消息只更新连接状态。 */
@@ -2304,10 +2318,12 @@ void Foot_ParseDataS(uint32_t event)
         }
         if((uint16_t)(received_len - offset) < frame_length)
         {
+            DIAG_EVENT(DIAG_EVENT_FOOT_PARSE, 0U, frame_length, 2U, received_len - offset); /* 明确区分半帧和CRC错误。 */
             break; /* DMA尾部只有半帧时不读取字段；本周期按无有效实时帧推进安全计时。 */
         }
         if(Foot_IsFrameCrcValid(&data[offset], frame_length) == false)
         {
+            DIAG_EVENT(DIAG_EVENT_FOOT_PARSE, 0U, frame_length, 0U, received_len - offset); /* CRC坏帧没有更新实时AD。 */
             ++offset; /* CRC 错误时向后一字节继续找帧头，后面仍可能有正确的数据帧。 */
             continue;
         }
@@ -2324,6 +2340,7 @@ void Foot_ParseDataS(uint32_t event)
             realtime_frame_valid = true; /* 只有这三类帧带有当前踩踏 AD，读取定标值或按键回包不能重置实时帧超时计数。 */
         }
 
+        DIAG_EVENT(DIAG_EVENT_FOOT_PARSE, 0U, frame_length, 1U, received_len - offset); /* 记录CRC通过，不把定标/按键帧当作实时踩踏。 */
         stop_scan = Foot_ParseUartFrame(&data[offset], frame_length); /* 完整且CRC正确后才允许更新AD、定标值或按键事件。 */
         offset = (uint16_t)(offset + frame_length); /* 当前帧已处理，跳到帧尾之后，避免把帧内数据当成另一个帧头。 */
         if(stop_scan != false)
@@ -2361,3 +2378,45 @@ void SscFootControlTask_Init(void)
     Kernel_TaskCreate(&FOOTBHHandle, FootControlTask);
     Kernel_TaskStart(&FOOTBHHandle, KERNEL_TASK_ALWAYS, 25); /* 每 25ms 处理踩踏动作；修改周期会影响松脚确认和双脚踏切通道等待时间。 */
 }
+
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+/*
+ * 函数功能：复制脚踏最近的 AD、连接、定标和启停判断数据，供诊断记录；不修改脚踏运行请求。
+ * 输入参数：out 指向一份 DiagnosticFootState_t 输出变量，不能为空；调用时须持有公共业务互斥锁。
+ * 返回参数：无；out 为空时直接返回。
+ */
+void Foot_CopyDiagnosticState(DiagnosticFootState_t *out)
+{
+    if (out == NULL) return; /* 没有输出变量时直接返回，诊断不修改脚踏数据。 */
+
+    out->ad_single = jt_adcvalue; /* 单踏板最近一次有效实时帧中的 AD 值，未换算成踩踏百分比。 */
+    out->ad_two_stage = jtb_adcvalue; /* 双段踏板最近一次有效实时帧中的 AD 值，未换算成踩踏百分比。 */
+    out->ad_left = jtd_adcvalue_l; /* 双脚踏左侧最近一次有效实时帧中的 AD 值。 */
+    out->ad_right = jtd_adcvalue_r; /* 双脚踏右侧最近一次有效实时帧中的 AD 值。 */
+    out->connected = s_foot_parser_state.connected; /* 1：脚踏定标通过且上线消息已入队；0：尚未上线或已确认离线。 */
+    out->pedal_type = footmessage.pedalType; /* 脚踏类型：1 单踏板，2 双段踏板，3 双脚踏。 */
+    out->frame_valid = s_foot_runtime_frame_valid; /* 收到 CRC 正确的实时帧后置 1；实时帧超时或脚踏失效时清零，禁止用旧 AD 值启动。 */
+    out->silent_ticks = s_foot_parser_state.silent_ticks; /* 连续未收到有效实时帧的次数，每次为 10ms 解析周期；收到有效实时帧后清零。 */
+    out->motor_stop = s_foot_motor_stop_latched; /* 1：要求脚踏电机保持停止；启动检查通过后清零。该值不是电机已停转的反馈。 */
+    out->release_ready = s_foot_motor_release_ready; /* 确认脚踏已退出电机运行区后置 1；批准新启动或启动检查失败后清零。 */
+    out->active_pedal = s_foot_motor_active_source; /* 获准启动电机的踏板侧：0 无，1 左，2 右；松脚或撤销脚踏启动后清零。 */
+    out->follow_pedal = s_foot_handle_pump_source; /* 启动手柄联动注水泵的踏板侧：0 无，1 左，2 右；撤销该次联动后清零。 */
+    out->left_drain_pump = s_double_left_gently_pump_channel; /* 左脚轻踩请求使用的泵：0 无，1 A 泵，2 B 泵；撤销左脚轻踩请求后清零。 */
+    out->right_drain_pump = s_double_right_gently_pump_channel; /* 右脚轻踩请求使用的泵：0 无，1 A 泵，2 B 泵；撤销右脚轻踩请求后清零。 */
+    out->switch_wait_release = s_double_pedal_release_before_run_channel; /* 切换成功后仍需先松脚的通道：0 无，1 A，2 B；该侧松脚确认后清零。 */
+    out->missing_tool_release = s_common_socket_missing_wait_release; /* 缺刀具报警后置 1，阻止同一次长踩反复报警；确认松脚后清零。 */
+    out->restart_release = s_foot_restart_release_required; /* 异常重启后置 1，禁止踩踏启动；连续三轮确认脚踏完全松开后清零。 */
+    out->restart_ticks = s_foot_restart_release_ticks; /* 异常重启后连续完全松脚的次数，每轮 25ms；任一侧踩下或实时帧失效时清零。 */
+    out->left_low = footmessage.LValue_Left; /* 脚踏报文解析函数保存的左侧松开定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->left_mid = footmessage.MValue_Left; /* 脚踏报文解析函数保存的左侧中点定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->left_high = footmessage.HValue_Left; /* 脚踏报文解析函数保存的左侧踩到底定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->right_low = footmessage.LValue_Right; /* 脚踏报文解析函数保存的右侧松开定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->right_mid = footmessage.MValue_Right; /* 脚踏报文解析函数保存的右侧中点定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->right_high = footmessage.HValue_Right; /* 脚踏报文解析函数保存的右侧踩到底定标 AD 值；控制任务已采用的值另记在组 24。 */
+    out->single_release_ticks = s_single_release_debounce_ticks; /* 单踏板连续松脚的次数，每轮 25ms；再次踩下后清零，用于延迟撤销开泵请求。 */
+    out->switch_a_ticks = WorkMessage.switchhandle_counts; /* 左脚深踩请求从 B 切到 A 的确认次数，每轮 25ms；达到切换次数或退出该踩踏区后清零。 */
+    out->switch_b_ticks = WorkMessage.switchhandle_countss; /* 右脚深踩请求从 A 切到 B 的确认次数，每轮 25ms；达到切换次数或退出该踩踏区后清零。 */
+    out->switch_a_ready = WorkMessage.switchhandleA_flag; /* 原样记录旧字段 switchhandleA_flag；当前切换流程不更新它，不能据此判断已切到 A。 */
+    out->switch_b_ready = WorkMessage.switchhandleB_flag; /* 原样记录旧字段 switchhandleB_flag；当前切换流程不更新它，不能据此判断已切到 B。 */
+}
+#endif

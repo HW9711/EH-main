@@ -6,6 +6,7 @@
 #include "Pubinterface.h"
 #include "screenkey.h"
 #include "sscKEYBH.h"
+#include "diagnostic.h" /* 按键队列记录在独立模块内去重和导出。 */
 
   kernel_task_t    KeyBehaviorsHandle;
 QueueHandle_t KeyBehivQueue = NULL;
@@ -35,12 +36,20 @@ bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 	// 	control_types=control_type;
 	// 	control_keys=control_key;
 	// }
-	if(KeyBehivQueue == NULL) return false; /* 按键队列尚未创建时不能投递事件，返回失败让关键状态事件保留并在下个扫描周期重试。 */
+	if(KeyBehivQueue == NULL) { DIAG_EVENT(DIAG_EVENT_KEY_QUEUE, 0U, control_type, control_key, 0U); return false; } /* 按键队列尚未创建时不能投递事件，返回失败让关键状态事件保留并在下个扫描周期重试。 */
 	KeyBehMessage_t msg;
 	msg.control_type =control_type ;
 	msg.control_key = control_key;
 	msg.queued_tick_ms = HAL_GetTick(); /* 普通按键只记录时间；触控按住信号取出时会检查是否已过 420ms。 */
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+    {
+        bool queued = (Kernel_QueueSend(KeyBehivQueue, &msg, 0U) == pdPASS); /* 仍只尝试一次非阻塞入队。 */
+        DIAG_EVENT(DIAG_EVENT_KEY_QUEUE, 0U, control_type, control_key, queued); /* 区分发出操作和成功排队。 */
+        return queued; /* 原调用方继续按真实结果重试关键事件。 */
+    }
+#else
 	return (Kernel_QueueSend(KeyBehivQueue, &msg, 0U) == pdPASS); /* 处理队列的任务也要取得同一把业务锁；当前任务等待会挡住它，因此队列满时直接返回失败。 */
+#endif
 }
 /*
  * 函数功能：按脚踏按键编号执行泵控制、开口定位或手柄切换。
@@ -280,16 +289,19 @@ void KeyBehaviors()
 		uint8_t control_type=msg.control_type; /* 记录消息来自脚踏、手柄、屏幕还是插拔，后面据此检查和处理。 */
 		uint8_t control_key=msg.control_key; /* 当前队列项的业务按键值，保持与来源类型一一对应。 */
 		uint32_t queued_age_ms=(uint32_t)(HAL_GetTick()-msg.queued_tick_ms); /* 按这条触控按住消息的入队时间判断是否过期，不能用后到的新消息时间代替。 */
+        DIAG_EVENT(DIAG_EVENT_KEY_QUEUE, 1U, control_type, control_key, queued_age_ms); /* 记录实际取出时间差，不能把旧触控包当成新操作。 */
 		if((control_type==SCREENKey) &&
 		   (control_key==SCREENKey_TouchKeepAlive) &&
 		   ((queued_age_ms>=SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS) ||
 		    (ScreenKey_IsAcceptedTouchKeepAliveFresh()==0U)))
 		{
+            DIAG_EVENT(DIAG_EVENT_KEY_QUEUE, 2U, control_type, control_key, queued_age_ms); /* 明确记录被丢弃的触控保活。 */
 			continue; /* 按住信号已过期，或触控已因报警、退出而取消时，丢弃旧信号，不能启动电机。 */
 		}
 		/* 其他控制方式正在使用设备时，跳过不允许的本地按键，但仍继续处理后面的插拔和 RFID 刷新。 */
 		if(ControlArbitration_ShouldBlockLocalKey(control_type, control_key))
 		{
+            DIAG_EVENT(DIAG_EVENT_KEY_QUEUE, 3U, control_type, control_key, 0U); /* 已由其它控制源占用，本次按键不执行。 */
 			continue;
 		}
 		switch(control_type)
@@ -312,6 +324,7 @@ void KeyBehaviors()
 			default:
 			break;
 		}
+        DIAG_CHECKPOINT(); /* 每条按键处理完即复制请求，连续切换或启停不会只剩最后状态。 */
 	}
 }
 void KeyBehaviorsTask(uint32_t event)

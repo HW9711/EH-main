@@ -4,6 +4,7 @@
 #include "queue.h"
 #include "sscPUMPB.h"
 #include "pump.h"
+#include "diagnostic.h" /* 泵设定消息与实际发送帧分开记录。 */
 #include "pump_behavior_core.h"
 
 /* B 泵速度队列最多存 2 条消息，不与 A 泵共用。 */
@@ -34,6 +35,7 @@ void SendPumpBMessage(uint8_t pump_type, uint16_t value)
 
     if (PUMPBMsgQueue == NULL)
     {
+        DIAG_EVENT(DIAG_EVENT_PUMP_QUEUE, 2U, pump_type, value, 0U); /* 未入队的设定不能当作已执行。 */
         return; /* 队列还没创建，直接返回，不等待也不保存本次消息。 */
     }
     if ((last_queued_valid != 0U) &&
@@ -47,9 +49,16 @@ void SendPumpBMessage(uint8_t pump_type, uint16_t value)
     new_msg.Value = value; /* 保存新设定，任务取到消息后用它更新 speed_work。 */
     if (Kernel_QueueSend(PUMPBMsgQueue, &new_msg, 0) == pdPASS)
     {
+        DIAG_EVENT(DIAG_EVENT_PUMP_QUEUE, 2U, pump_type, value, 1U); /* 记录本次设定已排队，泵任务稍后才取出。 */
         last_queued_msg = new_msg; /* 只在入队成功后记住消息；队列满时不改记录，方便下次重试。 */
         last_queued_valid = 1U; /* 已有成功入队记录，下次可据此跳过重复消息。 */
     }
+#if (MAINCTRL_DIAG_ENABLE == 1U) /* 关闭诊断时不保留空else，保持原分支代码。 */
+    else
+    {
+        DIAG_EVENT(DIAG_EVENT_PUMP_QUEUE, 2U, pump_type, value, 0U); /* 队列满立即返回，记录这次未送达的设定。 */
+    }
+#endif
 }
 
 /*

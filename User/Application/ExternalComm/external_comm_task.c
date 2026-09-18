@@ -1,4 +1,5 @@
 #include "external_comm_task.h"
+#include "diagnostic.h" /* 专用诊断帧不能进入外控登录或延长运行保活。 */
 
 #include "external_comm_protocol.h"
 #include "external_comm_simple_protocol.h"
@@ -5404,6 +5405,11 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     parse_result = ExternalCommProtocol_Parse(s_frame_buf, frame_len, &frame);
     if (parse_result == EXTERNAL_COMM_PARSE_OK)
     {
+        if (DIAG_COMMAND(frame.tran_code, frame.fun_code, frame.area_code, frame.info_code, frame.info_area, frame.info_len) != 0U)
+        {
+            (void)ExternalComm_RxFifoSkip(frame_len); /* 诊断模块已处理整帧，跳过普通控制与保活分发。 */
+            return 1U; /* 不取得控制权，不重置外控超时。 */
+        }
         frame_action = ExternalComm_ClassifyFormalFrame(&frame); /* CRC通过后再校验方向、三帧会话来源和未连接急停例外。 */
         if (frame_action == EXTERNAL_COMM_FORMAL_FRAME_IGNORE)
         {
@@ -5430,7 +5436,9 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
         /* 从缓存移除当前完整帧，下一轮循环从后面的新帧开始。 */
         (void)ExternalComm_RxFifoSkip(frame_len);
         /* 按 FunCode 分发下行命令，业务层仍然只看到一帧完整协议数据。 */
+        DIAG_EVENT(DIAG_EVENT_EXTERNAL, 0U, frame.fun_code, frame.area_code, ((uint32_t)frame.info_code << 16U) | frame.info_len); /* 仅记录已通过校验并准备执行的命令类别，不导出认证内容。 */
         ExternalComm_DispatchFrame(&frame);
+        DIAG_CHECKPOINT(); /* 同一批接收含多条命令时逐条保存处理后的手柄和泵请求。 */
         return 1U;
     }
 
@@ -5515,6 +5523,12 @@ static void ExternalCommTaskFunc(uint32_t event)
     /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
     ExternalComm_CheckLinkWatchdog();
 
+    if (DIAG_LINK_ACTIVE() != 0U) /* 上位机诊断查询持续到达时，RS485 只用于诊断请求和应答。 */
+    {
+        DIAG_SERVICE(); /* 接收处理完成后立即启动应答，不等待普通心跳或 EEPROM 批量上传。 */
+        return; /* 暂停本任务后续普通上报；其它脚踏、手柄、泵任务仍由调度器正常执行。 */
+    }
+
     /* 本周期没有处理 EEPROM 下行命令时，才允许批量任务继续访问一页。 */
     if (s_eeprom_command_processed_this_cycle == 0U)
     {
@@ -5542,6 +5556,7 @@ static void ExternalCommTaskFunc(uint32_t event)
         /* 采集当前工作状态并发送心跳。 */
         ExternalComm_SendHeartbeat();
     }
+    DIAG_SERVICE(); /* 普通应答和心跳排队后，空闲时才发诊断应答。 */
 }
 
 /*

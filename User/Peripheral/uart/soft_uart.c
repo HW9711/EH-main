@@ -1,4 +1,5 @@
 #include "soft_uart.h"
+#include "diagnostic.h" /* 压力解析在任务中记录，逐位采样中断不写诊断缓存。 */
 
 #include "FreeRTOS.h"
 #include "kernel_scheduler.h"
@@ -1136,6 +1137,7 @@ static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
         return; /* 21 字节尚未收齐时继续等待，不能提前刷新泵在线和压力状态。 */
     }
 
+    DIAG_WIRE((uint8_t)(11U + channel), 0U, 0x100U, parser->frame, CS1237_FRAME_LENGTH); /* 11为PE4/A、12为PE6/B；候选帧尚未校验。 */
     if (Cs1237_FrameValid(parser->frame))
     {
         if (Cs1237_BusinessDataTrusted(channel, parser->frame))
@@ -1653,3 +1655,24 @@ SoftUART_Status Soft_UART_SendString(char *str)
 {
     return SimUart_SendString(SIM_UART_1, str);
 }
+
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+/*
+ * 函数功能：复制指定压力板已保存的收帧时间、异常恢复和掉线计数；不取走串口接收队列里的字节。
+ * 输入参数：channel=1 为 A 压力板、2 为 B 压力板；out 指向 DiagnosticPressureState_t 输出变量；调用时须持有公共业务互斥锁。
+ * 返回参数：无；out 为空或通道不是 1/2 时直接返回，out 保持原值。
+ */
+void SimUart_CopyDiagnosticState(uint8_t channel, DiagnosticPressureState_t *out)
+{
+    uint8_t index; /* 对应压力串口数组的下标，A 为 0、B 为 1。 */
+    if ((out == NULL) || (channel < 1U) || (channel > 2U)) return; /* 无效通道或空输出指针直接返回，避免读取数组以外的数据。 */
+    index = (uint8_t)(channel - 1U); /* A 固定读取 PE4 压力板，B 固定读取 PE6 压力板，不跟随泵驱动 UART5/7 交换。 */
+    out->last_valid_tick = s_cs1237_last_valid_tick[index]; /* 本泵最近一帧通过格式、CRC 和数值检查的压力数据接收时刻，单位为主控毫秒。 */
+    out->loss_suspect_tick = s_cs1237_loss_suspect_tick[index]; /* 压力帧超时后开始等待掉线确认的主控毫秒数；收到有效帧或结束离线处理后清零。 */
+    out->recovery_required = s_cs1237_recovery_required[index]; /* 压力数据越界后置 1，暂停采用单个正常帧；连续三个正常帧到达后清零并恢复更新。 */
+    out->recovery_count = s_cs1237_recovery_valid_count[index]; /* 数值越界后已连续收到的正常压力帧数，再次越界时清零。 */
+    out->parser_bytes = s_cs1237_parsers[index].length; /* 压力接收缓存中尚未处理完的字节数，用于判断是否一直收不到完整帧。 */
+    out->sequence = (channel == 1U) ? pumpMessageA.seq : pumpMessageB.seq; /* 本泵最近已接受压力帧的序号；0 也是合法序号，不能仅凭它判断掉线。 */
+    out->offline_limit_ms = CS1237_PUMP_LOSS_CONFIRM_MS; /* 距最后有效压力帧允许经过的最长时间，单位 ms；超过此时间才可确认压力板掉线。 */
+}
+#endif

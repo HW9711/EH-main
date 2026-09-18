@@ -4,6 +4,7 @@
 #include "queue.h"
 #include <string.h>
 #include "sscUIDP.h"
+#include "diagnostic.h" /* 只观测相关UI消息，不改显示参数。 */
 #include "lcd.h"
 #include "Pubinterface.h"
 #include "screen_address.h"
@@ -229,7 +230,7 @@ static uint16_t UIDP_PumpButtonPicture(uint8_t button_type, bool enable_flag, bo
  */
 void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 {
-	if(UIDPMsgQueue == NULL) return; /* 显示队列尚未创建时不能投递刷新消息，直接返回避免访问空句柄。 */
+	if(UIDPMsgQueue == NULL) { DIAG_UI(0U, areaId, enable_flag, Value, 0U); return; } /* 显示队列尚未创建时不能投递刷新消息，直接返回避免访问空句柄。 */
     UIDPMessage_t msg;
     msg.areaId = areaId;
 	msg.enable_flag = enable_flag;
@@ -250,9 +251,16 @@ void SendUIDSMessage(uint8_t areaId,bool enable_flag,uint8_t *Value)
 	}
     if(Kernel_QueueSend(UIDPMsgQueue, &msg, 0U) == pdPASS) /* 显示任务也要取得同一把业务锁，因此队列满时不能等待；发送失败不更新去重记录，下次相同刷新仍可尝试。 */
 	{
+        DIAG_UI(0U, areaId, enable_flag, msg.Value, 1U); /* 记录成功入队，尚不代表屏幕已刷新。 */
 		s_uidp_last_msg = msg;//只在投递成功后更新去重缓存，避免队列满时吞掉下一次有效刷新。
 		s_uidp_last_valid = 1U;//标记去重缓存已建立，后续重复 UI 消息才允许被过滤。
 	}
+#if (MAINCTRL_DIAG_ENABLE == 1U) /* 关闭诊断时不保留空else，保持原分支代码。 */
+    else
+    {
+        DIAG_UI(0U, areaId, enable_flag, msg.Value, 0U); /* 队列满时保留这次未送达的显示请求。 */
+    }
+#endif
 }
 
 /*
@@ -1013,6 +1021,7 @@ void UIDISPLAYBehavior()
 			{
 				break; /* 当前队列已空时立即让出任务周期，避免空转占用调度时间。 */
 			}
+            DIAG_UI(1U, msg.areaId, msg.enable_flag, msg.Value, 1U); /* 保存真正被显示任务取出的值，仍不等于屏幕回读确认。 */
 			processed_count++; /* 记录本周期实际处理条数，用于限制 UART6 连续发送压力。 */
 			switch (msg.areaId)
 			{

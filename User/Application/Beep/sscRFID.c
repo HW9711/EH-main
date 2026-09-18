@@ -26,7 +26,7 @@
 #define RFID_TX_POWER_15_DBM_X100       1500U  /* 15dBm，对应模块协议功率值 1500。 */
 
 /* RFID 工作频段选择：填写上面的 RFID_REGION_* 常量。当前为中国 920 MHz 频段；A/B 模块上电时一起使用此设置，需与目标地区和模块支持范围一致。 */
-#define RFID_REGION_SELECT              RFID_REGION_CHINA_920
+#define RFID_REGION_SELECT              RFID_REGION_EUROPE
 
 /* RFID 发射功率选择：只允许上面的 0、10、13、15 dBm 常量，协议数值为 dBm × 100。当前为 10 dBm；A/B 模块上电时一起使用，改变后需实测识别距离和邻近标签误读。 */
 #define RFID_TX_POWER_SELECT            RFID_TX_POWER_10_DBM_X100

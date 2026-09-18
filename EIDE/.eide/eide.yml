@@ -127,6 +127,8 @@ virtualFolder:
         - name: Modules
           files:
             - path: ../User/Application/Common/common.c
+            - path: ../User/Application/Diagnostic/diagnostic.c
+            - path: ../User/Application/include/diagnostic.h
             - path: ../User/Application/Common/control_arbitration.c
             - path: ../User/Application/Common/work_alarm.c
             - path: ../User/Application/DriveCtrl/drivectrl_adapter.c

@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart1.h"
+#include "diagnostic.h" /* 从已复制的接收数据记录原始字节，不再次读取DMA。 */
 #include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
@@ -99,6 +100,7 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
 
         // 将DMA缓冲区中的数据复制到输出缓冲区
 		    Common_CopyData(Uart1_DMABuf, data, rlen);
+        DIAG_WIRE(1U, 0U, 0x100U, data, rlen); /* 原始字节尚未经过上层CRC检查，不能当成有效反馈。 */
 
         // 重置DMA接收状态
         Uart1_DMAReset();

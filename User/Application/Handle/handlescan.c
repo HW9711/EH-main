@@ -1,6 +1,7 @@
 // handlescan.c
 
 #include "handlescan.h"
+#include "diagnostic.h" /* 独立诊断开关及只读副本接口。 */
 #include "board.h"
 #include "board_profile.h"
 #include "bsp_gpio.h"
@@ -2597,6 +2598,7 @@ static AT24CS32_CRC_Status Handlescan_VerifyEeprom(const HandlescanChannelBindin
     AT24CS32_CRC_Status status = AT24CS32_VerifyCrcStep(
         (physical_channel == BOARD_PROFILE_HANDLE_CHANNEL_A) ? 0U : 1U,
         &binding->context->verify_context); /* 物理映射不变，中间进度只保存在本逻辑通道。 */
+    DIAG_EVENT(DIAG_EVENT_HANDLE_VERIFY, binding->channel, binding->context->verify_context.step, status, physical_channel); /* 只记录认证进度和错误码，不导出身份认证数据。 */
     *result = binding->context->verify_context.result; /* 保留原调用方的认证明细，不再依赖共享静态缓存。 */
     return status; /* 未完成与失败分开，PENDING不能触发重试或报警。 */
 }
@@ -3592,3 +3594,37 @@ void HandlescanTaskInit(void)
 	Kernel_TaskCreate(&HANDLESCANTaskHandle, HANDLESCANTaskFunc);
 	Kernel_TaskStart(&HANDLESCANTaskHandle, KERNEL_TASK_ALWAYS, 10); /* 实际扫描间隔固定为 10ms；调整时须同步上面的等待次数换算宏。 */
 }
+
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+/*
+ * 函数功能：复制指定手柄的认证和插拔记录，并读一次插入电平；不重新读取 EEPROM 或发起 RFID 查询。
+ * 输入参数：channel=1 为 A 手柄、2 为 B 手柄；out 指向 DiagnosticHandlescanState_t 输出变量；调用时须持有公共业务互斥锁。
+ * 返回参数：无；指针为空、通道无效或找不到通道配置时直接返回，out 保持原值。
+ */
+void Handlescan_CopyDiagnosticState(uint8_t channel, DiagnosticHandlescanState_t *out)
+{
+    if ((out == NULL) || (channel < 1U) || (channel > 2U)) return; /* 指针为空或通道不是 A/B 时不读取手柄记录，输出内容保持原值。 */
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 查找指定逻辑通道使用的引脚和认证数据，只查询配置，不开始认证。 */
+    const HandlescanChannelContext *context; /* 指向本通道已有的扫描进度，下面只读不改。 */
+    if (binding == NULL) return; /* 没有对应通道配置时返回，保留调用方给出的输出内容。 */
+    context = binding->context; /* 选定本通道保存的扫描数据，A/B 认证进度不能混用。 */
+    out->stage = context->stage; /* 手柄识别步骤：0 等插入，1 确认插入，2 等接口稳定，3 认证，4 读参数，5 等 RFID，6 在线，7 确认拔出，8 等重试，9 认证失败。 */
+    out->insert_ticks = context->debounce.in_debounce_ticks; /* 连续检测到手柄插入的次数，每轮 10ms；检测到拔出时清零。 */
+    out->remove_ticks = context->debounce.out_debounce_ticks; /* 连续检测到手柄拔出的次数，每轮 10ms；恢复插入电平时清零。 */
+    out->verify_step = context->verify_context.step; /* EEPROM 校验步骤：0 读第 1 页，1 读芯片序列号，2～8 读对应页。 */
+    out->verified = context->verify_context.verified; /* 全部 EEPROM 认证通过后为 1；开始新一轮认证时清零，0 表示尚未全部通过。 */
+    out->retry_count = context->verify_retry_count; /* 本通道连续认证失败次数；重新初始化认证记录后清零，达到上限后转为慢速重试。 */
+    out->retry_ticks = context->verify_retry_wait_ticks; /* 认证失败后已等待的 10ms 周期数；进入新一轮等待或等待结束后清零。 */
+    out->alarm = context->last_alarm; /* 本通道最近的手柄认证报警码；0 表示当前未保存认证报警。 */
+    out->identity_generation = context->navigation_generation; /* 开始确认手柄拔出时递增的编号；EEPROM 读取前后编号不同，就不能继续使用该次读取的数据。 */
+    out->tool_source = context->tool_source; /* 刀具参数从哪里取得：0 手柄 EEPROM 第 3 页，1 刀具 RFID 标签。 */
+    out->rfid_ticket = context->rfid_monitor_ticket; /* 当前 RFID 监测请求的编号，用它查询本次读取结果，避免误用另一轮结果。 */
+    out->rfid_sequence = context->rfid_last_sequence; /* 已经处理过的 RFID 结果编号，用于避免重复修改刀具参数和重复蜂鸣。 */
+    out->rfid_presence_sequence = context->rfid_last_presence_sequence; /* 最近一次确认本通道 RFID 标签仍在的结果编号。 */
+    out->rfid_pending = context->rfid_monitor_pending; /* RFID 监测请求被接受后置 1；读取结束或取消等待后清零，0 表示没有等待中的请求。 */
+    out->rfid_online = context->rfid_tool_online; /* 1：已识别到 RFID 刀具；0：尚未识别到或已确认刀具离线。 */
+    out->rfid_misses = context->rfid_miss_count; /* 连续未读到 RFID 标签的次数，用于判断刀具是否已取下。 */
+    out->offline_event_required = context->offline_event_required; /* 请求显示手柄上线后置 1；拔出消息成功入队后清零，防止漏发离线通知。 */
+    out->physical_level = HAL_GPIO_ReadPin(binding->short_gpio, binding->short_pin); /* 复制诊断数据时读取的手柄短接引脚：0 低电平表示插入，1 高电平表示拔出。 */
+}
+#endif

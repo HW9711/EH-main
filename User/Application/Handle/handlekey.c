@@ -1,6 +1,7 @@
 //handlekey.c
 
 #include "bsp_gpio.h"
+#include "diagnostic.h" /* 独立诊断开关及只读副本接口。 */
 #include "handlekey.h"
 #include "data.h"
 //#include "adc.h"
@@ -539,3 +540,25 @@ void HandleKeyScan_Init(void)
 	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc); /* 使用现有独立静态任务对象创建实体键任务。 */
 	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30U); /* 周期固定为 30ms，不改变当前实体键去抖时基。 */
 }
+
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+/*
+ * 函数功能：复制指定手柄按键的确认计数和引脚电平，供诊断记录；不增加计数，不产生新的按键事件。
+ * 输入参数：channel=1 为 A 手柄、2 为 B 手柄；out 指向 DiagnosticHandleKeyState_t 输出变量；调用时须持有公共业务互斥锁。
+ * 返回参数：无；out 为空或通道不是 1/2 时直接返回，out 保持原值。
+ */
+void HandleKey_CopyDiagnosticState(uint8_t channel, DiagnosticHandleKeyState_t *out)
+{
+    if ((out == NULL) || (channel < 1U) || (channel > 2U)) return; /* 指针为空或通道不是 A/B 时不读取按键数据，输出内容保持原值。 */
+    const HandleRunKeyDebounce_t *filter = (channel == 1U) ? &s_handle_run_key_a_filter : &s_handle_run_key_b_filter; /* 按通道选择 A 或 B 的按键确认记录，诊断不会增加计数。 */
+    out->pin_mode = (channel == 1U) ? s_handle_run_key_a_pin_mode : s_handle_run_key_b_pin_mode; /* 手柄按键引脚用途：0 尚未配置，1 GPIO 按键输入，2 UART 接收；用途切换时清旧按键记录。 */
+    out->raw_level = (channel == 1U) ? HANDLE_RUN_KEY_A_STATUS() : HANDLE_RUN_KEY_B_STATUS(); /* 读取诊断数据时的引脚电平：GPIO 模式下 0 为按下、1 为松开；UART 模式下不能解释为按键。 */
+    out->low_ticks = filter->low_count; /* 连续读到按下低电平的次数，每轮 30ms；读到高电平后清零。 */
+    out->high_ticks = filter->high_count; /* 连续读到松开高电平的次数，每轮 30ms；读到低电平后清零。 */
+    out->pressed = filter->stable_pressed; /* 按下电平持续达到确认次数后为 1；松开电平持续达到确认次数后清零。 */
+    out->press_event = filter->press_event; /* 本轮刚确认按下且已满足重启后松手要求时为 1；下一轮扫描先清零，长按不会反复产生。 */
+    out->release_event = filter->release_event; /* 本轮刚确认松开时为 1；下一轮扫描先清零，LGZI 用它请求松手停机。 */
+    out->restart_ready = filter->restart_release_ready; /* 异常重启后为 0；确认按键稳定松开后置 1，才允许新的按下事件。普通上电初值为 1。 */
+    out->owner_channel = s_handle_run_key_owner_channel; /* 由手柄实体键启动的通道：0 无，1 A，2 B；用于判断哪侧松手可以撤销运行请求。 */
+}
+#endif

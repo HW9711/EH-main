@@ -1,4 +1,5 @@
 #include "bsp_uart.h"
+#include "diagnostic.h" /* 在统一发送出口记录实际帧及HAL结果，关闭时不改变原路径。 */
 
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
@@ -95,7 +96,15 @@ HAL_StatusTypeDef Bsp_UartTransmit(bsp_uart_port_t port, uint8_t *p_data, uint16
         return HAL_ERROR;
     }
 
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+    {
+        HAL_StatusTypeDef result = HAL_UART_Transmit(uart, p_data, length, timeout); /* 仍按原参数发送且保留真实结果。 */
+        DIAG_WIRE((uint8_t)port, 1U, (uint16_t)result, p_data, length); /* 发送失败不标记为驱动已执行。 */
+        return result; /* 诊断不吞掉错误，也不额外重试电机命令。 */
+    }
+#else
     return HAL_UART_Transmit(uart, p_data, length, timeout);
+#endif
 }
 
 /*

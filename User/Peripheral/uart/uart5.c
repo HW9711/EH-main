@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart5.h"
+#include "diagnostic.h" /* 从已复制的接收数据记录原始字节，不再次读取DMA。 */
 #include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
@@ -85,6 +86,7 @@ uint16_t Uart5_DMARecvDataPeek(uint8_t *data)
 
   received_len = (uint16_t)(UART5_MAX_PACKET_SIZE - remain_len); /* 用缓存容量减去 DMA 剩余空间，得到本次可取出的字节数。 */
   Common_CopyData(Uart5_DMABuf, data, received_len); /* 先把已收到的字节复制给泵任务，再清空 DMA 缓存。 */
+        DIAG_WIRE(5U, 0U, 0x100U, data, received_len); /* 原始字节尚未经过上层CRC检查，不能当成有效反馈。 */
   Uart5_DMAReset(); /* 复制完成后立即重启 DMA，保证随后发送的泵命令能够收到对应反馈。 */
 
   return received_len;

@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart2.h"
+#include "diagnostic.h" /* 诊断开启时UART2共用非阻塞发送队列。 */
 #include "bsp_uart.h"
 #include "board.h"
 #include "common.h"
@@ -63,19 +64,23 @@ void Uart2_Init(void)
 }
 
 /*
- * 函数功能：切换 V4.0 RS485 芯片到发送状态，阻塞发送完整帧后恢复接收状态。
+ * 函数功能：发送外部通信帧；诊断关闭时阻塞发送，开启时复制到普通优先队列并由UART2 TC中断恢复接收。
  * 输入参数：pData 为待发送数据缓冲区；Length 为本次发送的字节数。
  * 返回参数：无。
  */
 void Uart2_SendPacket(uint8_t *pData, uint16_t Length)
 {
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+  Diagnostic_SendNormal(pData, Length); /* 普通帧优先排队，立即返回，不阻塞25ms泵任务。 */
+#else
   HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_SET);   /* 高电平允许发送、关闭接收，避免自己收到刚发出的数据。 */
   (void)Bsp_UartTransmit(BSP_UART_PORT_2, pData, Length, 100); /* 正常时等待最后一位发完；失败或超过 100ms 后也返回。 */
   HAL_GPIO_WritePin(BOARD_UART2_RS485_DIR_PORT, BOARD_UART2_RS485_DIR_PIN, GPIO_PIN_RESET); /* 不论发送成功还是失败，都恢复接收并释放 RS485 总线。 */
+#endif
 }
 
 /*
- * 函数功能：连续多次未收到新字节后，取出 UART2 DMA 数据并重新开始接收。
+ * 函数功能：诊断请求完整且 CRC 正确时立即取出；其它数据仍等连续三次未收到新字节后取出。
  * 输入参数：data 指向至少 UART2_MAX_PACKET_SIZE 字节的输出缓存。
  * 返回参数：复制的字节数；仍在接收或缓存为空时返回 0。
  */
@@ -87,6 +92,16 @@ uint16_t Uart2_DMARecvDataPeek(uint8_t *data)
   //------------------------------------------------------------------
   Uart2_RecvWaitTimeCnt++;
   RemainLen = Bsp_UartRxDmaRemain(BSP_UART_PORT_2);
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+  if ((RemainLen < UART2_MAX_PACKET_SIZE) &&
+      (Diagnostic_IsCompleteRequest(Uart2_DMABuf, (uint16_t)(UART2_MAX_PACKET_SIZE - RemainLen)) != 0U))
+  {
+    rlen = (uint16_t)(UART2_MAX_PACKET_SIZE - RemainLen); /* 诊断请求已收齐，不再额外等待约 30ms。 */
+    Common_CopyData(Uart2_DMABuf, data, rlen); /* 复制已校验的请求，交给原外部通信解析器执行一次。 */
+    Uart2_DMAReset(); /* 原请求已取走，立即准备接收下一条诊断请求。 */
+    return rlen; /* 本周期即可处理并应答，普通帧仍走下面的原等待流程。 */
+  }
+#endif
 
   /* 又收到字节时重新等待，不急着把当前数据交给上层。 */
   if (RemainLen != Uart2_Flag_Last)

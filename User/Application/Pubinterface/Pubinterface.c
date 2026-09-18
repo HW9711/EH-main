@@ -1,5 +1,6 @@
 // 调用对应头文件
 #include "Pubinterface.h"
+#include "diagnostic.h" /* 注水联动只报告请求，不在业务函数中保存或发送诊断数据。 */
 #include "stm32f4xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -1729,6 +1730,7 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		}
 	}
 
+	DIAG_EVENT(DIAG_EVENT_CONTROL, 0U, enable, target_mask, WorkMessage.channel_work); /* 保存本次联动启停及选中的泵，拒绝后的实际请求另由任务末尾复制。 */
 	if (enable && ((target_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U) &&
 		(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U))
 	{

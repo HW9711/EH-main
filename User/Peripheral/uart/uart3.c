@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart3.h"
+#include "diagnostic.h" /* 从已复制的接收数据记录原始字节，不再次读取DMA。 */
 #include "bsp_uart.h"
 #include "common.h"
 //#include "delay.h"
@@ -91,6 +92,7 @@ uint16_t Uart3_DMARecvDataPeek(uint8_t *data)
         rlen = (UART3_MAX_PACKET_SIZE - RemainLen);
 
         Common_CopyData(Uart3_DMABuf, data, rlen);
+        DIAG_WIRE(3U, 0U, 0x100U, data, rlen); /* 原始字节尚未经过上层CRC检查，不能当成有效反馈。 */
 
         Uart3_DMAReset();
       }

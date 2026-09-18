@@ -1,4 +1,5 @@
 #include "app_task.h"
+#include "diagnostic.h" /* 关闭时任务观测调用完全消失。 */
 #include "iwdg.h" /* 只在业务回调完整返回后记录执行进度，由独立线程统一检查。 */
 
 #include "FreeRTOS.h"
@@ -350,7 +351,9 @@ static void AppTaskRuntimeGate(task_t *task)
 
     AppTaskTrace_RecordBoundary(task, true);
     Iwdg_TaskEnter(task->watchdog_id); /* 已取得公共锁，记录即将执行的任务；此处不能报告完成。 */
+    DIAG_TASK_BEGIN(task); /* 只记录开始时间，不报告业务健康。 */
     task->func(0U);
+    DIAG_TASK_END(task); /* 返回后复制脚踏、手柄和泵状态，不发送日志。 */
     Iwdg_TaskComplete(task); /* 回调正常返回才更新时间，卡在回调或等锁时记录不会推进。 */
     AppTaskTrace_RecordBoundary(task, false);
 

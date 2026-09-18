@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "uart9.h"
+#include "diagnostic.h" /* 从已复制的接收数据记录原始字节，不再次读取DMA。 */
 #include "bsp_uart.h"
 #include "common.h"
 
@@ -82,6 +83,7 @@ uint16_t Uart9_DMARecvDataPeek(uint8_t *data)
   {
     rlen = (uint16_t)(UART9_MAX_PACKET_SIZE - RemainLen); /* DMA 剩余数变小的部分就是本轮收到的 RFID 字节数。 */
     Common_CopyData(Uart9_DMABuf, data, rlen); /* 复制给 RFID 任务；由任务判断数据属于哪个请求、是否完整。 */
+        DIAG_WIRE(9U, 0U, 0x100U, data, rlen); /* 原始字节尚未经过上层CRC检查，不能当成有效反馈。 */
     Uart9_DMAReset(); /* 取走数据后立即清空并重启 DMA，下一轮 RFID 请求不受旧回包影响。 */
   }
 
