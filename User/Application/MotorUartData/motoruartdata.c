@@ -3,7 +3,6 @@
 #include "motoruartdata.h"
 #include "common.h"
 #include "uart1.h"
-#include "pump.h"
 #include <string.h>
 #include "kernel_scheduler.h"
 #include "Pubinterface.h"
@@ -368,13 +367,14 @@ void MotorUart_ReleaseFootDriverAlarm(void)
 }
 
 /*
- * 函数功能：驱动刚从故障恢复时，清除各来源的电机运行请求，防止沿用故障前的请求自动启动。
+ * 函数功能：手柄驱动故障及恢复首帧清除各来源的电机运行请求，防止旧请求继续运行；不修改独立泵。
  * 输入参数：无，函数直接清理 WorkMessage 和 ControlSignalMessage。
  * 返回参数：无。
  */
 static void MotorUart_StopAllWork(void)
 {
 	WorkMessage.runflag_work = false; /* 撤销电机运行命令，驱动任务下一周期继续保持停机。 */
+	WorkMessage.speed_work = 0U; /* 清除脚踏实时目标速度，故障恢复后不能沿用故障前的转速请求。 */
 
 	ControlSignalMessage.handle_control_flag = false; /* 清除手柄按键运行来源，避免故障恢复后再次置位。 */
 	ControlSignalMessage.HMI_control_flag = false; /* 清除外控运行来源，要求上位机重新下发启动。 */
@@ -657,11 +657,11 @@ uint8_t MotorUart_IsDriverParameterTransactionActive(void)
 /*
  * 函数功能：读取 UART1 接收包，按当前状态处理参数响应或 12 字节电机反馈。
  * 输入参数：无，直接读取 UART1 DMA 接收缓冲区。
- * 返回参数：无；更新速度、电流和报警。故障时发 A 泵零速并撤销 A/B 泵请求；故障恢复首帧再清电机请求。
+ * 返回参数：无；更新速度、电流和报警。故障时停止手柄及其联动注水泵，保留独立泵；恢复首帧仍清电机请求。
  */
 void BrushlessMotorUartData_ReceiveData(void)
 {
-	static uint8_t clean_huic=0; /* 记录上一周期是否出现驱动故障，用于故障恢复边沿再执行一次安全全停。 */
+	static uint8_t clean_huic=0; /* 记录此前是否收到驱动故障，用于恢复首帧再次清除手柄运行请求。 */
   uint8_t rlen = 0, i = 0;
   uint8_t dat[UART1_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
   uint16_t CRC_Check_Vaule=0;
@@ -709,17 +709,12 @@ void BrushlessMotorUartData_ReceiveData(void)
 					}
 					else
 					{
-						/* 记录故障存在，供故障恢复帧执行一次安全全停。 */
+						/* 记录故障存在，供恢复首帧再次清除手柄运行请求。 */
 						clean_huic=1;
 						/* 把驱动私有故障码转换为主工程报警，保持蜂鸣、屏幕和上位机一致。 */
 						MotorUart_SetDriverAlarm(dat1[7]);
-						Pump_SetSpeed_A(0);//立即下发 A 泵零速，先切断当前泵硬件输出
-						//Pump_SetSpeed_B(0);//泵停止运行
-						pumpMessageA.run_flag = false; /* 撤销 A 泵运行请求，防止泵任务下一周期重新拉起。 */
-						//pumpMessageA.speed_work = 0U;
-						pumpMessageB.run_flag = false; /* 撤销 B 泵普通运行请求；这里没有直接下发 B 泵零速，也没有清除排空标志。 */
-						//pumpMessageB.speed_work = 0U;
-						// MotorUart_StopAllWork();
+						MotorUart_StopAllWork(); /* 报警已记住故障发生时的控制来源，此时清除手柄请求，下一驱动周期发送停止命令。 */
+						Pubinterface_SetHandleInjectionPumpRun(false); /* 只清除已记录的手柄联动泵请求，由各泵任务发送零速；独立灌注泵继续运行。 */
 					}	
 					/* byte1 是驱动当前方向回显；现阶段仅保留协议分支，不据此改写主控方向状态。 */
 					switch (dat1[1])

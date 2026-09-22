@@ -29,7 +29,7 @@ typedef enum
     PUMP_DRIVER_UNAVAILABLE = 0x00U, /* 没有可识别的定位状态，包括尚无回包或旧协议；反馈是否超时另行判断。 */
     PUMP_DRIVER_READY = 0x80U,       /* 驱动报告定位已完成、可以接受运行命令；主控仍须检查同帧故障码是否为0。 */
     PUMP_DRIVER_ALIGNING = 0x90U,    /* 驱动还未允许正常运行，可能正在等待定位条件、执行定位或等待定位后的零速确认。 */
-    PUMP_DRIVER_ALIGN_FAILED = 0xA0U /* 驱动报告本轮定位失败；需要用户重新操作，主控不会因持续启动请求自动重试。 */
+    PUMP_DRIVER_ALIGN_FAILED = 0xA0U /* 驱动报告本轮定位失败；上电首次失败等2秒重试一次，再失败则报警并保持停止。 */
 } PumpDriverAlignmentState_t;
 
 /* 保存步进驱动最近一帧 CRC 正确的反馈；复制函数保证字段不会来自两次不同更新。 */
@@ -75,15 +75,15 @@ uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel);
 uint8_t PumpBehavior_IsAlignmentBusy(void);
 
 /*
- * 函数功能：两路定位都结束后，把待播结果交给蜂鸣任务并清零；只要有一路失败就提示双响。
+ * 函数功能：每次取走一台泵的定位结果提示并清零，另一台的提示继续保留。
  * 输入参数：无。
- * 返回参数：0没有新结果或仍有泵在定位，1成功单响，2失败双响；不改变泵启停条件。
+ * 返回参数：0无提示、1成功单响、2上电重试失败双响；不改变泵启停条件。
  */
 uint8_t PumpBehavior_TakeAlignmentBeepResult(void);
 
 /*
- * 函数功能：记录屏幕要求失败泵重新定位的操作，由泵任务稍后发送零速定位命令，不启动输液。
- * 输入参数：channel 为逻辑A/B泵通道；只有屏幕重试操作调用，脚踏和上位机重复启动不能调用。
+ * 函数功能：记录屏幕操作或上电失败延时重试，由泵任务稍后发送零速定位命令，不启动输液。
+ * 输入参数：channel 为逻辑A/B泵通道；供屏幕重试或上电失败延时重试调用，脚踏和上位机重复启动不能调用。
  * 返回参数：已记下重试请求返回1；不是定位失败、离线、运行中或已有待处理请求时返回0。
  */
 uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel);

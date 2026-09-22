@@ -6,7 +6,7 @@
 #include <string.h>
 #include "sscBEEP.h"
 #include "work_alarm.h" /* 用压力报警码识别两声提示，其它报警仍沿用原响停节奏。 */
-#include "pump_behavior_core.h" /* 泵驱动定位时不播普通按键音；两泵定位都结束后统一提示，报警蜂鸣仍可播放。 */
+#include "pump_behavior_core.h" /* 泵驱动定位时不播普通按键音；两泵各自成功后分别单响，报警蜂鸣仍可播放。 */
 #include "board.h"
 #include "delay.h"
 
@@ -173,9 +173,9 @@ static uint8_t key_flag = 0;
 static uint8_t alarm_flag = 0;
 static uint16_t alarm_limited_ticks = 0U; //限时报警剩余周期，递减到0后自动关闭蜂鸣
 static uint8_t double_beep_phase = 0U; //双响剩余步骤：4=响、3=停、2=响、1=停，每步 100ms，0 表示结束。
-static uint8_t alignment_beep_phase = 0U; /* 定位结果响停步骤：成功2到0响一声；失败4到0响两声，每步100ms；普通按键不能打断。 */
-uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 本周期是否还有泵正在定位；A/B都结束后才能播放定位结果。 */
-uint8_t alignment_result; /* 本周期读取的定位结果：0不响、1单响、2双响；结果不经过普通蜂鸣队列。 */
+static uint8_t alignment_beep_phase = 0U; /* 定位结果响停步骤：成功2到0响一声，重试失败4到0响两声，每步100ms；普通按键不能打断。 */
+uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 本周期是否还有泵正在定位；用于暂停普通按键音，不阻止另一台泵播放定位结果音。 */
+uint8_t alignment_result; /* 本周期读取的定位结果：0不响、1成功单响、2重试失败双响；结果不经过普通蜂鸣队列。 */
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -245,14 +245,14 @@ if(BeepMsgQueue != NULL)
 	{
 		key_flag = 0U; /* 泵开始定位后清掉正在播放的按键音，之前已排队的普通提示也不能继续响。 */
 		double_beep_phase = 0U; /* 定位时停止普通双响，但不清除报警蜂鸣状态。 */
-		alignment_beep_phase = 0U; /* 新一轮定位开始时结束上一轮结果音，避免把旧成功提示听成本轮成功。 */
+		/* 另一台泵仍在定位时保留已开始的定位结果音，让各泵分别单响或双响。 */
 	}
-	alignment_result = PumpBehavior_TakeAlignmentBeepResult(); /* 两路都结束后读取定位结果并清零；仍有泵在定位时返回0，结果留待以后读取。 */
+	alignment_result = ((alignment_beep_phase == 0U) && (alarm_flag == 0U)) ? PumpBehavior_TakeAlignmentBeepResult() : 0U; /* 上一组响停结束后才取下一台的定位提示；报警期间保留待播结果。 */
 	if ((alignment_result != 0U) && (alarm_flag == 0U))
 	{
 		key_flag = 0U; /* 结果音优先于普通按键，成功的一声不与旧提示拼接。 */
-		double_beep_phase = 0U; /* 本次定位失败已经安排双响，先清掉普通双响步骤，避免重复响四声。 */
-		alignment_beep_phase = (alignment_result == 2U) ? 4U : 2U; /* 成功响停两步，失败响停响停四步，每步100ms。 */
+		double_beep_phase = 0U; /* 成功单响优先于普通故障提示，避免两种声音叠加。 */
+		alignment_beep_phase = (alignment_result == 2U) ? 4U : 2U; /* 成功响一声，重试失败响两声；每声100ms，中间停100ms。 */
 	}
 
 	/* 定位结果使用独立响停步骤，普通按键消息不能改变这一组声音的次数和长度。 */
@@ -260,7 +260,7 @@ if(BeepMsgQueue != NULL)
 	{
 		if ((alignment_beep_phase & 1U) == 0U)
 		{
-			BEEP_ON(); /* 偶数步骤播放一声100ms，成功只有步骤2，失败还有步骤4。 */
+			BEEP_ON(); /* 偶数步骤播放一声100ms，成功只有步骤2。 */
 		}
 		else
 		{

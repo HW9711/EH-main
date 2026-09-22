@@ -85,7 +85,7 @@ static uint16_t Pump_GetSpeedMin(const pumpMessage_t *pump_message)
 }
 
 /*
- * 函数功能：按当前注水/灌注流量和本次调节方向取得分段步进值。
+ * 函数功能：按当前注水流量和本次调节方向取得分段步进值。
  * 输入参数：current_flow 为当前 speed_work 流量，单位 mL/min；increase 为 true 表示增加，false 表示减少。
  * 返回参数：每次调整 2、5、10 或 20 mL/min；在 30/100/200 分界值，加键用上一区间的步长，减键用下一区间的步长。
  */
@@ -106,6 +106,24 @@ static uint16_t Pump_GetWaterFlowStep(uint16_t current_flow, bool increase)
 	return 20U; /* 高于 200 使用 20；恰好为 200 时增加流量也从本档开始使用 20。 */
 }
 
+
+/*
+ * 函数功能：按灌注泵当前流量和加减方向选择步进。
+ * 输入参数：current_flow为当前设定流量，单位mL/min；increase为true增加、false减少。
+ * 返回参数：0~70区间为5，70~100区间为10，100~300区间为20；分界点增加用较高区间，减少用较低区间。
+ */
+static uint16_t Pump_GetPourWaterFlowStep(uint16_t current_flow, bool increase)
+{
+	if ((current_flow < 70U) || ((increase == false) && (current_flow == 70U)))
+	{
+		return 5U; /* 低流量每次调整5mL/min；70向下调时仍使用5。 */
+	}
+	if ((current_flow < 100U) || ((increase == false) && (current_flow == 100U)))
+	{
+		return 10U; /* 中流量每次调整10mL/min；100向下调时使用10。 */
+	}
+	return 20U; /* 100向上及更高流量每次调整20mL/min，调用方限制最大流量。 */
+}
 
 /*
  * 函数功能：按 EX8 屏幕交互表判断屏幕泵按键是否应被拒绝。
@@ -191,135 +209,6 @@ static bool Pump_ShouldRejectScreenKey(uint8_t key_value)
 	}
 }
 
-/*
- * 函数功能：处理左右实体脚踏的泵档位循环，只调整对应泵的工作速度并刷新对应屏幕区域。
- * 输入参数：key_value 为左侧或右侧实体脚踏短按键值。
- * 返回参数：无。
- */
-static void Pump_HandleGearKey(uint8_t key_value)
-{
-	static uint8_t PumpA_Gear = 0; /* 保存 A 泵上次选中的脚踏档位，下次短按从该档继续循环。 */
-	static uint8_t PumpB_Gear = 0; /* 保存 B 泵实体脚踏档位，左右泵继续各自独立循环。 */
-
-	switch (key_value)
-	{
-	case JTkey_left_short:
-		PumpA_Gear++;
-		/* A 泵档位超过第五档后回到零档，使实体键保持 0~5 循环。 */
-		if (PumpA_Gear > 5)
-			PumpA_Gear = 0;
-		/* 未识别 A 泵时清除旧档位并退出，避免把残留类型对应的速度写入未知设备。 */
-		if (pumpMessageA.type == 0)
-		{
-			PumpA_Gear = 0; // 清掉上次档位；本次直接返回，不在这里刷新屏幕。
-			return;
-		}
-		/* A 路识别为抽吸泵时按每档 3 单位换算工作速度。 */
-		else if (pumpMessageA.type == DRAWWATER)
-		{
-			pumpMessageA.speed_work = 3 * PumpA_Gear; // 每档增加 3 个内部设定单位，输出时再乘 42 换成驱动速度。
-		}
-		/* A 路识别为注水泵时使用注水档位表，不能沿用抽吸泵倍率。 */
-		else if (pumpMessageA.type == INJECTWATER)
-		{
-			/* 屏幕定时排空期间禁止实体键改速，避免固定排空输出被档位覆盖。 */
-			if (pumpMessageA.timingDrainage_flag == true)
-				return;
-			switch (PumpA_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-				pumpMessageA.speed_work = PumpA_Gear * 10;
-				break;
-			case PUMPGEAR_IV:
-				pumpMessageA.speed_work = 50;
-				break;
-			case PUMPGEAR_V:
-				pumpMessageA.speed_work = 70;
-				break;
-			}
-		}
-		/* A 灌注泵前四档每档增加 50 mL/min，第五档直接设为 300 mL/min。 */
-		else if (pumpMessageA.type == POURWATER)
-		{
-
-			switch (PumpA_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-			case PUMPGEAR_IV:
-				pumpMessageA.speed_work = 50 * PumpA_Gear; // 第 0~4 档依次为 0、50、100、150、200 mL/min。
-				break;
-			case PUMPGEAR_V:
-				pumpMessageA.speed_work = 300;
-				break;
-			}
-		}
-		Pubinterface_RefreshPumpADisplay(); /* A 泵加减速后同步刷新流量数值和按钮状态。 */
-		// 显示已在上面直接刷新，这里不发送队列消息。
-		break;
-	case JTKey_right_short:
-		PumpB_Gear++;
-		/* B 泵档位超过第五档后回到零档，使右实体键同样保持 0~5 循环。 */
-		if (PumpB_Gear > 5)
-			PumpB_Gear = 0;
-		/* 未识别 B 泵时只清除旧档位，防止未知设备继承上一台泵的速度。 */
-		if (pumpMessageB.type == 0)
-		{
-			PumpB_Gear = 0;
-			// 此处只清档位，B 泵不可用的显示由本分支末尾统一刷新。
-		}
-		/* B 路识别为抽吸泵时按每档 3 单位换算工作速度。 */
-		else if (pumpMessageB.type == DRAWWATER)
-		{
-			pumpMessageB.speed_work = 3 * PumpB_Gear; // 每档增加 3 个内部设定单位，输出时再乘 42 换成驱动速度。
-		}
-		/* B 路识别为注水泵时使用原注水档位表，保持右泵历史行为。 */
-		else if (pumpMessageB.type == INJECTWATER)
-		{
-			switch (PumpB_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-				pumpMessageB.speed_work = PumpB_Gear * 10;
-				break;
-			case PUMPGEAR_IV:
-				pumpMessageB.speed_work = 50;
-				break;
-			case PUMPGEAR_V:
-				pumpMessageB.speed_work = 70;
-				break;
-			}
-		}
-		/* B 灌注泵前四档每档增加 50 mL/min，第五档直接设为 300 mL/min。 */
-		else if (pumpMessageB.type == POURWATER)
-		{
-			switch (PumpB_Gear)
-			{
-			case PUMPGEAR_ZERO:
-			case PUMPGEAR_I:
-			case PUMPGEAR_II:
-			case PUMPGEAR_III:
-			case PUMPGEAR_IV:
-				pumpMessageB.speed_work = 50 * PumpB_Gear; // 第 0~4 档依次为 0、50、100、150、200 mL/min。
-				break;
-			case PUMPGEAR_V:
-				pumpMessageB.speed_work = 300; // 第五档设为最大流量 300 mL/min。
-				break;
-			}
-		}
-		Pubinterface_RefreshPumpBDisplay(); /* B 泵档位变化后同步刷新流量数值和按钮状态。 */
-		break;
-	default:
-		break; /* 调度入口只会传入档位键；保留默认分支防止误调用改变泵状态。 */
-	}
-}
 
 /*
  * 函数功能：处理泵启停和排空按键。驱动未就绪时拒绝启动；定位失败后按屏幕泵键只重新定位，成功后仍须再按一次才能运行。
@@ -468,7 +357,7 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 }
 
 /*
- * 函数功能：处理屏幕和 HMI 的 A/B 泵加减速，注水/灌注按当前流量分段设置步进并限制在原上下限内。
+ * 函数功能：处理A/B泵共用加减速；屏幕、HMI和脚踏使用同一计算，按泵类型与当前设定选择步进并限幅。
  * 输入参数：key_value 为 A/B 泵加速或减速键值。
  * 返回参数：无。
  */
@@ -497,7 +386,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 灌注泵复用同一分段规则，保持两类水泵调节手感一致。 */
+			pumpMessageA.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageA.speed_work, increase); /* A灌注泵按当前流量选择5/10/20mL/min步进。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -562,7 +451,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 灌注泵复用同一分段规则，避免 A/B 调节行为分叉。 */
+			pumpMessageB.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageB.speed_work, increase); /* B灌注泵使用与A相同的5/10/20mL/min步进。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -612,6 +501,53 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 	default:
 		break; /* 非加减速键不读取旧步进值，也不刷新错误的泵通道。 */
 	}
+}
+
+/*
+ * 函数功能：脚踏短按从对应泵当前设定增加一步，已到最大值时回到0。
+ * 输入参数：key_value为左或右脚踏短按键值，分别调整A泵或B泵。
+ * 返回参数：无；只改变流量设定，不改变启停请求。
+ */
+static void Pump_HandleGearKey(uint8_t key_value)
+{
+	pumpMessage_t *pump_message; /* 指向本次按键对应的泵，避免左右脚踏互相改值。 */
+	uint8_t add_key; /* 转为共用调速函数的增加键，步进和上限与屏幕一致。 */
+	if (key_value == JTkey_left_short)
+	{
+		pump_message = &pumpMessageA; /* 左键只调整A泵当前设定。 */
+		add_key = HMIkey_APUMP_Add; /* 仅复用A泵加速计算，不改变外控状态。 */
+	}
+	else if (key_value == JTKey_right_short)
+	{
+		pump_message = &pumpMessageB; /* 右键只调整B泵当前设定。 */
+		add_key = HMIkey_BPUMP_Add; /* 仅复用B泵加速计算，不改变外控状态。 */
+	}
+	else
+	{
+		return; /* 非脚踏短按不改变任何泵的设定。 */
+	}
+	if ((pump_message->type != DRAWWATER) && (pump_message->type != INJECTWATER) && (pump_message->type != POURWATER))
+	{
+		return; /* 未识别到有效泵类型时不使用旧流量或旧步进。 */
+	}
+	if ((pump_message->type == INJECTWATER) && (pump_message->timingDrainage_flag == true))
+	{
+		return; /* 注水泵正在屏幕定时排空，本次不允许脚踏改速或回零。 */
+	}
+	if (pump_message->speed_work >= Pump_GetSpeedMax(pump_message))
+	{
+		pump_message->speed_work = 0U; /* 已到上限后再短按才回零，保留脚踏循环调节方式。 */
+		if (key_value == JTkey_left_short)
+		{
+			Pubinterface_RefreshPumpADisplay(); /* A泵回零后同步刷新屏幕设定。 */
+		}
+		else
+		{
+			Pubinterface_RefreshPumpBDisplay(); /* B泵回零后同步刷新屏幕设定。 */
+		}
+		return; /* 回零当次不再增加步进，下次短按才从0继续增加。 */
+	}
+	Pump_HandleSpeedKey(add_key); /* 按当前设定和泵类型增加一步，直接使用屏幕相同的步进及限幅计算。 */
 }
 
 /*
@@ -908,7 +844,7 @@ void PUMPActive(uint8_t key_value)
 	{
 	case JTkey_left_short:
 	case JTKey_right_short:
-		Pump_HandleGearKey(key_value); /* 实体脚踏短按只循环对应通道档位。 */
+		Pump_HandleGearKey(key_value); /* 实体脚踏短按按当前设定增加一步，到上限后再按回零。 */
 		break;
 
 	case JTKey_left_long:

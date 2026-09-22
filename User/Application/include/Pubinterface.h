@@ -462,10 +462,16 @@ uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void); /* 读取当前通道�
 void Pubinterface_SetHandleInjectionPumpRun(bool enable); /* 随手柄启动或停止注水冷却泵，只释放本次联动接管的泵。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B 泵持续超压确认后仅蜂鸣并显示 89 号弹窗，不停止泵或联动手柄。 */
-void Pubinterface_HandlePumpDriverFault(uint8_t pump_channel); /* 步进驱动首次回报非零故障时停本泵和相关控制源，注水冷却时联动停手柄。 */
+/*
+ * 函数功能：上电定位重试失败时显示79号报警图，3秒后自动关闭。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void Pubinterface_ReportPumpAlignmentFailure(void);
+void Pubinterface_HandlePumpDriverFault(uint8_t pump_channel); /* 步进驱动首次报告故障时只停本泵，不停止手柄或另一台泵。 */
 void Pubinterface_ServicePumpDriverFaultHold(uint8_t pump_channel); /* 驱动故障停机记录未清除时继续保持停止，不重复蜂鸣或弹窗。 */
-void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 保留旧名称；再次收到新的启动操作时，清除注水泵驱动故障造成的联动停机记录。 */
-bool Pubinterface_IsPressureBlockStopLatched(void); /* 保留旧名称；查询注水泵驱动故障是否要求联动停机，压力超限报警不会设置此记录。 */
+void Pubinterface_ClearPressureBlockStopLatchForNewTrigger(void); /* 保留旧名称；新启动时清除泵联动暂停记录，泵自身仍须就绪，手柄不受限制。 */
+bool Pubinterface_IsPressureBlockStopLatched(void); /* 保留诊断接口，固定返回false；泵故障不再要求手柄停机。 */
 void Pubinterface_CheckSpeedThresholdAlarm(void); /* 检查当前速度或往复频率是否达到刀具提示阈值。 */
 bool Pubinterface_IsRfidAutoIdentifyEnabled(uint8_t channel); /* 查询指定 PXBA/PXBB 通道是否仍允许自动识别 RFID，识别任务据此决定是否继续读取。 */
 void ControlTypeActive(uint8_t key_value); /* 按按键事件选择脚控、手控或触控。 */

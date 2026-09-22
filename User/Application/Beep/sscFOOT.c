@@ -835,37 +835,13 @@ static bool Foot_IgnoreSingleReleaseGlitch(uint8_t *release_ticks)
 }
 
 /*
- * 函数功能：确认松脚后，清除注水泵驱动故障导致的手柄停机记录，允许下次踩踏重试。
+ * 函数功能：确认松脚后，允许下次重新检查注水泵是否可联动；手柄不受该记录限制。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void Foot_ClearPressureLatchOnRelease(void)
 {
-    Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 保留旧 Pressure 接口名，实际清泵驱动故障的联动停机记录；泵任务仍检查驱动故障，超压提示本身不停机。 */
-}
-
-/*
- * 函数功能：注水泵驱动故障联动停止手柄后，脚踏还踩着就继续禁止电机和泵自动启动。
- * 输入参数：无。
- * 返回参数：true 表示本周期必须保持停机，false 表示允许脚踏按正常路径继续判断。
- */
-static bool Foot_BlockRunIfPressureStopLatched(void)
-{
-    if(Pubinterface_IsPressureBlockStopLatched() == false)
-    {
-        return false; /* 没有泵驱动故障留下的等待松脚要求，继续正常启动检查。 */
-    }
-
-    Foot_LatchMotorStopUntilRelease();              /* 泵驱动故障已触发联动停机，必须先松脚再允许手柄重试启动。 */
-    WorkMessage.runflag_work=false;                 /* 故障停机后脚踏仍踩着，手柄运行请求继续保持为停止。 */
-    WorkMessage.speed_work=0U;                      /* 同步清实际目标速度，避免驱动任务看到旧速度重新输出。 */
-    ControlSignalMessage.jtL_control_flag=false;    /* 清左脚踏运行来源，必须等左脚释放后重新踩下才允许再置位。 */
-    ControlSignalMessage.jtR_control_flag=false;    /* 清右脚踏运行来源，双脚踏两侧都不能靠保持踩踏自动恢复。 */
-    ControlSignalMessage.jtL_gentlypump_flag=false; /* 清左脚轻踩开泵标志，防止故障停机后保持轻踩就重新开泵。 */
-    ControlSignalMessage.jtR_gentlypump_flag=false; /* 清右侧轻踩泵联动来源，防止右脚保持踩下时泵自动恢复。 */
-    s_double_left_gently_pump_channel=CHANNEL_NONE; /* 泵驱动故障处理已撤销联动开泵请求，清掉左侧使用的泵记录。 */
-    s_double_right_gently_pump_channel=CHANNEL_NONE; /* 清右侧实际泵记录，必须重新踩下才能建立新请求。 */
-    return true;                                    /* 通知调用处退出本次脚踏启动分支，等待真实松脚。 */
+    Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 清除泵联动暂停记录，下次踩踏仍检查泵自身故障；不会限制手柄运行。 */
 }
 
 /*
@@ -1217,10 +1193,6 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
     }
     if ((adValue - msg->LValue_Left) > JT_threshold) /* 比低点高出 20 个 AD 计数以上才算踩下，随后检查启动条件并计算速度。 */
         {
-            if(Foot_BlockRunIfPressureStopLatched())
-            {
-                return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 泵驱动故障停机后脚踏仍踩着，本周期不允许重新写运行请求，必须先松脚。 */
-            }
             if(Foot_BlockIfSocketMissing())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 公共接头缺刀具后脚踏仍踩住时，只保持停机，等待松脚后才允许重新报警。 */
@@ -1303,7 +1275,7 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
             }
             else
             {
-                Foot_ClearPressureLatchOnRelease(); /* 单踏板已松开，清除泵驱动故障留下的联动停机记录，下次踩下可以重试。 */
+                Foot_ClearPressureLatchOnRelease(); /* 单踏板已松开，清除泵故障后的联动暂停记录，下次踩下可以重试。 */
                 Foot_ClearManualAlarmOnRelease(); /* 单踏板无运行标志但已释放时，也要关闭手控已选中报警。 */
                 Foot_ClearSocketLatchOnRelease(); /* 即使本次没启动成功，松脚后也结束缺刀具报警的等待状态。 */
                 //本来就是停止，如果不是脚踏控制的那么不需要任何处理和操作
@@ -1332,10 +1304,6 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
     if(adValue<msg->LValue_Left)adValue=msg->LValue_Left;
     if(adValue-msg->LValue_Left>JT_threshold)// 超过低点启动范围后可以开注水泵，A 泵优先，A 不是注水泵时再选 B。
     {
-        if(Foot_BlockRunIfPressureStopLatched())
-        {
-            return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 泵驱动故障联动停机后还没松脚，轻踩也不能重新开泵。 */
-        }
         if(Foot_BlockIfSocketMissing())
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 缺刀具报警后踏板还踩着，不再启动轻踩泵，也不重复弹 80。 */
@@ -1407,7 +1375,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
                    }
                  }
              Foot_ClearHandleOrOverloadAlarm(); /* 即使本次启动失败，完全松脚后仍需关闭“手柄未连接”提示，下次踩下重新检查。 */
-             Foot_ClearPressureLatchOnRelease(); /* 踏板已退到低点附近，清除泵驱动故障后的联动停机记录，下次踩下重新检查能否运行。 */
+             Foot_ClearPressureLatchOnRelease(); /* 踏板已退到低点附近，清除泵故障后的联动暂停记录，下次踩下重新检查能否运行。 */
              Foot_ClearManualAlarmOnRelease(); /* 双段脚踏完全松开后清除 81 号错模式报警。 */
              Foot_ClearSocketLatchOnRelease(); /* 双段脚踏完全释放后，下一次踩下才允许公共接头缺刀具重新报警。 */
      }
@@ -1483,10 +1451,6 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
     }
         if ((adValue - msg->LValue_Left) > JT_threshold) /* 左侧超过踩下阈值后才进入轻踩泵和深踩电机流程。 */
         {
-            if(Foot_BlockRunIfPressureStopLatched())
-            {
-                return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 泵驱动故障联动停机后左脚还踩着，本周期不再启动泵或电机。 */
-            }
             if(Foot_BlockIfSocketMissing())
             {
                 return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏左侧缺刀具后保持踩下时，本周期只维持停机并等待松脚。 */
@@ -1640,7 +1604,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
              if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
              {
                  Foot_ClearHandleOrOverloadAlarm(); /* 左右都松开后，即使运行标志早已清掉，也要关闭“手柄未连接”提示。 */
-                 Foot_ClearPressureLatchOnRelease(); /* 左右脚都已松开，才清除泵驱动故障留下的联动停机记录。 */
+                 Foot_ClearPressureLatchOnRelease(); /* 左右脚都已松开，才清除泵故障后的联动暂停记录。 */
                  Foot_ClearManualAlarmOnRelease(); /* 双脚踏左右都释放后清除手控已选中的错模式报警。 */
                  Foot_ClearSocketLatchOnRelease(); /* 双脚踏左右都释放后，下一次左/右脚踏启动才允许重新弹 80。 */
              }
@@ -1669,10 +1633,6 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
     if(adValue_r<msg->LValue_Right)adValue_r=msg->LValue_Right;
     if(adValue_r-msg->LValue_Right>JT_threshold)//右踏板
     {
-        if(Foot_BlockRunIfPressureStopLatched())
-        {
-            return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 泵驱动故障联动停机后右脚仍踩着，不能因蜂鸣结束而自动重启手柄和泵。 */
-        }
         if(Foot_BlockIfSocketMissing())
         {
             return FOOT_CONTROL_FLOW_FINISH_CYCLE; /* 双脚踏右侧缺刀具后保持踩下时，只保持停机，不再重复触发 80 弹窗。 */

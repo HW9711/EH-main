@@ -22,9 +22,9 @@
 #define PUMP_DRIVER_FEEDBACK_TIMEOUT_MS     100U    /* 驱动反馈有效期100ms，相当于4个25ms泵任务周期；超时清掉运行请求，调大后失联停机更晚。 */
 #define PUMP_DRIVER_REALIGN_COMMAND         0x02U   /* 命令第2字节为0x02时要求驱动重新定位，同时速度必须为0；该值与驱动协议配套，不作方向值使用。 */
 #define PUMP_DRIVER_CANCEL_COMMAND          0x03U   /* 命令第2字节为0x03时取消定位，同时速度必须为0；未收到取消确认时继续发送，不要求驱动重新定位。 */
-#define PUMP_DRIVER_REALIGN_ACK_MS          500U    /* 从屏幕要求重新定位起最多等500ms；期间收不到定位中状态就放弃请求，调大后等待更久，但不会重发定位命令。 */
-#define PUMP_DRIVER_COLOR_ALIGNING          0x07FFU /* RGB565青色，用于表示驱动正在定位或主控尚未解除停机限制；仅改变屏幕流量文字颜色。 */
-#define PUMP_DRIVER_COLOR_FAULT             0xF800U /* RGB565红色，用于表示定位失败、驱动故障或无有效反馈；仅改变屏幕流量文字颜色。 */
+#define PUMP_DRIVER_REALIGN_ACK_MS          500U    /* 从本次重试申请起最多等500ms；期间收不到定位中状态就放弃请求，调大后等待更久，但不会重发定位命令。 */
+#define PUMP_DRIVER_STARTUP_RETRY_MS       2000U   /* 上电定位失败回包到达后等待2000ms再申请一次定位；调大后重试间隔更长，等待期间仍按25ms周期发送零速。 */
+#define PUMP_DRIVER_COLOR_FAULT             0xF800U /* RGB565红色，用于表示正常运行故障或定位结束后的反馈失联；定位中和定位失败不使用红色。 */
 #define PUMP_DRIVER_FEEDBACK_RX_BUFFER_SIZE   UART5_MAX_PACKET_SIZE /* A/B 解析缓存按现有 UART5/7 共同 DMA 容量分配。 */
 
 #if (UART5_MAX_PACKET_SIZE != UART7_MAX_PACKET_SIZE)
@@ -49,15 +49,19 @@ typedef struct
 typedef struct
 {
     PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护持续超限和恢复确认，只产生报警事件。 */
-    uint16_t output_color;       /* 记住最近发送的RGB565颜色，定位状态变化也必须刷新。 */
+    uint16_t output_color;       /* 记住最近发送的RGB565颜色；定位过程保持停止白色，正常开泵仍显示黄色。 */
     uint8_t business_direction;  /* 保存本泵按类型选定的方向，发送普通零速命令时也使用该方向。 */
     volatile uint8_t driver_fault_hold; /* 1表示暂不允许启动；驱动已就绪、没有故障且旧运行/排空请求都清零后改为0。 */
     uint8_t last_feedback_error; /* 保存上次处理的故障码，用来判断本次是否刚出现故障；定位失败会统一记为6。 */
     volatile uint8_t alignment_notice_state; /* 保存已处理的定位中、成功或失败状态；用它避免同一结果每次回包都重复蜂鸣。 */
-    volatile uint8_t alignment_beep_result; /* 等待蜂鸣任务读取的定位结果：0不提示、1成功单响、2失败双响；读走后清零，A/B有一路失败就双响。 */
+    volatile uint8_t alignment_beep_result; /* 0无提示、1成功单响、2上电重试失败双响；蜂鸣任务取走后清零，A/B分别保存。 */
+    volatile uint8_t startup_alignment_active; /* 普通上电置1，首次失败允许自动重试一次；成功、重试失败或取消后清零。 */
+    volatile uint8_t startup_retry_state; /* 0尚未发出上电重试命令，1已发出唯一一次重试，2重试失败；仅重新上电清零。 */
+    uint8_t startup_retry_wait; /* 收到上电定位失败结果后置1并开始计时；定位开始、成功、取消或登记重试后清零。 */
+    uint32_t startup_retry_tick; /* 本轮首次收到定位失败结果的主控毫秒数；重复失败回包不重置，防止一直等不到2秒。 */
     volatile uint8_t realign_phase; /* 重新定位步骤：0空闲；3、2各发一帧普通零速；1发一次0x02定位命令；4等待驱动报告定位中。 */
     volatile uint8_t cancel_phase; /* 取消定位步骤：0无请求；1尚未发送取消命令；2已发送，继续发0x03直到有效回包表明不再正常定位。 */
-    uint32_t realign_tick;       /* 记录屏幕要求重新定位的毫秒时刻，用于500ms超时判断；周期通信不会重置这个时间。 */
+    uint32_t realign_tick;       /* 记录本次要求重新定位的毫秒时刻，用于500ms超时判断；周期通信不会重置这个时间。 */
 } PumpBehaviorRuntime_t;
 
 /* A/B 各保存一份启停、颜色和方向记录，互不覆盖。 */
@@ -248,78 +252,106 @@ static uint8_t PumpBehavior_GetFreshFeedback(PumpBehaviorChannel_t channel,
  */
 uint8_t PumpBehavior_IsAlignmentBusy(void)
 {
-    uint8_t channel; /* 逐路检查，不能在A结束而B仍标定时提前发成功音。 */
+    uint8_t channel; /* 逐路检查，任一泵上电定位未结束时暂停普通按键提示；成功单响单独处理。 */
     for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
         if ((s_pump_runtime[channel].alignment_notice_state == PUMP_DRIVER_ALIGNING) ||
-            (s_pump_runtime[channel].realign_phase != 0U))
+            (s_pump_runtime[channel].realign_phase != 0U) ||
+            (s_pump_runtime[channel].startup_alignment_active != 0U))
         {
             return 1U; /* 准备发送定位命令、等待定位中回包及实际定位期间，都先不播放普通按键音。 */
         }
     }
-    return 0U; /* 两路都没有定位记录或待执行的定位请求，允许播放结果提示。 */
+    return 0U; /* 两路均不再等待上电定位或重试，允许普通按键提示。 */
 }
 
 /*
- * 函数功能：两路标定全部结束后一次取走合并结果，避免两次成功单响被误听为失败双响。
- * 输入参数：无；由每100ms执行一次的蜂鸣任务调用。
- * 返回参数：0表示仍有泵在定位或没有新结果；1表示只收到成功结果；2表示至少一台泵失败。
+ * 函数功能：每次取走一台泵的定位提示；另一台仍在定位或也已成功时，不丢掉任何一台的待播提示。
+ * 输入参数：无；蜂鸣任务仅在上一声结束且没有报警时调用。
+ * 返回参数：0无提示、1成功单响、2上电重试失败双响；不改变泵启停请求。
  */
 uint8_t PumpBehavior_TakeAlignmentBeepResult(void)
 {
-    uint8_t channel; /* 依次读取A/B等待提示的定位结果，不修改两泵的运行请求。 */
-    uint8_t result = 0U; /* 默认静音，重复反馈不能重复生成声音。 */
-    taskENTER_CRITICAL(); /* 读取并清零A/B结果时禁止任务切换，防止屏幕任务同时开始新一轮定位。 */
-    if (PumpBehavior_IsAlignmentBusy() == 0U)
+    uint8_t channel; /* 按A、B顺序查找待播提示；一次只取一台，两台同时成功时分两次播放。 */
+    uint8_t result = 0U; /* 没有待播定位结果时保持静音。 */
+    taskENTER_CRITICAL(); /* 读取并清零同一台泵的提示时禁止任务切换，避免丢失刚登记的定位结果。 */
+    for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
-        for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
+        if (s_pump_runtime[channel].alignment_beep_result != 0U)
         {
-            if (s_pump_runtime[channel].alignment_beep_result > result)
-            {
-                result = s_pump_runtime[channel].alignment_beep_result; /* 失败2优先于成功1，只播放一组结果音。 */
-            }
-            s_pump_runtime[channel].alignment_beep_result = 0U; /* 结果已交给蜂鸣任务，立即清零，避免下周期重复播放同一结果。 */
+            result = s_pump_runtime[channel].alignment_beep_result; /* 保留本泵成功单响或重试失败双响的类型。 */
+            s_pump_runtime[channel].alignment_beep_result = 0U; /* 只取走这台泵的提示，另一台仍保留到下一次读取。 */
+            break; /* 本次只安排一台泵的提示，另一台留到下一次播放。 */
         }
     }
-    taskEXIT_CRITICAL(); /* 不在临界区操作蜂鸣GPIO、消息队列或阻塞等待。 */
-    return result; /* 蜂鸣任务仍须遵守持续报警和限时报警的优先级。 */
+    taskEXIT_CRITICAL(); /* 临界区内不操作蜂鸣器，也不等待。 */
+    return result; /* 蜂鸣任务按100ms响、100ms停播放。 */
 }
 
 /*
- * 函数功能：根据有效回包记录定位开始、成功或失败，供蜂鸣任务稍后播放提示。
- * 输入参数：runtime 保存本泵的定位和提示记录；snapshot 是刚收到并通过校验的反馈。
- * 返回参数：无；只登记待播结果，不在25ms泵任务中直接发声。
+ * 函数功能：按有效反馈处理定位结果：首次失败等2秒重试，重试失败双响并显示弹窗，成功单响。
+ * 输入参数：runtime为本泵定位记录；snapshot为刚通过校验的本泵反馈。
+ * 返回参数：无；登记定位结果和待播声音，重试失败时发送弹窗消息，不发送定位命令。
  */
 static void PumpBehavior_RecordAlignmentNotice(PumpBehaviorRuntime_t *runtime,
                                                const PumpDriverFeedbackSnapshot_t *snapshot)
 {
-    taskENTER_CRITICAL(); /* 更新定位提示记录时禁止任务切换，避免蜂鸣任务同时读走结果或屏幕任务同时重试。 */
+    uint8_t report_failure = 0U; /* 本次首次确认重试失败才置1，退出临界区后显示弹窗。 */
+    taskENTER_CRITICAL(); /* 定位进度和成功提示一起更新，防止蜂鸣任务读到只更新一半的数据。 */
+    if (runtime->startup_retry_state == 2U)
+    {
+        taskEXIT_CRITICAL(); /* 重试失败后保留停机记录，重复回包不能再次响铃或恢复启动。 */
+        return; /* 需重启主机后重新执行上电定位。 */
+    }
     if ((snapshot->alignment_state == PUMP_DRIVER_ALIGNING) &&
         (snapshot->raw_error == PUMP_DRIVER_ERROR_NONE) && (runtime->cancel_phase == 0U))
     {
-        runtime->alignment_notice_state = PUMP_DRIVER_ALIGNING; /* 回包表示定位中且没有故障，继续等待最终结果，不按收到的回包次数蜂鸣。 */
-        runtime->alignment_beep_result = 0U; /* 新一轮开始前清本通道旧结果，不能在重标定中补播上轮声音。 */
+        runtime->alignment_notice_state = PUMP_DRIVER_ALIGNING; /* 驱动已进入定位，继续等本轮最终结果。 */
+        runtime->startup_retry_wait = 0U; /* 已开始本轮定位，旧失败计时不能触发下一次命令。 */
     }
     else if ((snapshot->alignment_state == PUMP_DRIVER_ALIGN_FAILED) ||
              ((runtime->alignment_notice_state == PUMP_DRIVER_ALIGNING) && (snapshot->raw_error != PUMP_DRIVER_ERROR_NONE)))
     {
-        if (runtime->alignment_notice_state != PUMP_DRIVER_ALIGN_FAILED)
+        runtime->alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 首次失败保持静音，是否重试失败由已发命令记录判断。 */
+        if ((runtime->startup_alignment_active != 0U) && (runtime->startup_retry_wait == 0U) &&
+            ((runtime->realign_phase == 0U) || (runtime->realign_phase == 4U)) && (runtime->cancel_phase == 0U) &&
+            (snapshot->alignment_state == PUMP_DRIVER_ALIGN_FAILED))
         {
-            runtime->alignment_beep_result = 2U; /* 第一次得知定位失败时记下双响提示；连续收到相同失败结果不重复登记。 */
+            runtime->realign_phase = 0U; /* 新命令后直接收到失败结果时也结束应答等待，不必等到500ms超时。 */
+            if (runtime->startup_retry_state == 1U)
+            {
+                runtime->startup_retry_state = 2U; /* 唯一一次重试也收到失败结果，本次上电不再允许定位或开泵。 */
+                runtime->startup_alignment_active = 0U; /* 结束上电定位流程，不能再进入2秒自动重试。 */
+                runtime->driver_fault_hold = 1U; /* 保持本泵停止，弹窗关闭也不能解除故障。 */
+                runtime->alignment_beep_result = 2U; /* 只登记一次双响，另一台泵定位不会吞掉这次提示。 */
+                report_failure = 1U; /* 临界区外发送79号弹窗，避免在禁止任务切换时操作显示队列。 */
+            }
+            else
+            {
+                runtime->startup_retry_tick = HAL_GetTick(); /* 首次明确失败才开始2秒计时，通信超时不算定位结果。 */
+                runtime->startup_retry_wait = 1U; /* 重复失败回包不能重新计时，满2秒才允许重试。 */
+            }
         }
-        runtime->alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 记住本泵已判定定位失败，后续相同失败回包不再增加提示音。 */
     }
-    else if (snapshot->alignment_state == PUMP_DRIVER_READY)
+    else if ((snapshot->alignment_state == PUMP_DRIVER_READY) &&
+             (snapshot->raw_error == PUMP_DRIVER_ERROR_NONE) && (runtime->cancel_phase == 0U))
     {
-        if ((snapshot->raw_error == PUMP_DRIVER_ERROR_NONE) &&
-            ((runtime->alignment_notice_state == PUMP_DRIVER_ALIGNING) ||
-             (runtime->alignment_notice_state == PUMP_DRIVER_UNAVAILABLE)))
+        if ((runtime->startup_alignment_active != 0U) || (runtime->realign_phase != 0U) ||
+            (runtime->alignment_notice_state == PUMP_DRIVER_ALIGNING) ||
+            (runtime->alignment_notice_state == PUMP_DRIVER_UNAVAILABLE))
         {
-            runtime->alignment_beep_result = 1U; /* 原来在定位或尚无定位记录，本次收到无故障的就绪回包，登记一次成功提示。 */
+            runtime->alignment_beep_result = 1U; /* 本泵首次成功登记一声；后续连续就绪回包不会重复登记。 */
         }
-        runtime->alignment_notice_state = PUMP_DRIVER_READY; /* 保存驱动已就绪的状态；若同时有故障则不播成功音，之后故障清除也不重复报定位成功。 */
+        runtime->startup_alignment_active = 0U; /* 本泵上电定位已成功，此后运行故障不能重新开启自动定位。 */
+        runtime->startup_retry_wait = 0U; /* 成功后撤销尚未到期的失败计时。 */
+        runtime->realign_phase = 0U; /* 即使未捕获短暂的定位中回包，成功结果也结束本轮重试。 */
+        runtime->alignment_notice_state = PUMP_DRIVER_READY; /* 保存无故障就绪结果，供下一帧判断是否重复。 */
     }
-    taskEXIT_CRITICAL(); /* 结束提示记录更新；不认识的定位状态不会产生成功或失败提示。 */
+    taskEXIT_CRITICAL(); /* 结果记录完成，命令发送留给原泵任务。 */
+    if (report_failure != 0U)
+    {
+        Pubinterface_ReportPumpAlignmentFailure(); /* 显示79号图3秒；不设置全局报警，另一台泵可完成自己的定位。 */
+    }
 }
 
 /*
@@ -337,12 +369,13 @@ uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel)
     return ((PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U) &&
             (snapshot.alignment_state == PUMP_DRIVER_READY) && (snapshot.raw_error == PUMP_DRIVER_ERROR_NONE) &&
             (s_pump_runtime[channel].driver_fault_hold == 0U) && (s_pump_runtime[channel].realign_phase == 0U) &&
-            (s_pump_runtime[channel].cancel_phase == 0U)) ? 1U : 0U; /* 即使驱动已就绪，主控仍须完成旧请求清理和定位取消，才能允许下一次启动。 */
+            (s_pump_runtime[channel].cancel_phase == 0U) &&
+            (s_pump_runtime[channel].startup_retry_state != 2U)) ? 1U : 0U; /* 即使驱动已就绪，主控仍须完成旧请求清理和定位取消，才能允许下一次启动。 */
 }
 
 /*
- * 函数功能：屏幕要求失败泵重试定位时，登记先发两帧零速、再发一次定位命令的步骤；本次不启动输液。
- * 输入参数：channel 为逻辑 A/B 通道；只允许屏幕失败恢复入口调用。
+ * 函数功能：屏幕操作或上电失败延时到达时，登记先发两帧零速、再发一次定位命令的步骤；本次不启动输液。
+ * 输入参数：channel 为逻辑 A/B 通道；供屏幕失败恢复或上电失败延时重试调用。
  * 返回参数：已记下重新定位请求返回1；泵状态不允许或已有待处理请求时返回0。
  */
 uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
@@ -357,12 +390,16 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
     }
     runtime = &s_pump_runtime[channel]; /* 已确认通道号有效，取出该泵专用的定位记录。 */
     taskENTER_CRITICAL(); /* 禁止任务切换，保证泵任务读到配套的步骤和开始时间；这里不发送串口数据。 */
-    if ((runtime->realign_phase == 0U) && (runtime->cancel_phase == 0U) && (s_pump_binding[channel].message->online_flag != false) &&
+    if ((runtime->startup_retry_state != 2U) && /* 上电重试失败后必须重启，屏幕按键不能再次申请定位。 */
+        ((runtime->startup_alignment_active == 0U) ||
+         ((runtime->startup_retry_state == 0U) && (runtime->startup_retry_wait != 0U) &&
+          ((uint32_t)(HAL_GetTick() - runtime->startup_retry_tick) >= PUMP_DRIVER_STARTUP_RETRY_MS))) && /* 上电阶段屏幕重试也须等待首次失败满2秒。 */
+        (runtime->realign_phase == 0U) && (runtime->cancel_phase == 0U) && (s_pump_binding[channel].message->online_flag != false) &&
         (s_pump_binding[channel].message->type != 0U) && (s_pump_binding[channel].message->run_flag == false) &&
         (s_pump_binding[channel].message->timingDrainage_flag == false) &&
         (WorkMessage.runflag_work == false) && (WorkMessage.alarm_flag == false))
     {
-        runtime->realign_tick = HAL_GetTick(); /* 从本次屏幕操作开始计算500ms等待时间，不随泵任务运行而延后。 */
+        runtime->realign_tick = HAL_GetTick(); /* 从本次重试申请开始计算500ms等待时间，不随泵任务运行而延后。 */
         runtime->driver_fault_hold = 1U; /* 重新定位期间禁止普通开泵，避免旧运行请求使泵开始输液。 */
         runtime->realign_phase = 3U; /* 两个零速周期之后只发送一次独立校准帧，不自动重发。 */
         runtime->alignment_beep_result = 0U; /* 明确开始本通道新一轮时丢弃其旧提示，等待本次真实结果。 */
@@ -370,6 +407,24 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
     }
     taskEXIT_CRITICAL(); /* 定位请求记录完成后恢复任务切换，具体发送由后续泵任务处理。 */
     return accepted;
+}
+
+/*
+ * 函数功能：上电定位收到失败结果后等待2秒，条件允许时申请一次重试；本泵成功或被取消后不再自动申请。
+ * 输入参数：channel为逻辑A/B泵通道；runtime为本泵独立的失败计时和定位记录。
+ * 返回参数：无；只登记定位步骤，不阻塞等待，不发送非零速度。
+ */
+static void PumpBehavior_ServiceStartupRetry(PumpBehaviorChannel_t channel, PumpBehaviorRuntime_t *runtime)
+{
+    if ((runtime->startup_alignment_active == 0U) || (runtime->startup_retry_wait == 0U) ||
+        ((uint32_t)(HAL_GetTick() - runtime->startup_retry_tick) < PUMP_DRIVER_STARTUP_RETRY_MS))
+    {
+        return; /* 没有本轮上电失败或未满2秒时，继续原周期通信，不申请定位。 */
+    }
+    if (PumpBehavior_RequestRealign(channel) != 0U)
+    {
+        runtime->startup_retry_wait = 0U; /* 本次重试已登记，等待本次结果，不再安排第二次自动重试。 */
+    }
 }
 
 /*
@@ -381,6 +436,10 @@ void PumpBehavior_CancelAlignment(PumpBehaviorChannel_t channel)
 {
     if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT){ return; } /* 非法通道不访问其它泵的控制状态。 */
     taskENTER_CRITICAL(); /* 禁止任务切换，确保取消定位、清除重试和禁止启动这三项记录一起更新。 */
+    s_pump_runtime[channel].startup_alignment_active = 0U; /* 全停、报警或通信异常取消后停止自动重试，不能在2秒后自行恢复定位。 */
+    s_pump_runtime[channel].startup_retry_wait = 0U; /* 清掉尚未到期的失败计时。 */
+    s_pump_runtime[channel].alignment_beep_result = 0U; /* 已取消本次定位，不再补播取消前的结果。 */
+    s_pump_runtime[channel].alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 取消后等待新操作，不把随后的就绪回包当作本次成功提示。 */
     s_pump_runtime[channel].realign_phase = 0U; /* 清掉尚未发出或尚未应答的重定位，恢复条件后也不能继续旧请求。 */
     s_pump_runtime[channel].driver_fault_hold = 1U; /* 立即拒绝任何并发的新启动，等待泵任务停止输出。 */
     if (s_pump_runtime[channel].cancel_phase == 0U){ s_pump_runtime[channel].cancel_phase = 1U; } /* 尚未要求取消时记为待发送；重复全停不把已经发送的步骤退回起点。 */
@@ -441,13 +500,13 @@ static void PumpBehavior_ParseDriverFeedback(PumpBehaviorChannel_t channel,
         if ((driver_error != PUMP_DRIVER_ERROR_NONE) && (runtime->last_feedback_error == PUMP_DRIVER_ERROR_NONE))
         {
             runtime->driver_fault_hold = 1U; /* 第一次收到非零故障就禁止启动；后续故障清零还须等旧运行请求清掉，不能自动恢复转动。 */
-            Pubinterface_HandlePumpDriverFault(binding->public_channel); /* 同步停本泵和各控制源，若为手柄冷却泵则联动停手柄。 */
+            Pubinterface_HandlePumpDriverFault(binding->public_channel); /* 只撤销故障泵请求，手柄和另一台泵的运行不受此故障影响。 */
             if ((runtime->alignment_notice_state != PUMP_DRIVER_ALIGNING) &&
                 (runtime->alignment_notice_state != PUMP_DRIVER_ALIGN_FAILED))
             {
                 if ((PumpBehavior_IsAlignmentBusy() != 0U) || (runtime->alignment_beep_result != 0U))
                 {
-                    runtime->alignment_beep_result = 2U; /* 另一泵还在定位或成功提示尚未播放时，把待播结果改为失败双响，避免稍后误报成功。 */
+                    runtime->alignment_beep_result = 0U; /* 本泵出现新故障时取消其待播成功音，不影响另一台泵的成功提示。 */
                 }
                 else
                 {
@@ -480,16 +539,17 @@ static uint8_t PumpBehavior_ServiceDriverFaultHold(PumpBehaviorChannel_t channel
     if ((fresh == 0U) && (runtime->alignment_notice_state == PUMP_DRIVER_ALIGNING))
     {
         runtime->alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 定位期间反馈超时，先把本泵结果记为失败，后续发送取消定位命令。 */
-        runtime->alignment_beep_result = 2U; /* 记下一次失败提示；以后收到取消后的失败回包，也不为同一次故障重复双响。 */
+        runtime->alignment_beep_result = 0U; /* 定位期间失联不播放失败音；下面仍按原保护取消定位。 */
     }
     if ((fresh == 0U) || (snapshot.alignment_state != PUMP_DRIVER_READY) ||
-        (snapshot.raw_error != PUMP_DRIVER_ERROR_NONE) || (runtime->realign_phase != 0U) || (runtime->cancel_phase != 0U))
+        (snapshot.raw_error != PUMP_DRIVER_ERROR_NONE) || (runtime->realign_phase != 0U) || (runtime->cancel_phase != 0U) ||
+        (runtime->startup_retry_state == 2U)) /* 上电重试失败后即使随后收到就绪，也保持本泵停止到重启。 */
     {
         if ((fresh == 0U) && (runtime->driver_fault_hold == 0U) && (snapshot.valid != 0U))
         {
             if ((PumpBehavior_IsAlignmentBusy() != 0U) || (runtime->alignment_beep_result != 0U))
             {
-                runtime->alignment_beep_result = 2U; /* 本泵失联时将待播定位结果改为失败，避免另一泵结束后播放旧的成功音。 */
+                runtime->alignment_beep_result = 0U; /* 本泵失联时撤销尚未播放的成功音，不生成定位失败双响。 */
             }
             else
             {
@@ -503,7 +563,7 @@ static uint8_t PumpBehavior_ServiceDriverFaultHold(PumpBehaviorChannel_t channel
         runtime->driver_fault_hold = 1U; /* 驱动还在定位时也禁止开泵；这行只记停机限制，不把正常定位中状态当成新故障报警。 */
         if (request_active != 0U)
         {
-            Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 清掉本泵和外控的运行请求；若本泵用于手柄冷却，也停止手柄并要求先松开控制再重试。 */
+            Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 只清掉本泵及对应外控泵请求，保持手柄和另一台泵的运行状态。 */
         }
         return 1U; /* 定位期间所有速度和排空路径都跳过，周期通信仍发送零速。 */
     }
@@ -517,7 +577,7 @@ static uint8_t PumpBehavior_ServiceDriverFaultHold(PumpBehaviorChannel_t channel
         return 1U;
     }
 
-    Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 旧运行请求仍未清零，继续撤销本泵及相关联动请求，避免驱动恢复后被持续踩踏直接启动。 */
+    Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 旧泵请求仍未清零，只撤销本泵请求，本周期继续发送零速；手柄请求保持不变。 */
     return 1U;
 }
 
@@ -540,7 +600,7 @@ static uint8_t PumpBehavior_TakeRealignCommand(PumpBehaviorChannel_t channel, Pu
         runtime->cancel_phase = 2U; /* 尚未收到取消确认，每周期继续发同一个取消命令，避免因单帧丢失而留下未结束的定位。 */
         return PUMP_DRIVER_CANCEL_COMMAND; /* 优先返回0x03取消命令；发送函数会把速度字段强制清零。 */
     }
-    if (runtime->realign_phase == 0U){ return 0U; } /* 没有屏幕重新定位请求时不发0x02，正常待机的零速命令不会开始新一轮定位。 */
+    if (runtime->realign_phase == 0U){ return 0U; } /* 没有重新定位请求时不发0x02，正常待机的零速命令不会开始新一轮定位。 */
     if ((uint32_t)(HAL_GetTick() - runtime->realign_tick) >= PUMP_DRIVER_REALIGN_ACK_MS ||
         PumpBehavior_GetFreshFeedback(channel, &snapshot) == 0U ||
         s_pump_binding[channel].message->online_flag == false ||
@@ -559,6 +619,10 @@ static uint8_t PumpBehavior_TakeRealignCommand(PumpBehaviorChannel_t channel, Pu
     {
         runtime->realign_phase--; /* 步骤3、2各发送一次普通零速，减到1后下个周期才能发定位命令。 */
         return 0U;
+    }
+    if (runtime->startup_alignment_active != 0U)
+    {
+        runtime->startup_retry_state = 1U; /* 两帧零速完成、即将发送0x02时才记为已重试；此前的旧失败回包不能当作第二次失败。 */
     }
     runtime->realign_phase = 4U; /* 即将发出唯一一次定位命令，先把步骤设为4，后续周期只等待应答。 */
     return PUMP_DRIVER_REALIGN_COMMAND; /* 发送者必须把方向操作码改为0x02并强制两个速度字节为0。 */
@@ -897,13 +961,20 @@ void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment)
     uint32_t channel; /* 逐一覆盖逻辑A/B，物理UART继续使用工程已有映射。 */
     for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
+        s_pump_runtime[channel].startup_alignment_active = (cancel_alignment == 0U) ? 1U : 0U; /* 普通上电允许失败后重试；看门狗等异常重启沿用取消定位保护。 */
+        s_pump_runtime[channel].startup_retry_state = 0U; /* 本次启动尚未重试，清除上次启动的次数和失败记录。 */
+        s_pump_runtime[channel].startup_retry_wait = 0U; /* 上电尚未收到失败结果，不提前启动2秒计时。 */
+        if (cancel_alignment != 0U)
+        {
+            s_pump_runtime[channel].alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 异常重启取消后不把就绪回包误报为上电定位成功。 */
+        }
         PumpBehavior_SendFrame(&s_pump_binding[channel], 0U, 0U,
                                (cancel_alignment != 0U) ? PUMP_DRIVER_CANCEL_COMMAND : 0U); /* 开机停止只能携带零速，不能继承任何旧泵请求。 */
     }
 }
 
 /*
- * 函数功能：改变屏幕流量文字颜色，显示本泵正在定位、发生故障、已停止或已发送运行命令。
+ * 函数功能：定位过程中保持流量数字白色；正常运行仍按停止白色、非零命令黄色、运行故障红色显示。
  * 输入参数：channel 为逻辑通道；binding 为本泵配置；runtime 为颜色记录；uart_data 为下发速度，不是实测转速。
  * 返回参数：无。
  */
@@ -912,18 +983,19 @@ static void PumpBehavior_UpdateColor(PumpBehaviorChannel_t channel,
                                      PumpBehaviorRuntime_t *runtime,
                                      uint16_t uart_data)
 {
-    PumpDriverFeedbackSnapshot_t snapshot; /* 保存未超时的驱动反馈，用于判断应显示定位颜色还是故障颜色。 */
+    PumpDriverFeedbackSnapshot_t snapshot; /* 保存未超时的驱动反馈，只对正常运行故障显示红色。 */
     uint16_t color = (uart_data == 0U) ? 0xFFFFU : 0xFFE0U; /* 默认零速命令显示白色、非零命令显示黄色；黄色不等于已经测得泵转动。 */
-    if (binding->message->type != 0U)
+    if ((binding->message->type != 0U) && (runtime->startup_alignment_active == 0U) &&
+        (runtime->startup_retry_state != 2U)) /* 上电定位、失败等待及重试失败后均保持停止白色。 */
     {
-        if (PumpBehavior_GetFreshFeedback(channel, &snapshot) == 0U || snapshot.raw_error != PUMP_DRIVER_ERROR_NONE ||
-            snapshot.alignment_state == PUMP_DRIVER_ALIGN_FAILED)
+        if (PumpBehavior_GetFreshFeedback(channel, &snapshot) == 0U)
         {
-            color = PUMP_DRIVER_COLOR_FAULT; /* 已识别到泵，但驱动反馈无效、定位失败或有故障时显示红色，即使发送零速也保持红色。 */
+            color = PUMP_DRIVER_COLOR_FAULT; /* 上电定位结束后仍保留普通通信失联的红色提示。 */
         }
-        else if (snapshot.alignment_state == PUMP_DRIVER_ALIGNING || runtime->driver_fault_hold != 0U)
+        else if ((snapshot.alignment_state != PUMP_DRIVER_ALIGNING) &&
+                 (snapshot.alignment_state != PUMP_DRIVER_ALIGN_FAILED) && (snapshot.raw_error != PUMP_DRIVER_ERROR_NONE))
         {
-            color = PUMP_DRIVER_COLOR_ALIGNING; /* 驱动在定位或主控还未解除停机限制时显示青色，不按普通非零命令显示黄色。 */
+            color = PUMP_DRIVER_COLOR_FAULT; /* 正常运行故障仍显示红色，定位中或定位失败不改变停止白色。 */
         }
     }
     if (color != runtime->output_color)
@@ -963,13 +1035,14 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
 
     request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 先记住是否还有运行或排空请求，故障处理清标志后仍用此值判断是否允许重启。 */
     PumpBehavior_ParseDriverFeedback(channel, binding, runtime); /* 发送下一命令前先解析上一条命令的驱动回包。 */
-    if (WorkMessage.alarm_flag != false && (runtime->realign_phase != 0U ||
+    if (WorkMessage.alarm_flag != false && (runtime->startup_alignment_active != 0U || runtime->realign_phase != 0U ||
         (PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U && snapshot.alignment_state == PUMP_DRIVER_ALIGNING)))
     {
         PumpBehavior_CancelAlignment(channel); /* 全局报警不允许继续定位加力，也撤销尚未发送的校准请求。 */
     }
     driver_fault_active = PumpBehavior_ServiceDriverFaultHold(channel, binding, runtime, request_active); /* 定位、失联和故障期间统一撤销旧请求并维持零速。 */
-    control = PumpBehavior_TakeRealignCommand(channel, runtime); /* 先检查是否需要取消定位，再处理屏幕提出的重试请求，确定本周期的特殊命令。 */
+    PumpBehavior_ServiceStartupRetry(channel, runtime); /* 先处理旧请求和停机保护，再检查本泵失败等待是否已满2秒。 */
+    control = PumpBehavior_TakeRealignCommand(channel, runtime); /* 先检查是否需要取消定位，再处理屏幕或上电失败的重试请求，确定本周期的特殊命令。 */
     if (driver_fault_active == 0U)
     {
         drainage_active = binding->message->timingDrainage_flag ? 1U : 0U; /* 驱动允许输出时，先记下本周期是否正在定时排空，再计算流量。 */
@@ -992,7 +1065,7 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     PumpBehavior_ServiceDrainage(binding->message, drainage_active, &pump_speed, &uart_data); /* 处理屏幕排空的10秒计时；到时清掉排空请求和待发送速度，不按压力值提前结束。 */
     binding->publish_output_speed(pump_speed); /* 先保存本周期输出设定，再发送驱动帧和刷新颜色；该值不是实测转速。 */
     PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction, control); /* 周期帧长度不变，明确校准或取消均强制独立零速帧。 */
-    PumpBehavior_UpdateColor(channel, binding, runtime, uart_data); /* 根据真实定位状态和命令启停状态刷新对应泵颜色。 */
+    PumpBehavior_UpdateColor(channel, binding, runtime, uart_data); /* 定位时保持白色，正常运行按命令启停刷新泵颜色。 */
 }
 
 #if (MAINCTRL_DIAG_ENABLE == 1U)

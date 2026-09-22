@@ -2568,14 +2568,21 @@ void ExternalComm_ClearPumpRunRequest(uint8_t pump_channel)
     if (pump_channel == CHANNEL_A)
     {
         s_uart5_pump_manual_run_request = 0U; /* A 泵安全停机后撤销外控独立 A 泵请求，避免刷新函数重新置为运行。 */
-        s_uart5_inject_pump_follow_run_request = 0U; /* A 泵可能也是手柄冷却跟随泵，保护停机时同步清掉跟随请求。 */
+        if (ExternalComm_ShouldFollowPumpA()) /* 只有A是当前外控联动目标时才撤销跟随，不影响B联动。 */
+        {
+            s_uart5_inject_pump_follow_run_request = 0U; /* A泵故障后取消旧跟随请求，手柄外控运行请求继续保留。 */
+        }
         ExternalComm_RefreshUart5PumpRunState(); /* 请求清零后重算 A 泵最终状态，保证 run_flag 保持停止。 */
     }
     else if (pump_channel == CHANNEL_B)
     {
         s_external_pump_b_manual_run_request = 0U; /* B 泵安全停机后撤销外控独立 B 泵请求，等待上位机下一次启动命令。 */
-        s_uart5_inject_pump_follow_run_request = 0U; /* B 作为唯一注水泵时也可能来自手柄冷却跟随，保护停机必须清掉。 */
-        ExternalComm_RefreshUart5PumpRunState(); /* 清掉跟随后同步 A 泵合并状态，避免 A 泵仍因旧跟随请求运行。 */
+        if ((pumpMessageB.type == INJECTWATER) &&
+            ((pumpMessageA.type != INJECTWATER) || (WorkMessage.channel_work == CHANNEL_B)))
+        {
+            s_uart5_inject_pump_follow_run_request = 0U; /* B是当前联动目标时撤销B的跟随请求；不改手柄及A泵运行。 */
+        }
+        /* B故障不重算A泵状态，避免把屏幕或脚踏独立启动的A泵误停。 */
     }
     else
     {
