@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-/* 压力检查总开关：0 关闭报警且忽略 6000 未就绪值；非 0 启用报警并在未就绪时输出零速。超压只弹窗和蜂鸣，不停泵或手柄。 */
+/* 压力控制总开关：0 关闭压力减速、停泵和提示；非 0 按泵类型执行压力处理。 */
 #ifndef PUMP_PRESSURE_CONTROL_ENABLE
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
 #endif
@@ -20,7 +20,7 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE 0U
 #endif
 
-/* 压力板未完成自标定时发送的特殊值，单位 0.1g，6000 表示“未就绪”而非真实超压。需与压力板协议一致；非排空时输出零速且不报堵塞。 */
+/* 压力板未完成自标定时发送的特殊值，单位 0.1g；三种泵都不因该值归零，也不拿它累计超压或恢复时间。 */
 #define PUMP_PRESSURE_CONTROL_NOT_READY_X10 6000U
 
 /* 第1个压力报警参考流量，单位mL/min；流量不超过50时使用ALARM_50_G，改大后更多低流量档使用同一报警阈值。 */
@@ -36,7 +36,7 @@ extern "C" {
 /* 最高压力报警参考流量，单位mL/min；达到300及以上时使用ALARM_300_G，改大后要更高流量才使用该固定阈值。 */
 #define PUMP_PRESSURE_CONTROL_SPEED_300_ML_MIN 300U
 
-/* 流量不超过50mL/min时的压力报警阈值，当前130g；调大后需要更高压力才提示，不改变泵或手柄启停。 */
+/* 灌注流量不超过50mL/min时的原压力阈值，当前130g；调大后减速起点和停转确认线都随之升高。 */
 #define PUMP_PRESSURE_CONTROL_ALARM_50_G 130U
 /* 流量110mL/min时的压力报警阈值，当前210g；中间流量按相邻两点计算，调大后附近流量更晚提示。 */
 #define PUMP_PRESSURE_CONTROL_ALARM_110_G 210U
@@ -46,56 +46,42 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_ALARM_200_G 270U
 /* 流量260mL/min时的压力报警阈值，当前310g；须不低于前一档，调大后附近流量更晚提示。 */
 #define PUMP_PRESSURE_CONTROL_ALARM_260_G 310U
-/* 流量达到300mL/min及以上时的压力报警阈值，当前360g；调大后更晚提示，调小后更易提示，不改变启停。 */
+/* 灌注流量达到300mL/min及以上时的原压力阈值，当前360g；调大后减速和停转都更晚发生。 */
 #define PUMP_PRESSURE_CONTROL_ALARM_300_G 360U
 
-/* 压力曲线编号只用于选择阈值，不改变首次确认、恢复回差或重复报警算法。 */
-#define PUMP_PRESSURE_PROFILE_LEGACY        0U /* 灌注、抽吸、未覆盖手柄及未测流量沿用原曲线。 */
-#define PUMP_PRESSURE_PROFILE_INJECT_EM     1U /* EMBA/EMBB/EMBC/EMBD 注水口相同，共用 EMBB 实测表。 */
-#define PUMP_PRESSURE_PROFILE_INJECT_PX     2U /* PXBA/PXBB 共用 PXBB 实测表，仍直接比较原压力帧。 */
-#define PUMP_PRESSURE_PROFILE_INJECT_TM     3U /* TMBA/TMBB 注水口相同，共用 TMBB 实测表。 */
-#define PUMP_PRESSURE_PROFILE_INJECT_PXY    4U /* PXYTP/PXYTM 注水口相同，共用 PXYTM 实测表。 */
-#define PUMP_PRESSURE_PROFILE_INJECT_COMMON 5U /* DHYTM 与已装刀具的公共接头共用公共接头实测表。 */
+/* 灌注平均压力高于原标定阈值的 70% 时每周期降低一档；取值 1~99，调小会更早降速。 */
+#define PUMP_PRESSURE_POUR_SLOWDOWN_PERCENT 70U
+/* 灌注平均压力低于原阈值的 65% 并稳定满恢复确认时间后，直接恢复设定流量；调小会更难恢复。 */
+#define PUMP_PRESSURE_POUR_RECOVER_PERCENT 65U
+#if ((PUMP_PRESSURE_POUR_SLOWDOWN_PERCENT >= 100U) || \
+     (PUMP_PRESSURE_POUR_RECOVER_PERCENT == 0U) || \
+     (PUMP_PRESSURE_POUR_RECOVER_PERCENT >= PUMP_PRESSURE_POUR_SLOWDOWN_PERCENT))
+#error PUMP_PRESSURE_POUR_percentages_must_satisfy_0_recover_slowdown_100
+#endif
+/* 灌注逐档降速时的最低非零流量，单位 mL/min；当前 4 是最低实测档，用户设定更低时不抬高。 */
+#define PUMP_PRESSURE_POUR_MIN_FLOW_ML_MIN 4U
+/* 灌注统计平均压力并调一档流量的周期，单位 ms；当前 500，调大后每档等待更久、每档流量变化也更大。 */
+#define PUMP_PRESSURE_POUR_ADJUST_MS 500U
+/* 平均压力持续偏高时从设定流量降到最低档的参考时长，单位 ms；当前 6000，共十二档，调大后每档减得更少。 */
+#define PUMP_PRESSURE_POUR_RAMP_DOWN_MS 6000U
+#if ((PUMP_PRESSURE_POUR_ADJUST_MS == 0U) || \
+     (PUMP_PRESSURE_POUR_RAMP_DOWN_MS < PUMP_PRESSURE_POUR_ADJUST_MS))
+#error PUMP_PRESSURE_POUR_ramp_time_must_cover_one_nonzero_adjust_period
+#endif
+/* 灌注平均压力连续低于恢复线的确认时长，单位 ms；当前 2000，确认完成后直接恢复设定流量，调大将延后恢复。 */
+#define PUMP_PRESSURE_POUR_RECOVER_CONFIRM_MS 2000U
+/* 灌注原始新压力帧连续高于标定阈值 2000ms 后下发零速；每帧独立检查，不等待500ms平均值。 */
+#define PUMP_PRESSURE_POUR_STOP_CONFIRM_MS 2000U
+/* 注水泵统一的压力提示阈值，单位 g；不再依据手柄型号或流量选择报警线，调大将延后提示。 */
+#define PUMP_PRESSURE_INJECT_ALARM_G 800U
 
-/*
- * 注水细分表仅覆盖 20~70mL/min，按相邻实测流量点线性插值；范围外直接沿用上方原曲线。
- * 下列初始阈值依据 2026-09-12 单样件堵管前正常压力及堵管记录选取，仍需实机复核。
- * 每项单位为 g 换算读数：调大后更晚提示，调小后更易提示；不修改泵流量或手柄转速。
- */
-#define PUMP_PRESSURE_INJECT_POINT_COUNT 4U /* 每个手柄组有四个流量点；新增点时须同步全部组的表项。 */
-#define PUMP_PRESSURE_INJECT_FLOW_20    20U /* 细分曲线下限，单位mL/min；低于本点沿用原曲线，不向下外推。 */
-#define PUMP_PRESSURE_INJECT_FLOW_30    30U /* 第二个实测流量，单位mL/min；20到30之间按两点阈值插值。 */
-#define PUMP_PRESSURE_INJECT_FLOW_50    50U /* 第三个实测流量，单位mL/min；30到50之间按两点阈值插值。 */
-#define PUMP_PRESSURE_INJECT_FLOW_70    70U /* 细分曲线上限，单位mL/min；大于本点沿用原曲线，不向上外推。 */
-
-#define PUMP_PRESSURE_INJECT_EM_20_G    100U /* EM组20mL/min报警线；正常样本最大1.6g，调大将延后低流量堵管提示。 */
-#define PUMP_PRESSURE_INJECT_EM_30_G    120U /* EM组30mL/min报警线；正常样本最大3.3g，调大将延后此档堵管提示。 */
-#define PUMP_PRESSURE_INJECT_EM_50_G    180U /* EM组50mL/min报警线；正常样本最大46.1g，调小会缩短与正常压力的间隔。 */
-#define PUMP_PRESSURE_INJECT_EM_70_G    250U /* EM组70mL/min报警线；正常样本最大146.3g，调大需更高压力才提示。 */
-#define PUMP_PRESSURE_INJECT_PX_20_G    180U /* PX组20mL/min报警线；正常样本最大129.5g，不再使用原130g临界值。 */
-#define PUMP_PRESSURE_INJECT_PX_30_G    350U /* PX组30mL/min报警线；堵管前最大253.9g，恢复阶段仍可能因脉动重报。 */
-#define PUMP_PRESSURE_INJECT_PX_50_G    350U /* PX组50mL/min报警线；正常脉动可高于此值，依靠原1秒确认排除短峰。 */
-#define PUMP_PRESSURE_INJECT_PX_70_G    350U /* PX组70mL/min报警线；原20g回差可能使正常脉动下恢复不及时，未改变算法。 */
-#define PUMP_PRESSURE_INJECT_TM_20_G    100U /* TM组20mL/min报警线；正常样本最大2.3g，调大将延后低流量堵管提示。 */
-#define PUMP_PRESSURE_INJECT_TM_30_G    120U /* TM组30mL/min报警线；正常样本最大1.0g，调大将延后此档堵管提示。 */
-#define PUMP_PRESSURE_INJECT_TM_50_G    170U /* TM组50mL/min报警线；正常样本最大33.6g，调小会更接近正常压力。 */
-#define PUMP_PRESSURE_INJECT_TM_70_G    240U /* TM组70mL/min报警线；正常样本最大120.3g，调大需更高压力才提示。 */
-#define PUMP_PRESSURE_INJECT_PXY_20_G   120U /* PXY组20mL/min报警线；正常样本最大3.5g，首次关口试运行不作为正常基线。 */
-#define PUMP_PRESSURE_INJECT_PXY_30_G   250U /* PXY组30mL/min报警线；正常样本最大1.8g，调大将延后此档堵管提示。 */
-#define PUMP_PRESSURE_INJECT_PXY_50_G   380U /* PXY组50mL/min报警线；正常样本最大1.5g，调小将更早响应升压。 */
-#define PUMP_PRESSURE_INJECT_PXY_70_G   390U /* PXY组70mL/min报警线；正常读数仍接近零，不套用PX分体手柄高压线。 */
-#define PUMP_PRESSURE_INJECT_COMMON_20_G 100U /* 公共接头/DHYTM组20mL/min报警线；正常样本最大1.3g，调大将延后提示。 */
-#define PUMP_PRESSURE_INJECT_COMMON_30_G 120U /* 公共接头/DHYTM组30mL/min报警线；正常样本最大0.6g，调大将延后提示。 */
-#define PUMP_PRESSURE_INJECT_COMMON_50_G 190U /* 公共接头/DHYTM组50mL/min报警线；正常样本最大64.6g，调小会更接近正常压力。 */
-#define PUMP_PRESSURE_INJECT_COMMON_70_G 270U /* 公共接头/DHYTM组70mL/min报警线；正常样本最大193.3g，避免套用原157g。 */
-
-/* 压力连续达到或超过报警线多久才提示，单位 ms；当前 1000，增大会延后提示，减小会更容易响应短时压力升高。 */
+/* 注水泵高于 800g、抽吸泵达到原阈值后连续多久才提示，单位 ms；当前 1000，调大将延后提示。 */
 #define PUMP_PRESSURE_ALARM_CONFIRM_MS 1000U
-/* 从上次报警触发起等待多久再检查重复提示，单位ms；当前10秒，调大后持续超压时的提示间隔更长。 */
+/* 注水泵和抽吸泵持续超压时的重复提示间隔，单位 ms；灌注泵停转期间不重复提示。 */
 #define PUMP_PRESSURE_ALARM_REPEAT_MS 10000U
-/* 压力连续降到恢复线或以下多久才允许下次报警，单位 ms；当前 1000，增大会延长两次报警之间的恢复确认。 */
+/* 注水/抽吸解除压力提示记录的低压确认时长，单位 ms；当前 1000，调大后更晚允许下一次独立超压提示。 */
 #define PUMP_PRESSURE_ALARM_RECOVER_MS 1000U
-/* 恢复线比报警线低多少，单位 g，当前 20；值越大，压力需降得越低才允许再次报警，避免临界值附近反复提示。 */
+/* 注水泵和抽吸泵恢复线比提示线低多少，单位 g；灌注泵使用上面配置的65%平均压力恢复线。 */
 #define PUMP_PRESSURE_ALARM_HYSTERESIS_G 20U
 /* 新压力帧允许的最大间隔，单位 ms，当前 1000；间隔达到此值便重新计时，调大可容忍更长断帧但更易沿用旧计时。 */
 #define PUMP_PRESSURE_ALARM_MAX_SAMPLE_GAP_MS 1000U
@@ -126,29 +112,43 @@ extern "C" {
 /* 每路泵任务独占一份报警状态，避免 A/B 压力样本和确认计时互相影响。 */
 typedef struct
 {
-    uint32_t condition_tick_ms; /* 当前超限或恢复条件开始时间，单位 ms。 */
+    uint32_t condition_tick_ms; /* 注水/抽吸超限或恢复条件的开始时间；灌注只用于原始压力连续超限计时，单位 ms。 */
     uint32_t last_sample_tick_ms; /* 最近一个新压力样本时间，用于断帧后重新确认。 */
-    uint32_t last_alarm_tick_ms; /* 最近一次触发压力提示的毫秒时刻；持续超压时据此间隔10秒重报，重置报警状态时清零。 */
-    uint16_t target_speed; /* 上次计算报警线用的流量设定；设定变化后重新开始超限或恢复计时。 */
-    uint16_t alarm_threshold_g; /* 上次实际使用的g单位报警线；切换手柄导致阈值变化时重新确认，不继承旧阈值计时。 */
+    uint32_t last_alarm_tick_ms; /* 最近一次提示时刻；注水/抽吸据此每10秒重报，灌注只记录首次停转时间。 */
+    uint16_t target_speed; /* 上次处理的设定值；灌注和抽吸调速后重新确认，注水固定 800g 时不因调速中断计时。 */
+    uint16_t alarm_threshold_g; /* 上次使用的压力阈值，单位 g；灌注随原设定流量变化，注水固定使用 800g。 */
+    uint16_t last_output_speed; /* 灌注泵最近一次计算的下发流量；短时无新压力帧时保持该流量，不因旧帧恢复转动。 */
+    uint64_t pour_pressure_sum; /* 当前500ms窗口内有效新压力帧之和，单位0.1g；窗口重开时清零或用当前帧重新开始，重复帧不加入。 */
+    uint32_t pour_window_start_ms; /* 当前压力窗口首帧时刻，单位ms；设定改变、无效帧、长时间断帧和超压停泵后重新建立窗口。 */
+    uint32_t pour_sample_count; /* 当前窗口参与平均的有效新帧数；0表示等待首帧，重复帧不增加，窗口结束后以当前帧开始下一窗。 */
+    uint32_t pour_low_duration_ms; /* 连续平均压力低于65%的窗口时长，单位ms，最多保存恢复确认时长；进入保持/减速区或重开统计时清零。 */
+    uint32_t pour_step_remainder; /* 降速步进除法的余数；保持区继续保存，恢复设定流量或重开统计时清零，避免低流量取整后始终不变化。 */
+    uint8_t pour_adjust_direction; /* 0为未减速或已恢复设定流量，1为已按压力减速；保持区和重新统计保留原值，低压确认完成、停止请求或切换泵用途时清零。 */
     uint8_t last_sequence; /* 最近处理的压力帧序号；序号相同就不重复计算持续时间。 */
     uint8_t sequence_valid; /* 已接收首个有效样本时置 1，允许首帧序号为 0。 */
-    uint8_t alarm_active; /* 首次确认超压后置1，之后按10秒间隔提示；压力稳定回落或状态重置时清零。 */
-    uint8_t timing_active; /* 1 表示正在计算超限或恢复持续时间，不控制泵和手柄启停。 */
+    uint8_t alarm_active; /* 注水/抽吸已提示或灌注已因超压停转时置1；恢复确认或运行请求结束时清零。 */
+    uint8_t timing_active; /* 1 表示正在计算超限或恢复持续时间；条件中断时清零。 */
+    uint8_t mode; /* 0 未使用，1 抽吸提示，2 注水提示，3 灌注减速及停转；类型改变时清旧状态。 */
 } PumpPressureAlarmState_t;
 
-/* 停止、排空或读数无效时清除单路报警状态，不修改输出请求。 */
+/* 停止或泵类型切换时清除单路压力记录，不修改开泵请求。 */
 void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state);
-/* 依据新压力帧及持续时间判断是否产生一次报警事件，返回 1 时只允许提示。 */
+/* 注水固定按 800g、抽吸沿用原曲线，依据新压力帧判断是否产生提示事件。 */
 uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t target_speed,
-                                        uint8_t pressure_profile, /* 注水手柄曲线编号；LEGACY或20~70范围外使用原阈值。 */
+                                        uint8_t is_injection, /* 1 为注水泵，0 为抽吸泵。 */
                                         uint32_t weight_x10,
                                         uint16_t threshold_g,
                                         uint8_t sequence,
                                         uint32_t now_ms);
-/* 压力板报告未就绪时返回零速；真实压力超限仍返回原目标速度。 */
-uint16_t PumpPressureControl_ApplyReadiness(uint16_t target_speed, uint32_t weight_x10);
+/* 灌注每500ms按平均压力逐档减速或保持；原始压力连续超限2秒返回零速，平均低压连续正常2秒后直接恢复设定流量。 */
+uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
+                                       uint16_t target_speed,
+                                       uint32_t weight_x10,
+                                       uint16_t threshold_g,
+                                       uint8_t sequence,
+                                       uint32_t now_ms,
+                                       uint8_t *alarm_event);
 
 #ifdef __cplusplus
 }

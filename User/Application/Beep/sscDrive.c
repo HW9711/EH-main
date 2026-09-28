@@ -128,9 +128,9 @@ static uint8_t MotorDrive_IsBrushedTool(uint8_t hand_model, uint8_t tool_type, u
 }
 
 /*
- * 函数功能：按分体手柄手动刀具模式或RFID机械刀具规则，把屏幕方向转换为实际电机方向。
+ * 函数功能：按手动选刀或 RFID 机械刀具规则换算方向；PXBA/PXBB 的驱动方向补偿由 MOTORRUN 在发送前统一处理。
  * 输入参数：hand_model为当前Page2基座型号；display_direction为屏幕方向；raw_tool_type为EPC byte0原始刀具型号；auto_identify为0表示手动选刀，非0表示RFID自动识别。
- * 返回参数：写入驱动控制模式的ZZDIR/FZDIR/OSCDIR；不修改屏幕和通道记忆。
+ * 返回参数：刀具规则要求的 ZZDIR/FZDIR/OSCDIR，尚未补偿分体手柄的驱动方向；不修改屏幕和通道记忆。
  */
 static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t display_direction, uint8_t raw_tool_type, uint8_t auto_identify)
 {
@@ -140,15 +140,7 @@ static uint8_t MotorDrive_BuildActualDirection(uint8_t hand_model, uint8_t displ
 
     if(((hand_model == PXBA_ONLINES) || (hand_model == PXBB_ONLINES)) && (auto_identify == 0U))
     {
-        if(display_direction == ZZDIR)
-        {
-            return FZDIR; /* 分体手柄手动选刀时，屏幕正转对应实际电机反转，不改显示和通道记忆。 */
-        }
-        if(display_direction == FZDIR)
-        {
-            return ZZDIR; /* 分体手柄手动选刀时，屏幕反转对应实际电机正转，不叠加旧RFID型号的反向规则。 */
-        }
-        return display_direction; /* 手动刨刀往复仍执行往复，只互换单向正反转。 */
+        return display_direction; /* 手动选刀不使用 RFID 方向规则；PXBA/PXBB 的驱动正反转补偿统一在发送前处理。 */
     }
 
     if (rfid_tool_handle == false)
@@ -603,8 +595,19 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify); /* 分体手柄手动选刀互换实际正反转，自动识别继续按RFID刀具换算，屏幕方向保持原值。 */
-        if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM屏幕固定显示反转，但内部反旋机械结构要求电机始终正转。 */
+        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify); /* 先保留原有 RFID 刀具方向规则；手动选刀使用屏幕方向，下一步统一补偿分体手柄的驱动方向。 */
+        if((WorkMessage.hand_model==PXBA_ONLINES) || (WorkMessage.hand_model==PXBB_ONLINES)) /* 分体手柄的驱动方向相反，刀具规则换算完成后统一补偿。 */
+        {
+            if(effective_dir_work==ZZDIR) /* 刀具规则要求电机正转时，驱动板需要接收反转命令。 */
+            {
+                effective_dir_work=FZDIR; /* 只修改本次驱动帧，屏幕方向和通道方向记忆保持不变。 */
+            }
+            else if(effective_dir_work==FZDIR) /* 刀具规则要求电机反转时，驱动板需要接收正转命令。 */
+            {
+                effective_dir_work=ZZDIR; /* 单向正反转互换；往复命令保持原值，不改变 RFID 的往复限制。 */
+            }
+        }
+        else if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM屏幕固定显示反转，但内部反旋机械结构要求电机始终正转。 */
         {
             effective_dir_work=ZZDIR; /* 只覆盖本次驱动帧方向，不回写屏幕和通道记忆，确保界面仍固定显示反转。 */
         }

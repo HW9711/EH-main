@@ -40,7 +40,7 @@ static uint8_t s_speed_threshold_beep_refresh_ticks = 0U;
 static uint8_t s_screen_external_exit_pending = 0U;
 /* 屏幕外控退出第一次点击的 HAL tick 时间戳，用于计算 1 秒双击窗口。 */
 static uint32_t s_screen_external_exit_first_tick = 0U;
-/* 压力超限提示所用报警编号；只触发限时蜂鸣和 89 号弹窗，不停止泵或手柄，不可当作流量配置修改。 */
+/* 压力提示所用报警编号；此接口只负责限时蜂鸣和 89 号弹窗，灌注泵零速由泵任务单独决定。 */
 #define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_PUMP_PRESSURE_BLOCKED
 /* 压力蜂鸣按100ms响、100ms停执行四步，正常播放两声；与2秒弹窗时长分开设置。 */
 #define PUMP_PRESSURE_BEEP_MS 400U
@@ -1167,7 +1167,7 @@ uint16_t Pubinterface_GetPumpDisplaySpeed(const pumpMessage_t *pump_message)
 
 	if (pump_message->run_flag || pump_message->timingDrainage_flag)
 	{
-		return pump_message->speed_output; /* 运行时显示泵任务给出的输出值；真实压力超限只提示，不在这里降速。 */
+		return pump_message->speed_output; /* 运行时显示泵任务算出的输出值；灌注减速或停转时反映实际下发设定。 */
 	}
 
 	return pump_message->speed_work; /* 停止后显示用户设定值，方便查看下次启动将使用的流量或档位。 */
@@ -1554,7 +1554,7 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 }
 
 /*
- * 函数功能：A/B泵首次确认超压或间隔10秒仍超压时，蜂鸣两声并显示2秒的89号弹窗。
+ * 函数功能：压力处理报告提示事件时蜂鸣两声并显示 2 秒的 89 号弹窗；灌注停转期间不重复调用。
  * 输入参数：pump_channel 为压力超限的逻辑通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。
  */
@@ -1565,8 +1565,8 @@ void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel)
 		return; /* 非法通道不能产生压力提示，避免错误调用占用报警区。 */
 	}
 
-	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 四个100ms响停步骤播放两声，不设置全局报警或停止泵。 */
-	RaisePumpAlarm(89U, ALARM_PRESSURE_MS); /* 只显示 89 号提示，不清泵或手柄运行标志，不改变速度和外控请求。 */
+	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 四个 100ms 响停步骤播放两声，不操作泵或手柄请求。 */
+	RaisePumpAlarm(89U, ALARM_PRESSURE_MS); /* 显示 89 号提示 2 秒；灌注泵零速已在本轮压力处理时决定。 */
 }
 
 /*

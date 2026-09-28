@@ -3,8 +3,6 @@
 #include "stm32f4xx_hal.h"
 #include "delay.h"
 #include "pump.h"
-#include "Pubinterface.h"
-#include "pump_pressure_control.h"
 #include "data.h"
 #include "board.h"
 #include "common.h"
@@ -27,22 +25,6 @@ uint8_t pum_close_flag_B=0;
 static void PumpTaskDelayMs(uint32_t delay_ms)
 {
 	Kernel_DelayUntilMs(delay_ms);
-}
-
-/*
- * 函数功能：旧直发接口在压力板未就绪时输出零速；排空时不检查压力，真实超压不减速或停泵。
- * 输入参数：runtime_msg 为对应逻辑泵状态；output_value 为旧协议待发送速度值。
- * 返回参数：返回协议 16 位速度；压力检查启用、非排空且压力板未就绪时返回 0。
- */
-static uint32_t PumpLegacy_ApplyReadiness(const pumpMessage_t *runtime_msg, uint32_t output_value)
-{
-	uint16_t output_speed = (uint16_t)(output_value & 0xFFFFU); /* 保持旧协议速度字段的 16 位范围。 */
-
-	if (runtime_msg->timingDrainage_flag || runtime_msg->pedalDrainage_flag)
-	{
-		return output_speed; /* 定时排空和脚踏/HMI 轻排均忽略压力状态。 */
-	}
-	return PumpPressureControl_ApplyReadiness(output_speed, runtime_msg->weight_x10); /* 真实超压仍返回原速度，报警由对应 25ms 泵任务确认。 */
 }
 
 /*
@@ -94,13 +76,13 @@ uint16_t PumpStartUp[25] =
 
 
 /*
- * 函数功能：检查 B 泵压力板是否就绪并限制命令最大值，再发送速度、刷新颜色；真实超压不改速度。
+ * 函数功能：旧直发接口把 B 泵速度限制到协议范围后发送命令并刷新颜色；压力由周期泵任务处理。
  * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_B(uint32_t s)
 {
-	s = PumpLegacy_ApplyReadiness(&pumpMessageB, s); /* 排空不检查压力；非排空且未就绪时输出零速，真实超压保持原速度。 */
+	s = (uint16_t)s; /* 旧直发接口仍只使用命令低 16 位，特殊压力读数不再使速度归零。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{
 		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */
@@ -155,14 +137,14 @@ void Pump_SetSpeed_B(uint32_t s)
 }
 
 /*
- * 函数功能：检查 A 泵压力板是否就绪并限制命令最大值，再发送速度、刷新颜色；真实超压不改速度。
+ * 函数功能：旧直发接口把 A 泵速度限制到协议范围后发送命令并刷新颜色；压力由周期泵任务处理。
  * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_A(uint32_t s)
 {
  static	uint8_t repeat_data; /* 旧接口只保存上次命令的低 8 位；大于 255 的速度仍会被重复发送。 */
-	s = PumpLegacy_ApplyReadiness(&pumpMessageA, s); /* 排空不检查压力；非排空且未就绪时输出零速，真实超压保持原速度。 */
+	s = (uint16_t)s; /* 旧直发接口仍只使用命令低 16 位，特殊压力读数不再使速度归零。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{
 		s = PUMP_DRIVER_COMMAND_SPEED_MAX; /* 旧直连入口同样限制到当前整机最大合法驱动速度 630。 */

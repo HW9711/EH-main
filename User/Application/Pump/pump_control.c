@@ -579,7 +579,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 轻排启动也要补非零注水流量，避免只置运行标志但泵不转。 */
 				}
-				pumpMessageA.pedalDrainage_flag = true; /* A 进入轻排；该阶段不判断压力报警，也不因压力板未就绪而输出零速。 */
+				pumpMessageA.pedalDrainage_flag = true; /* A 进入轻排；泵任务继续用统一 800g 阈值监测压力并提示。 */
 				pumpMessageA.run_flag = true;
 			}
 		}
@@ -599,7 +599,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* B 注水泵轻排启动时补非零流量，保持和屏幕/外控启泵一致。 */
 				}
-				pumpMessageB.pedalDrainage_flag = true; /* 左轻排实际使用 B，因此仅让 B 跳过压力报警和未就绪检查。 */
+				pumpMessageB.pedalDrainage_flag = true; /* 左轻排实际使用 B；B 泵任务仍按统一 800g 阈值监测压力。 */
 				pumpMessageB.run_flag = true;
 				// B 泵周期任务会按新的轻排状态发送运行命令。
 			}
@@ -669,7 +669,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* 右轻排回退启动 A 注水泵时补非零流量。 */
 				}
-				pumpMessageA.pedalDrainage_flag = true; /* 右轻排实际使用 A，因此仅让 A 跳过压力报警和未就绪检查。 */
+				pumpMessageA.pedalDrainage_flag = true; /* 右轻排实际使用 A；A 泵任务仍按统一 800g 阈值监测压力。 */
 				pumpMessageA.run_flag = true;
 			}
 		}
@@ -735,7 +735,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageB.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageB); /* HMI 轻排启动 B 注水泵时补非零流量。 */
 				}
-				pumpMessageB.pedalDrainage_flag = true; /* HMI 实际使用 B 轻排，因此仅让 B 跳过压力报警和未就绪检查。 */
+				pumpMessageB.pedalDrainage_flag = true; /* HMI 实际使用 B 轻排；B 泵任务仍按统一 800g 阈值监测压力。 */
 				pumpMessageB.run_flag = true;
 			}
 		}
@@ -771,7 +771,7 @@ static void Pump_HandleGentlyKey(uint8_t key_value, uint8_t pump_owner)
 				{
 					pumpMessageA.speed_work = Pubinterface_GetPumpStartSpeed(&pumpMessageA); /* HMI 当前 B 通道但 A 是注水泵时补 A 启动流量。 */
 				}
-				pumpMessageA.pedalDrainage_flag = true; /* HMI 实际使用 A 轻排，因此仅让 A 跳过压力报警和未就绪检查。 */
+				pumpMessageA.pedalDrainage_flag = true; /* HMI 实际使用 A 轻排；A 泵任务仍按统一 800g 阈值监测压力。 */
 				pumpMessageA.run_flag = true;
 			}
 		}

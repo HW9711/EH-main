@@ -107,7 +107,7 @@ typedef struct
     uint32_t pressure_threshold_g; /* 本泵本轮采用的压力报警阈值，单位 g，用于和压力重量比较。 */
     uint32_t pressure_sequence; /* 压力报警计算上次处理的压力帧序号，用于识别是否收到新样本。 */
     uint32_t pressure_valid; /* 收到可用于报警计算的首个压力样本后置 1；重置压力报警记录后清零。 */
-    uint32_t pressure_alarm; /* 持续超限达到确认时间后置 1，恢复确认或重置报警后清零；只表示已报警，不表示已停泵。 */
+    uint32_t pressure_alarm; /* 注水/抽吸已提示或灌注已因超压下发零速时置 1；恢复确认或停止请求后清零。 */
     uint32_t pressure_timing; /* 1：正在连续确认压力超限或恢复；条件中断、确认结束或重置报警后清零。 */
     uint32_t can_run; /* 1：反馈未超时、驱动就绪且无故障、停机限制已解除、无定位或取消请求；否则为 0。 */
 } DiagnosticPumpBehaviorState_t;

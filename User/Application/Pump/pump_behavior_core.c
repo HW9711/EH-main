@@ -40,7 +40,7 @@ typedef struct
     uint8_t draw_direction;                     /* 抽吸类型使用的原业务方向值。 */
     uint8_t inject_direction;                   /* 注水和灌注类型使用的原业务方向值。 */
     uint8_t invert_protocol_direction;          /* 为 1 时发送前取反，保留 A 泵原协议方向规则。 */
-    void (*publish_output_speed)(uint16_t);     /* 保存本周期最终输出设定，不是实测转速；真实超压不改变该值。 */
+    void (*publish_output_speed)(uint16_t);     /* 保存本周期最终输出设定，不是实测转速；灌注减速或停转时该值随压力变化。 */
     void (*send_packet)(uint8_t *, uint16_t);   /* 把完整 6 字节控制帧送到固定物理 UART。 */
     uint16_t (*receive_data)(uint8_t *);        /* 取走同一物理 UART 上一命令对应的步进驱动回包。 */
 } PumpBehaviorBinding_t;
@@ -48,7 +48,7 @@ typedef struct
 /* PumpBehaviorRuntime_t 保存每路任务自己的跨周期状态，A/B 不能互相覆盖。 */
 typedef struct
 {
-    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护持续超限和恢复确认，只产生报警事件。 */
+    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护压力确认；灌注据此减速和停转，注水只产生提示事件。 */
     uint16_t output_color;       /* 记住最近发送的RGB565颜色；定位过程保持停止白色，正常开泵仍显示黄色。 */
     uint8_t business_direction;  /* 保存本泵按类型选定的方向，发送普通零速命令时也使用该方向。 */
     volatile uint8_t driver_fault_hold; /* 1表示暂不允许启动；驱动已就绪、没有故障且旧运行/排空请求都清零后改为0。 */
@@ -650,84 +650,48 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：为本泵选择注水手柄压力曲线；单注水泵跟随选中手柄，双注水泵分别使用同侧手柄。
- * 输入参数：binding为本泵固定绑定；调用方须在临界区内调用，保证泵类型、在线标志和手柄型号一起读取。
- * 返回参数：PUMP_PRESSURE_PROFILE_*编号；非注水泵、无对应在线手柄或未覆盖型号返回LEGACY。
- */
-static uint8_t PumpBehavior_GetPressureProfile(const PumpBehaviorBinding_t *binding)
-{
-    uint8_t hand_channel = WorkMessage.channel_work; /* 只有一个注水泵时，由当前选中的手柄决定供水管路。 */
-    uint8_t hand_model = 0U; /* 未取得在线手柄型号时保持0，后面使用原阈值，不继承另一手柄的配置。 */
-
-    if (binding->message->type != INJECTWATER)
-    {
-        return PUMP_PRESSURE_PROFILE_LEGACY; /* 灌注和抽吸不使用手柄注水孔实测表。 */
-    }
-    if ((pumpMessageA.type == INJECTWATER) && (pumpMessageB.type == INJECTWATER))
-    {
-        hand_channel = binding->public_channel; /* 双注水泵沿用同侧冷却关系，不能都套用当前选中手柄的阈值。 */
-    }
-    if ((hand_channel == CHANNEL_A) && (WorkMessage.Channel_Aonline != false))
-    {
-        hand_model = MemoryMsgA.hand_model; /* 读取A手柄自己的型号，避免切通道时混用B手柄参数。 */
-    }
-    else if ((hand_channel == CHANNEL_B) && (WorkMessage.Channel_Bonline != false))
-    {
-        hand_model = MemoryMsgB.hand_model; /* 单B注水泵也可能给A手柄供水；这里依据手柄通道而非泵字母读取型号。 */
-    }
-
-    switch (hand_model)
-    {
-        case EMBA_ONLINES: /* EMBA与EMBB注水口相同。 */
-        case EMBB_ONLINES: /* 本次EM组实际测试型号。 */
-        case EMBC_ONLINES: /* EMBC沿用同一EM注水口参数。 */
-        case EMBD_ONLINES: /* EMBD沿用同一EM注水口参数。 */
-            return PUMP_PRESSURE_PROFILE_INJECT_EM; /* EM四种型号共用按流量细分的EM报警线。 */
-        case PXBA_ONLINES: /* PXBA与PXBB注水口相同。 */
-        case PXBB_ONLINES: /* 本次PX组实际测试型号。 */
-            return PUMP_PRESSURE_PROFILE_INJECT_PX; /* PX高正常压力单独使用PX表，不影响灌注。 */
-        case TMBA_ONLINES: /* TMBA与TMBB注水口相同。 */
-        case TMBB_ONLINES: /* 本次TM组实际测试型号。 */
-            return PUMP_PRESSURE_PROFILE_INJECT_TM; /* 两种TM手柄共用TM报警线。 */
-        case PX_YIM_ONLINES: /* PXYTM是一体磨手柄，本次已测试。 */
-        case PX_YIP_ONLINES: /* PXYTP与PXYTM注水口相同。 */
-            return PUMP_PRESSURE_PROFILE_INJECT_PXY; /* PXY一体式使用独立低正常压力表，不套用PX分体式。 */
-        case COMMON_SOCKET_ONLINES: /* 公共接头按已装刀具且统一注水口的组合取值。 */
-        case DHYTM_ONLINES: /* DHYTM与公共接头手柄注水口相同。 */
-            return PUMP_PRESSURE_PROFILE_INJECT_COMMON; /* 两类组合共用公共接头实测表。 */
-        default:
-            return PUMP_PRESSURE_PROFILE_LEGACY; /* 无手柄或未覆盖型号保持原报警线，不擅自套用已测型号。 */
-    }
-}
-
-/*
- * 函数功能：用新压力帧和对应手柄阈值判断是否提示超压；只有压力板未完成自标定时才把输出设为零。
- * 输入参数：binding 为本通道固定配置；runtime 保存独立报警状态；pump_speed 为类型限幅后的业务速度。
- * 返回参数：有效压力始终返回原业务速度，压力板未就绪时返回 0。
+ * 函数功能：按泵用途处理压力；灌注泵按原标定点减速、停转和恢复，注水泵按固定 800g 提示。
+ * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
+ * 返回参数：本周期应下发的业务速度；灌注泵确认超压后为 0，注水泵提示不改变速度。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
+                                           uint8_t pump_type,
                                            uint16_t pump_speed)
 {
     uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
     uint16_t threshold_g; /* 压力帧中此字段为 0 表示数据无效；实际报警阈值由主控配置表计算。 */
     uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
-    uint8_t pressure_profile; /* 本泵用途及对应手柄决定的报警曲线，不改变泵运行请求。 */
+    uint8_t alarm_event; /* 1 表示本周期首次满足提示条件，弹窗和双响只发一次。 */
+    uint16_t output_speed; /* 灌注泵可被压力降低或归零；注水和抽吸保持原设定速度。 */
+    uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
 
     taskENTER_CRITICAL(); /* 复制压力数据时禁止任务切换，避免压力接收任务更新到一半就被读走。 */
     weight_x10 = binding->message->weight_x10; /* 复制当前完整压力帧的重量值。 */
     threshold_g = binding->message->pressure_threshold; /* 复制同一帧的有效性字段。 */
     sequence = binding->message->seq; /* 最后复制同一帧序号，供持续超限确认使用。 */
-    pressure_profile = PumpBehavior_GetPressureProfile(binding); /* 与压力数据一起读取本泵对应手柄，避免两路泵混用当前选中手柄。 */
-    taskEXIT_CRITICAL(); /* 压力字段和手柄曲线读取完立即恢复正常调度，报警消息在临界区外发送。 */
+    taskEXIT_CRITICAL(); /* 压力字段复制完立即恢复任务调度，报警消息在临界区外发送。 */
 
-    if (PumpPressureControl_UpdateAlarm(&runtime->pressure_alarm, pump_speed, pressure_profile,
-                                         weight_x10, threshold_g, sequence, HAL_GetTick()) != 0U)
+    now_ms = HAL_GetTick(); /* 压力帧复制完成后读取时间，所有计时都基于同一时刻。 */
+    if (pump_type == POURWATER)
     {
-        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 压力持续超限后只弹窗和蜂鸣，不清开泵请求，也不停止正在联动的手柄。 */
+        output_speed = PumpPressureControl_ApplyPour(&runtime->pressure_alarm, pump_speed,
+                                                      weight_x10, threshold_g, sequence, now_ms,
+                                                      &alarm_event); /* 灌注只在真正停转的周期提示，停转中不重复提示。 */
+    }
+    else
+    {
+        output_speed = pump_speed; /* 注水和抽吸只监测压力，不改变本周期业务速度。 */
+        alarm_event = PumpPressureControl_UpdateAlarm(&runtime->pressure_alarm, pump_speed,
+                                                       (pump_type == INJECTWATER) ? 1U : 0U,
+                                                       weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
+    }
+    if (alarm_event != 0U)
+    {
+        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 首次确认后弹 89 号图 2 秒并蜂鸣两声，不清泵或手柄运行请求。 */
     }
 
-    return PumpPressureControl_ApplyReadiness(pump_speed, weight_x10); /* 真实压力超限保持设定输出，仅未就绪协议状态仍等待标定。 */
+    return output_speed; /* 三种泵遇到 6000 无效读数都维持原有运行请求；灌注已停转时仍保持零速。 */
 }
 
 /*
@@ -823,7 +787,7 @@ static uint16_t PumpBehavior_ConvertWaterFlowToUart(uint16_t pump_flow)
 }
 
 /*
- * 函数功能：按泵类型限制设定值并换算驱动速度；正常运行检查压力，注水排空不检查压力。
+ * 函数功能：按泵类型限制设定值、检查压力并换算驱动速度；注水普通运行和排空都检查统一 800g 提示线。
  * 输入参数：binding 为本通道配置；runtime 为独立运行态；pump_type 为泵类型；pump_speed 为业务速度；drainage_active 为屏幕定时排空标志。
  * 返回参数：换算后的 16 位 UART 速度字段。
  */
@@ -843,7 +807,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 15U; /* 抽吸泵的内部设定最多为 15，之后按 42 倍换成协议速度。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 抽吸沿用原阈值档位判断，超压只提示。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 抽吸沿用原阈值档位判断，超压只提示。 */
             uart_data = (uint16_t)(*pump_speed * 42U); /* 抽吸泵继续使用原 42 倍驱动换算。 */
             break;
 
@@ -853,14 +817,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = PUMP_INJECTWATER_SPEED_MAX; /* 普通注水和手柄联动最多设为 300 mL/min；屏幕排空单独设定流量。 */
             }
-            if ((drainage_active == 0U) && (binding->message->pedalDrainage_flag == false))
-            {
-                *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 正常注水和手柄冷却超压只报警，泵和手柄继续按原请求运行。 */
-            }
-            else
-            {
-                PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 排空不读取压力，并清旧确认时间，退出排空后重新判断持续超限。 */
-            }
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 普通注水、定时排空及脚踏排空都用同一 800g 提示线。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 注水及排空按目标流量查实测表，仅修正速度，不改变排空计时。 */
             break;
 
@@ -870,7 +827,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, *pump_speed); /* 灌注仍按目标流量判断压力，不能用修正后的UART命令代替流量。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注按原设定查压力阈值，再把本周期下发流量减到最低档或零。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 
@@ -1061,7 +1018,7 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
         pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
     }
 
-    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active); /* 超压只报警，未就绪时输出零速，排空不查压力；驱动故障时始终输出零速。 */
+    uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active); /* 灌注按压力减速或归零，注水包含排空仅提示；驱动故障仍优先输出零速。 */
     PumpBehavior_ServiceDrainage(binding->message, drainage_active, &pump_speed, &uart_data); /* 处理屏幕排空的10秒计时；到时清掉排空请求和待发送速度，不按压力值提前结束。 */
     binding->publish_output_speed(pump_speed); /* 先保存本周期输出设定，再发送驱动帧和刷新颜色；该值不是实测转速。 */
     PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction, control); /* 周期帧长度不变，明确校准或取消均强制独立零速帧。 */
@@ -1092,7 +1049,7 @@ void PumpBehavior_CopyDiagnosticState(uint8_t channel, DiagnosticPumpBehaviorSta
     out->pressure_threshold_g = runtime->pressure_alarm.alarm_threshold_g; /* 本泵本轮采用的压力报警阈值，单位 g，用于和压力重量比较。 */
     out->pressure_sequence = runtime->pressure_alarm.last_sequence; /* 压力报警计算上次处理的压力帧序号，用于识别是否收到新样本。 */
     out->pressure_valid = runtime->pressure_alarm.sequence_valid; /* 收到可用于报警计算的首个压力样本后置 1；重置压力报警记录后清零。 */
-    out->pressure_alarm = runtime->pressure_alarm.alarm_active; /* 持续超限达到确认时间后置 1，恢复确认或重置报警后清零；只表示已报警，不表示已停泵。 */
+    out->pressure_alarm = runtime->pressure_alarm.alarm_active; /* 注水/抽吸已提示或灌注已下发零速时为 1，恢复确认或停泵重置后清零。 */
     out->pressure_timing = runtime->pressure_alarm.timing_active; /* 1：正在连续确认压力超限或恢复；条件中断、确认结束或重置报警后清零。 */
     out->can_run = PumpBehavior_DriverCanRun((PumpBehaviorChannel_t)(channel - 1U)); /* 1：反馈未超时、驱动就绪且无故障、停机限制已解除、无定位或取消请求；否则为 0。 */
 }
