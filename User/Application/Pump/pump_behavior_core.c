@@ -650,9 +650,9 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：按泵用途处理压力；灌注泵按原标定点减速、停转和恢复，注水泵按固定 800g 提示。
+ * 函数功能：按泵用途和压力保护开关处理压力；灌注保护关闭时保持设定流量，开启时按原标定点减速、停转和恢复。
  * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
- * 返回参数：本周期应下发的业务速度；灌注泵确认超压后为 0，注水泵提示不改变速度。
+ * 返回参数：本周期应下发的业务速度；灌注保护开启且确认超压后为 0，保护关闭或注水、吸引提示时保持原速度。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
@@ -665,6 +665,14 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
     uint8_t alarm_event; /* 1 表示本周期首次满足提示条件，弹窗和双响只发一次。 */
     uint16_t output_speed; /* 灌注泵可被压力降低或归零；注水和抽吸保持原设定速度。 */
     uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
+
+#if (PUMP_PRESSURE_POUR_PROTECTION_ENABLE == 0U)
+    if (pump_type == POURWATER) /* 只屏蔽已识别为灌注泵的通道，注水和吸引仍执行原压力提示。 */
+    {
+        PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 清除本泵旧减速和超压停泵记录，避免继续限制当前设定流量。 */
+        return pump_speed; /* 直接使用本次设定流量，不计算灌注压力减速、不发送压力报警，也不因压力返回零速。 */
+    }
+#endif
 
     taskENTER_CRITICAL(); /* 复制压力数据时禁止任务切换，避免压力接收任务更新到一半就被读走。 */
     weight_x10 = binding->message->weight_x10; /* 复制当前完整压力帧的重量值。 */
@@ -827,7 +835,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注按原设定查压力阈值，再把本周期下发流量减到最低档或零。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注保护关闭时保持设定；开启时按原标定阈值计算本周期减速或零速。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 

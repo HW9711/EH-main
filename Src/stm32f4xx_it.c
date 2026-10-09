@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "soft_uart.h"
+#include "handlekey.h" /* UART8/UART10 接收 GZYT 数字按钮帧，中断只保存字节。 */
+#include "usart.h" /* 测试未使用串口时，仍使用对应 huart 交给 HAL 处理。 */
 #include "iwdg.h" /* 处理器异常直接记录并复位，不在异常处理里等待业务通信。 */
 /* USER CODE END Includes */
 
@@ -530,5 +532,31 @@ void UART9_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/*
+ * 函数功能：处理 B 通道 UART8 按钮接收中断。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void UART8_IRQHandler(void)
+{
+  if (HandleKey_UartIrqHandler(2U) == false) /* B 通道未进入 GZYT 测试时不读取其测试缓存。 */
+  {
+    HAL_UART_IRQHandler(&huart8); /* 保留 UART8 的 HAL 中断处理，供非测试用途使用。 */
+  }
+}
+
+/*
+ * 函数功能：处理 A 通道 UART10 按钮接收中断。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void UART10_IRQHandler(void)
+{
+  if (HandleKey_UartIrqHandler(1U) == false) /* A 通道未进入 GZYT 测试时不读取其测试缓存。 */
+  {
+    HAL_UART_IRQHandler(&huart10); /* 保留 UART10 的 HAL 中断处理，不改变其它串口。 */
+  }
+}
 
 /* USER CODE END 1 */

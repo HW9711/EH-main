@@ -79,6 +79,9 @@ void UART7_IRQHandler(void);
 void UART9_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
+void UART8_IRQHandler(void); /* B 手柄数字模块按钮接收中断。 */
+void UART10_IRQHandler(void); /* A 手柄数字模块按钮接收中断。 */
+
 /* USER CODE END EFP */
 
 #ifdef __cplusplus

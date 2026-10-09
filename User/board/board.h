@@ -25,8 +25,8 @@ extern "C" {
     XX(5, UART5, 9600)       /* UART5 - A泵步进驱动板 */ \
     XX(6, USART6, 115200)   /* USART6 - 显示屏 */ \
     XX(7, UART7, 9600)       /* UART7 - B泵步进驱动板 */ \
-    XX(8, UART8, 115200)     /* UART8 - B通道KSZ手柄通信 */ \
-    XX(10, UART10, 115200)   /* UART10 - A通道KSZ手柄通信 */
+    XX(8, UART8, 115200)     /* UART8 - B通道KSZ/GZYT手柄通信 */ \
+    XX(10, UART10, 115200)   /* UART10 - A通道KSZ/GZYT手柄通信 */
 
 /* UART引脚配置 - 如需更改引脚，修改以下定义 */
 #define BOARD_UART1_TX_PORT   GPIOB        /* USART1_TX - PB6 */

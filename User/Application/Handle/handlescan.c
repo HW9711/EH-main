@@ -310,7 +310,8 @@ static const HandlescanHandleTypeConfig s_hand_type_config_table[] =
     {0x6B, 0x0D, COMMON_SOCKET_ONLINES, "COMMON_SOCKET"}, /* 公共接头没有实体键，只作为在线类型和 UI 占位。无刷，单向 */
     {0x6B, 0x0E, EMBD_ONLINES, "EMBD"},                   /* EMBD 6万增速手柄按普通电动手柄上线，不额外开放实体键控制。无刷，单向 */
     {0x6B, 0x0F, EMBC_ONLINES, "EMBC"},                   /* EMBC 新增普通电动手柄，按 EEPROM 第二页 0x6B/0x0F 识别。无刷，单向 */
-    {0x6B, 0x10, DHYTM_ONLINES, "DHYTM"}                  /* DHYTM 使用独立 EEPROM 参数，不读取 RFID；屏幕固定反转且电机实际正转。 */
+    {0x6B, 0x10, DHYTM_ONLINES, "DHYTM"},                 /* DHYTM 使用独立 EEPROM 参数，不读取 RFID；屏幕固定反转且电机实际正转。 */
+    {0x6B, 0x11, GZYT_ONLINES, "GZYT"}                    /* GZYT 使用独立 EEPROM 参数；识别在线后由按键任务把本通道按钮脚切为 UART 接收。 */
 };
 
 /*

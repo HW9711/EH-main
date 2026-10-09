@@ -14,6 +14,7 @@
 #include "sscBEEP.h"
 #include "sscRFID.h"
 #include "handlescan.h"
+#include "handlekey.h" /* GZYT 临时测试开启时，屏幕允许选中手柄按钮控制。 */
 #include "motoruartdata.h"
 #include "external_comm_task.h"
 
@@ -97,6 +98,7 @@ static uint8_t MapHandleToUiType(uint8_t handle_model)
 	switch (handle_model)
 	{
 	case TMBB_ONLINES:
+	case GZYT_ONLINES: /* GZYT 使用与 TMBB 相同的图标类别 1，在线和选中高亮均沿用 TMBB 资源。 */
 	case TMBA_ONLINES:
 	case EMBA_ONLINES:
 	case EMBB_ONLINES:
@@ -121,7 +123,7 @@ static uint8_t MapHandleToUiType(uint8_t handle_model)
 		return 5U; /* 颅骨钻/空心钻预留类复用图标类别 5。 */
 	case KSZ_I_ONLINES:
 	case KSZ_II_ONLINES:
-		return 6U; /* 克氏针预留类复用图标类别 6。 */
+		return 6U; /* 两类 KSZ 使用现有串口手柄图标类别 6。 */
 	case COMMON_SOCKET_ONLINES:
 		return COMMON_SOCKET_ONLINES; /* 公共接头沿用 UIDP 专用占位图标。 */
 	case DHYTM_ONLINES:
@@ -754,6 +756,9 @@ bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
 {
 	return ((hand_model == PXBA_ONLINES) ||    /* EX8 表格确认 PXBA 分体手柄允许显示并进入手控。 */
 			(hand_model == LGZ_I_ONLINES) ||   /* LGZI 单按键颅骨钻允许进入手控，实体键按住运行、松开停止。 */
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+			(hand_model == GZYT_ONLINES) ||    /* 临时测试需要先选手控，再允许 HAL4/HAL5 按住启动；关闭开关后取消此入口。 */
+#endif
 			(hand_model == LGZ_II_ONLINES));   /* EX8 表格确认 LGZII 双按键手柄保留手控入口，其它预留型号不再误亮手控。 */
 }
 

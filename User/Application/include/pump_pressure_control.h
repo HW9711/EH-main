@@ -12,6 +12,11 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
 #endif
 
+/* 灌注泵压力保护开关：0 暂时屏蔽 A/B 灌注泵的压力报警、减速和停机；1 在总开关开启时恢复原保护。 */
+#ifndef PUMP_PRESSURE_POUR_PROTECTION_ENABLE
+#define PUMP_PRESSURE_POUR_PROTECTION_ENABLE 0U
+#endif
+
 /*
  * 旧版 UART10 压力调试开关，保留 0=关闭、1=开启的历史定义。
  * 当前代码没有读取该宏，改成 1 不会产生调试日志；正式配置保持 0。

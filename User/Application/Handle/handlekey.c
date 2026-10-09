@@ -15,11 +15,15 @@
 #include "sscBEEP.h"
 #include "sscKEYBH.h"
 #include "sscUIDP.h"
+#include "usart.h" /* GZYT 临时测试使用 A/UART10、B/UART8 的接收寄存器。 */
+#include "common.h" /* 数字模块与主控使用同一 CRC16/MODBUS 算法。 */
+#include "handle_control.h" /* 插拔变化后丢弃旧手柄缓存，重新确认数字按钮已松开。 */
+#include "motoruartdata.h" /* 近期反馈仍有转速时不接受新的测试启动或反向请求。 */
 
 /*
- * 文件功能：每 30ms 按手柄型号切换 A/B 按键脚的GPIO/串口模式，并处理普通手柄实体运行键。
+ * 文件功能：按手柄型号切换 A/B 按键脚用途，GPIO 每 30ms 扫描；GZYT 临时测试每 10ms 解析数字按钮串口。
  * 运行入口：Userparser_Init() 调用 HandleKeyScan_Init()，任务回调只进入 HANDLEKEYTaskFunc()。
- * 处理顺序：先更新引脚用途，再检查 82 号提示是否到期；其它控制方式没占用时，先处理 A 键再处理 B 键。
+ * 处理顺序：先更新引脚用途和串口测试，再检查 82 号提示；其它控制方式没占用时，按原 30ms 周期处理 GPIO 键。
  * 启动条件：只接受当前选中通道的手控按键；有报警、已运行、刀具未准备好或其它方式正在控制时都不能启动。
  */
 kernel_task_t HANDLEKEYTaskHandle;
@@ -34,7 +38,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	SimUart_HandleExti(GPIO_Pin); /* 压力传感器靠这次电平变化开始收数据，手柄按键处理不能省掉此调用。 */
 }
 
-#define HANDLE_KEY_DEBOUNCE_COUNT 4U /* 连续 4 次读到相同电平才确认按下或松开；每次间隔 30ms，增大后响应更慢。 */
+#define HANDLE_KEY_DEBOUNCE_COUNT 8U /* 连续 8 次读到相同电平才确认按下或松开；每次间隔 30ms，增大后响应更慢。 */
 #define HANDLE_KEY_PRESSED_LEVEL GPIO_PIN_RESET /* 按下时为低电平（RESET），松开时上拉为高电平（SET）；须与硬件接线一致。 */
 
 typedef struct
@@ -51,7 +55,7 @@ typedef enum
 {
 	HANDLE_RUN_KEY_PIN_MODE_UNKNOWN = 0U, /* 上电后尚未设置引脚用途，第一次扫描必须配置。 */
 	HANDLE_RUN_KEY_PIN_MODE_GPIO,         /* 普通手柄模式：引脚上拉输入，低电平表示按钮按下。 */
-	HANDLE_RUN_KEY_PIN_MODE_UART          /* KSZ模式：引脚切换为对应UART接收复用，不再读取GPIO电平。 */
+	HANDLE_RUN_KEY_PIN_MODE_UART          /* KSZ/GZYT模式：引脚切换为对应UART接收复用，不再读取GPIO电平。 */
 } HandleRunKeyPinMode_t;
 
 static HandleRunKeyDebounce_t s_handle_run_key_a_filter = {0U, 0U, false, false, false, false}; /* A通道实体键去抖及重启松手确认。 */
@@ -61,6 +65,86 @@ static HandleRunKeyPinMode_t s_handle_run_key_b_pin_mode = HANDLE_RUN_KEY_PIN_MO
 static uint8_t s_handle_run_key_owner_channel = CHANNEL_NONE;			   /* 当前由实体键启动的通道，防止另一通道松开误停。 */
 static uint8_t s_handle_foot_selected_timed_alarm_active = 0U; /* 记录 82 号错模式弹窗是否由手柄键模块显示，防止到期误清其它报警。 */
 static uint32_t s_handle_foot_selected_timed_alarm_tick = 0U; /* 记录 82 号错模式弹窗开始时间，按 ALARM_MODE_MS（当前 2000ms）自动清除。 */
+
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+#define GZYT_TEST_TASK_MS 10U          /* 串口任务周期，单位 ms；调大后按钮停机和通信超时处理会变慢。 */
+#define GZYT_TEST_TIMEOUT_MS 50U       /* 完整有效新帧超过此毫秒数未到达就清运行请求；实际清除还受任务调度和业务锁等待影响。 */
+#define GZYT_TEST_RELEASE_FRAMES 3U    /* 新启动前连续确认 HAL4/HAL5 松开的帧数；模块每 10ms 发帧，调大后重新启动等待更久。 */
+#define GZYT_TEST_RX_SIZE 128U         /* 每通道字节缓存容量，实际最多保存 127 字节；满后停本次测试并丢弃旧数据。 */
+#define GZYT_TEST_FRAME_SIZE 12U       /* 数字模块 v2 帧长，包含 A5 5A、版本、序号、按钮、状态、复位原因及 CRC。 */
+#define GZYT_TEST_FORWARD_MASK 0x08U   /* TRIGGER_MASK bit3 为 HAL4/HW4，数字模块 PA1 低电平确认后置 1。 */
+#define GZYT_TEST_REVERSE_MASK 0x10U   /* TRIGGER_MASK bit4 为 HAL5/HW5，数字模块 PA7 低电平确认后置 1。 */
+#define GZYT_TEST_BUTTON_MASK 0x18U    /* 临时测试只使用 HAL4/HAL5，HAL1~HAL3 不参与启停或松手确认。 */
+
+typedef struct
+{
+    volatile uint8_t rx[GZYT_TEST_RX_SIZE];       /* 中断接收到的字节，任务按 read_index 顺序取出后解析。 */
+    volatile uint32_t rx_tick[GZYT_TEST_RX_SIZE]; /* 各字节真正到达的 HAL 毫秒时刻，防止积压旧帧被当成刚收到。 */
+    volatile uint16_t write_index;               /* 中断写入位置，写完字节和时刻后才推进；到缓存末尾回到 0。 */
+    volatile uint16_t read_index;                /* 任务读取位置，取出字节和时刻后才推进；配置切换时与 write_index 一起清零。 */
+    volatile bool enabled;                      /* 当前选中通道是在线 GZYT 时置 true，离线或切走时清零并关闭接收中断。 */
+    volatile bool rx_fault;                     /* 串口错误或缓存满时由中断置 true；任务停测试、丢旧字节后清零。 */
+    uint8_t frame[GZYT_TEST_FRAME_SIZE];          /* 逐字节组装的候选帧，完整通过校验后才读取触发位。 */
+    uint8_t frame_size;                          /* 已组装字节数，完整处理或接收异常后清零；帧头错位时保留后 11 字节继续查找。 */
+    uint8_t release_count;                       /* 连续有效松开帧计数，到 3 才允许新按下；停机、拒绝启动或异常时清零。 */
+    uint8_t trigger;                             /* 最近有效帧中的 HAL4/HAL5 触发位；0 松开、08 正转、10 反转，18 不允许启动。 */
+    uint8_t run_trigger;                         /* 本次测试启动时使用的 08/10；后续触发位改变就清运行请求，禁止直接换向。 */
+    uint8_t reset_flags;                         /* 最近有效帧的模块复位原因；原因改变后必须重新确认松手。 */
+    uint16_t sequence;                           /* 最近有效帧序号，下一帧必须递增 1，FFFF 到 0000 属于正常递增。 */
+    bool have_sequence;                          /* 已收到有效帧时置 true；重新启用、超时或异常后清零，下一帧重新记录起点。 */
+    bool running;                               /* 本通道数字按钮已发出运行请求时置 true；清请求或控制方式改变时清零，不表示实测转动。 */
+    uint32_t last_frame_tick;                    /* 最近有效新帧最后一个字节到达的时刻，重复序号不能刷新此时间。 */
+    uint32_t frame_start_tick;                   /* 当前候选帧开始到达的时刻，拆帧跨越 50ms 时丢弃，不能继承旧半帧。 */
+    uint32_t identity_generation;                /* 启用接收时记住本通道插拔次数，变化后不能继续使用旧手柄的松手记录。 */
+} GzytTestState_t;
+
+static GzytTestState_t s_gzyt_test_a; /* A 通道只接收 UART10/PE2，按钮和松手记录与 B 独立。 */
+static GzytTestState_t s_gzyt_test_b; /* B 通道只接收 UART8/PE0，不能用 A 的串口数据启动。 */
+static uint32_t s_handle_gpio_scan_tick; /* 保留普通 GPIO 按键两次扫描之间至少 30ms，不随测试任务加快去抖。 */
+#endif
+
+/*
+ * 函数功能：保存 GZYT 数字按钮串口收到的单字节及接收时刻，串口错误和缓存满只记录异常。
+ * 输入参数：channel 为 CHANNEL_A/UART10 或 CHANNEL_B/UART8。
+ * 返回参数：true 表示本串口由测试接收处理；false 表示未启用或通道无效，交给 HAL 处理。
+ */
+bool HandleKey_UartIrqHandler(uint8_t channel)
+{
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+    GzytTestState_t *state; /* 按逻辑通道选择独立缓存，禁止交叉保存 A/B 字节。 */
+    UART_HandleTypeDef *uart; /* A 固定 UART10，B 固定 UART8，不跟随电机物理通道交换。 */
+    uint32_t status; /* 先读 SR，再读 DR，按 STM32F4 要求清除接收错误。 */
+    uint8_t byte; /* 暂存本次 DR 中的低 8 位数据。 */
+    uint16_t next; /* 计算下一写入位置，等于读取位置时说明缓存满。 */
+
+    if ((channel != CHANNEL_A) && (channel != CHANNEL_B)) return false; /* 无效通道不读取任何串口。 */
+    state = (channel == CHANNEL_A) ? &s_gzyt_test_a : &s_gzyt_test_b; /* A/B 中断只修改自己的接收缓存。 */
+    uart = (channel == CHANNEL_A) ? &huart10 : &huart8; /* 使用与 PE2/PE0 一致的硬件接收口。 */
+    if (state->enabled == false) return false; /* 非当前在线 GZYT 不参与临时测试接收。 */
+    status = uart->Instance->SR; /* 取得本次接收标志，后续 DR 读取清掉同次错误。 */
+    if ((status & (USART_SR_RXNE | USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE)) == 0U) return true; /* 本次没有字节或接收错误，不推进缓存。 */
+    byte = (uint8_t)uart->Instance->DR; /* 读取 DR，清 RXNE 及已读 SR 对应的错误标志。 */
+    if ((status & (USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE)) != 0U)
+    {
+        state->rx_fault = true; /* 丢字节、噪声或帧错误后停止使用旧按钮记录，任务下一轮清运行请求。 */
+        return true; /* 错误字节不进入候选帧，防止被当成新的有效按下。 */
+    }
+    if (state->rx_fault == true) return true; /* 已异常时丢弃后续字节，等待任务停止测试并清缓存。 */
+    next = (uint16_t)((state->write_index + 1U) % GZYT_TEST_RX_SIZE); /* 缓存位置回绕，不覆盖尚未读取的字节。 */
+    if (next == state->read_index)
+    {
+        state->rx_fault = true; /* 缓存满说明数据完整性已丢失，本次测试必须重新松手。 */
+        return true; /* 不覆盖旧数据，避免拼出来源不完整的按钮帧。 */
+    }
+    state->rx[state->write_index] = byte; /* 先保存当前字节。 */
+    state->rx_tick[state->write_index] = HAL_GetTick(); /* 保存字节到达时间，任务延迟不能把旧帧时间改成当前时间。 */
+    state->write_index = next; /* 两项数据写完再公布新写入位置，任务不会取到只更新一半的数据。 */
+    return true; /* 本次字节已交给测试缓存，HAL 不再重复读取 DR。 */
+#else
+    (void)channel; /* 关闭测试时不用通道参数，也不打开 RXNE 中断。 */
+    return false; /* 保留原 HAL 串口处理。 */
+#endif
+}
 
 /*
  * 函数功能：脚控已选中时按手柄实体运行键，上报 82 号限时提示，保持时间由 ALARM_MODE_MS 控制（当前 2000ms）。
@@ -152,12 +236,13 @@ static uint8_t HandleRunKey_GetChannelModel(uint8_t channel)
 /*
  * 函数功能：判断手柄是否带内部MCU并要求使用硬件串口接收按钮数据。
  * 输入参数：hand_model 为当前通道已经识别出的手柄型号。
- * 返回参数：true 表示KSZ_I/KSZ_II串口手柄，false 表示普通GPIO按钮手柄。
+ * 返回参数：true 表示KSZ_I、KSZ_II或GZYT串口手柄，false 表示该型号使用普通GPIO按钮模式。
  */
 static bool HandleRunKey_IsUartModel(uint8_t hand_model)
 {
 	return ((hand_model == KSZ_I_ONLINES) ||
-			(hand_model == KSZ_II_ONLINES)); /* 仅两类KSZ手柄切换串口，离线值和其它型号全部保持普通GPIO模式。 */
+			(hand_model == KSZ_II_ONLINES) ||
+			(hand_model == GZYT_ONLINES)); /* GZYT与两类KSZ共用按钮串口复用；离线或其它型号由在线检查恢复GPIO。 */
 }
 
 /*
@@ -201,13 +286,13 @@ static void HandleRunKey_ApplyPinMode(uint8_t channel,
 	{
 		gpio_port = BOARD_RES_HANDLE_RUN_KEY_A_PORT;       /* A按钮固定使用PE2。 */
 		gpio_pin = BOARD_RES_HANDLE_RUN_KEY_A_PIN;         /* 选中PE2引脚位。 */
-		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_A_UART_AF; /* KSZ手柄下PE2切为UART10_RX。 */
+		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_A_UART_AF; /* KSZ/GZYT手柄下PE2切为UART10_RX。 */
 	}
 	else if (channel == CHANNEL_B)
 	{
 		gpio_port = BOARD_RES_HANDLE_RUN_KEY_B_PORT;       /* B按钮固定使用PE0。 */
 		gpio_pin = BOARD_RES_HANDLE_RUN_KEY_B_PIN;         /* 选中PE0引脚位。 */
-		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_B_UART_AF; /* KSZ手柄下PE0切为UART8_RX。 */
+		uart_alternate = BOARD_RES_HANDLE_RUN_KEY_B_UART_AF; /* KSZ/GZYT手柄下PE0切为UART8_RX。 */
 	}
 	else
 	{
@@ -217,14 +302,14 @@ static void HandleRunKey_ApplyPinMode(uint8_t channel,
 	gpio_init.Pin = gpio_pin; /* 本次只修改目标通道RX/按钮复用脚，不影响同端口其它引脚。 */
 	if (target_mode == HANDLE_RUN_KEY_PIN_MODE_UART)
 	{
-		gpio_init.Mode = GPIO_MODE_AF_PP;             /* KSZ内部MCU输出串口数据，RX脚恢复硬件复用输入路径。 */
+		gpio_init.Mode = GPIO_MODE_AF_PP;             /* KSZ/GZYT内部MCU输出串口数据，RX脚恢复硬件复用输入路径。 */
 		gpio_init.Pull = GPIO_NOPULL;                  /* 串口模式沿用CubeMX现有无上下拉配置。 */
 		gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;   /* 串口复用沿用UART MSP初始化速度。 */
 		gpio_init.Alternate = uart_alternate;          /* A绑定UART10_RX，B绑定UART8_RX，禁止交叉。 */
 	}
 	else
 	{
-		gpio_init.Mode = GPIO_MODE_INPUT;              /* 非KSZ手柄使用普通数字输入读取实体按钮。 */
+		gpio_init.Mode = GPIO_MODE_INPUT;              /* 非KSZ/GZYT手柄或通道离线时恢复普通数字输入。 */
 		gpio_init.Pull = GPIO_PULLUP;                  /* 按钮仍为低电平有效，松开时由内部上拉保持高电平。 */
 		gpio_init.Speed = GPIO_SPEED_FREQ_LOW;         /* 普通按钮无需高速翻转，保持低速GPIO配置。 */
 		gpio_init.Alternate = 0U;                      /* GPIO输入模式不使用复用编号，显式清零便于审查。 */
@@ -248,12 +333,12 @@ static void HandleRunKey_UpdatePinModes(void)
 	if ((WorkMessage.Channel_Aonline == true) &&
 		(HandleRunKey_IsUartModel(MemoryMsgA.hand_model) == true))
 	{
-		a_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* A识别到KSZ后把PE2切换为UART10_RX。 */
+		a_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* A在线且识别为KSZ/GZYT后，把PE2切换为UART10_RX。 */
 	}
 	if ((WorkMessage.Channel_Bonline == true) &&
 		(HandleRunKey_IsUartModel(MemoryMsgB.hand_model) == true))
 	{
-		b_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* B识别到KSZ后把PE0切换为UART8_RX。 */
+		b_target_mode = HANDLE_RUN_KEY_PIN_MODE_UART; /* B在线且识别为KSZ/GZYT后，把PE0切换为UART8_RX。 */
 	}
 
 	HandleRunKey_ApplyPinMode(CHANNEL_A, a_target_mode, &s_handle_run_key_a_filter, &s_handle_run_key_a_pin_mode); /* 独立更新A，B型号变化不影响PE2。 */
@@ -497,7 +582,7 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
  */
 static void HandleKey_ScanRunKeys(void)
 {
-	bool key_a_press_event = false; /* UART模式没有GPIO按下沿；后续接入明确的KSZ报文协议后再由串口解析结果赋值。 */
+	bool key_a_press_event = false; /* UART模式没有GPIO按下沿；后续按KSZ/GZYT报文协议解析后再赋值。 */
 	bool key_b_press_event = false; /* UART模式没有GPIO按下沿；禁止把UART数据跳变当作低有效实体键。 */
 
 	if (s_handle_run_key_a_pin_mode == HANDLE_RUN_KEY_PIN_MODE_GPIO)
@@ -513,6 +598,214 @@ static void HandleKey_ScanRunKeys(void)
 	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理 B；如果 A 已经由实体键启动，B 的按键不会影响 A。 */
 }
 
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+/*
+ * 函数功能：结束本通道数字按钮发起的测试请求，并清除旧帧和松手记录。
+ * 输入参数：state 为通道测试记录；channel 为 CHANNEL_A 或 CHANNEL_B；由持有业务互斥锁的任务调用。
+ * 返回参数：无；其它控制方式正在控制或当前已换通道时，不修改其电机和泵请求。
+ */
+static void HandleGzytTest_Revoke(GzytTestState_t *state, uint8_t channel)
+{
+    if ((state->running == true) && (WorkMessage.channel_work == channel) &&
+        (ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) == true))
+    {
+        WorkMessage.runflag_work = false; /* 清掉本数字按钮的运行请求，驱动任务随后发送停止帧；不代表实测已停。 */
+        WorkMessage.speed_work = 0U; /* 同时清目标速度，下一驱动周期不继续使用旧转速。 */
+        ControlSignalMessage.handle_control_flag = false; /* 手控运行标志随本次测试请求一起清除。 */
+        Pubinterface_SetHandleInjectionPumpRun(false); /* 结束本次手柄冷却联动，不改变其它来源单独控制的泵。 */
+        ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 近期反馈仍非零时保留占用，等待原有反馈检查允许退出。 */
+    }
+    state->running = false; /* 本模块不再持有测试运行记录，下次按下重新检查启动条件。 */
+    state->run_trigger = 0U; /* 清掉上次启动使用的按钮位，不能继承上次方向。 */
+    state->trigger = 0U; /* 丢弃旧按钮状态，后续只能使用新帧报告的 HAL4/HAL5。 */
+    state->release_count = 0U; /* 重新收到 3 帧两键松开后，才允许下一次按下。 */
+    state->have_sequence = false; /* 后续第一帧重新记录序号起点，避免模块重启后永久拒绝接收。 */
+    state->frame_size = 0U; /* 丢弃正在组装的旧半帧，不能与后续字节拼接使用。 */
+    taskENTER_CRITICAL(); /* 暂停接收中断修改位置，避免清缓存时只更新一半。 */
+    state->read_index = state->write_index; /* 丢弃已积压字节，新的松手确认必须来自后续接收。 */
+    state->rx_fault = false; /* 本次异常已经处理，接收中断可以继续保存新字节。 */
+    taskEXIT_CRITICAL(); /* 接收位置更新完成，允许串口中断继续执行。 */
+}
+
+/*
+ * 函数功能：在当前选中在线 GZYT 或其插拔次数改变时，重新配置本通道的字节接收。
+ * 输入参数：state 为通道记录；channel 为 A/B；uart 为 A 的 huart10 或 B 的 huart8；enable 表示是否允许接收。
+ * 返回参数：无；配置后仍须新收 3 帧两键松开，不能直接沿用插入时按住的按钮。
+ */
+static void HandleGzytTest_Configure(GzytTestState_t *state, uint8_t channel,
+                                    UART_HandleTypeDef *uart, bool enable)
+{
+    uint32_t generation = Handle_GetIdentityGeneration(channel); /* 读取本通道的插拔次数，同型号换柄也要清旧记录。 */
+    if ((state->enabled == enable) && ((enable == false) || (state->identity_generation == generation))) return; /* 通道用途和手柄未变时不重复初始化。 */
+    __HAL_UART_DISABLE_IT(uart, UART_IT_RXNE); /* 先暂停该串口字节接收中断，避免清记录途中又写入字节。 */
+    __HAL_UART_DISABLE_IT(uart, UART_IT_ERR); /* 配置期间不让旧串口错误再次进入测试接收。 */
+    state->enabled = false; /* 中断若已经排队，看到此值后不再读写测试缓存。 */
+    HandleGzytTest_Revoke(state, channel); /* 原测试停止并重新要求松手；不发异步启动/停止按键消息。 */
+    state->read_index = 0U; /* 接收已关闭，可以把读取位置恢复到缓存开头。 */
+    state->write_index = 0U; /* 写入位置与读取位置一起复位，缓存从空状态开始。 */
+    state->identity_generation = generation; /* 记录本次使用的手柄，下一次插拔后重新配置。 */
+    __HAL_UART_CLEAR_OREFLAG(uart); /* 按 SR/DR 顺序清旧 RXNE 和错误，GPIO 阶段留下的电平不进入新帧。 */
+    state->enabled = enable; /* 初始化全部完成后，再允许中断访问这份接收记录。 */
+    if (enable == true)
+    {
+        __HAL_UART_ENABLE_IT(uart, UART_IT_ERR); /* 丢字节、噪声或帧错误时记录异常，任务随后清本次测试请求。 */
+        __HAL_UART_ENABLE_IT(uart, UART_IT_RXNE); /* 每收到一个字节就保存，不需要等待固定 DMA 块收满。 */
+    }
+}
+
+/*
+ * 函数功能：校验完整数字模块 v2 帧，更新 HAL4/HAL5 的有效状态和松手计数。
+ * 输入参数：state 为通道记录；received_tick 为最后一个字节的接收时刻；now 为当前 HAL 毫秒时刻。
+ * 返回参数：true 表示帧可接受或为不续时的重复帧；false 表示须停止、清旧缓存并重新松手，包括运行中松开或改变按钮。
+ */
+static bool HandleGzytTest_AcceptFrame(GzytTestState_t *state, uint32_t received_tick, uint32_t now)
+{
+    uint16_t crc = (uint16_t)state->frame[10] | ((uint16_t)state->frame[11] << 8U); /* CRC 低字节先发，与数字模块格式一致。 */
+    uint16_t sequence = (uint16_t)state->frame[4] | ((uint16_t)state->frame[5] << 8U); /* 读取 16 位小端递增序号。 */
+    uint8_t trigger = state->frame[7] & GZYT_TEST_BUTTON_MASK; /* 只解释 HAL4/HAL5，其它三个 Hall 不控制此次测试。 */
+    if ((Common_Crc16(&state->frame[2], 8U) != crc) || (state->frame[8] != 0x01U) ||
+        ((state->frame[6] & 0xE0U) != 0U) || ((state->frame[7] & 0xE0U) != 0U) ||
+        ((state->frame[9] & 0xC0U) != 0U) || ((uint32_t)(now - received_tick) >= GZYT_TEST_TIMEOUT_MS))
+    {
+        return false; /* CRC、就绪状态、保留位或帧时效不合格，不能把异常时清零的触发位当成有效松手。 */
+    }
+    if (state->have_sequence == true)
+    {
+        if (sequence == state->sequence) return true; /* 重复帧不改变按钮、不累计松手，也不刷新通信有效时间。 */
+        if (((uint16_t)(sequence - state->sequence) != 1U) || (state->frame[9] != state->reset_flags) ||
+            ((uint32_t)(received_tick - state->last_frame_tick) >= GZYT_TEST_TIMEOUT_MS))
+        {
+            return false; /* 跳号、倒序、复位原因改变或帧间断超过 50ms 后，先停测试再重新确认松手。 */
+        }
+    }
+    if ((trigger == GZYT_TEST_BUTTON_MASK) ||
+        ((state->running == true) && (trigger != state->run_trigger)) ||
+        ((state->trigger != 0U) && (trigger != 0U) && (trigger != state->trigger)))
+    {
+        return false; /* 双键、运行中松开或未松开就换键均清运行请求，不允许直接由正转切到反转。 */
+    }
+    if (trigger == 0U)
+    {
+        if (state->trigger != 0U) state->release_count = 0U; /* 从按下变为松开时，重新累计本次松手的有效帧。 */
+        if (state->release_count < GZYT_TEST_RELEASE_FRAMES)
+        {
+            if ((state->frame[6] & GZYT_TEST_BUTTON_MASK) == GZYT_TEST_BUTTON_MASK)
+            {
+                ++state->release_count; /* 原始电平均高且稳定触发位为零，才计为一帧确实松开。 */
+            }
+            else
+            {
+                state->release_count = 0U; /* 原始电平仍低时不能用去抖延迟的零触发位解锁新启动。 */
+            }
+        }
+    }
+    state->trigger = trigger; /* 保存本帧确认的按钮状态，供任务按住运行或等待新按下。 */
+    state->sequence = sequence; /* 只保存新且正常的序号，下一帧必须连续。 */
+    state->reset_flags = state->frame[9]; /* 保存本次复位原因，模块重启后不能沿用旧松手记录。 */
+    state->last_frame_tick = received_tick; /* 使用实际到达时刻，不能用当前处理时刻给积压帧续时。 */
+    state->have_sequence = true; /* 已有正常新帧，后续开始序号和超时检查。 */
+    return true; /* 帧有效，按钮状态及通信时刻已同步更新。 */
+}
+
+/*
+ * 函数功能：处理一个通道的数字按钮缓存；HAL4 按住正转、HAL5 按住反转，释放、异常或超时后清请求。
+ * 输入参数：channel 为 CHANNEL_A 或 CHANNEL_B；由按键任务在公共业务互斥锁内调用。
+ * 返回参数：无；仅当前在线 GZYT、手控选中且已有非零方向转速时允许启动。
+ */
+static void HandleGzytTest_PollChannel(uint8_t channel)
+{
+    GzytTestState_t *state = (channel == CHANNEL_A) ? &s_gzyt_test_a : &s_gzyt_test_b; /* 选择本通道独立记录。 */
+    UART_HandleTypeDef *uart = (channel == CHANNEL_A) ? &huart10 : &huart8; /* 保持 A/UART10、B/UART8 对应关系。 */
+    bool online = (channel == CHANNEL_A) ? WorkMessage.Channel_Aonline : WorkMessage.Channel_Bonline; /* 只使用本通道校验完成后的在线标志。 */
+    bool enable = online && (HandleRunKey_GetChannelModel(channel) == GZYT_ONLINES) &&
+                  (WorkMessage.channel_work == channel) && (WorkMessage.hand_model == GZYT_ONLINES); /* 非选中或非 GZYT 时不接收测试按钮。 */
+    uint32_t now = HAL_GetTick(); /* 本轮超时检查时刻，不能用它替换字节实际接收时刻。 */
+    uint16_t end; /* 本轮最多处理开始时已收字节，防止噪声连续到达让任务无法返回。 */
+    uint8_t direction; /* 按触发位生成 ZZDIR/FZDIR，禁止把 Hall 电平当成方向号。 */
+
+    HandleGzytTest_Configure(state, channel, uart, enable); /* 插拔、切通道或退出 GZYT 时清掉旧数据并重新要求松手。 */
+    if (enable == false) return; /* 本通道不具备测试条件，不处理 GPIO 或 KSZ 的串口电平。 */
+    if ((state->rx_fault == true) ||
+        ((state->frame_size != 0U) && ((uint32_t)(now - state->frame_start_tick) >= GZYT_TEST_TIMEOUT_MS)))
+    {
+        HandleGzytTest_Revoke(state, channel); /* 串口错误、缓存满或旧半帧超时后先清请求，不允许后面的积压字节立即重启。 */
+        return; /* 下一轮从新字节重新确认两键松开。 */
+    }
+    end = state->write_index; /* 固定本轮结束位置，本轮后到达的字节留给下一次任务。 */
+    now = HAL_GetTick(); /* 取结束位置后再读当前时间，已保存字节的接收时刻不会晚于本次检查时刻。 */
+    while (state->read_index != end)
+    {
+        uint8_t byte = state->rx[state->read_index]; /* 先复制字节，随后才能把该位置交回中断使用。 */
+        uint32_t tick = state->rx_tick[state->read_index]; /* 同时复制该字节到达时刻，不能混入下一圈写入的新时刻。 */
+        state->read_index = (uint16_t)((state->read_index + 1U) % GZYT_TEST_RX_SIZE); /* 字节和时刻复制完成后推进读取位置。 */
+        if ((uint32_t)(now - tick) >= GZYT_TEST_TIMEOUT_MS)
+        {
+            HandleGzytTest_Revoke(state, channel); /* 即使随后还有新字节，也不能让积压旧帧维持运行或累计松手。 */
+            return; /* 丢掉本轮剩余积压数据，等待新的正常松手帧。 */
+        }
+        if (state->frame_size == 0U) state->frame_start_tick = tick; /* 新候选帧开始时记下时间，后续拆帧不得跨越超时限制。 */
+        state->frame[state->frame_size++] = byte; /* 逐字节拼候选帧，支持一帧拆成多次任务接收。 */
+        if (state->frame_size < GZYT_TEST_FRAME_SIZE) continue; /* 字节不足 12 个时不解析按钮，保留到下一轮。 */
+        if ((state->frame[0] != 0xA5U) || (state->frame[1] != 0x5AU) ||
+            (state->frame[2] != 0x02U) || (state->frame[3] != GZYT_TEST_FRAME_SIZE))
+        {
+            memmove(state->frame, &state->frame[1], GZYT_TEST_FRAME_SIZE - 1U); /* 帧头错位时只移掉首字节，保留后面的可能帧头。 */
+            state->frame_size = GZYT_TEST_FRAME_SIZE - 1U; /* 下一字节到达后继续查找完整 v2 帧，不把杂字节当成按钮。 */
+            continue; /* 尚未找到可校验的帧，本轮通信有效时间不变。 */
+        }
+        state->frame_size = 0U; /* 已取得完整候选帧，校验成功后可继续处理同一缓存中的下一帧。 */
+        if (HandleGzytTest_AcceptFrame(state, tick, now) == false)
+        {
+            HandleGzytTest_Revoke(state, channel); /* 坏帧、松开或换键均先清请求，后面的积压按下不能在本轮再次启动。 */
+            return; /* 等新的三帧松手及下一次按下，避免同轮停止后又发送非零请求。 */
+        }
+    }
+    if ((state->rx_fault == true) ||
+        ((state->have_sequence == true) && ((uint32_t)(now - state->last_frame_tick) >= GZYT_TEST_TIMEOUT_MS)))
+    {
+        HandleGzytTest_Revoke(state, channel); /* 处理期间接收出错或最后新帧已超时，均清本次测试请求。 */
+        return; /* 重复帧和坏版本帧不能延长运行许可。 */
+    }
+    if (state->have_sequence == false) return; /* 首帧尚未收全时保留半帧；没有正常帧不能累计松手或启动。 */
+    if (state->running == true)
+    {
+        if ((WorkMessage.runflag_work == false) || (WorkMessage.alarm_flag == true) ||
+            (WorkMessage.drivetype_work != HANDLEWORK) || (ControlSignalMessage.handle_control_flag == false) ||
+            (ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) == false))
+        {
+            HandleGzytTest_Revoke(state, channel); /* 报警或其它处理已经结束测试时清旧按住记录，条件恢复不能自动重启。 */
+        }
+        return; /* 正常按住时保留原请求，不反复写方向、转速和启动消息。 */
+    }
+    if ((state->trigger == 0U) || (state->release_count < GZYT_TEST_RELEASE_FRAMES)) return; /* 两键松开或还未确认三帧松手时不启动。 */
+    if ((WorkMessage.drivetype_work != HANDLEWORK) || (WorkMessage.runflag_work == true) ||
+        (WorkMessage.alarm_flag == true) || (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE) == true) ||
+        (MotorUart_IsRecentFeedbackMoving() == true) || (s_handle_run_key_owner_channel != CHANNEL_NONE))
+    {
+        HandleGzytTest_Revoke(state, channel); /* 未选手控、已有请求、报警、其它来源占用、近期仍转动或旧 GPIO 按键尚未退出时拒绝本次按下；必须再松开后重试。 */
+        return; /* 持续按住不能在条件后来恢复时自行启动。 */
+    }
+    direction = (state->trigger == GZYT_TEST_FORWARD_MASK) ? ZZDIR : FZDIR; /* HAL4 使用主控正转语义，HAL5 使用反转语义。 */
+    DirActive((direction == ZZDIR) ? HANDLEKey_dir_Forward : HANDLEKey_dir_Reverse); /* 使用原方向处理，同步当前方向、该方向转速和 A/B 记忆及屏幕。 */
+    if ((WorkMessage.dir_work != direction) || (WorkMessage.speed_set_work == 0U) ||
+        (Pubinterface_CheckCommonSocketToolReadyForRun() == false) ||
+        (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false))
+    {
+        HandleGzytTest_Revoke(state, channel); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */
+        return; /* 下次需重新确认两键松开并按下，不能反复尝试旧请求。 */
+    }
+    HandleRunKey_ApplyHandleMode(channel); /* 保存本通道手控方式，切换通道后仍按正常界面规则选择控制方式。 */
+    Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 这是新按下，冷却泵按原规则重新检查实际压力。 */
+    WorkMessage.speed_work = WorkMessage.speed_set_work; /* 使用本方向当前保存的 rpm 设置，不修改电机类型、倍率或保护电流。 */
+    ControlSignalMessage.handle_control_flag = true; /* 标记本次由手柄数字按钮发出运行请求。 */
+    WorkMessage.runflag_work = true; /* 驱动任务按已有电机参数发送运行帧，仍由驱动反馈和原报警逻辑处理保护。 */
+    Pubinterface_SetHandleInjectionPumpRun(true); /* 与正常手控相同，冷却泵继续执行原定位、压力和联动检查。 */
+    state->run_trigger = state->trigger; /* 保存本次实际使用的按钮，随后换键必须先清请求并重新松手。 */
+    state->running = true; /* 记录本模块已经写入运行请求；不代表驱动已回复或电机已实际转动。 */
+    /* 本测试直接更新请求，不再发送 HANDLEKey_motor_start 队列消息，避免超时停机后旧启动消息再次置位。 */
+}
+#endif
+
 /*
  * 函数功能：手柄实体按键周期扫描任务，按统一物理映射和手柄型号处理A/B实体键启停。
  * 输入参数：event 调度器事件参数，当前任务不使用。
@@ -520,8 +813,14 @@ static void HandleKey_ScanRunKeys(void)
  */
 void HANDLEKEYTaskFunc(uint32_t event)
 {
-	(void)event; /* 当前任务只按固定 30ms 周期运行，不使用调度事件值。 */
-	HandleRunKey_UpdatePinModes(); /* 无论控制权是否被占用都先跟随识别结果切换复用脚，避免KSZ串口长期停在GPIO模式。 */
+	(void)event; /* 使用周期扫描，不使用调度事件值；测试开启后只加快串口处理。 */
+	HandleRunKey_UpdatePinModes(); /* 无论控制权是否被占用都先跟随识别结果切换复用脚，避免KSZ/GZYT串口停在GPIO模式。 */
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+    HandleGzytTest_PollChannel(CHANNEL_A); /* 即使其它来源占用，也先维护 A 测试的超时和旧请求清除。 */
+    HandleGzytTest_PollChannel(CHANNEL_B); /* B 单独接收和确认松手，不用 A 数据控制 B。 */
+    if ((uint32_t)(HAL_GetTick() - s_handle_gpio_scan_tick) < 30U) return; /* GPIO 仍间隔至少 30ms，不能把原连续确认次数缩短为 10ms。 */
+    s_handle_gpio_scan_tick = HAL_GetTick(); /* 记录本次 GPIO 扫描时刻，下一次至少再等待 30ms。 */
+#endif
 	HandleRunKey_ServiceFootAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
 	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 	{
@@ -531,14 +830,19 @@ void HANDLEKEYTaskFunc(uint32_t event)
 }
 
 /*
- * 函数功能：创建并启动手柄实体按键 30ms 周期任务。
+ * 函数功能：创建手柄按键任务；开启 GZYT 测试时每 10ms 处理串口，普通 GPIO 仍按 30ms 扫描。
  * 输入参数：无。
  * 返回参数：无。
  */
 void HandleKeyScan_Init(void)
 {
 	Kernel_TaskCreate(&HANDLEKEYTaskHandle, HANDLEKEYTaskFunc); /* 使用现有独立静态任务对象创建实体键任务。 */
+#if (GZYT_DIGITAL_TEST_ENABLE == 1U)
+    s_handle_gpio_scan_tick = HAL_GetTick(); /* 初始化 GPIO 扫描时刻，测试任务加快后仍保持原去抖间隔。 */
+    Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, GZYT_TEST_TASK_MS); /* 同一任务每 10ms 检查收帧及超时，不额外增加业务线程。 */
+#else
 	Kernel_TaskStart(&HANDLEKEYTaskHandle, KERNEL_TASK_ALWAYS, 30U); /* 周期固定为 30ms，不改变当前实体键去抖时基。 */
+#endif
 }
 
 #if (MAINCTRL_DIAG_ENABLE == 1U)

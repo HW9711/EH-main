@@ -29,6 +29,7 @@
 #define EMBD_ONLINES         20U//EMBD 6 万增速手柄编号，用于 EEPROM 识别和屏幕显示
 #define EMBC_ONLINES         21U//EMBC 普通电动手柄编号，用于 EEPROM 识别和屏幕显示
 #define DHYTM_ONLINES        22U//DHYTM 反旋增速手柄编号；屏幕固定反转，电机实际正转，使用无霍尔无刷驱动
+#define GZYT_ONLINES         23U//GZYT 手柄编号；Page2 为 6B 11，在线后按钮脚切为串口接收，运行参数由 EEPROM 单独配置
 
 
 /* 通道固定编号；0 表示未选择通道，不代表 A 或 B。 */
