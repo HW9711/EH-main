@@ -443,33 +443,36 @@ static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 公共接头 EP
 //           Diameter：直径
 //           Angle：角度
 // 输    出: 无
-// 函数说明: 4_运行界面、5_运行界面，一体式刀具参数（文字显示），样式：
+// 函数说明: 刀具规格文字的中文样式如下；英文模式仅将前 4 字节改为 Spec。
 //  规     格    :      φ     4  .  0   、   1  1  0   m   m   、          0    °
 // B9E6   B8F1  3A 20  A6D5  34 2E 30 A1A2  31 31 30  6D  6D  A1A2  20    30   A1E3
 //============================================================================
 /*
- * 函数功能：拼出刀具的直径、长度和角度文字并发送到屏幕；三项都为 0 时清空文字。
- * 输入参数：Addr 为文字地址；Length 为长度整数（mm）；Diameter 普通模式按 0.1mm 显示，原始整数模式不除以 10；Angle 为角度整数（度）。
+ * 函数功能：按 LCD_TOOL_SPEC_LANGUAGE 选择“规格”或“Spec”前缀，拼出直径、长度和角度文字并发送到屏幕；三项都为 0 时清空文字。
+ * 输入参数：Addr 为文字地址；Length 为长度整数（mm）；Diameter 为 16 位原值，普通模式按 0.1mm 显示，EPC 原始整数模式仅传 0~255 且不除以 10；Angle 为角度整数（度）。
  * 返回参数：无。
  */
-void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
+void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t Diameter, uint8_t Angle)
 {
   uint8_t LengthTemp[3] = { 0 }, DiameterTemp[3] = { 0 }, AngleTemp[3] = { 0 };
 
   uint8_t dat[64] = {0x5A, 0xA5, 0x1E, 0x82};
 
   static uint16_t LengthLast = 0xff;
-  static uint8_t DiameterLast = 0xff, AngleLast = 0xff;
+  static uint16_t DiameterLast = 0xffffU; /* 保留上次完整直径，避免 144 和 400 这类低字节相同的规格被误判为无需刷新。 */
+  static uint8_t AngleLast = 0xff;
+  static uint8_t TextLengthLast = 28U; /* 上次规格正文的字节数，较长直径切回短值时补空格清除旧尾部。 */
+  uint8_t text_length; /* 保存本次正文实际长度，不把末尾清旧文字的空格计入下一次正文长度。 */
   static uint8_t ModeLast = 0xff;
   uint8_t raw_integer_mode = s_lcd_integrated_cutter_raw_integer_mode; /* 1 表示公共接头直径直接显示整数，0 表示直径除以 10 后显示一位小数。 */
-  uint8_t diameter_decimal_extra = 0U; /* 直径小数格式达到 10.0mm 以上时多占 1 个字符，长度和角度文本需要同步右移。 */
+  uint8_t diameter_decimal_extra = 0U; /* 比 x.y 格式多出的字符数，16 位直径最多显示 6553.5，长度和角度最多右移 3 字节。 */
 
   /* 规格数值和显示模式都未变化时跳过重复写屏，避免周期刷新占用 UART6。 */
   if ((Length == LengthLast) && (Diameter == DiameterLast) && (Angle == AngleLast) && (raw_integer_mode == ModeLast))
     return ;
 
   LengthLast = Length;
-  DiameterLast = Diameter;
+  DiameterLast = Diameter; /* 按 16 位记住本次直径，下次高字节变化也会重新写屏。 */
   AngleLast = Angle;
   ModeLast = raw_integer_mode;
 
@@ -497,19 +500,18 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
   }
   else
   {
-		#if 1
-	  dat[6] = 0xB9;
-	  dat[7] = 0xE6;  //规
-
-	  dat[8] = 0xB8;
-	  dat[9] = 0xF1;  //格
-		#else
-		 dat[6] = 'S';
-	  dat[7] = 'p';  //规
-
-	  dat[8] = 'e';
-	  dat[9] = 'c';  //格
-		#endif
+	  /* 中英文前缀都占 4 字节，后面的直径、长度和角度仍使用原来的字节位置。 */
+#if (LCD_TOOL_SPEC_LANGUAGE == 0U)
+	  dat[6] = 0xB9; /* “规”的 GBK 高字节，与下一字节一起显示中文前缀。 */
+	  dat[7] = 0xE6; /* “规”的 GBK 低字节，保持中文屏幕原有编码。 */
+	  dat[8] = 0xB8; /* “格”的 GBK 高字节，接在“规”字之后。 */
+	  dat[9] = 0xF1; /* “格”的 GBK 低字节，完成 4 字节中文前缀。 */
+#else
+	  dat[6] = 'S'; /* 英文前缀 Spec 的第 1 个 ASCII 字节，替换原“规”字高字节。 */
+	  dat[7] = 'p'; /* 英文前缀 Spec 的第 2 个 ASCII 字节，替换原“规”字低字节。 */
+	  dat[8] = 'e'; /* 英文前缀 Spec 的第 3 个 ASCII 字节，替换原“格”字高字节。 */
+	  dat[9] = 'c'; /* 英文前缀 Spec 的第 4 个 ASCII 字节，保持后续数值位置不变。 */
+#endif
 
 	  dat[10] = 0x3A; //:
 	  dat[11] = 0x20; //空格
@@ -541,21 +543,20 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  }
 	  else
 	  {
-		  if(DiameterTemp[2] > 0U)
+		  uint16_t diameter_integer = Diameter / 10U; /* 先取得毫米整数部分，65535 对应 6553，不能再用单个百位字符表示。 */
+		  uint16_t divisor = 1000U; /* 整数部分最多四位，从千位开始查找首个有效数字。 */
+		  uint8_t digits = 0U; /* 已写入的整数位数，用于安排小数点以及后续长度和角度位置。 */
+		  while ((divisor > 1U) && (diameter_integer < divisor)) divisor /= 10U; /* 跳过前导零，但小于 1mm 时仍保留整数位 0。 */
+		  do
 		  {
-			  diameter_decimal_extra = 1U; /* 普通模式直径按 0.1mm 解释，150 显示为 15.0，多出的字符让后面文字右移一位。 */
-			  dat[2] = 32; /* 直径从 x.y 扩展为 xx.y 后，DWIN 本帧数据长度增加 1 字节。 */
-			  dat[14] = DiameterTemp[2] + 0x30; //直径十位，150 中的 1 表示 15.0 的十位。
-			  dat[15] = DiameterTemp[1] + 0x30; //直径个位，150 中的 5 表示 15.0 的个位。
-			  dat[16] = 0x2E;  //.
-			  dat[17] = DiameterTemp[0] + 0x30; //直径小数位，151 时这里显示 1。
-		  }
-		  else
-		  {
-			  dat[14] = DiameterTemp[1] + 0x30; //直径整数位，40 显示为 4.0 时保持旧位置。
-			  dat[15] = 0x2E;  //.
-			  dat[16] = DiameterTemp[0] + 0x30; //直径小数位，40 显示为 4.0。
-		  }
+			  dat[14U + digits] = (uint8_t)(diameter_integer / divisor % 10U) + 0x30U; /* 从高位到低位写入十进制整数，400 的整数部分写成 40。 */
+			  ++digits; /* 下一个数字写入后一个字符位置，不覆盖前面的整数位。 */
+			  divisor /= 10U; /* 转向下一位，个位写完后变为 0 并结束循环。 */
+		  } while (divisor != 0U);
+		  dat[14U + digits] = 0x2E; /* 整数之后写小数点，保持 EEPROM 规格的一位小数格式。 */
+		  dat[15U + digits] = (uint8_t)(Diameter % 10U) + 0x30U; /* 原始值的个位为 0.1mm 位，400 的小数位为 0。 */
+		  diameter_decimal_extra = digits - 1U; /* 相比旧 x.y 格式，多出的整数位全部计入后续文字偏移。 */
+		  dat[2] = 31U + diameter_decimal_extra; /* 同步 DWIN 帧长度，确保完整发送扩展后的直径及后续文字。 */
 	  }
 	  dat[17 + diameter_decimal_extra] = 0xA1;
 	  dat[18 + diameter_decimal_extra] = 0xA2;  //、
@@ -601,7 +602,14 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Dia
 	  }
   }
 
-  Uart6_SendPacket(dat, (uint16_t)(dat[2] + 3U));
+  text_length = dat[2] - 3U; /* 帧长度字段包含命令和两字节地址，减去 3 才是规格正文长度。 */
+  if (text_length < TextLengthLast)
+  {
+    Common_Memset(0x20, &dat[6U + text_length], TextLengthLast - text_length); /* 长直径切到短直径或清空时，用空格擦掉上一条规格的多余尾部。 */
+    dat[2] = TextLengthLast + 3U; /* 本帧须包含新增清屏空格，避免旧角度或单位残留。 */
+  }
+  TextLengthLast = text_length; /* 保存本次实际正文长度，旧尾部已经由本帧空格清除。 */
+  Uart6_SendPacket(dat, (uint16_t)(dat[2] + 3U)); /* 发送完整规格正文及必要的尾部清屏空格。 */
 
 }
 

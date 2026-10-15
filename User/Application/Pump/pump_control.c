@@ -9,6 +9,10 @@
 #define PUMP_DRAWWATER_SPEED_MAX 15U
 /* 灌注泵设定流量上限，单位 mL/min，允许 0~300；改值还须核对泵任务中的 300 上限和高流量换算。 */
 #define PUMP_POURWATER_SPEED_MAX 300U
+/* 灌注泵每次加减的流量，单位 mL/min；屏幕、HMI和脚踏共用，靠近上下限时只调整至边界。 */
+#define PUMP_POURWATER_FLOW_STEP 30U
+/* 注水泵脚踏短按每次增加的流量，单位 mL/min；调大可减少按键次数，不改变屏幕步进。 */
+#define PUMP_INJECTWATER_PEDAL_FLOW_STEP 10U
 /* 抽吸泵设定为 0 时使用的启动值，单位为内部设定，须在 1~15；改值会改变调用补速函数时的起始输出。 */
 #define PUMP_DRAWWATER_START_SPEED 3U
 /* 灌注泵设定为 0 时使用的启动流量，单位 mL/min，须在 1~300；仅在调用补速函数的启动路径生效。 */
@@ -53,6 +57,10 @@ static uint16_t Pump_GetSpeedMax(const pumpMessage_t *pump_message)
 
 	if (pump_message->speed_Max != 0U)
 	{
+		if ((pump_message->type == INJECTWATER) && (pump_message->speed_Max > PUMP_INJECTWATER_SPEED_MAX))
+		{
+			return PUMP_INJECTWATER_SPEED_MAX; /* 配置上限超过70时仍限制注水流量，防止屏幕和脚踏绕过统一上限。 */
+		}
 		return pump_message->speed_Max; /* 若后续 EEPROM 或参数表配置了上限，则优先服从配置值。 */
 	}
 
@@ -106,24 +114,6 @@ static uint16_t Pump_GetWaterFlowStep(uint16_t current_flow, bool increase)
 	return 20U; /* 高于 200 使用 20；恰好为 200 时增加流量也从本档开始使用 20。 */
 }
 
-
-/*
- * 函数功能：按灌注泵当前流量和加减方向选择步进。
- * 输入参数：current_flow为当前设定流量，单位mL/min；increase为true增加、false减少。
- * 返回参数：0~70区间为5，70~100区间为10，100~300区间为20；分界点增加用较高区间，减少用较低区间。
- */
-static uint16_t Pump_GetPourWaterFlowStep(uint16_t current_flow, bool increase)
-{
-	if ((current_flow < 70U) || ((increase == false) && (current_flow == 70U)))
-	{
-		return 5U; /* 低流量每次调整5mL/min；70向下调时仍使用5。 */
-	}
-	if ((current_flow < 100U) || ((increase == false) && (current_flow == 100U)))
-	{
-		return 10U; /* 中流量每次调整10mL/min；100向下调时使用10。 */
-	}
-	return 20U; /* 100向上及更高流量每次调整20mL/min，调用方限制最大流量。 */
-}
 
 /*
  * 函数功能：按 EX8 屏幕交互表判断屏幕泵按键是否应被拒绝。
@@ -211,7 +201,7 @@ static bool Pump_ShouldRejectScreenKey(uint8_t key_value)
 
 
 /*
- * 函数功能：处理泵启停和排空按键。驱动未就绪时拒绝启动；定位失败后按屏幕泵键只重新定位，成功后仍须再按一次才能运行。
+ * 函数功能：处理泵启停和排空按键。注水泵忽略脚踏按钮长按，不执行启动或停止。驱动未就绪时拒绝启动；定位失败后按屏幕泵键只重新定位，成功后仍须再按一次才能运行。
  * 输入参数：key_value 为泵启停键值，pump_owner 为该键对应的控制权来源。
  * 返回参数：无。
  */
@@ -224,6 +214,10 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 	case JTKey_left_long:
 	case HMIkey_APUMP_control:
 	case SCREENKey_APUMP_control:
+		if ((key_value == JTKey_left_long) && (pumpMessageA.type == INJECTWATER))
+		{
+			return; /* A注水泵忽略脚踏按钮长按，不改变运行、排空和流量设定；屏幕及HMI启停继续按原逻辑处理。 */
+		}
 		/* A 泵类型未识别时强制保持停止，并退出可能残留的本地控制权。 */
 		if (pumpMessageA.type == 0)
 		{
@@ -289,6 +283,10 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 	case JTKey_right_long:
 	case SCREENKey_BPUMP_control:
 	case HMIkey_BPUMP_control:
+		if ((key_value == JTKey_right_long) && (pumpMessageB.type == INJECTWATER))
+		{
+			return; /* B注水泵忽略脚踏按钮长按，不改变运行、排空和流量设定；屏幕及HMI启停继续按原逻辑处理。 */
+		}
 		/* B 泵类型未识别时强制保持停止，并退出可能残留的本地控制权。 */
 		if (pumpMessageB.type == 0)
 		{
@@ -357,7 +355,7 @@ static void Pump_HandleRunKey(uint8_t key_value, uint8_t pump_owner)
 }
 
 /*
- * 函数功能：处理A/B泵共用加减速；屏幕、HMI和脚踏使用同一计算，按泵类型与当前设定选择步进并限幅。
+ * 函数功能：处理A/B泵屏幕和HMI加减速，以及非注水泵的脚踏加速；按泵类型与当前设定选择步进并限幅。
  * 输入参数：key_value 为 A/B 泵加速或减速键值。
  * 返回参数：无。
  */
@@ -386,7 +384,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageA.speed_work, increase); /* A灌注泵按当前流量选择5/10/20mL/min步进。 */
+			pumpMessageA.speed_step_value = PUMP_POURWATER_FLOW_STEP; /* A灌注泵每次固定加减30mL/min，后续统一限制上下限。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -451,7 +449,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageB.speed_work, increase); /* B灌注泵使用与A相同的5/10/20mL/min步进。 */
+			pumpMessageB.speed_step_value = PUMP_POURWATER_FLOW_STEP; /* B灌注泵与A相同，每次固定加减30mL/min。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -504,14 +502,15 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 }
 
 /*
- * 函数功能：脚踏短按从对应泵当前设定增加一步，已到最大值时回到0。
+ * 函数功能：脚踏短按调节对应泵：注水泵每次增加10mL/min，其余泵沿用屏幕步进，已到最大值时回到0。
  * 输入参数：key_value为左或右脚踏短按键值，分别调整A泵或B泵。
  * 返回参数：无；只改变流量设定，不改变启停请求。
  */
 static void Pump_HandleGearKey(uint8_t key_value)
 {
 	pumpMessage_t *pump_message; /* 指向本次按键对应的泵，避免左右脚踏互相改值。 */
-	uint8_t add_key; /* 转为共用调速函数的增加键，步进和上限与屏幕一致。 */
+	uint8_t add_key; /* 非注水泵转为共用增加键，保持原有步进与上限。 */
+	uint16_t pump_speed_max; /* 保存本次对应泵的流量上限，注水泵不超过70mL/min。 */
 	if (key_value == JTkey_left_short)
 	{
 		pump_message = &pumpMessageA; /* 左键只调整A泵当前设定。 */
@@ -534,7 +533,8 @@ static void Pump_HandleGearKey(uint8_t key_value)
 	{
 		return; /* 注水泵正在屏幕定时排空，本次不允许脚踏改速或回零。 */
 	}
-	if (pump_message->speed_work >= Pump_GetSpeedMax(pump_message))
+	pump_speed_max = Pump_GetSpeedMax(pump_message); /* 使用对应泵配置并限制注水泵最高流量，脚踏不能绕过上限。 */
+	if (pump_message->speed_work >= pump_speed_max)
 	{
 		pump_message->speed_work = 0U; /* 已到上限后再短按才回零，保留脚踏循环调节方式。 */
 		if (key_value == JTkey_left_short)
@@ -547,7 +547,28 @@ static void Pump_HandleGearKey(uint8_t key_value)
 		}
 		return; /* 回零当次不再增加步进，下次短按才从0继续增加。 */
 	}
-	Pump_HandleSpeedKey(add_key); /* 按当前设定和泵类型增加一步，直接使用屏幕相同的步进及限幅计算。 */
+	if (pump_message->type == INJECTWATER) /* 注水泵脚踏使用独立步进，屏幕加减速仍走原有计算。 */
+	{
+		pump_message->speed_step_value = PUMP_INJECTWATER_PEDAL_FLOW_STEP; /* 本次脚踏短按增加10mL/min，不受屏幕上次使用的步进影响。 */
+		if ((uint16_t)(pump_speed_max - pump_message->speed_work) <= pump_message->speed_step_value)
+		{
+			pump_message->speed_work = pump_speed_max; /* 剩余流量不足10时只加到上限，本次不回零。 */
+		}
+		else
+		{
+			pump_message->speed_work += pump_message->speed_step_value; /* 从当前设定增加10，不把屏幕设置的非整十数值重置。 */
+		}
+		if (key_value == JTkey_left_short)
+		{
+			Pubinterface_RefreshPumpADisplay(); /* 左脚踏改值后刷新A泵数值和流量进度。 */
+		}
+		else
+		{
+			Pubinterface_RefreshPumpBDisplay(); /* 右脚踏改值后刷新B泵数值和流量进度。 */
+		}
+		return; /* 注水泵已按独立步进处理，不再叠加屏幕步进。 */
+	}
+	Pump_HandleSpeedKey(add_key); /* 灌注泵和抽吸泵继续使用原有步进及限幅计算。 */
 }
 
 /*

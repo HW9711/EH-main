@@ -19,7 +19,7 @@
 #define DIAG_REFRESH_MS 1000U /* 相同数据每 1000ms 补记一次；数据有变化就立即记录。调小会产生更多记录，更快覆盖旧日志。 */
 #define DIAG_CACHE_COUNT 128U /* 最多记住 128 组数据的上次值，用于判断是否变化；用完后直接记日志。调大会增加 RAM 占用。 */
 #define DIAG_TX_DEPTH 8U /* 普通 UART2 应答最多排队 8 帧；队列满后丢弃新帧并计数。调大会增加 RAM 占用。 */
-#define DIAG_TX_TIMEOUT_MS 40U /* UART2 发送超过 40ms 仍未完成就中止本帧。150 字节在 115200 波特率下约需 13ms；调小会更早中止。 */
+#define DIAG_TX_TIMEOUT_MS 40U /* UART2 发送超过 40ms 仍未完成就中止本帧。160 字节在 115200 波特率下约需 14ms；调小会更早中止。 */
 #define DIAG_LINK_TIMEOUT_MS 2500U /* 上位机每秒查询诊断状态；连续 2500ms 无诊断请求后恢复普通通信。调大会延后恢复，调小容易受 USB 延迟影响。 */
 #define DIAG_WIRE_CHUNK 28U /* 每条串口日志最多放 28 个原始字节，较长报文拆成多条；修改此值必须同步上位机解码。 */
 
@@ -47,7 +47,7 @@ typedef struct
 typedef struct
 {
     uint8_t data[EXTERNAL_COMM_MAX_FRAME_SIZE]; /* 保存整帧的独立副本；入队后，调用方可以修改原来的组帧数组。 */
-    uint16_t length; /* 本帧实际字节数，范围为 1～150；发送时只取这些字节。 */
+    uint16_t length; /* 本帧实际字节数，范围为 1～160；发送时只取这些字节。 */
 } DiagnosticTxFrame_t;
 
 typedef struct
@@ -559,7 +559,7 @@ uint8_t Diagnostic_IsCompleteRequest(const uint8_t *data, uint16_t length)
 
 /*
  * 函数功能：复制一帧普通外部通信应答并排队，立即返回；队列满或参数无效时丢弃本帧并计数。
- * 输入参数：data 指向完整正式帧或简易帧，不能为空；length 为 1～150 字节。
+ * 输入参数：data 指向完整正式帧或简易帧，不能为空；length 为 1～160 字节。
  * 返回参数：无。
  */
 void Diagnostic_SendNormal(const uint8_t *data, uint16_t length)
@@ -671,7 +671,7 @@ void Diagnostic_TransportService(void)
  */
 uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, uint8_t info, const uint8_t *data, uint16_t length)
 {
-    uint8_t payload[EXTERNAL_COMM_MAX_INFO_SIZE] = {0U}; /* 诊断应答的数据区，最多 134 字节；整帧仍由原外部通信协议补帧头和 CRC。 */
+    uint8_t payload[EXTERNAL_COMM_MAX_INFO_SIZE] = {0U}; /* 诊断应答的数据区，最多 144 字节；整帧仍由原外部通信协议补帧头和 CRC。 */
     uint8_t key[12] = {0U}; /* 用操作码、字节数和全部请求参数判断是否是上一条命令的重试。 */
     uint16_t payload_length = 16U; /* 应答前 16 字节固定保存版本、结果、请求号、采集批次、下一序号、条数和记录开关。 */
     uint32_t cursor = 0U; /* 上位机要求从哪条日志开始读取；0 表示从当前最旧日志开始。 */

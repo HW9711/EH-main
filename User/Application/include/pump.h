@@ -15,12 +15,12 @@
 #endif
 
 /*
- * 注水泵正常运行和手柄联动时的最大设定流量，单位 mL/min，当前允许 0~300。
+ * 注水泵正常运行和手柄联动时的最大设定流量，单位 mL/min，当前允许 0~70。
  * 修改后会改变屏幕、脚踏和上位机注水请求的上限；还应核对驱动换算和实测出液量。
  * 屏幕定时排空单独使用 PUMP_TIMING_DRAINAGE_SPEED，不按本宏限制排空流量。
  */
 #ifndef PUMP_INJECTWATER_SPEED_MAX
-#define PUMP_INJECTWATER_SPEED_MAX 300U
+#define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
 /*

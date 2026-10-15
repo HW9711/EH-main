@@ -7,9 +7,11 @@
 #include "diagnostic.h" /* 只观测相关UI消息，不改显示参数。 */
 #include "lcd.h"
 #include "Pubinterface.h"
+#include "pump.h" /* 注水泵进度条与流量调节共用最大流量，避免70已到上限却仍显示部分进度。 */
 #include "screen_address.h"
 #include "sscBEEP.h"
 #include "motoruartdata.h"
+#include "external_comm_task.h" /* 报警图片发给屏幕后同步给外控，临时提示也能在上位机显示。 */
 
 uint8_t DisPlayData[10] = {0};
 
@@ -87,7 +89,7 @@ static void UIDPQueue_Init(void)
 }
 
 /*
- * 函数功能：按泵类型和流量值换算屏幕 0~10 档档位。
+ * 函数功能：按泵类型和流量值换算屏幕0~10档；注水泵以统一流量上限为满格。
  * 输入参数：pump_type 为抽吸、注水或灌注类型；value 在注水/灌注时为 mL/min，在抽吸时为内部设置档值。
  * 返回参数：屏幕 0~10 档，换算结果大于 10 时只显示 10 档。
  */
@@ -97,17 +99,14 @@ static uint8_t UIDP_PumpGearFromValue(uint8_t pump_type, uint16_t value)
 
 	if(pump_type==INJECTWATER)//注水
 	{
-		if(value==0U)gear_value=0U; /* 注水流量为 0 时显示停止档，不点亮进度。 */
-		else if(value<=30U)gear_value=1U; /* 注水泵 1~30mL/min 显示 1 格，与灌注泵相同。 */
-		else if(value<=60U)gear_value=2U; /* 注水泵 31~60mL/min 显示 2 格。 */
-		else if(value<=90U)gear_value=3U; /* 注水泵 61~90mL/min 显示 3 格。 */
-		else if(value<=120U)gear_value=4U; /* 注水泵 91~120mL/min 显示 4 格。 */
-		else if(value<=150U)gear_value=5U; /* 注水泵 121~150mL/min 显示 5 格。 */
-		else if(value<=180U)gear_value=6U; /* 注水泵 151~180mL/min 显示 6 格。 */
-		else if(value<=210U)gear_value=7U; /* 注水泵 181~210mL/min 显示 7 格。 */
-		else if(value<=240U)gear_value=8U; /* 注水泵 211~240mL/min 显示 8 格。 */
-		else if(value<=270U)gear_value=9U; /* 注水泵 241~270mL/min 显示 9 格。 */
-		else gear_value=10U; /* 注水泵大于 270mL/min 就显示满格，异常大值也不再增加格数。 */
+		if(value >= PUMP_INJECTWATER_SPEED_MAX)
+		{
+			gear_value = (uint8_t)(UIDP_PUMP_GEAR_COUNT - 1U); /* 70及以上显示满格，定时排空的100流量也不越过图片表。 */
+		}
+		else
+		{
+			gear_value = (uint8_t)(((uint32_t)value * (UIDP_PUMP_GEAR_COUNT - 1U) + PUMP_INJECTWATER_SPEED_MAX - 1U) / PUMP_INJECTWATER_SPEED_MAX); /* 按70满量程向上取整到十格，零流量保持空格，非零小流量至少亮一格。 */
+		}
 	}
 	else if(pump_type==DRAWWATER)//抽吸
 	{
@@ -180,7 +179,7 @@ static uint16_t UIDP_PumpTypePicture(uint8_t pump_type, bool enable_flag)
 		case POURWATER:
 			return enable_flag ? 213U : 212U; /* 灌注泵标题使用 212/213 一组。 */
 		case INJECTWATER:
-			return enable_flag ? 213U : 210U; /* 注水泵识别在线后改用灌注泵 213 图标，停用态仍保留原 210 灰色图。 */
+			return enable_flag ? 211U : 210U; /* A/B 注水泵标题使用 210 灰色、211 黄色，分别表示停用和可用，与 EX8 中文屏幕资源一致。 */
 		default:
 			return 0U; /* 未知类型不显示成抽吸泵，由调用方隐藏标题。 */
 	}
@@ -644,10 +643,10 @@ void UITOOLDP(bool enable_flag,bool tool_type)
 }
 /*
  * 函数功能：刷新主界面刀具规格文本。
- * 输入参数：enable_flag 表示规格区是否显示；tool_length/tool_Diameter/tool_angle 为屏幕规格值；raw_display_flag 为公共接头 EPC 原始整数显示标志。
+ * 输入参数：enable_flag 表示规格区是否显示；tool_length/tool_angle 沿用长度、角度显示值；tool_Diameter 为 16 位直径，raw_display_flag=0 时单位为 0.1mm，=1 时为 EPC 原始整数。
  * 返回参数：无。
  */
-void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
+void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint16_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
 {
 	if(enable_flag)
 	{
@@ -655,11 +654,11 @@ void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint8_t tool_Diameter,ui
 		//LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, 30, 20, 10); 
 		if(raw_display_flag != 0U)
 		{
-			LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //公共接头 EPC 按原始整数显示，避免 0x10 被格式化成 1.6。
+			LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, (uint8_t)tool_Diameter, tool_angle); /* EPC 来源已限制在 0~255，继续按整数显示，16 显示为 Φ16。 */
 		}
 		else
 		{
-			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); //PXBA/PXBB 保持原有 x10 小数直径格式。
+			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); /* EEPROM 直径以 16 位原值传入，400 按 0.1mm 显示为 Φ40.0。 */
 		}
 	}
 	else
@@ -828,8 +827,8 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 	}
 }
 /*
- * 函数功能：刷新报警提示图片，驱动报警可使用独立图片覆盖值。
- * 输入参数：enable_flag 表示是否显示报警；arm_value 为 WorkMessage 统一报警码；picture_value 为驱动报警图片覆盖值。
+ * 函数功能：刷新报警提示图片，并记录实际发出的图片供上位机显示相同报警。
+ * 输入参数：enable_flag表示显示或关窗；arm_value为持续故障或临时提示的逻辑码；picture_value为图片覆盖值，0按逻辑码选图，0xFF隐藏图片。
  * 返回参数：无。
  */
 void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
@@ -839,11 +838,13 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	  if(picture_value == MOTOR_ALARM_PICTURE_NONE)
 	  {
 		LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP); /* 该驱动错误没有对应图片时清除旧图，但停机、蜂鸣和外控报警继续有效。 */
+		ExternalComm_ReportScreenAlarm(arm_value, MOTOR_ALARM_PICTURE_NONE); /* 上位机保留逻辑故障并明确没有图片，不能继续显示上一次故障的名称。 */
 		return; /* 图片处理已经完成，不能再按逻辑报警码误落到 84 号缺相图片。 */
 	  }
 	  if(picture_value != 0U)
 	  {
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,picture_value); /* 驱动报警使用上游选定的84~99图片，逻辑报警码不参与图号重映射。 */
+		ExternalComm_ReportScreenAlarm(arm_value, picture_value); /* 上传屏幕实际使用的覆盖图片，区分共用逻辑码的驱动故障及泵提示。 */
 		return; /* 已显示驱动专用图片，避免后续公用报警分支覆盖。 */
 	  }
       //根据报警值显示图片
@@ -852,35 +853,45 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	  {
 		case WORK_ALARM_HANDLE_NOT_CONNECTED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,80U);//手柄未连接，请链接手柄
+		ExternalComm_ReportScreenAlarm(arm_value, 80U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_MANUAL_SELECTED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,81U);//手控已选中，请用手控
+		ExternalComm_ReportScreenAlarm(arm_value, 81U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_FOOT_SELECTED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,82U);//脚控已选中，请用脚控
+		ExternalComm_ReportScreenAlarm(arm_value, 82U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_MOTOR_OVERLOAD:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,87U);//电机过载使用 EX8 87 号报警图
+		ExternalComm_ReportScreenAlarm(arm_value, 87U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_FOOT_VALUE_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,83U);//脚踏存储值错误使用 EX8 83 号报警图
+		ExternalComm_ReportScreenAlarm(arm_value, 83U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_MOTOR_OVERLOAD_ALT:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,87U);//兼容旧过载报警码，同样显示 EX8 87 号过载图
+		ExternalComm_ReportScreenAlarm(arm_value, 87U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_UID_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,85U);//UID错误
+		ExternalComm_ReportScreenAlarm(arm_value, 85U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,86U);//HALL 值错误使用 EX8 86 号报警图
+		ExternalComm_ReportScreenAlarm(arm_value, 86U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
 		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,90U);//手柄校验失败统一显示 EX8 90 号“手柄校验异常”报警图
+		ExternalComm_ReportScreenAlarm(arm_value, 90U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_PUMP_PRESSURE_BLOCKED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,89U);//泵压力达到阈值时显示屏幕新增 89 号压力报警图
+		ExternalComm_ReportScreenAlarm(arm_value, 89U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 	  }
 
@@ -889,6 +900,7 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	{
 		//消失
 		LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP);//无错隐藏
+		ExternalComm_ReportScreenAlarm(WORK_ALARM_NONE, MOTOR_ALARM_PICTURE_NONE); /* 屏幕关窗后同步清除临时提示；持续故障仍由WorkMessage控制。 */
 	}
 }
 /*
@@ -1047,7 +1059,7 @@ void UIDISPLAYBehavior()
 					UITOOLDP(msg.enable_flag,msg.Value[0]);
 					break;
 					case UI_TOOLSPEC_ID:
-					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],msg.Value[2],msg.Value[3],msg.Value[4]);
+					UITOOLSPECDP(msg.enable_flag,msg.Value[0]<<8|msg.Value[1],(uint16_t)(((uint16_t)msg.Value[2]<<8)|msg.Value[3]),msg.Value[4],msg.Value[5]); /* 合并直径高低字节，角度和模式读取新位置，避免再次截断为 8 位。 */
 					break;
 					case UI_ORAL_ID:
 					UIORALDP(msg.enable_flag);

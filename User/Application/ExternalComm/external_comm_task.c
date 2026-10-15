@@ -16,6 +16,7 @@
 #include "mainboard_software_version.h"
 #include "motoruartdata.h"
 #include "Pubinterface.h"
+#include "pump.h" /* 外控注水流量与屏幕、脚踏共用70mL/min上限。 */
 #include "pump_behavior_core.h" /* 外控启动须验证泵定位就绪，不能对未执行的启泵返回成功。 */
 #include "sscBEEP.h"
 #include "sscDRIVE.h"
@@ -97,10 +98,21 @@ static uint8_t s_external_restart_stop_required = 0U; /* 异常重启置1，明�
 #define EXTERNAL_COMM_HANDLE_MODE_REVERSE   0x02U   /* 心跳手柄工作模式：当前手柄反转。 */
 #define EXTERNAL_COMM_HANDLE_MODE_OSC       0x03U   /* 心跳手柄工作模式：当前手柄往复。 */
 #define EXTERNAL_COMM_HANDLE_MODE_UNKNOWN   0xFFU   /* 心跳手柄工作模式：当前没有可识别方向。 */
-#if (RFID_LINK_STATS_ENABLE == 1U)
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 134U   /* 旧状态和刀具扩展之后容纳 43 字节 A/B RFID v2统计，等于协议 InforArea 上限。 */
+#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_MAGIC 0xA7U /* 运行参数扩展标记，放在刀具信息之后、RFID统计之前；未申请外控也必须发送。 */
+#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION 0x02U /* 版本2在频率之后增加控制模式和最近定位状态；上位机仍兼容只有频率的版本1。 */
+#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN 9U /* 运行参数共9字节：标记和版本各1字节、频率2字节，控制模式及定位状态/通道/方向/步长各1字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_CONTROL_FOOT 0x01U /* 心跳当前控制模式：脚踏；只定义上报编码，不改变下发控制命令。 */
+#define EXTERNAL_COMM_HEARTBEAT_CONTROL_HANDLE 0x02U /* 心跳当前控制模式：手柄按键控制。 */
+#define EXTERNAL_COMM_HEARTBEAT_CONTROL_TOUCH 0x03U /* 心跳当前控制模式：本机触摸控制，外控标志必须未激活。 */
+#define EXTERNAL_COMM_HEARTBEAT_CONTROL_EXTERNAL 0x04U /* 心跳当前控制模式：外控；内部同样使用TOUCHWORK，必须通过外控激活标志区分。 */
+#define EXTERNAL_COMM_HEARTBEAT_CONTROL_UNKNOWN 0xFFU /* 当前控制方式不是已定义值时明确上报未知，不能默认解释为脚踏。 */
+#if ((RFID_LINK_STATS_ENABLE == 1U) && (RFID_LINK_STATS_HEARTBEAT_ENABLE == 1U))
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN (131U + EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN) /* 统计采集和上传均开启时，缓存容纳旧状态、刀具、运行参数及末尾43字节RFID统计。 */
 #else
-#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN 88U    /* 关闭 RFID 统计时恢复原心跳缓冲上限，不增加任务栈占用。 */
+#define EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN (88U + EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN) /* 上传关闭或未采集统计时，心跳只容纳旧状态、两通道刀具和运行参数，本机统计不受影响。 */
+#endif
+#if (EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN > EXTERNAL_COMM_MAX_INFO_SIZE)
+#error "Heartbeat information exceeds external protocol capacity"
 #endif
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_MAGIC 0xA5U /* 刀具扩展数据的起始标记，放在泵字段之后；旧上位机可忽略这段尾部扩展。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_EXT_VERSION 0x02U /* 刀具扩展版本2保持块长不变，倍率字段统一改为x100。 */
@@ -117,7 +129,11 @@ static uint8_t s_external_restart_stop_required = 0U; /* 异常重启置1，明�
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE 0x01U /* 刀具扩展方向字段：反转。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC 0x02U /* 刀具扩展方向字段：往复。 */
 #define EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_UNKNOWN 0xFFU /* 刀具扩展方向字段：当前方向无效或未识别。 */
-#define EXTERNAL_COMM_RUNNING_INFO_ALARM    0x05U   /* 主机运行内容上传的信息码：0x05 表示报警信息，InforArea[0] 放 WorkMessage.alarm_value。 */
+#define EXTERNAL_COMM_RUNNING_INFO_ALARM    0x05U   /* 主机运行内容上传的信息码：0x05表示报警，首字节为持续报警或屏幕临时提示的逻辑码。 */
+#define EXTERNAL_COMM_ALARM_PICTURE_MAGIC 0xA8U /* 报警帧尾部图片扩展标记；首字节报警码仍兼容旧上位机。 */
+#define EXTERNAL_COMM_ALARM_PICTURE_VERSION 0x01U /* 图片扩展版本1，字段为标记、版本和实际显示的图片编号。 */
+#define EXTERNAL_COMM_ALARM_INFO_LEN 4U /* 报警数据共4字节：逻辑码、扩展标记、版本、图片号；不改变心跳内容。 */
+#define EXTERNAL_COMM_ALARM_REPORT_PERIOD_MS 1000U /* 当前报警独立补发间隔，单位ms；调大后中途连接的上位机等待同步会更久。 */
 
 #define EXTERNAL_COMM_REASON_BAD_LENGTH     0x01U   /* 失败原因：InforArea 长度不符合命令要求。 */
 #define EXTERNAL_COMM_REASON_BAD_AREA       0x02U   /* 失败原因：AreaCode 不在当前命令允许范围内。 */
@@ -251,7 +267,11 @@ static volatile uint8_t s_local_exit_requested = 0U; /* 屏幕任务只置退出
 static uint8_t s_local_exit_guard = 0U;              /* 屏幕退出后的旧申请帧拦截标志，1 表示暂不允许上位机重新取得控制权。 */
 static uint16_t s_local_exit_quiet_ms = 0U;          /* 屏幕退出后连续未收到申请帧的时间；收到申请就清零，满 1 秒才允许重新登录。 */
 static uint8_t s_last_alarm_value = 0xFFU;           /* 上一次已经上传给上位机的报警码，初始值故意设为 0xFF，确保启动后先同步一次当前报警状态。 */
-static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过 WorkMessage 报警状态。 */
+static uint8_t s_alarm_report_ready = 0U;            /* 报警上传初始化标志，0 表示还没有向上位机同步过报警状态。 */
+static uint8_t s_last_alarm_picture = MOTOR_ALARM_PICTURE_NONE; /* 上次上传图片号；同码换图时触发重发，0xFF表示没有图片。 */
+static uint8_t s_screen_alarm_value = 0U; /* 最近已显示报警的逻辑码；UI显示时写入，关闭时清零，用于同步临时提示。 */
+static uint8_t s_screen_alarm_picture = MOTOR_ALARM_PICTURE_NONE; /* 最近UI实际发出的报警图片号；关闭或没有对应图片时为0xFF。 */
+static uint16_t s_alarm_report_elapsed_ms = 0U; /* 距离上次上传的毫秒数，每轮累加10ms，发送后清零，1秒到时补发。 */
 static uint8_t s_transient_alarm_value = 0U;         /* 运行中另一路手柄校验失败时临时上传的报警码，不写入 WorkMessage。 */
 static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持时间，递减到 0 后自动上传无报警关闭上位机弹窗。 */
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵时置 1；独立停泵、保护停机或退出外控时清零。 */
@@ -985,54 +1005,86 @@ static void ExternalComm_ServiceMotorTelemetry(void)
     }
 }
 
+/*
+ * 函数功能：上传持续报警或屏幕临时报警；报警码、图片变化时立即发送，并每秒补发一次当前状态。
+ * 输入参数：无，读取主控工作报警、最近实际显示的报警图片及临时报警计时。
+ * 返回参数：无；只发送 UART2 报警信息，不修改电机、泵或报警保护状态。
+ */
 static void ExternalComm_SendAlarmInfoIfChanged(void)
 {
-    /* alarm_value 是协议 InforArea[0]，0 表示无报警，非 0 表示固件当前 WorkMessage 报警码。 */
-    uint8_t alarm_value;
+    uint8_t alarm_value; /* 本次上传的逻辑报警码；0表示当前没有持续报警或屏幕临时提示。 */
+    uint8_t picture_value = MOTOR_ALARM_PICTURE_NONE; /* 未显示对应图片时使用0xFF，不猜测共用报警码的具体故障。 */
+    uint8_t info[EXTERNAL_COMM_ALARM_INFO_LEN]; /* 保留首字节报警码，后面追加图片扩展，旧上位机仍可读取首字节。 */
 
-    /* 全局报警优先级最高，一旦存在真实系统报警，临时报警必须让位，避免覆盖持续故障。 */
+    s_alarm_report_elapsed_ms = (uint16_t)(s_alarm_report_elapsed_ms + EXTERNAL_COMM_TASK_PERIOD_MS); /* 每轮累计10ms，达到1秒后补发，供中途连接的上位机同步。 */
     if (WorkMessage.alarm_flag == true)
     {
-        s_transient_alarm_value = 0U;                 /* 清掉临时报警值，后续只以上报真实报警为准。 */
-        s_transient_alarm_remaining_ms = 0U;          /* 清掉临时报警计时，防止真实报警解除后旧弹窗再次出现。 */
-        alarm_value = WorkMessage.alarm_value;        /* 有报警时直接复用 WorkMessage.alarm_value，保持蜂鸣、屏幕和上位机一致。 */
+        s_transient_alarm_value = 0U; /* 持续报警出现时清掉旧临时提示，防止故障解除后再次弹出。 */
+        s_transient_alarm_remaining_ms = 0U; /* 同时清掉旧提示计时，持续故障仍由原业务模块决定何时解除。 */
+        alarm_value = WorkMessage.alarm_value; /* 持续故障保持原优先级，屏幕临时提示不能替换主控故障码。 */
+    }
+    else if (s_screen_alarm_value != 0U)
+    {
+        alarm_value = s_screen_alarm_value; /* 没有持续故障时，上传已经显示的泵或控制方式临时提示，直到屏幕关闭。 */
     }
     else if (s_transient_alarm_remaining_ms > 0U)
     {
-        alarm_value = s_transient_alarm_value;        /* 无真实报警但临时报警未超时，继续让上位机显示本次提示。 */
+        alarm_value = s_transient_alarm_value; /* 屏幕消息尚未处理时保留原临时报警上传，避免遗漏正在排队的提示。 */
         if (s_transient_alarm_remaining_ms > EXTERNAL_COMM_TASK_PERIOD_MS)
         {
-            s_transient_alarm_remaining_ms = (uint16_t)(s_transient_alarm_remaining_ms - EXTERNAL_COMM_TASK_PERIOD_MS); /* 每个通信周期扣减 10ms。 */
+            s_transient_alarm_remaining_ms = (uint16_t)(s_transient_alarm_remaining_ms - EXTERNAL_COMM_TASK_PERIOD_MS); /* 尚未显示的临时提示仍按原10ms周期扣减保持时间。 */
         }
         else
         {
-            s_transient_alarm_remaining_ms = 0U;      /* 最后一个周期扣到 0，下个周期会上传 0 关闭弹窗。 */
+            s_transient_alarm_remaining_ms = 0U; /* 保持时间到期，下轮无其它报警时上传0关闭上位机弹窗。 */
         }
     }
     else
     {
-        alarm_value = 0U;                             /* 无真实报警且无临时报警时，协议报警码固定为 0。 */
+        alarm_value = 0U; /* 持续报警和屏幕提示都已关闭，明确通知上位机没有报警。 */
     }
 
-    /* 状态未变化时不重复刷报警帧，避免串口日志被同一个报警码持续淹没。 */
-    if ((s_alarm_report_ready != 0U) && (s_last_alarm_value == alarm_value))
+    if ((alarm_value != 0U) && (s_screen_alarm_value == alarm_value))
     {
-        /* 已经同步过同一个报警值，本周期无需发送。 */
-        return;
+        picture_value = s_screen_alarm_picture; /* 只附带同一报警码实际显示的图片，不能借用其它报警遗留的图片。 */
+    }
+    if ((s_alarm_report_ready != 0U) && (s_last_alarm_value == alarm_value) &&
+        (s_last_alarm_picture == picture_value) &&
+        (s_alarm_report_elapsed_ms < EXTERNAL_COMM_ALARM_REPORT_PERIOD_MS))
+    {
+        return; /* 报警内容未变且未到补发时间，本轮不占用UART2。 */
     }
 
-    /* 记录已完成首次同步，后续只在报警码变化时再发。 */
-    s_alarm_report_ready = 1U;
-    /* 保存本次上传值，下一周期用来判断是否变化。 */
-    s_last_alarm_value = alarm_value;
-    /* 按协议上传主机运行内容：FunCode=0x03、AreaCode=0xFF、InforCode=0x05、InforArea=报警码。 */
+    s_alarm_report_ready = 1U; /* 已完成首次同步，后续按报警变化或1秒间隔发送。 */
+    s_last_alarm_value = alarm_value; /* 记录已发送报警码，作为下轮变化检查依据。 */
+    s_last_alarm_picture = picture_value; /* 同码故障换图也要重新发送，防止上位机继续显示上一种故障。 */
+    s_alarm_report_elapsed_ms = 0U; /* 从本次成功调用发送接口开始重新累计补发间隔。 */
+    info[0] = alarm_value; /* offset0保持旧协议的逻辑报警码，0仍表示关闭弹窗。 */
+    info[1] = EXTERNAL_COMM_ALARM_PICTURE_MAGIC; /* offset1标记图片扩展，上位机不能把旧帧尾部误当成图片。 */
+    info[2] = EXTERNAL_COMM_ALARM_PICTURE_VERSION; /* offset2标记扩展版本，只有匹配版本才能解释图片字段。 */
+    info[3] = picture_value; /* offset3为UI实际发出的图片号；0xFF表示当前没有对应图片。 */
     ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_HOST_RUNNING,
                            EXTERNAL_COMM_AREA_NONE,
                            EXTERNAL_COMM_RUNNING_INFO_ALARM,
-                           &alarm_value,
-                           1U);
+                           info,
+                           sizeof(info)); /* 继续使用独立0x03/0x05报警帧，不把报警扩展塞入心跳。 */
 }
 
+/*
+ * 函数功能：记录UI已经发给屏幕的报警码和图片，供外部通信同步临时提示和具体驱动故障。
+ * 输入参数：alarm_value为逻辑报警码，0表示屏幕关闭报警；picture_value为实际图片号，0xFF表示没有图片。
+ * 返回参数：无；由UI业务任务调用，与外控任务共用调度器业务锁，不在中断中调用。
+ */
+void ExternalComm_ReportScreenAlarm(uint8_t alarm_value, uint8_t picture_value)
+{
+    s_screen_alarm_value = alarm_value; /* 显示报警时保存逻辑码，关闭时清零；外控任务随后据此上传屏幕临时提示。 */
+    s_screen_alarm_picture = picture_value; /* 保存本次实际发出的图片，区分同码的过流、堵转、泵定位失败和压力提示。 */
+    if (alarm_value == 0U)
+    {
+        s_transient_alarm_value = 0U; /* 屏幕已经关闭提示，清除旧临时报警码，防止上位机再次打开旧提示。 */
+        s_transient_alarm_remaining_ms = 0U; /* 同步清掉旧计时，持续故障仍通过WorkMessage独立上传，不受关窗影响。 */
+    }
+}
 /*
  * 函数功能：上传一个不写入 WorkMessage 的限时报警码，用于运行中另一路手柄校验失败提示。
  * 输入参数：alarm_value 需要上位机显示的报警码；hold_ms 保持时间，单位毫秒。
@@ -1930,12 +1982,20 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             ExternalComm_SaveCurrentFreq(value);
             break;
         case 0x03U:
+            if ((pumpMessageA.type == INJECTWATER) && (value > PUMP_INJECTWATER_SPEED_MAX))
+            {
+                value = PUMP_INJECTWATER_SPEED_MAX; /* A注水泵外控请求最多70，屏幕和成功应答均使用限幅后的值。 */
+            }
             /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
             pumpMessageA.speed_work = value;
             /* 上位机改 A 泵速度后立即刷新屏幕，避免泵已按新速度输出但数值区仍显示旧值。 */
             Pubinterface_RefreshPumpADisplay();
             break;
         case 0x04U:
+            if ((pumpMessageB.type == INJECTWATER) && (value > PUMP_INJECTWATER_SPEED_MAX))
+            {
+                value = PUMP_INJECTWATER_SPEED_MAX; /* B注水泵使用相同上限，避免先回显超限值再由泵任务修正。 */
+            }
             /* 设置 B 泵速度，不切换泵启停状态。 */
             pumpMessageB.speed_work = value;
             /* 上位机改 B 泵速度后立即刷新屏幕，解决 B 泵已转但屏幕仍显示 0 的问题。 */
@@ -3979,6 +4039,30 @@ static uint8_t ExternalComm_CurrentHandleRunStatus(void)
     return EXTERNAL_COMM_STATUS_STANDBY;
 }
 
+/*
+ * 函数功能：把当前选择的控制方式转换成心跳编码，区分共用TOUCHWORK编号的触控和外控。
+ * 输入参数：无，读取当前WorkMessage的外控激活标志和控制方式。
+ * 返回参数：1脚踏、2手控、3触控、4外控；无法识别的控制方式返回0xFF。
+ */
+static uint8_t ExternalComm_CurrentControlMode(void)
+{
+    if (WorkMessage.hmiactive_work != 0U)
+    {
+        return EXTERNAL_COMM_HEARTBEAT_CONTROL_EXTERNAL; /* 外控激活时优先上报4，不能把内部TOUCHWORK编号误显示为本机触控。 */
+    }
+    switch (WorkMessage.drivetype_work)
+    {
+    case JTWORK:
+        return EXTERNAL_COMM_HEARTBEAT_CONTROL_FOOT; /* 当前选择脚踏时上报1，不要求脚踏已经踩下或电机正在运行。 */
+    case HANDLEWORK:
+        return EXTERNAL_COMM_HEARTBEAT_CONTROL_HANDLE; /* 当前选择手柄按键时上报2，停止状态也保留该控制选择。 */
+    case TOUCHWORK:
+        return EXTERNAL_COMM_HEARTBEAT_CONTROL_TOUCH; /* 外控未激活且选择TOUCHWORK时，才表示本机触摸控制。 */
+    default:
+        return EXTERNAL_COMM_HEARTBEAT_CONTROL_UNKNOWN; /* 上电未选择或控制值异常时上报FF，不猜测控制来源。 */
+    }
+}
+
 static uint8_t ExternalComm_CurrentHandleMode(void)
 {
     /* 未选中 A/B 或选中插孔已经离线时，方向字段没有现场意义，上报未知避免上位机误判。 */
@@ -4642,7 +4726,7 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     }
 }
 
-#if (RFID_LINK_STATS_ENABLE == 1U)
+#if ((RFID_LINK_STATS_ENABLE == 1U) && (RFID_LINK_STATS_HEARTBEAT_ENABLE == 1U))
 /*
  * 函数功能：向心跳末尾追加一个逻辑通道的 RFID 请求应答和确认掉线统计块。
  * 输入参数：info_area/info_len 为心跳缓存和当前长度；statistics 为已复制的统计数据，调用顺序固定为 A 后 B。
@@ -4775,7 +4859,36 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
 }
 
 /*
- * 函数功能：整理 A/B 手柄、脚踏、泵和可选刀具/RFID 统计，生成 0xAA 心跳并从配置的串口发送。
+ * 函数功能：在普通心跳中追加当前频率、控制模式和最近定位信息，待机或未申请外控时也可读取。
+ * 输入参数：info_area为本次心跳数据缓存；info_len为已写入长度，成功后增加9字节。
+ * 返回参数：无；缓存不足或参数为空时保留原数据和长度，不写入残缺扩展。
+ */
+static void ExternalComm_HeartbeatAppendRuntime(uint8_t *info_area, uint16_t *info_len)
+{
+    MotorToolPositionStatus_t position_status; /* 接收最近定位指令和主控等待状态，组帧时不向驱动查询绝对角度。 */
+
+    if ((info_area == NULL) || (info_len == NULL))
+    {
+        return; /* 没有有效输出缓存或长度指针时，本次不写入运行参数。 */
+    }
+    if (*info_len > (EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN - EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN))
+    {
+        return; /* 必须一次放下整段频率、控制模式和定位信息，避免上位机读取残缺扩展。 */
+    }
+
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RUNTIME_MAGIC); /* 写入A7标记，上位机据此识别运行参数的起点。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION); /* 写入版本2，接收方按9字节布局读取频率、控制模式和定位信息。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, WorkMessage.freq_work); /* 当前往复频率按16位大端原值上传，与屏幕参数一致，不换算为Hz。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_CurrentControlMode()); /* 上传脚踏、手控、触控或外控的当前选择，待机时也不省略。 */
+    (void)MotorDrive_CopyToolPositionStatus(&position_status); /* 读取最近定位指令；没有记录时函数写入状态0、通道/方向FF和步长0。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.state); /* 状态0没有指令、1等待中、2等待结束，不表示驱动确认的绝对位置。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.channel); /* 最近定位的逻辑通道单独上传，避免切换A/B后误认最近方向的归属。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.direction); /* 最近定位帧方向4为向左、5为向右；没有定位记录时上传FF。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.step); /* 最近定位帧步长原样上传，现有左右按钮发送1，不累加成绝对角度。 */
+}
+
+/*
+ * 函数功能：整理 A/B 手柄、脚踏、泵、频率、控制模式、定位信息和刀具/RFID统计，生成0xAA心跳；未申请外控也发送。
  * 输入参数：无；状态字段来自当前内存，电机转速和泵流量字段是控制设定值，电流和压力来自反馈。
  * 返回参数：无。
  */
@@ -4858,8 +4971,9 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);
     /* 追加 A/B 刀具扩展信息；无有效刀具时不追加，保持旧心跳兼容。 */
     ExternalComm_HeartbeatAppendToolInfo(heartbeat_info, &heartbeat_len);
-#if (RFID_LINK_STATS_ENABLE == 1U)
-    /* 统计开关开启时在心跳最末尾追加 A/B 请求/应答计数；关闭时不改变原心跳任何字节。 */
+    ExternalComm_HeartbeatAppendRuntime(heartbeat_info, &heartbeat_len); /* 每轮心跳都上传运行参数，不检查外控申请或手柄运行标志。 */
+#if ((RFID_LINK_STATS_ENABLE == 1U) && (RFID_LINK_STATS_HEARTBEAT_ENABLE == 1U))
+    /* 统计采集和上传均开启时才追加 A/B 计数；上传关闭时仍发送前面的频率、控制模式和开口定位。 */
     ExternalComm_HeartbeatAppendRfidStatistics(heartbeat_info, &heartbeat_len);
 #endif
 
@@ -5546,7 +5660,7 @@ static void ExternalCommTaskFunc(uint32_t event)
         batch_frame_sent = 1U; /* 下行 EEPROM 命令已占用本周期，连同心跳一起让到后续周期。 */
     }
 
-    /* 监视 WorkMessage 报警码变化，变化时立即上传 0x03/0x05 报警信息帧给上位机弹窗。 */
+    /* 持续报警或屏幕提示变化时立即上传独立报警帧，未变化时每秒补发当前报警内容。 */
     ExternalComm_SendAlarmInfoIfChanged();
 
     /* 订阅开启时每 50ms 上传最近电机命令和反馈；未订阅时不生成状态帧。 */

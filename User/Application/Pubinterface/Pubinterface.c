@@ -75,7 +75,7 @@ static uint8_t s_injection_pump_fault_hold_mask = 0U;
 #define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 30U
 /* Page4 默认注水流量下限，单位 mL/min；小于 1 时改用默认冷却流量，修改会改变哪些配置值被接受。 */
 #define HANDLE_INJECTION_PUMP_FLOW_MIN 1U
-/* Page4 默认注水流量上限，单位 mL/min；超过 300 时改用默认冷却流量，修改时须与泵任务流量上限一致。 */
+/* Page4 默认注水流量的有效编码上限，单位 mL/min；超过300时回退30，有效值还须受注水泵运行上限限制。 */
 #define HANDLE_INJECTION_PUMP_FLOW_MAX 300U
 /* 调速小步进，单位 rpm；仅当识别结果的小步进为 0 时使用，修改会改变普通加减键和慢加慢减键每次调整量。 */
 #define SCREEN_SPEED_STEP_FALLBACK 1000U
@@ -380,8 +380,8 @@ static uint8_t MapToolTypeToPicture(uint8_t tool_type)
 }
 
 /*
- * 函数功能：读取指定通道扫描阶段缓存的刀具规格，并转换成 UIDP 使用的 4 字节显示数据。
- * 输入参数：channel 当前屏幕选中的通道，display_value UIDP 消息数据缓冲区。
+ * 函数功能：读取指定通道的刀具规格，打包长度和直径各两字节、角度和显示模式各一字节，供 UIDP 刷新规格。
+ * 输入参数：channel 为当前屏幕选中的 A/B 通道；display_value 至少容纳 6 字节，长度和直径均高字节在前。
  * 返回参数：true 表示规格有效，可打开 UI_TOOLSPEC_ID；false 表示没有有效规格。
  */
 static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
@@ -431,9 +431,9 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 	{
 		tool_length = 0xFFFFU; /* UIDP 长度字段只有 16 位，异常数据钳位后再显示。 */
 	}
-	if (tool_diameter > 0xFFU)
+	if (tool_diameter > (raw_spec_display ? 0xFFU : 0xFFFFU)) /* EPC 直径仍是一字节整数，EEPROM 直径保留完整两字节的 0.1mm 数值。 */
 	{
-		tool_diameter = 0xFFU; /* UIDP 直径字段为 8 位，避免高位截断造成不可预期显示。 */
+		tool_diameter = raw_spec_display ? 0xFFU : 0xFFFFU; /* 仅限制超出对应来源字段范围的异常值，不再把 EEPROM 的 400 压成 255。 */
 	}
 	if (tool_angle > 0xFFU)
 	{
@@ -442,9 +442,10 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 
 	display_value[0] = (uint8_t)(tool_length >> 8);
 	display_value[1] = (uint8_t)(tool_length & 0xFFU);
-	display_value[2] = (uint8_t)tool_diameter;
-	display_value[3] = (uint8_t)tool_angle;
-	display_value[4] = raw_spec_display ? 1U : 0U; /* Value[4] 通知 UIDP 本次规格为公共接头 EPC 原始整数格式。 */
+	display_value[2] = (uint8_t)(tool_diameter >> 8); /* 直径高字节随 UI 消息传递，保证 25.5mm 以上的 EEPROM 规格不会丢失。 */
+	display_value[3] = (uint8_t)(tool_diameter & 0xFFU); /* 直径低字节与前一字节合成原始数值，400 对应 01 90。 */
+	display_value[4] = (uint8_t)tool_angle; /* 角度向后移一字节，继续沿用原来的角度显示单位。 */
+	display_value[5] = raw_spec_display ? 1U : 0U; /* 1 表示 EPC 整数直径，0 表示 EEPROM 直径按 0.1mm 显示。 */
 	return true;
 }
 
@@ -507,7 +508,7 @@ static void RefreshToolDisplay(uint8_t channel, bool planer_selected)
 		manual_display_value[2] = 0U; /* 自动识别成功时 0x1404 必须隐藏，只保留 0x4200 刀具规格。 */
 		SendUIDSMessage(UI_TOOL_ID, false, display_value); /* 显示规格窗口时关闭普通刀具图，避免两个区域同时显示。 */
 		SendUIDSMessage(UI_MANUALBUTTON_ID, false, manual_display_value); /* 已有有效规格时关闭手动磨/刨按钮，但 0x1407 仍显示自动识别模式。 */
-		SendUIDSMessage(UI_TOOLSPEC_ID, true, display_value); /* 规格数据按长度高低字节、直径、角度发送给屏幕。 */
+		SendUIDSMessage(UI_TOOLSPEC_ID, true, display_value); /* 消息依次保存两字节长度、两字节直径、角度和显示模式，由 UIDP 拼成屏幕文字。 */
 	}
 	else
 	{
@@ -1477,8 +1478,9 @@ static void StopDriverFaultPumps(uint8_t blocked_mask)
  */
 static void RaisePumpAlarm(uint8_t picture, uint32_t duration)
 {
-	uint8_t display_value[10] = {0U}; /* 报警显示参数先清零，本次只填写Value[1]图片号。 */
+	uint8_t display_value[10] = {0U}; /* 报警显示参数先清零，再填写泵提示逻辑码及指定图片。 */
 
+	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按79或89号图片区分，不能把本次提示当成无报警。 */
 	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，79和89共用现有报警显示区。 */
 	s_pump_transient_alarm_tick = HAL_GetTick(); /* 记录本次提示开始时间，不改变泵运行请求。 */
 	s_pump_transient_alarm_duration = duration; /* 保存本次保持时长，压力提示仍使用原时长。 */
@@ -1529,7 +1531,7 @@ static void ServicePumpAlarm(void)
  */
 void Pubinterface_ReportPumpAlignmentFailure(void)
 {
-	RaisePumpAlarm(79U, 3000U); /* 图中文字：泵转动异常，检查是否卡死。再重启主机，若未解决请联系工程师。 */
+	RaisePumpAlarm(79U, 3000U); /* 图中文字：泵转动异常，检查是否卡死。再重启主机，若未解决请联系售后。 */
 }
 
 /*
@@ -1940,9 +1942,9 @@ uint16_t Pubinterface_GetCurrentDefaultInjectionFlow(void)
 }
 
 /*
- * 函数功能：检查默认注水流量是否有效，无效时改用程序默认值。
+ * 函数功能：检查默认注水流量是否有效，无效时改用程序默认值，再限制到注水泵运行上限。
  * 输入参数：flow 为通道保存的默认注水流量，单位 mL/min。
- * 返回参数：1~300 mL/min 原样返回；0 或超过 300 时返回 30 mL/min。
+ * 返回参数：1~70 mL/min原样返回；71~300限制到70；0或超过300时返回30 mL/min。
  */
 static uint16_t ClampInjectionStartFlow(uint16_t flow)
 {
@@ -1952,7 +1954,11 @@ static uint16_t ClampInjectionStartFlow(uint16_t flow)
 		return HANDLE_INJECTION_PUMP_DEFAULT_FLOW; /* 异常 EEPROM/RFID 流量不能写入泵速度，统一使用 30 保证启动可控。 */
 	}
 
-	return flow; /* 有效配置值直接使用，保证 EEPROM 写多少，注水泵默认就按多少运行。 */
+	if (flow > PUMP_INJECTWATER_SPEED_MAX)
+	{
+		return PUMP_INJECTWATER_SPEED_MAX; /* 手柄保存的有效默认流量超过70时只用70启动，不改写EEPROM原值。 */
+	}
+	return flow; /* 70以内的有效默认流量保持原值，避免改变原有注水设定。 */
 }
 
 /*
@@ -1964,7 +1970,7 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 {
 	uint16_t flow = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 先读当前通道 Page4 默认注水流量，保证有配置时仍以 EEPROM 为准。 */
 
-	return ClampInjectionStartFlow(flow); /* 0 或越界时统一回退 30，正常 1~300 直接作为注水泵速度。 */
+	return ClampInjectionStartFlow(flow); /* 无效编码回退30，有效流量最多70，避免启动时先写入超限值。 */
 }
 
 /*

@@ -19,6 +19,12 @@ typedef enum
 void ExternalComm_Init(void);
 /* 临时上传一个报警码，保持 hold_ms 后通信任务自动上传 0，供运行中另一路手柄校验失败弹窗限时显示。 */
 void ExternalComm_SendTransientAlarm(uint8_t alarm_value, uint16_t hold_ms);
+/*
+ * 函数功能：记录屏幕实际显示或关闭的报警，供上位机同步具体图片及临时提示。
+ * 输入参数：alarm_value为逻辑报警码，0表示关窗；picture_value为图片号，0xFF表示没有图片。
+ * 返回参数：无；仅供UI业务任务调用，不修改主控报警保护状态。
+ */
+void ExternalComm_ReportScreenAlarm(uint8_t alarm_value, uint8_t picture_value);
 /* 手柄运行中掉线时清除外控层保存的注水泵跟随请求，避免后续外控刷新重新拉起联动泵。 */
 void ExternalComm_ClearHandleInjectionPumpFollow(void);
 /* 泵因压力或驱动保护停机时，清除外控保存的运行请求，防止后续刷新再次启动故障泵。 */

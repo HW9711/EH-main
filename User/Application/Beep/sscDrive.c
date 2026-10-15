@@ -58,6 +58,7 @@ static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚未保存命�
 static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示数据可读，奇数表示正在更新；读取前后比较此值，避免混用两次命令。 */
 static volatile uint8_t s_tool_position_guard_active = 0U; /* 1 表示已发出定位命令，暂不重发空闲停止帧，给驱动留出完成定位的时间。 */
 static volatile uint32_t s_tool_position_guard_until_ms = 0U; /* 保存定位保护截止时刻，配合有符号差值兼容HAL毫秒计数回绕。 */
+static volatile uint32_t s_tool_position_last_command = 0U; /* 最近定位指令：bit0～7逻辑通道、bit8～15方向4/5、bit16～23步长；上电为0，普通启停不清除最近指令。 */
 
 /*
  * 函数功能：把往复频率限制在驱动允许的 0~100 范围内。
@@ -301,22 +302,74 @@ static uint32_t MotorDrive_QuantizeFootDisplaySpeed(uint32_t actual_speed)
     return (actual_speed / MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM) * MOTOR_DRIVE_FOOT_DISPLAY_STEP_RPM; /* 只截掉百位以下数值，不回写 WorkMessage，也不影响电机驱动帧。 */
 }
 
+/*
+ * 函数功能：读取最近定位指令和主控等待状态，保留最近方向与步长，不推算绝对开口角度。
+ * 输入参数：status指向接收定位信息的结构体，不能为空。
+ * 返回参数：1表示已有定位指令记录；0表示没有记录或参数为空，没有记录时输出默认值。
+ */
+uint8_t MotorDrive_CopyToolPositionStatus(MotorToolPositionStatus_t *status)
+{
+    uint32_t saved_primask; /* 保存进入前的中断屏蔽状态，读取完成后原样恢复。 */
+    uint32_t last_command; /* 同一次定位指令的通道、方向和步长，复制后不再读取共享记录。 */
+    uint32_t guard_until_ms; /* 同一次定位指令的等待截止时刻，单位为HAL毫秒时钟。 */
+    uint32_t now_ms; /* 本次读取时的HAL毫秒时钟，用于判断等待窗口是否已经到期。 */
+    uint8_t guard_active; /* 1表示周期电机任务还没有结束定位等待，0表示等待已撤销。 */
+
+    if (status == NULL)
+    {
+        return 0U; /* 调用方没有提供输出缓存，本次不能返回定位信息，也不改变定位等待。 */
+    }
+
+    saved_primask = __get_PRIMASK(); /* 保存中断状态，读取函数不能自行打开调用前已关闭的中断。 */
+    __disable_irq(); /* 复制定位指令和等待时间时禁止任务切换，避免混用新指令和旧截止时刻。 */
+    last_command = s_tool_position_last_command; /* 复制最近逻辑通道、方向和步长的完整32位记录。 */
+    guard_until_ms = s_tool_position_guard_until_ms; /* 复制与最近定位指令一起更新的等待截止时刻。 */
+    guard_active = s_tool_position_guard_active; /* 复制电机周期任务实际保留的等待标志，不从手柄运行请求推断。 */
+    now_ms = HAL_GetTick(); /* 同一读取期间记录当前时刻，等待判断使用同一组数据。 */
+    __set_PRIMASK(saved_primask); /* 数据复制完成后立即恢复原中断状态，后续字段解释不阻止中断响应。 */
+
+    status->state = MOTOR_TOOL_POSITION_STATE_NONE; /* 没有定位指令时上报0，避免上电默认值被理解为定位完成。 */
+    status->channel = 0xFFU; /* 没有最近定位指令时不指定A/B通道。 */
+    status->direction = 0xFFU; /* 没有定位指令时方向未知，不能默认显示向左。 */
+    status->step = 0U; /* 没有定位指令时步长没有有效值，使用0并由state=0说明。 */
+    if (last_command == 0U)
+    {
+        return 0U; /* 上电后尚未形成定位指令，本次只返回上面的默认字段。 */
+    }
+
+    status->channel = (uint8_t)(last_command & 0xFFU); /* 取出最近操作的逻辑通道，不把当前选中通道代替历史指令通道。 */
+    if ((status->channel != CHANNEL_A) && (status->channel != CHANNEL_B))
+    {
+        status->channel = 0xFFU; /* 调用方曾传入无效逻辑通道时明确上报未知，不猜测A/B归属。 */
+    }
+    status->direction = (uint8_t)((last_command >> 8U) & 0xFFU); /* 取出定位帧方向4/5，与最近一次交给UART1的指令一致。 */
+    status->step = (uint8_t)((last_command >> 16U) & 0xFFU); /* 取出定位帧byte5原值，不累加或换算成绝对角度。 */
+    status->state = ((guard_active != 0U) && ((int32_t)(guard_until_ms - now_ms) > 0))
+                      ? MOTOR_TOOL_POSITION_STATE_WAITING : MOTOR_TOOL_POSITION_STATE_ENDED; /* 仅在等待标志有效且未到期时上报1，否则上报等待结束2；有符号差值兼容时钟回绕。 */
+    return 1U; /* 已有最近定位指令，等待结束后仍保留其通道、方向和步长供心跳查询。 */
+}
+
 /**
- * 函数功能：按逻辑手柄通道生成开口定位命令，并发送给对应的物理电机通道。
- * 输入参数：channel_number 为逻辑通道；direction 为定位方向；angel 为定位角度。
+ * 函数功能：按逻辑手柄通道生成定位命令、记录最近指令和等待时间，再交给UART1发送。
+ * 输入参数：channel_number为逻辑A/B通道；direction为true时向左/正向拖动、false时向右/反向拖动；angel为定位步长原值，现有按钮传1。
  * 返回参数：无。
  */
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 {
- uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0x00 ,0x00 };
+ uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0x00 ,0x00 }; /* 形成11字节定位帧，保留原有电机运行方式和CRC位置。 */
+ uint32_t saved_primask; /* 保存本次更新前的中断屏蔽状态，写完定位记录后按原状态恢复。 */
  uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(channel_number); /* 定位命令只交换物理电机路，调用方仍传逻辑A/B。 */
 
  cmd[3]=(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A)?BOARD_PROFILE_HANDLE_CHANNEL_A:BOARD_PROFILE_HANDLE_CHANNEL_B; /* 驱动帧第3字节选择原物理A或B电机通道。 */
  direction==true?(cmd[1]=4):(cmd[1]=5); /* 定位方向沿用原协议4/5，不受通道交换影响。 */
  cmd[5]=angel; /* 定位角度继续写入协议第5字节，保持原单位和范围。 */
  MotorDrive_UpdateCommandCrc(cmd); /* 定位命令也必须携带真实 CRC，否则升级后的手柄驱动会按无效帧拒绝。 */
- s_tool_position_guard_until_ms=HAL_GetTick()+MOTOR_TOOL_POSITION_GUARD_MS; /* 从本次点击开始保留足够时间，使驱动完成准备、单步拖动和末端保持。 */
- s_tool_position_guard_active=1U; /* 先发布保护状态再发送定位帧，避免任务切换时停机保活帧插到定位帧之后。 */
+ saved_primask=__get_PRIMASK(); /* 记住原来的中断状态，不能把调用前已屏蔽的中断误打开。 */
+ __disable_irq(); /* 同时更新定位指令和等待时间时禁止任务切换，避免通信任务读到两次定位的数据。 */
+ s_tool_position_last_command=((uint32_t)angel<<16U)|((uint32_t)cmd[1]<<8U)|channel_number; /* 一起保存本次逻辑通道、实际帧方向和步长，切换A/B后也能分辨最近操作通道。 */
+ s_tool_position_guard_until_ms=HAL_GetTick()+MOTOR_TOOL_POSITION_GUARD_MS; /* 从本次点击建立原有150ms等待窗口，只表示主控暂缓空闲停止帧。 */
+ s_tool_position_guard_active=1U; /* 先建立等待状态再交给UART1，保持原有定位帧与周期停止帧的发送顺序。 */
+ __set_PRIMASK(saved_primask); /* 指令、通道和等待时间全部写完后恢复原中断状态，UART1发送不在中断屏蔽期间执行。 */
  Uart1_SendPacket(cmd,motor_frem_length); /* 保护窗口已经建立，再通过UART1发送完整定位帧。 */
 }
 

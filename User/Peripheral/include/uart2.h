@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define UART2_MAX_PACKET_SIZE  150 /* 外部设备通信接收缓存容量，单位：字节；增大时也要检查调用方缓存大小。 */
+#define UART2_MAX_PACKET_SIZE  160 /* 外部通信DMA接收缓存为160字节，与正式协议整帧上限一致，避免较长心跳或粘包处理使用不同容量。 */
 
 void Uart2_Init(void);
 

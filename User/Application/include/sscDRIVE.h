@@ -43,6 +43,26 @@ typedef struct
     uint8_t valid;              /* 已形成至少一份周期电机命令时置1。 */
 } MotorDriveCommandSnapshot_t;
 
+#define MOTOR_TOOL_POSITION_STATE_NONE 0U /* 上电后尚未形成定位指令；最近方向和步长没有有效值。 */
+#define MOTOR_TOOL_POSITION_STATE_WAITING 1U /* 主控仍保留定位指令的等待窗口，不代表驱动反馈正在转动。 */
+#define MOTOR_TOOL_POSITION_STATE_ENDED 2U /* 主控等待窗口到期或被运行、报警结束，不代表驱动已确认定位完成。 */
+
+/* 保存最近一次定位指令及主控等待状态；没有绝对角度反馈，不能据此推算当前位置。 */
+typedef struct
+{
+    uint8_t state;     /* 0没有定位指令，1等待窗口未结束，2等待已结束；新定位指令重新进入1。 */
+    uint8_t channel;   /* 最近定位指令的逻辑通道：1为A、2为B；没有指令或通道无效时为0xFF。 */
+    uint8_t direction; /* 最近驱动定位帧的方向：4为向左/正向拖动，5为向右/反向拖动；没有指令时为0xFF。 */
+    uint8_t step;      /* 最近定位帧byte5的步长原值；现有按钮发送1，没有定位指令时为0。 */
+} MotorToolPositionStatus_t;
+
+/*
+ * 函数功能：读取最近定位指令的通道、方向、步长和主控等待状态，不向驱动查询或发送命令。
+ * 输入参数：status指向接收定位信息的结构体，不能为空。
+ * 返回参数：1表示已有定位指令记录；0表示没有记录或参数为空，没有记录时输出默认值。
+ */
+uint8_t MotorDrive_CopyToolPositionStatus(MotorToolPositionStatus_t *status);
+
 void SscDriveMotorTask_Init(void);
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel);//通道，方向，角度
 

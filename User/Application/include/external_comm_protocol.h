@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define EXTERNAL_COMM_MAX_FRAME_SIZE       150U   /* 正式协议整帧最大字节数；调大时必须同步检查 UART2 接收缓存和上位机帧长限制。 */
+#define EXTERNAL_COMM_MAX_FRAME_SIZE       160U   /* 正式协议整帧上限为160字节，容纳新增心跳运行参数；UART2缓存和上位机帧长限制必须使用同一容量。 */
 #define EXTERNAL_COMM_FRAME_FIXED_SIZE     16U    /* 帧头4+传输码1+长度2+功能码1+区域码1+信息码1+CRC2+帧尾4。 */
 #define EXTERNAL_COMM_MAX_INFO_SIZE        (EXTERNAL_COMM_MAX_FRAME_SIZE - EXTERNAL_COMM_FRAME_FIXED_SIZE) /* InforArea 最大可用字节数。 */
 

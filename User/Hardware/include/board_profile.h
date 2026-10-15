@@ -13,9 +13,10 @@
 #define RFID_USE_DUAL_UART_MODE           0U  /* RFID接线选择：0=A/B共用UART3，由R200-K8切换；1=A固定UART3、B固定UART9。只能按实际接线修改。 */
 
 /*
- * RFID 请求/应答与确认掉线统计开关：
- * 1U：主控分别累计 A/B 通道的读取命令、有效回包、无有效回包、异常帧、在线监测完成和确认掉线，并在心跳尾部上报。
- * 0U：不累计这些次数，心跳也不附带统计字段；修改后上位机必须能识别对应的心跳长度。
+ * RFID 请求/应答与确认掉线统计采集开关：
+ * 1U：主控分别累计 A/B 通道的读取命令、有效回包、无有效回包、异常帧、在线监测完成和确认掉线。
+ * 0U：不累计这些次数；即使打开上传开关，心跳也不附带统计字段。
+ * 本机统计是否上传由 RFID_LINK_STATS_HEARTBEAT_ENABLE 单独控制。
  */
 #ifndef RFID_LINK_STATS_ENABLE
 #define RFID_LINK_STATS_ENABLE             1U
@@ -23,6 +24,20 @@
 
 #if ((RFID_LINK_STATS_ENABLE != 0U) && (RFID_LINK_STATS_ENABLE != 1U))
 #error "RFID_LINK_STATS_ENABLE must be 0U or 1U"
+#endif
+
+/*
+ * RFID 掉线统计心跳上传开关：
+ * 0U：心跳不附带 A6 统计段，本机仍按 RFID_LINK_STATS_ENABLE 继续累计统计。
+ * 1U：统计采集也开启时，在心跳末尾追加 A/B 通道统计，便于上位机排查掉线。
+ * 此开关不影响频率、控制模式、开口定位字段，也不改变 RFID 在线检测和报警。
+ */
+#ifndef RFID_LINK_STATS_HEARTBEAT_ENABLE /* 允许工程编译选项覆盖上传开关，不需要修改统计采集设置。 */
+#define RFID_LINK_STATS_HEARTBEAT_ENABLE   0U /* 默认关闭上传，正常心跳不携带掉线统计段。 */
+#endif
+
+#if ((RFID_LINK_STATS_HEARTBEAT_ENABLE != 0U) && (RFID_LINK_STATS_HEARTBEAT_ENABLE != 1U)) /* 上传开关只允许关闭或开启，避免错误配置悄悄改变协议。 */
+#error "RFID_LINK_STATS_HEARTBEAT_ENABLE must be 0U or 1U"
 #endif
 
 /*

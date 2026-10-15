@@ -46,7 +46,7 @@
 
 
 
-#define JT_threshold  20U /* 踩下判断需超过定标起点 20 个 AD 计数；调大需踩得更深，也会提高定标行程的最小要求。 */
+#define JT_threshold  15U /* 踩下判断需超过定标起点 20 个 AD 计数；调大需踩得更深，也会提高定标行程的最小要求。 */
 /* 单踏板连续前 3 次低值先不停止泵，第 4 次才确认松脚；周期 25ms，即首个低值后再等约 75ms。调大可减少抖动停泵，但松脚停泵更慢；电机不等待此计数。 */
 #define FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS 3U
 #define FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS 10U /* 双脚踏深踩切通道需累计 10 次控制检查，每次 25ms，约 250ms；调大切换更慢，调小更容易误切。 */

@@ -5,6 +5,14 @@
 
 #include <stdint.h>
 
+/* 刀具规格前缀语言：0=中文“规格”，1=英文“Spec”；应与配套屏幕工程语言一致。 */
+#define LCD_TOOL_SPEC_LANGUAGE 0U /* 当前配套英文屏幕；改为 0U 后重新编译、烧录主控，即恢复中文前缀。 */
+
+/* 只允许两种已实现的语言，避免配置写错后静默生成另一种显示版本。 */
+#if (LCD_TOOL_SPEC_LANGUAGE != 0U) && (LCD_TOOL_SPEC_LANGUAGE != 1U)
+#error "LCD_TOOL_SPEC_LANGUAGE must be 0 or 1"
+#endif
+
 //============================================================================
 // 函数名称: LCD_Show_Which_Map()
 // 功能描述: 显示某一张背景图片
@@ -87,11 +95,11 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data);
 //           Diameter：直径
 //           Angle：角度
 // 输    出: 无
-// 函数说明: 4_运行界面、5_运行界面，一体式刀具参数（文字显示），样式：
+// 函数说明: 刀具规格文字的中文样式如下；英文模式仅将前 4 字节改为 Spec。
 //  规     格    :      φ     4  .  0   、   1  1  0   m   m   、          0    °
 // B9E6   B8F1  3A 20  A6D5  34 2E 30 A1A2  31 31 30  6D  6D  A1A2  20    30   A1E3
 //============================================================================
-void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
+void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t Diameter, uint8_t Angle); /* Diameter 保留 EEPROM 两字节原值，普通模式按 0.1mm 显示。 */
 
 //============================================================================
 // 函数名称: LCD_IntegratedCutterRawData_Update()

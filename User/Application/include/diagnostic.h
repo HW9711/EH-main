@@ -167,7 +167,7 @@ void Diagnostic_Checkpoint(void); /* 同一任务处理连续操作时，在操�
 void Diagnostic_Ui(uint8_t stage, uint8_t area, uint8_t enabled, const uint8_t *data, uint8_t result); /* 保存屏幕消息入队或取出记录；data 最多读取 10 字节，为 NULL 时按全零参数记录。 */
 void Diagnostic_FootConfig(uint8_t connected, uint8_t type, uint16_t ll, uint16_t lm, uint16_t lh, uint16_t rl, uint16_t rm, uint16_t rh); /* 记录脚踏控制任务已取出的配置；ll/lm/lh 为左侧低中高 AD，rl/rm/rh 为右侧低中高 AD。 */
 void SimUart_CopyDiagnosticState(uint8_t channel, DiagnosticPressureState_t *out); /* channel=1 A 压力板、2 B 压力板；out 接收已保存的收帧时间和计数，不取走接收字节。 */
-void Diagnostic_SendNormal(const uint8_t *data, uint16_t length); /* 复制完整普通外部通信帧并排队；data 不能为空，length 为 1～150 字节。 */
+void Diagnostic_SendNormal(const uint8_t *data, uint16_t length); /* 复制完整普通外部通信帧并排队；data 不能为空，length 为 1～160 字节。 */
 uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, uint8_t info, const uint8_t *data, uint16_t length); /* CRC 校验通过后调用；返回 1 表示诊断帧到此处理结束，0 表示普通帧应继续原控制流程。 */
 #define DIAG_EVENT(event, channel, a, b, c) Diagnostic_Event((event), (channel), (a), (b), (c)) /* 编译开启时，把业务分支的检查结果交给诊断模块记录。 */
 #define DIAG_WIRE(port, tx, result, data, length) Diagnostic_Wire((port), (tx), (result), (data), (length)) /* 编译开启时，记录业务函数已有的串口数据，tx=0 接收、1 发送。 */
