@@ -10,7 +10,7 @@ void Uart6_Configuration(uint16_t baud);
 
 void Uart6_Init(void);
 
-void Uart6_SendPacket(uint8_t *pData, uint16_t Length);
+uint8_t Uart6_SendPacket(uint8_t *pData, uint16_t Length); /* 返回 1=HAL 整帧发送完成，0=发送失败；正常发完立即返回。 */
 
 uint16_t Uart6_DMARecvDataPeek(uint8_t *data);
 

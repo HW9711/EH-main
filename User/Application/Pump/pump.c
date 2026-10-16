@@ -36,7 +36,7 @@ void PumpDebugPoint(uint16_t point, uint16_t value, uint8_t detail)
 {
 	(void)value;
 	(void)detail;
-	LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,34);
+	LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_LENGTH, LCD_TOOL_SPEC_TEXT_BYTES); /* 调试显示也使用完整规格文本长度，不把0x8008当作颜色地址。 */
 	LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, point, value, detail);
 }
 

@@ -23,6 +23,9 @@
 #define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
+/* 灌注泵接入及零设定启动时的默认流量，单位mL/min；调大后默认出液量增加，必须保持在1~300。 */
+#define PUMP_POURWATER_DEFAULT_FLOW 120U
+
 /*
  * 发给步进驱动的速度整数上限，不是 mL/min，也不是实测转速；0 表示停止。
  * 当前按抽吸泵最大设定 15 × 42 得到 630，所有发送入口都会把更大值限制到此值。

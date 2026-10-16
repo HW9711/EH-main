@@ -28,6 +28,10 @@ typedef struct
 
 static UIDPMessage_t s_uidp_last_msg = {0};//记住上一次成功放入队列的显示消息，内容完全相同时不重复发送。
 static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
+static UIDPMessage_t s_uidp_tool_spec_retry = {0}; /* 保存最近一次规格显示请求；enable_flag 为显隐，Value[0..5] 为长度、直径、角度和来源格式。 */
+static uint8_t s_uidp_tool_spec_retry_pending = 0U; /* 规格正文或显示长度发送失败时置 1，成功后清 0；新规格或隐藏请求会替换待重试内容。 */
+static uint32_t s_uidp_tool_spec_retry_tick = 0U; /* 记录最近一次规格发送尝试结束时的 HAL 毫秒计数，防止故障时连续占用串口。 */
+#define UIDP_TOOL_SPEC_RETRY_INTERVAL_MS 100U /* 规格发送失败后的最短重试间隔，单位 ms；调小会增加故障期间的串口负担，正常刷新不等待此间隔。 */
 /* 显示队列容量，单位条：默认 48。开机时需容纳 A/B 手柄及 RFID 连续刷新；减小可能丢消息，增大会多占内存。 */
 #define UIDP_QUEUE_LENGTH 48U
 /* 开机补刷总时长，单位为 10ms 任务周期：300 对应约 3 秒；期间等待手柄和 RFID 识别结果后补刷。 */
@@ -642,30 +646,44 @@ void UITOOLDP(bool enable_flag,bool tool_type)
 	// }
 }
 /*
- * 函数功能：刷新主界面刀具规格文本。
- * 输入参数：enable_flag 表示规格区是否显示；tool_length/tool_angle 沿用长度、角度显示值；tool_Diameter 为 16 位直径，raw_display_flag=0 时单位为 0.1mm，=1 时为 EPC 原始整数。
- * 返回参数：无。
+ * 函数功能：刷新规格正文及显示长度；发送失败时保存最新请求，供显示任务稍后重试。
+ * 输入参数：enable_flag 为规格区显隐；tool_length/tool_angle 为长度和角度显示值；tool_Diameter 为 16 位直径，raw_display_flag=0 时单位为 0.1mm，=1 时为 EPC 原始整数。
+ * 返回参数：无；失败由本模块记录并重试，后到的规格或隐藏请求会替换旧请求。
  */
 void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint16_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
 {
+	uint8_t sent_ok; /* 同时检查正文和显示长度是否发送完成，任意一帧失败都要保留重试。 */
+
+	s_uidp_tool_spec_retry.enable_flag = enable_flag; /* 保存最近的显隐要求，拔出时用隐藏请求替换旧规格，重试不会重新显示已拔出的刀具。 */
+	s_uidp_tool_spec_retry.Value[0] = (uint8_t)(tool_length >> 8); /* 保存长度高字节，重试不再读取可能变化的通道全局变量。 */
+	s_uidp_tool_spec_retry.Value[1] = (uint8_t)tool_length; /* 保存长度低字节，与高字节组成同一次请求的长度。 */
+	s_uidp_tool_spec_retry.Value[2] = (uint8_t)(tool_Diameter >> 8); /* 保存直径高字节，避免重试时丢失 EEPROM 的 16 位规格。 */
+	s_uidp_tool_spec_retry.Value[3] = (uint8_t)tool_Diameter; /* 保存直径低字节，不截掉 0.1mm 小数位。 */
+	s_uidp_tool_spec_retry.Value[4] = tool_angle; /* 保存本次角度，确保重试文字与本次请求一致。 */
+	s_uidp_tool_spec_retry.Value[5] = raw_display_flag; /* 保存本次直径来源格式，避免 EEPROM 与 RFID 重试时换算错误。 */
+
 	if(enable_flag)
 	{
-		LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,34);
-		//LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, 30, 20, 10); 
 		if(raw_display_flag != 0U)
 		{
-			LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, (uint8_t)tool_Diameter, tool_angle); /* EPC 来源已限制在 0~255，继续按整数显示，16 显示为 Φ16。 */
+			sent_ok = LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, (uint8_t)tool_Diameter, tool_angle); /* EPC 直径保持 0~255 的整数含义，同时写入 mm 和完整文本尾部。 */
 		}
 		else
 		{
-			LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); /* EEPROM 直径以 16 位原值传入，400 按 0.1mm 显示为 Φ40.0。 */
+			sent_ok = LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); /* EEPROM 直径保留完整 16 位并按 0.1mm 显示，例如 45 显示为 4.5mm。 */
+		}
+		if(sent_ok != 0U)
+		{
+			sent_ok = LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_LENGTH, LCD_TOOL_SPEC_TEXT_BYTES); /* 正文整帧发完后再开启文本长度，避免先显示未清理的旧尾部。 */
 		}
 	}
 	else
 	{
-		//消失
-		LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_COLOR,0);
+		sent_ok = LCD_Show_2byte_Number(UIDP_LCD_SP_TOOL_SPEC_LENGTH, 0U); /* 显示长度写 0 隐藏规格；失败时也重试隐藏，不再发送旧刀具正文。 */
 	}
+
+	s_uidp_tool_spec_retry_pending = (sent_ok == 0U) ? 1U : 0U; /* 发送失败保留最新请求，正文与显隐都完成后才清掉重试标志。 */
+	s_uidp_tool_spec_retry_tick = HAL_GetTick(); /* 从本次尝试结束开始计时，下一次重试至少相隔设定毫秒数。 */
 }
 
 /*
@@ -1016,7 +1034,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：取出显示消息并刷新屏幕，同时处理开机补刷和手柄拔出后的连接状态补刷。
+ * 函数功能：取出显示消息并刷新屏幕，处理规格发送失败重试、开机补刷和手柄拔出后的连接状态补刷。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1110,6 +1128,15 @@ void UIDISPLAYBehavior()
 					break;
 			}
 		}
+	}
+	if ((s_uidp_tool_spec_retry_pending != 0U) &&
+		((uint32_t)(HAL_GetTick() - s_uidp_tool_spec_retry_tick) >= UIDP_TOOL_SPEC_RETRY_INTERVAL_MS) &&
+		(UIDPMsgQueue != NULL) && (uxQueueMessagesWaiting(UIDPMsgQueue) == 0U)) /* 先处理完新消息，避免旧规格重试覆盖刚换通道或刚拔出的显示要求。 */
+	{
+		UITOOLSPECDP(s_uidp_tool_spec_retry.enable_flag,
+			(uint16_t)(((uint16_t)s_uidp_tool_spec_retry.Value[0] << 8) | s_uidp_tool_spec_retry.Value[1]),
+			(uint16_t)(((uint16_t)s_uidp_tool_spec_retry.Value[2] << 8) | s_uidp_tool_spec_retry.Value[3]),
+			s_uidp_tool_spec_retry.Value[4], s_uidp_tool_spec_retry.Value[5]); /* 只重试最近一次失败的规格或隐藏请求，全部发送完成后由函数清掉重试标志。 */
 	}
 	if (s_uidp_startup_replay_ticks > 0U)
 	{

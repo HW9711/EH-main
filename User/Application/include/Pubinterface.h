@@ -370,7 +370,7 @@ typedef struct
   volatile uint16_t pressure_threshold;//压力板上报的阈值，单位 g；主控只检查它是否为0，实际报警线取主控宏和灌注标定表
 
   /* 本泵档位、识别结果和运行请求。 */
-  volatile uint8_t  step_value;//当前泵档位
+  volatile uint8_t  step_value; /* 脚踏流量档位：0为尚未调节，1/2/3为三档；开机、泵上下线、屏幕/外控或手柄默认流量改写后归0，下次短按从首档开始。 */
   volatile uint8_t  associated_channel;//泵与手柄通道的关联标志
   volatile uint8_t  direction;//泵业务方向
   volatile uint8_t  losses_times;//压力模块连续识别丢失次数

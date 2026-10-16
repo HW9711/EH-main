@@ -14,7 +14,7 @@ extern "C" {
 
 /* 灌注泵压力保护开关：0 暂时屏蔽 A/B 灌注泵的压力报警、减速和停机；1 在总开关开启时恢复原保护。 */
 #ifndef PUMP_PRESSURE_POUR_PROTECTION_ENABLE
-#define PUMP_PRESSURE_POUR_PROTECTION_ENABLE 0U
+#define PUMP_PRESSURE_POUR_PROTECTION_ENABLE 1U /* 开启A/B灌注泵压力减速、超压停机及报警，压力恢复后按原规则恢复设定流量。 */
 #endif
 
 /*

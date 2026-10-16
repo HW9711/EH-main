@@ -1987,6 +1987,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
                 value = PUMP_INJECTWATER_SPEED_MAX; /* A注水泵外控请求最多70，屏幕和成功应答均使用限幅后的值。 */
             }
             /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
+            pumpMessageA.step_value = 0U; /* 外控直接设定流量后清脚踏循环记录，下次短按从20或100开始。 */
             pumpMessageA.speed_work = value;
             /* 上位机改 A 泵速度后立即刷新屏幕，避免泵已按新速度输出但数值区仍显示旧值。 */
             Pubinterface_RefreshPumpADisplay();
@@ -1997,6 +1998,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
                 value = PUMP_INJECTWATER_SPEED_MAX; /* B注水泵使用相同上限，避免先回显超限值再由泵任务修正。 */
             }
             /* 设置 B 泵速度，不切换泵启停状态。 */
+            pumpMessageB.step_value = 0U; /* 外控直接设定流量后清脚踏循环记录，下次短按从20或100开始。 */
             pumpMessageB.speed_work = value;
             /* 上位机改 B 泵速度后立即刷新屏幕，解决 B 泵已转但屏幕仍显示 0 的问题。 */
             Pubinterface_RefreshPumpBDisplay();
@@ -4859,6 +4861,46 @@ static void ExternalComm_HeartbeatAppendPump(uint8_t *info_area,
 }
 
 /*
+ * 函数功能：在刀具扩展后补充离线泵的最近压力，泵管未识别时仍允许上位机观察压力板数据。
+ * 输入参数：info_area为心跳数据缓存，info_len为已写入字节数；压力数据从A/B泵最近有效帧读取。
+ * 返回参数：无；两泵均在线时不追加，压力板停止通信时保留最后数值和序号，不生成新采样。
+ */
+static void ExternalComm_HeartbeatAppendOfflinePressure(uint8_t *info_area, uint16_t *info_len)
+{
+    uint8_t mask = 0U; /* bit0表示本段含A泵压力，bit1表示含B泵压力；只为离线泵补充数据。 */
+    uint16_t length = 3U; /* 段头为A9标记、版本1、通道位图，每个离线通道另占11字节。 */
+    if ((info_area == NULL) || (info_len == NULL))
+    {
+        return; /* 无有效缓存时不写入，避免破坏本帧其他状态。 */
+    }
+    if (pumpMessageA.online_flag == false)
+    {
+        mask |= 0x01U; /* A泵基本段没有压力，登记在本扩展中补发。 */
+        length += 11U; /* 为A泵原始值、重量、阈值和序号预留完整空间。 */
+    }
+    if (pumpMessageB.online_flag == false)
+    {
+        mask |= 0x02U; /* B泵独立判断，不能因A泵在线而遗漏B泵压力。 */
+        length += 11U; /* 为B泵完整压力记录预留空间。 */
+    }
+    if ((mask == 0U) || ((uint16_t)(*info_len + length + EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN) > EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN))
+    {
+        return; /* 两泵均在线无需重复上传；空间不足时不写半段，并保留后续运行参数空间。 */
+    }
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, 0xA9U); /* A9标记区分离线压力与A5刀具、A7运行参数。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, 0x01U); /* 版本1固定使用原有11字节小端压力布局。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, mask); /* 告知上位机本段包含哪些通道，顺序固定先A后B。 */
+    if ((mask & 0x01U) != 0U)
+    {
+        ExternalComm_AppendPumpPressure(info_area, info_len, &pumpMessageA); /* 上传A泵最近有效压力帧，保持离线状态及控制请求不变。 */
+    }
+    if ((mask & 0x02U) != 0U)
+    {
+        ExternalComm_AppendPumpPressure(info_area, info_len, &pumpMessageB); /* 上传B泵最近有效压力帧，未收到新帧时序号不变。 */
+    }
+}
+
+/*
  * 函数功能：在普通心跳中追加当前频率、控制模式和最近定位信息，待机或未申请外控时也可读取。
  * 输入参数：info_area为本次心跳数据缓存；info_len为已写入长度，成功后增加9字节。
  * 返回参数：无；缓存不足或参数为空时保留原数据和长度，不写入残缺扩展。
@@ -4888,7 +4930,7 @@ static void ExternalComm_HeartbeatAppendRuntime(uint8_t *info_area, uint16_t *in
 }
 
 /*
- * 函数功能：整理 A/B 手柄、脚踏、泵、频率、控制模式、定位信息和刀具/RFID统计，生成0xAA心跳；未申请外控也发送。
+ * 函数功能：整理A/B手柄、脚踏、泵、离线压力、运行参数和刀具/RFID统计，生成0xAA心跳；未申请外控也发送。
  * 输入参数：无；状态字段来自当前内存，电机转速和泵流量字段是控制设定值，电流和压力来自反馈。
  * 返回参数：无。
  */
@@ -4971,6 +5013,7 @@ static void ExternalComm_SendHeartbeat(void)
     ExternalComm_HeartbeatAppendU8(heartbeat_info, &heartbeat_len, pump_run_bitmap);
     /* 追加 A/B 刀具扩展信息；无有效刀具时不追加，保持旧心跳兼容。 */
     ExternalComm_HeartbeatAppendToolInfo(heartbeat_info, &heartbeat_len);
+    ExternalComm_HeartbeatAppendOfflinePressure(heartbeat_info, &heartbeat_len); /* 离线泵省略的压力在A9段补齐，最多25字节，小于两泵离线省下的28字节。 */
     ExternalComm_HeartbeatAppendRuntime(heartbeat_info, &heartbeat_len); /* 每轮心跳都上传运行参数，不检查外控申请或手柄运行标志。 */
 #if ((RFID_LINK_STATS_ENABLE == 1U) && (RFID_LINK_STATS_HEARTBEAT_ENABLE == 1U))
     /* 统计采集和上传均开启时才追加 A/B 计数；上传关闭时仍发送前面的频率、控制模式和开口定位。 */

@@ -164,8 +164,8 @@
 #define UIDP_LCD_VP_PEDAL_HIGH_KEY_VALUE 0x3720U
 /* 刀具规格文本VP：用于写入刀具长度、直径和角度文本。 */
 #define UIDP_LCD_VP_TOOL_SPEC_TEXT 0x4200U
-/* 刀具规格颜色SP：用于切换刀具规格文本颜色控制字。 */
-#define UIDP_LCD_SP_TOOL_SPEC_COLOR 0x8008U
+/* 刀具规格文本长度SP：屏幕控件SP为0x8000，偏移8设置显示字节数；写0隐藏，颜色实际位于偏移3。 */
+#define UIDP_LCD_SP_TOOL_SPEC_LENGTH 0x8008U
 /* 转速数值显示SP：用于绑定或隐藏转速数值控件。 */
 #define UIDP_LCD_SP_SPEED_VALUE 0x9420U
 /* 转速单位颜色SP：用于切换转速单位颜色控制字。 */

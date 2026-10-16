@@ -2019,12 +2019,14 @@ void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
 
 	if (pumpMessageA.type == INJECTWATER)
 	{
+		pumpMessageA.step_value = 0U; /* 手柄默认流量重新装载后，下次脚踏短按从首档开始。 */
 		pumpMessageA.speed_work = default_flow; /* A 泵是注水泵时写入新的待机流量，使后续屏幕启动和手柄联动使用同一设定。 */
 		Pubinterface_RefreshPumpADisplay(); /* 默认流量变化后立即刷新 A 泵数值，避免屏幕停留在泵先上线时的 30。 */
 	}
 
 	if (pumpMessageB.type == INJECTWATER)
 	{
+		pumpMessageB.step_value = 0U; /* 手柄默认流量重新装载后，下次脚踏短按从首档开始。 */
 		pumpMessageB.speed_work = default_flow; /* B 泵是注水泵时同步写入同一默认流量，保证单注水泵或双注水泵场景一致。 */
 		Pubinterface_RefreshPumpBDisplay(); /* 默认流量变化后立即刷新 B 泵数值，确保插拔手柄后屏幕显示跟随当前通道。 */
 	}

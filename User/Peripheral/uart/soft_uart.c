@@ -8,6 +8,7 @@
 #include "tim.h"
 #include "bsp_uart.h"
 #include "Pubinterface.h"
+#include "pump.h" /* 泵接入默认流量与启动补速共用定义，保持右侧灌注默认120。 */
 #include "sscBEEP.h"
 
 #include <stdbool.h>
@@ -31,10 +32,10 @@
 #define CS1237_PAYLOAD_LENGTH          0x0CU /* 数据区长度 12 字节；帧内长度字段必须与此值一致。 */
 #define CS1237_CRC_OFFSET              17U /* CRC 低字节在 frame[17]、高字节在 frame[18]；数组下标从 0 开始。 */
 #define CS1237_CRC_LENGTH              15U /* 从 frame[2] 起连续 15 字节参与 CRC，不包含帧头、CRC 本身和帧尾。 */
-/* 根据压力板设备码识别泵类型；未列出的编码按未知泵处理，不允许启动。 */
-#define CS1237_DEVICE_CODE_INJECT_WATER 0x07U  /* 压力板上报 0x07 时，主控识别为注水泵。 */
-#define CS1237_DEVICE_CODE_POUR_WATER   0x0EU  /* 压力板上报 0x0E 时，主控识别为灌注泵。 */
-#define CS1237_DEVICE_CODE_DRAW_WATER   0x0DU  /* 压力板上报 0x0D 时，主控识别为抽吸泵。 */
+/* 以下设备码只确认泵已接入，实际用途固定为A注水、B灌注；未知码不允许启动。 */
+#define CS1237_DEVICE_CODE_INJECT_WATER 0x07U  /* 原注水设备码；接A口按注水泵处理，接B口按灌注泵处理。 */
+#define CS1237_DEVICE_CODE_POUR_WATER   0x0EU  /* 原灌注设备码；接A口按注水泵处理，接B口按灌注泵处理。 */
+#define CS1237_DEVICE_CODE_DRAW_WATER   0x0DU  /* 原抽吸设备码继续接受；接A口按注水泵处理，接B口按灌注泵处理，不再识别为抽吸泵。 */
 #define CS1237_PUMP_LOSS_SUSPECT_MS     1500U  /* 单位：ms；距上次有效帧超过 1500ms 时开始怀疑掉线，但暂不改变在线状态。 */
 #define CS1237_PUMP_LOSS_CONFIRM_MS     3000U  /* 单位：ms；距上次有效帧超过 3000ms 才确认离线并清运行请求，不是疑似后再等 3 秒。 */
 #define CS1237_RAW_MIN_VALUE            (-8388608L) /* 24 位有符号 ADC 原始计数的最小值，不是重量；低于此值的帧不使用。 */
@@ -888,23 +889,28 @@ static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t
 }
 
 /*
- * 函数功能：根据压力板上报的设备码，识别注水、灌注或抽吸泵。
- * 输入参数：device_code 为上报帧 frame[16] 的设备码，数组下标从 0 开始。
- * 返回参数：DRAWWATER/INJECTWATER/POURWATER 表示已识别泵类型，0 表示备用码或未知码。
+ * 函数功能：先用设备码确认泵已接入，再按左右插口固定用途；左侧A为注水，右侧B为灌注。
+ * 输入参数：channel为压力模拟串口，SIM_UART_1对应A、SIM_UART_2对应B；device_code为frame[16]。
+ * 返回参数：支持的接入码在A返回INJECTWATER、在B返回POURWATER；未知码或无效通道返回0。
  */
-static uint16_t Cs1237_DecodePumpType(uint8_t device_code)
+static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device_code)
 {
-    /* 以压力板设备码决定泵类型，不能靠当前屏幕操作或手柄运行状态猜泵类型。 */
     switch (device_code)
     {
         case CS1237_DEVICE_CODE_INJECT_WATER:
-            return INJECTWATER; /* 0x07 明确识别为注水泵，允许手柄冷却联动。 */
         case CS1237_DEVICE_CODE_POUR_WATER:
-            return POURWATER; /* 0x0E 明确识别为灌注泵，不参与手柄冷却联动。 */
         case CS1237_DEVICE_CODE_DRAW_WATER:
-            return DRAWWATER; /* 0x0D 明确识别为抽吸泵，不参与手柄冷却联动。 */
+            if (channel == SIM_UART_1)
+            {
+                return INJECTWATER; /* 左侧收到任一受支持泵接入码后统一执行注水功能，显示也使用此类型。 */
+            }
+            if (channel == SIM_UART_2)
+            {
+                return POURWATER; /* 右侧收到任一受支持泵接入码后统一执行灌注功能，不参与手柄冷却联动。 */
+            }
+            return 0U; /* 无效串口不能映射到任何泵，不建立在线状态。 */
         default:
-            return 0U; /* 其它设备码为备用码，当前不强行映射为任何已知泵类型。 */
+            return 0U; /* 未接泵或未知设备码仍按离线处理，不能仅凭压力板通信就认为有泵。 */
     }
 }
 
@@ -920,7 +926,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     uint32_t weight_x10 = Cs1237_ReadU32Le(&frame[10]);
     uint16_t threshold_g = Cs1237_ReadU16Le(&frame[14]);
     uint8_t device_code = frame[16];
-    uint16_t pump_type = Cs1237_DecodePumpType(device_code);
+    uint16_t pump_type = Cs1237_DecodePumpType(channel, device_code); /* 接入确认仍依据设备码，业务类型固定按左右插口决定。 */
     bool new_online_flag = (pump_type != 0U);
     uint16_t old_pump_type;
     bool old_online_flag;
@@ -943,8 +949,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     pump_message->pressure_value = raw_cs1237; /* 保存压力板的 ADC 原始计数，不是换算后的重量。 */
     pump_message->weight_x10 = weight_x10; /* 保存 0.1g 重量值，供屏幕或外部通信读取压力模块当前重量。 */
     pump_message->pressure_threshold = threshold_g; /* 保存压力板上报阈值，单位：g，供泵控制任务读取。 */
-    /* 保存识别出的泵类型；泵任务据此选择方向和流量换算公式。 */
-    pump_message->type = pump_type;
+    pump_message->type = pump_type; /* 有效接入固定左注水、右灌注；离线为0，显示、联动和驱动换算均读取该类型。 */
     pump_message->seq = frame[5]; /* 保存下位机帧序号，便于后续诊断压力模块是否连续上报。 */
     pump_message->online_flag = new_online_flag; /* 只有设备码映射到业务泵类型时才认为泵在线，备用码不允许启动泵。 */
     if (new_online_flag != false)
@@ -969,17 +974,14 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     /* 只在泵类型或在线状态改变时设置默认流量/档位，不覆盖用户之后手动调整的值。 */
     if (pump_display_changed)
     {
+        pump_message->step_value = 0U; /* 识别接入或离线后清脚踏档位，重新接泵的第一次短按固定进入首档。 */
         if(pump_message->type==INJECTWATER)
         {
         pump_message->speed_work = 30U; /* 注水泵刚识别时默认 30mL/min，之后仍可调速。 */
         }
         else if(pump_message->type==POURWATER)
         {
-        pump_message->speed_work=200; /* 灌注泵刚识别时默认 200mL/min，之后仍可在屏幕调速。 */
-        }
-        else if(pump_message->type==DRAWWATER)
-        {
-        pump_message->speed_work=10; /* 抽水泵刚识别时装载 10 档默认设定，避免上线后保持零速。 */
+        pump_message->speed_work = PUMP_POURWATER_DEFAULT_FLOW; /* 右侧灌注泵刚接入默认120mL/min，后续调节不被周期识别覆盖。 */
         }
         Cs1237_RefreshPumpUi(channel); /* 把新的泵类型和在线状态显示到对应泵区。 */
     }
@@ -1043,6 +1045,7 @@ static void Cs1237_CheckPumpTimeout(void)
         {
             pump_message->online_flag = false; /* 超时确认泵丢失，屏幕和外部通信后续都读到离线。 */
             pump_message->type = 0U; /* 清业务泵类型，避免屏幕或控制路径沿用旧类型继续允许启动。 */
+            pump_message->step_value = 0U; /* 断帧确认离线后清脚踏档位，下次接入仍从首档开始。 */
             pump_message->run_flag = false; /* 泵丢失时强制退出运行，避免后续泵任务继续按旧状态输出。 */
             pump_message->timingDrainage_flag = false; /* 清定时排空状态，避免重新接入后继承拔泵前的排空请求。 */
             pump_message->speed_output = 0U; /* 清除记录的速度指令，屏幕和外部通信不再显示旧值。 */

@@ -53,10 +53,15 @@ void Uart6_Init(void)
 	
 }
 
-void Uart6_SendPacket(uint8_t *pData, uint16_t Length)
+/*
+ * 函数功能：发送一帧屏幕数据，给长规格帧留出足够等待时间并返回发送结果。
+ * 输入参数：pData 指向完整待发帧；Length 为帧字节数，调用期间缓存必须有效。
+ * 返回参数：1 表示 HAL 完成整帧发送，0 表示忙、错误或超时；不表示屏幕已确认收到。
+ */
+uint8_t Uart6_SendPacket(uint8_t *pData, uint16_t Length)
 {
-  Bsp_UartTransmit(BSP_UART_PORT_6, pData, Length, 3);
-	
+  /* UART6 为 115200、8N2，42 字节规格帧约需 4.01ms；20ms 是 HAL 等待参数，正常发完立即返回，不固定延时。 */
+  return (Bsp_UartTransmit(BSP_UART_PORT_6, pData, Length, 20U) == HAL_OK) ? 1U : 0U; /* 将失败结果交给规格显示重试，避免发送失败后仍记为成功。 */
 }
 
 /*

@@ -6,12 +6,15 @@
 #include <stdint.h>
 
 /* 刀具规格前缀语言：0=中文“规格”，1=英文“Spec”；应与配套屏幕工程语言一致。 */
-#define LCD_TOOL_SPEC_LANGUAGE 0U /* 当前配套英文屏幕；改为 0U 后重新编译、烧录主控，即恢复中文前缀。 */
+#define LCD_TOOL_SPEC_LANGUAGE 0U /* 当前配套中文屏幕；改为 1U 并重新编译、烧录主控后显示英文 Spec 前缀。 */
 
 /* 只允许两种已实现的语言，避免配置写错后静默生成另一种显示版本。 */
 #if (LCD_TOOL_SPEC_LANGUAGE != 0U) && (LCD_TOOL_SPEC_LANGUAGE != 1U)
 #error "LCD_TOOL_SPEC_LANGUAGE must be 0 or 1"
 #endif
+
+/* 规格文本区每次写入 36 字节，含末尾 FFFF；显示长度与发包共用此值，必须为偶数且至少容纳 33 字节正文和两字节结束标记。 */
+#define LCD_TOOL_SPEC_TEXT_BYTES 36U
 
 //============================================================================
 // 函数名称: LCD_Show_Which_Map()
@@ -72,10 +75,10 @@ void LCD_Show_Picture(uint16_t PicAddr, uint16_t PicNum);
 // 功能描述: 2字节数据更新
 // 输　  入: Addr：数据的显示地址
 //           Data：更新的数据
-// 输    出: 无
+// 输    出: 1=整帧发送完成，0=发送失败。
 // 函数说明:
 //============================================================================
-void LCD_Show_2byte_Number(uint16_t Addr, uint16_t Data);
+uint8_t LCD_Show_2byte_Number(uint16_t Addr, uint16_t Data); /* 返回 1 表示整帧发送完成，0 表示失败，不是屏幕回读确认。 */
 
 //============================================================================
 // 函数名称: LCD_Show_4byte_Number()
@@ -94,12 +97,11 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data);
 //           Length：长度
 //           Diameter：直径
 //           Angle：角度
-// 输    出: 无
+// 输    出: 1=此前相同规格或本次发送完成，0=发送失败。
 // 函数说明: 刀具规格文字的中文样式如下；英文模式仅将前 4 字节改为 Spec。
-//  规     格    :      φ     4  .  0   、   1  1  0   m   m   、          0    °
-// B9E6   B8F1  3A 20  A6D5  34 2E 30 A1A2  31 31 30  6D  6D  A1A2  20    30   A1E3
+//  示例：规格: φ4.0mm、 110mm、 0°；文字末尾发送 FFFF，较长规格切到较短规格时完整清理旧尾部。
 //============================================================================
-void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t Diameter, uint8_t Angle); /* Diameter 保留 EEPROM 两字节原值，普通模式按 0.1mm 显示。 */
+uint8_t LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t Diameter, uint8_t Angle); /* Diameter 单位 0.1mm；返回 1=此前相同规格或本次发送完成，0=发送失败。 */
 
 //============================================================================
 // 函数名称: LCD_IntegratedCutterRawData_Update()
@@ -108,10 +110,10 @@ void LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t Di
 //           Length：长度原始整数
 //           Diameter：直径原始整数
 //           Angle：角度原始整数
-// 输    出: 无
-// 函数说明: 仅用于公共接头 EPC，直径 0x10 显示为 Φ16，避免复用一体式小数直径格式。
+// 输    出: 1=此前相同规格或本次发送完成，0=发送失败。
+// 函数说明: 用于公共接头及 PXBA/PXBB 的 EPC 规格，直径 0x10 显示为 Φ16mm，保留现行整数单位。
 //============================================================================
-void LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle);
+uint8_t LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle); /* 返回 1=此前相同规格或本次发送完成，0=发送失败。 */
 
 //============================================================================
 // 函数名称: LCD_HostModel_Update()
