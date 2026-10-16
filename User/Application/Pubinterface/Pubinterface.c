@@ -2043,15 +2043,16 @@ void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
 }
 
 /*
- * 函数功能：判断报警码是否属于手柄 EEPROM 识别/校验失败系列报警。
+ * 函数功能：判断报警码是否属于手柄识别失败或功能模式不支持，允许另一侧继续识别。
  * 输入参数：alarm_value 当前报警码，来自 WorkMessage.alarm_value 或临时提示报警。
- * 返回参数：true 表示 A、B 或两侧手柄校验失败；false 表示不属于这三种报警。
+ * 返回参数：true 表示手柄校验失败或型号不受支持；false 表示其它系统报警。
  */
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value)
 {
 	return ((alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||  /* A 通道 EEPROM 校验失败时，不阻塞 B 通道继续识别。 */
 			(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||  /* B 通道 EEPROM 校验失败时，不阻塞 A 通道继续识别。 */
-			(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB));  /* A/B 均失败时仍属于手柄校验系列，拔出任一坏手柄后再降级报警。 */
+			(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB) ||  /* A/B 均失败时仍属于手柄校验系列，拔出任一坏手柄后再降级报警。 */
+			(alarm_value == WORK_ALARM_HANDLE_UNSUPPORTED)); /* 功能不匹配同样允许另一侧识别，但本通道必须拔出才能解除。 */
 }
 
 /*

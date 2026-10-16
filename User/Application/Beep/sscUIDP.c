@@ -10,6 +10,7 @@
 #include "pump.h" /* 注水泵进度条与流量调节共用最大流量，避免70已到上限却仍显示部分进度。 */
 #include "screen_address.h"
 #include "sscBEEP.h"
+#include "handlescan.h" /* 71号不支持手柄提示必须跟随插入锁存，队列清空或普通关窗不能提前移除。 */
 #include "motoruartdata.h"
 #include "external_comm_task.h" /* 报警图片发给屏幕后同步给外控，临时提示也能在上位机显示。 */
 
@@ -845,12 +846,25 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 	}
 }
 /*
- * 函数功能：刷新报警提示图片，并记录实际发出的图片供上位机显示相同报警。
+ * 函数功能：刷新报警图片并同步外控；不支持手柄未拔出时保持71号提示，系统故障仍可优先显示。
  * 输入参数：enable_flag表示显示或关窗；arm_value为持续故障或临时提示的逻辑码；picture_value为图片覆盖值，0按逻辑码选图，0xFF隐藏图片。
  * 返回参数：无。
  */
 void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 {
+	if (Handlescan_HasUnsupportedHandle() &&
+		(!WorkMessage.alarm_flag || Pubinterface_IsHandleVerifyAlarm(WorkMessage.alarm_value)))
+	{
+		enable_flag = true; /* 不支持手柄未拔出时，普通关窗请求也必须保持提示。 */
+		arm_value = WORK_ALARM_HANDLE_UNSUPPORTED; /* 同步逻辑报警码，防止外控仍显示上一次校验错误。 */
+		picture_value = 0U; /* 强制按专用逻辑码选71号图片，不沿用上一条报警的覆盖图号。 */
+	}
+	else if ((arm_value == WORK_ALARM_HANDLE_UNSUPPORTED) &&
+		(!Handlescan_HasUnsupportedHandle() ||
+		 (WorkMessage.alarm_flag && !Pubinterface_IsHandleVerifyAlarm(WorkMessage.alarm_value))))
+	{
+		return; /* 已拔出的旧消息不能重新弹窗；驱动等系统故障已接管时也不能被迟到的71号消息覆盖。 */
+	}
 	if(enable_flag)
 	{
 	  if(picture_value == MOTOR_ALARM_PICTURE_NONE)
@@ -910,6 +924,10 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		case WORK_ALARM_PUMP_PRESSURE_BLOCKED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,89U);//泵压力达到阈值时显示屏幕新增 89 号压力报警图
 		ExternalComm_ReportScreenAlarm(arm_value, 89U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
+		break;
+		case WORK_ALARM_HANDLE_UNSUPPORTED:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,71U); /* 屏幕71号资源明确提示“不支持该手柄”。 */
+		ExternalComm_ReportScreenAlarm(arm_value, 71U); /* 外控同步16号逻辑报警及实际显示图片。 */
 		break;
 	  }
 
@@ -1034,12 +1052,14 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：取出显示消息并刷新屏幕，处理规格发送失败重试、开机补刷和手柄拔出后的连接状态补刷。
+ * 函数功能：处理显示队列和各类补刷；不支持手柄插着时可靠保持71号提示，拔出且无其它故障后关闭。
  * 输入参数：无。
  * 返回参数：无。
  */
 void UIDISPLAYBehavior()
 {
+	static uint8_t unsupported_displayed = 0U; /* 记录周期维护是否显示过71号，最后拔出后负责可靠关窗。 */
+	static uint8_t unsupported_refresh_ticks = 0U; /* 每20个10ms周期补刷一次，防止队列复位丢失提示且不每周期占用串口。 */
 	if(UIDPMsgQueue != NULL)
 	{
 		UIDPMessage_t msg;
@@ -1128,6 +1148,26 @@ void UIDISPLAYBehavior()
 					break;
 			}
 		}
+	}
+	if (Handlescan_HasUnsupportedHandle() &&
+		(!WorkMessage.alarm_flag || Pubinterface_IsHandleVerifyAlarm(WorkMessage.alarm_value)))
+	{
+		if (unsupported_refresh_ticks == 0U)
+		{
+			UIAIARMDP(true, WORK_ALARM_HANDLE_UNSUPPORTED, 0U); /* 直接由显示任务补刷，队列满或复位也不能永久丢掉71号提示。 */
+			unsupported_refresh_ticks = 20U; /* 正常每200ms补刷，控制持续报警的串口占用。 */
+		}
+		--unsupported_refresh_ticks; /* 仅在提示持续有效时累计下一次补刷等待。 */
+		unsupported_displayed = 1U; /* 记录本任务维护的窗口，最后拔出后必须清理。 */
+	}
+	else if (unsupported_displayed != 0U)
+	{
+		if (!WorkMessage.alarm_flag)
+		{
+			UIAIARMDP(false, WORK_ALARM_NONE, 0U); /* 最后一只拒绝手柄已拔出且无其它故障，可靠关闭旧窗口。 */
+		}
+		unsupported_displayed = 0U; /* 其它故障接管时不强制关窗，后续恢复可重新显示71号。 */
+		unsupported_refresh_ticks = 0U; /* 下次进入拒绝状态立即补刷，不继承旧间隔。 */
 	}
 	if ((s_uidp_tool_spec_retry_pending != 0U) &&
 		((uint32_t)(HAL_GetTick() - s_uidp_tool_spec_retry_tick) >= UIDP_TOOL_SPEC_RETRY_INTERVAL_MS) &&
