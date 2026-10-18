@@ -1561,6 +1561,16 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 }
 
 /*
+ * 函数功能：灌注压力测试结束后清除指定泵的本机和外控运行请求，保持原设定值供下次人工启动。
+ * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不修改任何泵。
+ * 返回参数：无；只撤销软件请求，零速命令由当前泵任务发送，不表示已经确认硬件停转。
+ */
+void Pubinterface_StopPumpPressureTest(uint8_t pump_channel)
+{
+	HandlePumpDriverFaultStop(pump_channel); /* 复用已有单泵请求清理：清运行、排空、联动和外控请求，刷新本泵按钮，保留手柄及另一台泵。 */
+}
+
+/*
  * 函数功能：压力处理报告提示事件时蜂鸣两声并显示 2 秒的 89 号弹窗；灌注停转期间不重复调用。
  * 输入参数：pump_channel 为压力超限的逻辑通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。

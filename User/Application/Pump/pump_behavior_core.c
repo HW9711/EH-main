@@ -650,9 +650,9 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：按泵用途和压力保护开关处理压力；灌注保护关闭时保持设定流量，开启时按原标定点减速、停转和恢复。
+ * 函数功能：按泵用途处理压力；灌注测试使用固定压力和限时探测，旧灌注算法只在测试关闭时参与。
  * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
- * 返回参数：本周期应下发的业务速度；灌注保护开启且确认超压后为 0，保护关闭或注水、吸引提示时保持原速度。
+ * 返回参数：本周期应下发的业务速度；测试可返回原流量、20或0，彻底停机事件还会撤销本泵运行请求。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
@@ -660,13 +660,13 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            uint16_t pump_speed)
 {
     uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
-    uint16_t threshold_g; /* 压力帧中此字段为 0 表示数据无效；实际报警阈值由主控配置表计算。 */
+    uint16_t threshold_g; /* 压力帧中0表示无效；灌注测试用固定100mmHg，注水/抽吸和旧灌注仍用各自配置。 */
     uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
-    uint8_t alarm_event; /* 1 表示本周期首次满足提示条件，弹窗和双响只发一次。 */
+    uint8_t alarm_event; /* 事件位分别表示报警、彻底停机和恢复原流量；恢复事件不能误触发蜂鸣。 */
     uint16_t output_speed; /* 灌注泵可被压力降低或归零；注水和抽吸保持原设定速度。 */
     uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
 
-#if (PUMP_PRESSURE_POUR_PROTECTION_ENABLE == 0U)
+#if ((PUMP_PRESSURE_POUR_PROTECTION_ENABLE == 0U) && (PUMP_PRESSURE_POUR_VALVE_TEST_ENABLE == 0U))
     if (pump_type == POURWATER) /* 只屏蔽已识别为灌注泵的通道，注水和吸引仍执行原压力提示。 */
     {
         PumpPressureControl_ResetAlarm(&runtime->pressure_alarm); /* 清除本泵旧减速和超压停泵记录，避免继续限制当前设定流量。 */
@@ -685,7 +685,7 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
     {
         output_speed = PumpPressureControl_ApplyPour(&runtime->pressure_alarm, pump_speed,
                                                       weight_x10, threshold_g, sequence, now_ms,
-                                                      &alarm_event); /* 灌注只在真正停转的周期提示，停转中不重复提示。 */
+                                                      &alarm_event); /* 固定压力测试或旧灌注算法返回本周期流量及待处理事件。 */
     }
     else
     {
@@ -694,12 +694,21 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                                        (pump_type == INJECTWATER) ? 1U : 0U,
                                                        weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
     }
-    if (alarm_event != 0U)
+    if ((alarm_event & PUMP_PRESSURE_EVENT_FINAL_STOP) != 0U)
     {
-        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 首次确认后弹 89 号图 2 秒并蜂鸣两声，不清泵或手柄运行请求。 */
+        Pubinterface_StopPumpPressureTest(binding->public_channel); /* 15秒到时、探测再超压或压力失效时，清本机及外控旧请求，等待新的手动启动。 */
+        output_speed = 0U; /* 清请求后本周期也只能向指定泵发送零速，不能等下一周期才停。 */
+    }
+    else if ((alarm_event & PUMP_PRESSURE_EVENT_RESTORE_FLOW) != 0U)
+    {
+        binding->message->speed_work = output_speed; /* 确认开阀后把设定恢复为超压时保存的原流量，探测中的临时设定不覆盖它。 */
+    }
+    if ((alarm_event & PUMP_PRESSURE_EVENT_ALARM) != 0U)
+    {
+        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 初次超压或探测再次持续超压时弹89号图2秒并蜂鸣两声，不影响另一台泵。 */
     }
 
-    return output_speed; /* 三种泵遇到 6000 无效读数都维持原有运行请求；灌注已停转时仍保持零速。 */
+    return output_speed; /* 灌注测试遇到无效压力会结束并撤销请求；注水和抽吸仍执行原提示逻辑。 */
 }
 
 /*
@@ -835,7 +844,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注保护关闭时保持设定；开启时按原标定阈值计算本周期减速或零速。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 测试开启时按固定压力停泵及限时探测；关闭测试后才受旧灌注保护开关控制。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 
@@ -1053,8 +1062,8 @@ void PumpBehavior_CopyDiagnosticState(uint8_t channel, DiagnosticPumpBehaviorSta
     out->pressure_condition_tick = runtime->pressure_alarm.condition_tick_ms; /* 开始连续确认压力超限或恢复正常时的主控毫秒数，配合 pressure_timing 判断是否正在计时。 */
     out->pressure_sample_tick = runtime->pressure_alarm.last_sample_tick_ms; /* 上次处理新压力样本时的主控毫秒数；间隔过长时重新确认超限或恢复，不能把断帧前后合成连续时间。 */
     out->pressure_alarm_tick = runtime->pressure_alarm.last_alarm_tick_ms; /* 上次发出压力报警提示时的主控毫秒数，用于限制连续提示的间隔。 */
-    out->pressure_target = runtime->pressure_alarm.target_speed; /* 计算压力报警阈值所用的泵设定值；注水、灌注为 mL/min，吸引为内部档值。 */
-    out->pressure_threshold_g = runtime->pressure_alarm.alarm_threshold_g; /* 本泵本轮采用的压力报警阈值，单位 g，用于和压力重量比较。 */
+    out->pressure_target = runtime->pressure_alarm.target_speed; /* 保存的用户设定；灌注测试不据此改变100mmHg，注水/灌注单位mL/min，吸引为内部档值。 */
+    out->pressure_threshold_g = runtime->pressure_alarm.alarm_threshold_g; /* 诊断阈值单位g；灌注测试显示约191g，实际停泵比较仍按100mmHg整数倍率执行。 */
     out->pressure_sequence = runtime->pressure_alarm.last_sequence; /* 压力报警计算上次处理的压力帧序号，用于识别是否收到新样本。 */
     out->pressure_valid = runtime->pressure_alarm.sequence_valid; /* 收到可用于报警计算的首个压力样本后置 1；重置压力报警记录后清零。 */
     out->pressure_alarm = runtime->pressure_alarm.alarm_active; /* 注水/抽吸已提示或灌注已下发零速时为 1，恢复确认或停泵重置后清零。 */

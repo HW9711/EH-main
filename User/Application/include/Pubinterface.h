@@ -367,7 +367,7 @@ typedef struct
   volatile uint16_t speed_Max;//本泵允许的设置上限，单位与 speed_work 相同
   volatile uint16_t speed_Min;//本泵允许的设置下限，单位与 speed_work 相同
   volatile uint16_t speed_step_value;//加减键每次改变的量，单位与 speed_work 相同
-  volatile uint16_t pressure_threshold;//压力板上报的阈值，单位 g；主控只检查它是否为0，实际报警线取主控宏和灌注标定表
+  volatile uint16_t pressure_threshold;//压力板上报字段，单位g；主控只检查0表示无效，灌注测试按固定100mmHg处理，关闭测试后才使用旧标定表
 
   /* 本泵档位、识别结果和运行请求。 */
   volatile uint8_t  step_value; /* 脚踏流量档位：0为尚未调节，1/2/3为三档；开机、泵上下线、屏幕/外控或手柄默认流量改写后归0，下次短按从首档开始。 */
@@ -463,6 +463,7 @@ uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void); /* 读取当前通道�
 void Pubinterface_SetHandleInjectionPumpRun(bool enable); /* 随手柄启动或停止注水冷却泵，只释放本次联动接管的泵。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B 泵确认压力事件后蜂鸣两声并显示 89 号弹窗；灌注零速由泵任务控制。 */
+void Pubinterface_StopPumpPressureTest(uint8_t pump_channel); /* 灌注测试结束时撤销指定泵的本机及外控请求，保留原设定，等待新的人工启动。 */
 /*
  * 函数功能：上电定位重试失败时显示79号报警图，3秒后自动关闭。
  * 输入参数：无。
