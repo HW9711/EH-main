@@ -22,6 +22,7 @@
 #define WORK_ALARM_HANDLE_MODEL_ERROR_B  12U /* B 通道手柄参数校验异常。 */
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U /* A/B 两通道手柄参数均校验异常。 */
 #define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U /* 泵压力达到报警条件，显示 89 号图；编号本身不表示停泵动作。 */
+#define WORK_ALARM_HANDLE_UNSUPPORTED    16U /* 当前功能模式不支持该手柄，显示71号图，确认拔出后才解除。 */
 
 void WorkAlarm_Set(uint8_t alarm_value); /* 写入报警码并同步报警有效标志。 */
 void WorkAlarm_Clear(void); /* 清除当前工作报警。 */

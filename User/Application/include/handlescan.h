@@ -6,6 +6,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* 产品功能选择：只接受下列两类手柄，未列出的型号在任何模式下均拒绝上线。 */
+#define HANDLE_FUNCTION_BOTH          1U /* 同时支持磨削和刨削。 */
+#define HANDLE_FUNCTION_GRINDING_ONLY 2U /* 仅支持 TMBB、TMBA、EMBA、EMBB、公共接头和 DHYTM。 */
+#define HANDLE_FUNCTION_SHAVING_ONLY  3U /* 仅支持 PXBA、PXBB、PXYTP 和 PXYTM。 */
+#ifndef HANDLE_FUNCTION_MODE /* 允许通过编译选项指定产品功能，未指定时使用下方选择的模式。 */
+#define HANDLE_FUNCTION_MODE HANDLE_FUNCTION_SHAVING_ONLY /* 修改此处为上述三种模式之一后重新编译。 */
+#endif
+#if (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_BOTH) && \
+    (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_GRINDING_ONLY) && \
+    (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_SHAVING_ONLY)
+#error "HANDLE_FUNCTION_MODE must be 1, 2 or 3"
+#endif
+
+bool Handlescan_HasUnsupportedHandle(void); /* 任一通道拒绝的手柄尚未确认拔出时为 true，按键或清报警命令不能解除。 */
+
 void HandlescanTaskInit(void); /* 创建并启动每 10ms 检查 A/B 手柄插拔和识别状态的任务。 */
 bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type); /* 切回手动模式时，从该手柄 EEPROM 恢复倍率、转速范围和每次调速的增减量。 */
 void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 重新启用自动识别前清掉旧 RFID 结果编号和计数，保留当前刀具参数。 */

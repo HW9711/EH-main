@@ -5,6 +5,7 @@
 #include "queue.h"
 #include <string.h>
 #include "sscBEEP.h"
+#include "handlescan.h" /* 不支持的手柄必须持续蜂鸣，不能由按键、限时报警或泵定位提前静音。 */
 #include "work_alarm.h" /* 用压力报警码识别两声提示，其它报警仍沿用原响停节奏。 */
 #include "pump_behavior_core.h" /* 泵驱动定位时不播普通按键音；两泵各自成功后分别单响，报警蜂鸣仍可播放。 */
 #include "board.h"
@@ -162,7 +163,7 @@ static void BeepQueue_Init(void)
 }
 
 /*
- * 函数功能：每100ms取一条蜂鸣消息并更新响停；定位时忽略普通提示，定位结果音可被报警打断。
+ * 函数功能：每100ms取消息并更新响停；不支持手柄的锁存优先保持报警，只有确认拔出后才解除。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -187,7 +188,7 @@ if(BeepMsgQueue != NULL)
     if(Kernel_QueueReceive(BeepMsgQueue, &msg, 0) == pdTRUE)
     {
         /* 没有泵定位或定位结果音时，普通按键消息清掉旧报警蜂鸣，再按指定时长短响。 */
-        if((msg.msgType == BEEP_MSG_KEY) && (alignment_busy == 0U) && (alignment_beep_phase == 0U))
+        if((msg.msgType == BEEP_MSG_KEY) && (alignment_busy == 0U) && (alignment_beep_phase == 0U) && !Handlescan_HasUnsupportedHandle()) /* 拒绝手柄仍插着时丢弃普通按键音，保留其它故障原有蜂鸣状态。 */
         {
             // 按键响应消息：keyBeepTime不为0表示需要按键蜂鸣
             key_flag = msg.keyBeepTime;
@@ -240,6 +241,28 @@ if(BeepMsgQueue != NULL)
         }
     }
 }
+
+	if (Handlescan_HasUnsupportedHandle())
+	{
+		key_flag = 0U; /* 拒绝手柄的报警期间不混入按键声。 */
+		double_beep_phase = 0U; /* 清普通双响，确保只保持报警节奏。 */
+		alignment_beep_phase = 0U; /* 定位结果不能打断持续报警。 */
+		if (alarmCounter == 0U)
+		{
+			BEEP_ON(); /* 每100ms交替响停，持续到最后一只拒绝手柄确认拔出。 */
+		}
+		else
+		{
+			BEEP_OFF(); /* 保留100ms间隔，使持续报警节奏与现有报警一致。 */
+		}
+		alarmCounter ^= 1U; /* 推进响停阶段，不篡改其它报警编号及剩余时长。 */
+		return; /* 按键、清报警消息和泵定位均不能跳过本周期的持续报警。 */
+	}
+	else if (alarm_flag == WORK_ALARM_HANDLE_UNSUPPORTED)
+	{
+		alarm_flag = 0U; /* 最后一只拒绝手柄已确认拔出，丢弃队列内迟到的旧报警，避免重新响起。 */
+		alarm_limited_ticks = 0U; /* 清旧倒计时，后续按新的真实报警消息运行。 */
+	}
 
 	if (alignment_busy != 0U)
 	{

@@ -226,6 +226,7 @@ typedef struct
 typedef struct
 {
     HandlescanStage stage;                                  /* 当前扫描阶段，静态零值对应空闲态。 */
+    volatile uint8_t unsupported_latched;                   /* 型号不在当前模式白名单时置1，仅本通道确认拔出后清零。 */
     AT24CS32_CRC_StepContext verify_context;                  /* 保存本通道的认证进度和页数据，A/B交替读取时不会覆盖另一通道的数据。 */
     volatile uint32_t navigation_generation;                /* 进入拔出确认时加 1；外部导航读取前后比较此数，不同就放弃旧读取。 */
     HandlescanDebounce debounce;                             /* 插入和拔出去抖计数，单位都是 10ms 扫描周期。 */
@@ -333,6 +334,43 @@ static const HandlescanHandleTypeConfig s_tool_type_config_table[] =
 /* A/B 通道各自保存一份扫描运行状态，禁止跨通道共用。 */
 static HandlescanChannelContext s_a_context;                  /* 文件静态对象自动清零，保持 A 通道原有初始状态。 */
 static HandlescanChannelContext s_b_context;                  /* 文件静态对象自动清零，保持 B 通道原有初始状态。 */
+
+/*
+ * 函数功能：读取两侧不支持手柄的插入锁存状态，供报警、蜂鸣和屏幕共用。
+ * 输入参数：无。
+ * 返回参数：任一拒绝的手柄仍未确认拔出时返回 true，否则返回 false。
+ */
+bool Handlescan_HasUnsupportedHandle(void)
+{
+    return ((s_a_context.unsupported_latched != 0U) ||
+            (s_b_context.unsupported_latched != 0U)); /* 不直接读取瞬时GPIO，避免拔出毛刺或只拔一侧提前解除报警。 */
+}
+
+/*
+ * 函数功能：按编译配置限定可上线的手柄型号，双功能模式也拒绝名单之外的型号。
+ * 输入参数：mapped_model 为 Page2 双字节映射得到的内部型号，0表示未知型号。
+ * 返回参数：属于当前模式允许的磨削或刨削名单时返回 true，其余返回 false。
+ */
+static bool Handlescan_IsModelSupported(uint8_t mapped_model)
+{
+    switch (mapped_model)
+    {
+    case TMBB_ONLINES:
+    case TMBA_ONLINES:
+    case EMBA_ONLINES:
+    case EMBB_ONLINES:
+    case COMMON_SOCKET_ONLINES:
+    case DHYTM_ONLINES:
+        return (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_SHAVING_ONLY); /* 六种磨削手柄只在双功能或磨削模式上线。 */
+    case PXBA_ONLINES:
+    case PXBB_ONLINES:
+    case PX_YIP_ONLINES:
+    case PX_YIM_ONLINES:
+        return (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_GRINDING_ONLY); /* PXYTP/PXYTM均按刨削产品分类，不按刀具名称猜测。 */
+    default:
+        return false; /* 未列出的已知型号和完全未知的型号均不得进入运行参数装载。 */
+    }
+}
 
 /* A/B 固定绑定只描述资源归属；运行时不会改写，防止泵位、I2C 总线或事件键值串通道。 */
 static const HandlescanChannelBinding s_a_binding =
@@ -2226,6 +2264,10 @@ static uint8_t Handlescan_GetChannelHandleAlarm(uint8_t channel)
  */
 static uint8_t Handlescan_CombineHandleAlarm(uint8_t channel_alarm, uint8_t peer_alarm)
 {
+    if ((channel_alarm == WORK_ALARM_HANDLE_UNSUPPORTED) || (peer_alarm == WORK_ALARM_HANDLE_UNSUPPORTED))
+    {
+        return WORK_ALARM_HANDLE_UNSUPPORTED; /* 任一侧不受支持时保留71号提示，不能合并成普通校验异常图。 */
+    }
     if ((Handlescan_IsHandleVerifyAlarm(channel_alarm) != 0U) &&
         (Handlescan_IsHandleVerifyAlarm(peer_alarm) != 0U) &&
         (channel_alarm != peer_alarm))
@@ -2245,7 +2287,7 @@ static uint8_t Handlescan_GetPeerActiveHandleAlarm(uint8_t channel)
 {
     if (channel == CHANNEL_A) /* 当前 A 准备清报警时，需要先检查 B 是否仍持有认证失败报警。 */
     {
-        if ((s_b_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL) &&
+        if ((s_b_context.stage != HANDLESCAN_STAGE_IDLE) &&
             (Handlescan_IsHandleVerifyAlarm(s_b_context.last_alarm) != 0U))
         {
             return s_b_context.last_alarm;                           /* A 通道准备清报警时，B 通道仍失败保持，则返回 B 通道报警码。 */
@@ -2254,7 +2296,7 @@ static uint8_t Handlescan_GetPeerActiveHandleAlarm(uint8_t channel)
         return 0U;                                           /* B 通道没有可继承的手柄认证报警。 */
     }
 
-    if ((s_a_context.stage == HANDLESCAN_STAGE_VERIFY_FAIL) &&
+    if ((s_a_context.stage != HANDLESCAN_STAGE_IDLE) &&
         (Handlescan_IsHandleVerifyAlarm(s_a_context.last_alarm) != 0U))
     {
         return s_a_context.last_alarm;                               /* B 通道准备清报警时，A 通道仍失败保持，则返回 A 通道报警码。 */
@@ -2309,16 +2351,14 @@ static void Handlescan_ClearChannelAlarm(uint8_t channel, uint8_t alarm_value)
     peer_alarm = Handlescan_GetPeerActiveHandleAlarm(channel); /* 当前通道清报警前，先检查另一通道是否仍需保持手柄认证报警。 */
     if (peer_alarm != 0U)
     {
-        WorkMessage.alarm_flag = true;                       /* 另一通道仍失败时，全局报警继续保持有效。 */
-        WorkMessage.alarm_value = peer_alarm;                /* 把全局报警值切回另一通道仍保持的手柄型号错误报警。 */
+        WorkAlarm_Set(peer_alarm);                          /* 继承另一通道报警，重试或拔出消抖期间也不能清掉尚未解除的异常。 */
         SendAlarmMessage(peer_alarm);                        /* 重新通知蜂鸣任务当前仍存在手柄认证报警。 */
         Handlescan_SendHandleVerifyAlarmUi(peer_alarm, true); /* 屏幕弹窗同步切换到仍失败的通道报警，避免拔出一只坏手柄后误清提示。 */
         Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, peer_alarm); /* 输出报警继承调试码。 */
         return;                                              /* 已由另一通道接管报警，不执行清零。 */
     }
 
-    WorkMessage.alarm_flag = false;                          /* 没有其他手柄认证报警时，清除全局报警标志。 */
-    WorkMessage.alarm_value = 0U;                             /* 清除全局报警码，UI 和外部通信后续可读到无报警状态。 */
+    WorkAlarm_Clear();                                       /* 没有其它通道报警时通过统一入口清除，仍插着的不支持手柄受锁存保护。 */
     SendAlarmMessage(0U);                                     /* 通知蜂鸣任务退出报警蜂鸣模式。 */
     Handlescan_SendHandleVerifyAlarmUi(WORK_ALARM_NONE, false); /* 最后一只坏手柄拔出或恢复后关闭手柄校验报警弹窗。 */
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_CLEAR, 0U); /* 输出报警清除调试码。 */
@@ -2450,6 +2490,12 @@ static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
 {
     uint8_t report_alarm = alarm_value;                      /* 默认按当前通道报警码上报。 */
 
+    if (Handlescan_HasUnsupportedHandle() && WorkMessage.alarm_flag &&
+        !Pubinterface_IsHandleVerifyAlarm(WorkMessage.alarm_value))
+    {
+        return; /* 已有驱动等系统故障时保留其报警归属；不支持状态仍锁存，系统故障解除后继续提示。 */
+    }
+
     if (Handlescan_IsHandleVerifyAlarm(alarm_value) != 0U)
     {
         report_alarm = Handlescan_CombineHandleAlarm(alarm_value,
@@ -2460,6 +2506,22 @@ static void Handlescan_RaiseAlarm(uint8_t channel, uint8_t alarm_value)
     SendAlarmMessage(report_alarm);                          /* 持续报警蜂鸣直到对应清除路径发送 0。 */
     Handlescan_SendHandleVerifyAlarmUi(report_alarm, true);  /* 手柄 EEPROM 校验持续报警需要主动推送屏幕弹窗，非手柄报警由 helper 自动忽略。 */
     Handlescan_DebugTrace(channel, HANDLESCAN_DBG_STEP_ALARM_SET, report_alarm);
+}
+
+/*
+ * 函数功能：拒绝当前模式不支持或型号未知的手柄，锁存报警且不发布上线事件。
+ * 输入参数：binding 为已完成认证并读取 Page2 的本通道资源。
+ * 返回参数：无。
+ */
+static void Handlescan_RejectUnsupportedHandle(const HandlescanChannelBinding *binding)
+{
+    HandlescanChannelContext *context = binding->context; /* 锁存只属于本通道，另一侧插拔不能清除它。 */
+    Handlescan_ClearChannelState(binding); /* 清识别缓存并取消RFID结果，禁止不支持的基座提前上线。 */
+    Handlescan_ClearToolSpecValues(binding->spec_values); /* 不允许旧刀具规格残留到被拒绝的手柄。 */
+    context->unsupported_latched = 1U; /* 锁存独立于重试计时和屏幕报警，只有确认拔出才可释放。 */
+    context->last_alarm = WORK_ALARM_HANDLE_UNSUPPORTED; /* 保存本通道归属，拔出时保留另一侧仍有效的报警。 */
+    context->stage = HANDLESCAN_STAGE_VERIFY_FAIL; /* 复用失败态的拔出消抖，锁存期间不再执行认证重试。 */
+    Handlescan_RaiseAlarm(binding->channel, context->last_alarm); /* 建立持续提示，不使用限时或三声蜂鸣。 */
 }
 
 /*
@@ -2742,6 +2804,7 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
           (uint8_t)((Handlescan_IsHandleVerifyAlarm(context->last_alarm) != 0U) &&
                     (WorkMessage.alarm_flag == true) &&
                     (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) != 0U)); /* 只有本次拔出前确有持续校验报警，才允许建立关窗交接。 */
+      context->unsupported_latched = 0U; /* 仅在拔出消抖完成且离线事件成功入队后解除本通道锁存。 */
       Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* A
                                                                               通道坏手柄拔出后，释放本通道手柄型号错误报警。
                                                                             */
@@ -2794,6 +2857,12 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
         0U; /* 在线短接在配置门槛前恢复时只清毛刺计数，保持 ONLINE 且不重新访问 EEPROM。 */
   }
   if (context->stage == HANDLESCAN_STAGE_DEBOUNCE_OUT) {
+    if (context->unsupported_latched != 0U)
+    {
+      context->debounce.out_debounce_ticks = 0U; /* 拔出未满确认时间又接通，只撤销拔出计数，不解除报警。 */
+      context->stage = HANDLESCAN_STAGE_VERIFY_FAIL; /* 被拒绝手柄回到保持态，不能因接触抖动重新识别上线。 */
+      return true; /* 仍是同一次插入，继续等待真实拔出。 */
+    }
     context->debounce.out_debounce_ticks =
         0U; /* 短接在 500ms 拔出确认前恢复时，旧拔出去抖计数不能继续沿用。 */
     context->debounce.in_debounce_ticks =
@@ -3389,11 +3458,11 @@ Handlescan_ProcessReadInfo(const HandlescanChannelBinding *binding) {
           ->info_buf[HANDLESCAN_MODEL_MINOR_OFFSET]; /* 取 Page2 手柄子类型。 */
   handle_type_cfg = Handlescan_FindHandleTypeConfig(
       raw_type_major, raw_type_minor); /* 按原始双字节查型号表。 */
-  if (handle_type_cfg == NULL) {
+  if ((handle_type_cfg == NULL) ||
+      !Handlescan_IsModelSupported(handle_type_cfg->mapped_handle_type)) {
     Handlescan_DebugTrace(binding->channel, HANDLESCAN_DBG_STEP_MODEL_INVALID,
                           raw_type_minor); /* 输出无法识别的型号字节。 */
-    Handlescan_EnterRetryOrFail(binding->channel, context,
-                                0U); /* 保留原重试策略，避免热插拔瞬间误判。 */
+    Handlescan_RejectUnsupportedHandle(binding); /* 认证通过后按功能白名单拒绝，未知型号也必须提示并保持到拔出。 */
     return true;                     /* 型号未确认时不读取后续业务页。 */
   }
 
@@ -3518,6 +3587,16 @@ static void Handlescan_RunChannel(const HandlescanChannelBinding *binding) {
                 GPIO_PIN_RESET); /* 只读取绑定通道的短接脚。 */
   if (Handlescan_ProcessDisconnect(binding, is_inserted) != false) {
     return; /* 拔出候选、去抖或离线清理已经处理，本轮不再认证。 */
+  }
+
+  if (binding->context->unsupported_latched != 0U)
+  {
+    if ((binding->context->offline_event_required != 0U) &&
+        SendKeyBehMessage(PLUGunPLUG, binding->unplug_key))
+    {
+      binding->context->offline_event_required = 0U; /* 快速换柄未经过完整拔出时，也必须可靠撤销上一只手柄的在线图标和通道记忆。 */
+    }
+    return; /* 不支持的手柄只允许走上方拔出处理，禁止定时重试、RFID或外控导航把它重新上线。 */
   }
 
   if (Handlescan_ShouldDeferRecognition(binding->channel) != 0U) {

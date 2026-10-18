@@ -1,14 +1,20 @@
 #include "work_alarm.h"
 
 #include "Pubinterface.h"
+#include "handlescan.h" /* 不支持手柄的插入状态由扫描任务锁存，统一清报警入口不能绕过。 */
 
 /*
- * 函数功能：保存报警编号，编号非零时同时标记“有报警”；不在这里发送停机命令或刷新屏幕。
+ * 函数功能：保存报警编号并同步有效标志；不支持手柄尚未拔出时拒绝清零或降级为普通校验提示。
  * 输入参数：alarm_value 为需要写入的报警编号，WORK_ALARM_NONE 表示无报警。
  * 返回参数：无。
  */
 void WorkAlarm_Set(uint8_t alarm_value)
 {
+	if (Handlescan_HasUnsupportedHandle() &&
+		((alarm_value == WORK_ALARM_NONE) || Pubinterface_IsHandleVerifyAlarm(alarm_value)))
+	{
+		alarm_value = WORK_ALARM_HANDLE_UNSUPPORTED; /* 清报警命令或另一侧校验恢复不能解除插入锁存，驱动等其它故障仍可优先上报。 */
+	}
 	/* 报警编号和有效标志一起更新，避免出现“有编号但未报警”的不一致状态。 */
 	WorkMessage.alarm_value = alarm_value;
 	WorkMessage.alarm_flag = (alarm_value != WORK_ALARM_NONE);
