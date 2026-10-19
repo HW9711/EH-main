@@ -11,7 +11,7 @@
 #define HANDLE_FUNCTION_GRINDING_ONLY 2U /* 仅支持 TMBB、TMBA、EMBA、EMBB、公共接头和 DHYTM。 */
 #define HANDLE_FUNCTION_SHAVING_ONLY  3U /* 仅支持 PXBA、PXBB、PXYTP 和 PXYTM。 */
 #ifndef HANDLE_FUNCTION_MODE /* 允许通过编译选项指定产品功能，未指定时使用下方选择的模式。 */
-#define HANDLE_FUNCTION_MODE HANDLE_FUNCTION_SHAVING_ONLY /* 修改此处为上述三种模式之一后重新编译。 */
+#define HANDLE_FUNCTION_MODE HANDLE_FUNCTION_BOTH /* 当前主机同时支持磨削和刨削；修改模式后须重新编译。 */
 #endif
 #if (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_BOTH) && \
     (HANDLE_FUNCTION_MODE != HANDLE_FUNCTION_GRINDING_ONLY) && \
@@ -22,6 +22,7 @@
 bool Handlescan_HasUnsupportedHandle(void); /* 任一通道拒绝的手柄尚未确认拔出时为 true，按键或清报警命令不能解除。 */
 
 void HandlescanTaskInit(void); /* 创建并启动每 10ms 检查 A/B 手柄插拔和识别状态的任务。 */
+bool Handlescan_IsRfidToolReady(uint8_t channel); /* 当前RFID结果已经完整装载且最近一次读取未失败时，才允许自动模式启动。 */
 bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type); /* 切回手动模式时，从该手柄 EEPROM 恢复倍率、转速范围和每次调速的增减量。 */
 void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 重新启用自动识别前清掉旧 RFID 结果编号和计数，保留当前刀具参数。 */
 bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel); /* 取出并清掉关窗请求；插拔任务清空屏幕队列后须重新发送关闭 90 号报警窗的消息。 */

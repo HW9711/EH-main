@@ -51,7 +51,7 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_VERIFY_RETRY_DELAY_MS      200U /* 校验或读取失败后，下次快速重试前等待的 ms 数。 */
 #define HANDLESCAN_VERIFY_ALARM_RETRY_MS      1000U /* 已报校验失败后，每隔这么多 ms 重试，成功后可恢复在线。 */
 #define HANDLESCAN_VERIFY_RETRY_MAX           3U /* 连续失败累计达到 3 次后停止快速重试，转入报警后的定时重试。 */
-#define HANDLESCAN_RFID_VERIFY_RETRY_MAX      2U  /* 首次 RFID 识别最多等 2 轮；每轮 900ms，失败后还需重试等待和 EEPROM 校验，并非 2 秒内完成空基座上线。 */
+#define HANDLESCAN_RFID_VERIFY_RETRY_MAX      2U  /* 首次 RFID 识别最多等 2 轮；每轮最多3200ms，失败后还需重试等待和 EEPROM 校验，并非 2 秒内完成空基座上线。 */
 
 #define HANDLESCAN_INSERT_DEBOUNCE_TICKS      (HANDLESCAN_INSERT_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS (HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS / HANDLESCAN_TASK_PERIOD_MS) /* 在线高电平需要连续出现的扫描次数，A/B 使用相同要求。 */
@@ -59,17 +59,12 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_VERIFY_START_DELAY_TICKS   (HANDLESCAN_VERIFY_START_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
-#define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       900U /* 首次识别刀具时，每轮最多等待的 ms 数；运行暂停期间不累计。 */
+#define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       3200U /* 首次识别最多等3200ms，覆盖A/B排队及EPC转USER的两次1.4s请求；运行暂停不累计。 */
 #define HANDLESCAN_RFID_MONITOR_PERIOD_MS     500U  /* 空闲时两轮 RFID 检查的最短启动间隔，单位 ms；上一轮没结束就继续等。 */
 #define HANDLESCAN_RFID_MISS_MAX              6U    /* 连续 6 轮读取超时才确认刀具掉线；排队和取消不计入，实际时间还取决于每轮耗时。 */
 
 #define HANDLESCAN_RFID_WAIT_TIMEOUT_TICKS    (HANDLESCAN_RFID_WAIT_TIMEOUT_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_RFID_MONITOR_PERIOD_TICKS  (HANDLESCAN_RFID_MONITOR_PERIOD_MS / HANDLESCAN_TASK_PERIOD_MS)
-#define HANDLESCAN_RFID_EPC_SPEED_K_UNIT      1000UL  /* EPC 速度每增加 1 代表 1000 rpm；例如 0x8C（140）代表 140000 rpm。 */
-#define HANDLESCAN_RFID_RATIO_MARK_MASK       0xF0U   /* EPC 齿轮比高 4 位保存减速/增速方向标记。 */
-#define HANDLESCAN_RFID_RATIO_REDUCTION_MARK  0x00U   /* EPC 齿轮比高 4 位为 0 时表示减速。 */
-#define HANDLESCAN_RFID_RATIO_SPEEDUP_MARK    0xF0U   /* EPC 齿轮比高 4 位为 F 时表示增速。 */
-#define HANDLESCAN_RFID_RATIO_VALUE_MASK      0x0FFFU /* EPC 齿轮比低 12 位保存 x10 倍率值，50 表示 5.0 倍。 */
 
 /*
  * EEPROM 中手柄信息区定义。
@@ -107,7 +102,6 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_TOOL_RATIO_DECIMAL_MAX     99U  /* 倍率小数部分只允许 0~99；超过 99 时两组倍率都只使用旧整数部分。 */
 #define HANDLESCAN_TOOL_RATIO_UNIT            100U /* 运行时倍率按实际值乘 100 保存；100 表示 1.00 倍，即不增速也不减速。 */
 #define HANDLESCAN_TOOL_RATIO_X100_UNIT       100U /* Page3 整数部分乘 100 后进入公共倍率字段。 */
-#define HANDLESCAN_RFID_RATIO_X10_TO_X100     10U  /* RFID EPC 原倍率为 x10，乘 10 后与 Page3 的 x100 单位统一。 */
 #define HANDLESCAN_TOOL_SPEED_UP_SHIFT        16U  /* tool_reduction_ratio 高 16 位表示增速比，低 16 位表示减速比。 */
 
 /*
@@ -403,6 +397,26 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
     }
 
     return NULL; /* 非 A/B 通道不允许回退到任意一侧，避免写错业务状态。 */
+}
+
+/*
+ * 函数功能：确认指定通道最近的有效RFID结果已经装载到刀具参数，防止识别失败后沿用旧刀启动。
+ * 输入参数：channel为CHANNEL_A或CHANNEL_B。
+ * 返回参数：true表示该通道刀具在线且已装载最新有效结果；false表示未识别、读取失败或仍待装载。
+ */
+bool Handlescan_IsRfidToolReady(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 读取指定通道的扫描状态，不借用当前屏幕通道。 */
+    RfidToolResult_t result; /* 复制最近一次完整结果，避免只根据历史刀具类型放行。 */
+    if ((binding == NULL) || (binding->context->rfid_tool_online == 0U))
+    {
+        return false; /* 扫描任务尚未确认刀具上线，本次不能启动。 */
+    }
+    if (!Rfid_CopyLastResult(channel, &result))
+    {
+        return false; /* EPC和USER均失败后结果已失效，即使屏幕暂时保留规格也不能启动。 */
+    }
+    return (result.sequence == binding->context->rfid_last_sequence); /* 最新结果必须已经完成参数装载，不能在换刀的两个任务之间使用旧参数。 */
 }
 
 /*
@@ -734,45 +748,7 @@ static uint32_t Handlescan_BuildToolReductionRatio(const uint8_t *tool_info_buf)
     return HANDLESCAN_TOOL_RATIO_UNIT; /* 0、1.00 或小于 1.00 的异常值都按 1.00 倍直联。 */
 }
 
-/*
- * 函数功能：把 EPC 标签中的速度字节转换为工程内部速度值。
- * 输入参数：speed_k 为 EPC byte6/7/8 保存的 k rpm 数值，例如 0x8C 表示 140000。
- * 返回参数：可写入 WorkMessage/ChannelrecognizeMessage 的速度值。
- */
-static uint32_t Handlescan_RfidEpcSpeedToWorkSpeed(uint8_t speed_k)
-{
-    return ((uint32_t)speed_k * HANDLESCAN_RFID_EPC_SPEED_K_UNIT); /* EPC 协议按 k rpm 存储，乘 1000 后进入现有速度显示/调速链路。 */
-}
 
-/*
- * 函数功能：把 EPC 两字节 x10 齿轮比转换为运行链路使用的 x100 完整倍率字段。
- * 输入参数：ratio_hi 为 EPC byte4；ratio_lo 为 EPC byte5。
- * 返回参数：低 16 位表示 x100 减速比，高 16 位表示 x100 增速比；未知或不大于 1.00 时按 100 保护。
- */
-static uint32_t Handlescan_BuildRfidEpcReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
-{
-    uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 先合成 EPC 原始两字节，便于按高 4 位方向标记解析。 */
-    uint16_t ratio_value = (uint16_t)(raw_ratio & HANDLESCAN_RFID_RATIO_VALUE_MASK); /* 去掉方向标记后得到 x10 倍率值，例如 0x0032 表示 5.0。 */
-    uint16_t ratio_x100 = (uint16_t)(ratio_value * HANDLESCAN_RFID_RATIO_X10_TO_X100); /* EPC x10 倍率乘 10 转成公共 x100 单位，例如 50 转成 500。 */
-    uint8_t ratio_mark = (uint8_t)(ratio_hi & HANDLESCAN_RFID_RATIO_MARK_MASK); /* 只读取最高 4 位，0 表示减速，F 表示增速。 */
-
-    if (ratio_x100 <= HANDLESCAN_TOOL_RATIO_UNIT)
-    {
-        return HANDLESCAN_TOOL_RATIO_UNIT; /* 0、1.00 或小于 1.00 的标签值都按直联处理，避免异常标签改变电机速度。 */
-    }
-
-    if (ratio_mark == HANDLESCAN_RFID_RATIO_REDUCTION_MARK)
-    {
-        return (uint32_t)ratio_x100; /* 减速机构把 x100 倍率写入低 16 位，例如 500 表示 5.00 倍。 */
-    }
-
-    if (ratio_mark == HANDLESCAN_RFID_RATIO_SPEEDUP_MARK)
-    {
-        return ((uint32_t)ratio_x100 << HANDLESCAN_TOOL_SPEED_UP_SHIFT); /* 增速机构把 x100 倍率写入高 16 位，与 Page3 单位保持一致。 */
-    }
-
-    return HANDLESCAN_TOOL_RATIO_UNIT; /* 方向标记不是 F/0 时说明标签不符合协议，按 1.00 倍保护运行安全。 */
-}
 
 /*
  * 函数功能：把 EPC 标签刀具型号转换为业务刀具能力。
@@ -789,31 +765,6 @@ static uint8_t Handlescan_MapRfidToolType(uint8_t tool_model)
     }
 
     return GRINDH; /* 普通磨刀、反旋刀具、MXYTM和异常值按磨头能力处理，禁止误开放电气往复。 */
-}
-/*
- * 函数功能：按RFID原始刀具型号约束屏幕默认方向。
- * 输入参数：tool_model为EPC byte0原始型号；rfid_direction为EPC方向字段解析后的内部方向。
- * 返回参数：允许写入WorkMessage的显示方向；MXYTP固定OSCDIR，单向刀具拒绝电气往复。
- */
-static uint8_t Handlescan_BuildRfidRunDirection(uint8_t tool_model, uint8_t rfid_direction)
-{
-    if (tool_model == RFID_TOOL_MODEL_MXYTP)
-    {
-        return OSCDIR; /* MXYTP由机械结构把电机单向转动转换成往复，屏幕固定显示往复。 */
-    }
-
-    if ((tool_model == RFID_TOOL_MODEL_PLANER) ||
-        (tool_model == RFID_TOOL_MODEL_REVERSE_PLANER))
-    {
-        return rfid_direction; /* 普通刨刀和反向刨刀均支持正转、反转和电气往复；0x06标签默认写往复时保留OSCDIR。 */
-    }
-
-    if (rfid_direction == FZDIR)
-    {
-        return FZDIR; /* 普通磨刀、反旋刀具和MXYTM允许标签指定反向单向显示。 */
-    }
-
-    return ZZDIR; /* 单向刀具遇到正向或异常往复值时保护为正转，避免下发不支持的电气往复。 */
 }
 /*
  * 函数功能：把 Page3 的减速/增速比写入通道识别缓存。
@@ -897,25 +848,6 @@ static RfidReadSource_t Handlescan_ToRfidSource(HandlescanToolSource tool_source
     return RFID_READ_SOURCE_NONE; /* EEPROM 第三页来源不需要 RFID。 */
 }
 
-/*
- * 函数功能：把 RFID 协议方向值转换为工程内部方向值。
- * 输入参数：raw_direction 为 RFID 标签方向字段，1 正转、2 反转、3 往复。
- * 返回参数：ZZDIR/FZDIR/OSCDIR。
- */
-static uint8_t Handlescan_ParseRfidDirection(uint8_t raw_direction)
-{
-    if (raw_direction == 2U)
-    {
-        return FZDIR; /* 协议 2 表示反转刀具。 */
-    }
-
-    if (raw_direction == 3U)
-    {
-        return OSCDIR; /* 协议 3 表示往复刀具。 */
-    }
-
-    return ZZDIR; /* 协议 1 或异常值默认正转，避免无效方向影响启动。 */
-}
 
 /*
  * 函数功能：把 RFID 读取结果解析成通道识别缓存和屏幕刀具规格缓存。
@@ -930,9 +862,10 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
                                            uint8_t raw_type_minor,
                                            const RfidToolResult_t *rfid_result)
 {
-    const uint8_t *payload;      /* 指向 RFID 提取出的原始标签数据。 */
+    const uint8_t *payload; /* 原始标签仅用于最低转速特例。 */
+    RfidToolParameters_t decoded; /* 两份协议转换成统一参数，不混用字节位置。 */
     uint8_t tool_model;          /* RFID 标签中的刀具型号或代号结构字段。 */
-    uint8_t diameter;            /* RFID 标签中的直径字段。 */
+    uint16_t diameter;           /* 老USER直径乘5后保留完整数值。 */
     uint8_t length;              /* RFID 标签中的长度字段。 */
     uint8_t angle;               /* RFID 标签中的弯曲角度字段。 */
     uint32_t default_speed;      /* RFID 标签转换后的默认速度；EPC 最大可到 255000，必须保留32位。 */
@@ -940,7 +873,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     uint32_t min_speed;          /* RFID 标签转换后的最小速度；统一用32位避免和默认速度比较时截断。 */
     uint32_t reduction_ratio = HANDLESCAN_TOOL_RATIO_UNIT; /* RFID 标签解析出的 x100 完整倍率，默认 100 表示直联。 */
     uint16_t reduction_integer; /* 保存低 16 位减速倍率的整数部分，用于兼容旧 8 位镜像字段。 */
-    uint16_t current_threshold; /* 保存 RFID 电流阈值换算结果；标签单位 0.1A，主控与驱动协议统一使用 0.01A。 */
+    uint16_t current_threshold; /* 保存解析后的保护电流，单位0.01A；新版EPC换算标签值，老USER使用兼容表。 */
     uint32_t speed_range;       /* 保存公共接头 RFID 最大/最小转速差，计算前先确认上限大于下限，避免无符号下溢。 */
     uint16_t common_speed_step_small; /* 保存公共接头按 RFID 速度范围分档后选中的小步进。 */
     uint16_t common_speed_step_large; /* 保存公共接头按 RFID 速度范围分档后选中的大步进。 */
@@ -964,9 +897,9 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         return false; /* RFID 结果必须属于当前通道，避免 A/B 刀具头数据串用。 */
     }
 
-    if ((rfid_result->source != RFID_READ_SOURCE_EPC) || (rfid_result->payload_length != RFID_PAYLOAD_EPC_LENGTH))
+    if (!Rfid_DecodeToolPayload(rfid_result->source, rfid_result->payload, rfid_result->payload_length, &decoded))
     {
-        return false; /* 最终射频协议只接受 EPC 12 字节标签，异常来源不允许清空当前识别缓存。 */
+        return false; /* 业务CRC或参数失败，不清空也不部分改写识别缓存。 */
     }
 
     keep_speed_zzstep = message->speed_zzstep; /* RFID 结果刷新前先暂存正转步进，避免清识别缓存时丢掉 EEPROM Page6 参数。 */
@@ -975,7 +908,8 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     keep_speed_zzstep_large = message->speed_zzstep_large; /* RFID 结果刷新前同步暂存正转大步进，避免大加/大减键丢配置。 */
     keep_speed_fzstep_large = message->speed_fzstep_large; /* 暂存反转大步进，保持 Page6 大步进和方向状态解耦。 */
     keep_speed_oscstep_large = message->speed_oscstep_large; /* 暂存往复大步进，等待刀具能力确认后继续使用。 */
-    payload = rfid_result->payload; /* 后续按 EPC 12 字节协议解释原始标签数据。 */
+
+    payload = rfid_result->payload; /* 原文只用于PX普通刨刀最低转速特例。 */
     memset(message, 0, sizeof(*message)); /* RFID 刀具头重新识别时先清旧识别缓存，避免旧 EEPROM 字段残留。 */
 
     message->handle_type = mapped_model; /* 手柄基座型号仍来自 EEPROM 第二页，RFID 只更新刀具头信息。 */
@@ -984,47 +918,36 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->freq_min = FreqMin; /* RFID 当前不提供频率下限时沿用工程默认。 */
     message->freq_max = FreqMax; /* RFID 当前不提供频率上限时沿用工程默认。 */
 
-    tool_model = payload[0]; /* EPC byte0：刀具型号。 */
-    diameter = payload[1]; /* EPC byte1：刀头直径。 */
-    length = payload[2]; /* EPC byte2：刀具长度。 */
-    angle = payload[3]; /* EPC byte3：弯曲角度。 */
-    max_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，协议按 k rpm 保存，进入工程前转换成实际速度值。 */
-    if (((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) &&
-        (tool_model == RFID_TOOL_MODEL_PLANER) &&
-        (payload[7] == 0U))
+    tool_model = decoded.model; /* B0位字段解出型号后才进入机械转向判断。 */
+    diameter = decoded.diameter; /* 两种标签的直径已分别按协议转换。 */
+    length = decoded.length; /* 保存刀具长度。 */
+    angle = decoded.angle; /* 保存弯曲角度。 */
+    max_speed = decoded.max_speed; /* 最高转速统一为rpm。 */
+    min_speed = decoded.min_speed; /* 老刀下限按型号，新刀按EPC字段。 */
+    if ((rfid_result->source == RFID_READ_SOURCE_EPC) &&
+        ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) &&
+        (tool_model == RFID_TOOL_MODEL_PLANER) && (payload[7] == 0U))
     {
-        min_speed = HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM; /* PX普通RFID刨刀用0x00专门表示500rpm，解决原k rpm字段无法表达0.5k rpm的问题。 */
+        min_speed = HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM; /* 保留PX普通刨刀0表示500rpm的已有约定。 */
     }
-    else
-    {
-        min_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[7]); /* 其它基座、刀具或非零编码继续保持原k rpm换算，不能全局改变0x00语义。 */
-    }
-    default_speed = Handlescan_RfidEpcSpeedToWorkSpeed(payload[8]); /* EPC byte8：上电默认速度，屏幕显示和实际运行都以该值为初始值。 */
-    default_flow = payload[9]; /* EPC byte9：注水泵默认流量。 */
-    direction = Handlescan_ParseRfidDirection(payload[10]); /* EPC byte10：方向能力。 */
-    reduction_ratio = Handlescan_BuildRfidEpcReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比，自动识别模式下按标签倍率换算电机速度。 */
-    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* EPC byte0按0x01~0x06映射业务外观，机械能力继续由原始型号区分。 */
-    reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* x100 减速值除以 100 得到旧字段需要的整数镜像，增速时低 16 位为 0。 */
-    message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 旧字段最大只能表示 255，超限时钳位而不是低字节回绕。 */
-    current_threshold = (uint16_t)payload[11] * 10U; /* EPC byte11 每单位表示 0.1A，乘 10 后转换为驱动帧要求的 0.01A；100 对应 10.00A。 */
-    message->overloadThresholdFor = current_threshold; /* 正转使用标签换算后的保护电流，0 仍表示不覆盖驱动内部默认阈值。 */
-    message->overloadThresholdRev = current_threshold; /* 反转沿用同一刀具电机阈值，保持标签只配置一个电流值。 */
-    message->overloadThresholdOSC = current_threshold; /* 往复沿用同一刀具电机阈值，驱动侧按 0.01A 直接解释。 */
-    message->freq_default = ((tool_model == RFID_TOOL_MODEL_PLANER) ||
-                             (tool_model == RFID_TOOL_MODEL_REVERSE_PLANER)) ? 40U : 0U; /* 普通刨刀和反向刨刀默认频率指令为 40；机械往复 MXYTP 的频率字段置 0，实际 Hz 以驱动协议为准。 */
-
-    if ((max_speed != 0U) && (default_speed > max_speed))
-    {
-        default_speed = max_speed; /* RFID 默认速度不能超过 RFID 上限。 */
-    }
-    if (default_speed < min_speed)
-    {
-        default_speed = min_speed; /* RFID 默认速度不能低于 RFID 下限。 */
-    }
-    message->run_direction = Handlescan_BuildRfidRunDirection(tool_model, direction); /* 默认显示方向按RFID型号和标签共同决定，MXYTP固定显示往复。 */
+    default_speed = decoded.default_speed; /* 错误默认速度已被拒绝，不再通过钳位掩盖标签错误。 */
+    default_flow = decoded.flow; /* EPC流量来自B9，USER流量来自B11。 */
+    direction = decoded.direction; /* 这里是显示方向，机械转向仍由驱动转换。 */
+    reduction_ratio = decoded.ratio; /* 老USER按兼容表取190或430，新刀按EPC倍率。 */
+    business_tool_type = Handlescan_MapRfidToolType(tool_model); /* 归一为刨刀或磨刀，另保留机械型号。 */
+    reduction_integer = (uint16_t)((reduction_ratio & 0xFFFFU) / HANDLESCAN_TOOL_RATIO_X100_UNIT); /* 生成旧整数字段镜像，完整倍率不丢小数。 */
+    message->meioticratio = (reduction_integer > 0xFFU) ? 0xFFU : (uint8_t)reduction_integer; /* 避免旧字段溢出回绕。 */
+    current_threshold = decoded.current; /* 新EPC已换算为0.01A，老USER已由兼容表补齐。 */
+    message->overloadThresholdFor = current_threshold; /* 为正转运行保存本次刀具的保护电流。 */
+    message->overloadThresholdRev = current_threshold; /* 为反转运行保存本次刀具的保护电流。 */
+    message->overloadThresholdOSC = current_threshold; /* 为往复运行保存本次刀具的保护电流。 */
+    message->freq_default = decoded.frequency; /* USER取B10，新电气往复刀默认40。 */
+    message->run_direction = direction; /* 默认方向已确认属于允许集合。 */
+    message->rfid_result_sequence = rfid_result->sequence; /* 记录本次装载的完整标签编号，通道记忆和工作参数必须同步该编号。 */
+    message->rfid_direction_mask = decoded.direction_mask; /* 保存允许方向，后续通道记忆和外控使用相同限制。 */
     message->tool_type = business_tool_type; /* 保存业务刀具类型，屏幕/方向/开口定位按 PLANER/GRINDH 判断。 */
     message->raw_tool_type = tool_model; /* 保存 RFID 原始刀具型号，供上位机扩展和售后核对标签原值。 */
-    message->diameter = diameter; /* 保存 RFID 直径。 */
+    message->diameter = (diameter > 255U) ? 255U : (uint8_t)diameter; /* 旧镜像为8位，超范围饱和；完整直径仍写入屏幕规格数组。 */
     message->length = length; /* 保存 RFID 长度。 */
     message->draw = angle; /* 保存 RFID 弯曲角度。 */
     message->tool_reduction_ratio = reduction_ratio; /* 保存完整 RFID 减速比，供心跳扩展和开口定位逻辑读取。 */
@@ -1046,7 +969,16 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->speed_zzstep_large = keep_speed_zzstep_large; /* RFID 成功后恢复正转大步进，让屏幕快加/快减使用 Page6 大步进。 */
     message->speed_fzstep_large = keep_speed_fzstep_large; /* RFID 成功后恢复反转大步进，避免反转快键回退为小步进。 */
     message->speed_oscstep_large = keep_speed_oscstep_large; /* RFID 成功后恢复往复大步进，保证往复调速两档均来自 EEPROM。 */
-    if ((mapped_model == COMMON_SOCKET_ONLINES) && (max_speed > min_speed))
+    if (rfid_result->source == RFID_READ_SOURCE_USER)
+    {
+        message->speed_zzstep = decoded.speed_step_small; /* 老刀正转小步进按型号补齐，不使用基座通用值。 */
+        message->speed_fzstep = decoded.speed_step_small; /* 老刀反转使用同一型号小步进，方向是否可选仍由方向掩码限制。 */
+        message->speed_oscstep = decoded.speed_step_small; /* 老刨刀往复慢调使用PXYTP小步进。 */
+        message->speed_zzstep_large = decoded.speed_step_large; /* 老刀正转快调使用兼容表大步进。 */
+        message->speed_fzstep_large = decoded.speed_step_large; /* 老刀反转快调使用同一型号大步进。 */
+        message->speed_oscstep_large = decoded.speed_step_large; /* 老刨刀往复快调使用PXYTP大步进。 */
+    }
+    else if ((mapped_model == COMMON_SOCKET_ONLINES) && (max_speed > min_speed))
     {
         speed_range = max_speed - min_speed; /* 合法 RFID 范围先求差值；EPC 速度单位换算后最大差值为 255000rpm，不会溢出 32 位。 */
         if (speed_range >= 70000U)
@@ -1297,7 +1229,7 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
         if (result.sequence != context->rfid_last_sequence)
         {
             /* 结果来源要与基座要求一致，标签内容也必须解析成功，才能更新本通道刀具参数。 */
-            if ((Handlescan_ToRfidSource(context->tool_source) == result.source) &&
+            if ((Handlescan_ToRfidSource(context->tool_source) == RFID_READ_SOURCE_EPC) &&
                 (Handlescan_ApplyRfidToolResult(binding->channel,
                                                 binding->message,
                                                 binding->spec_values,
@@ -1331,7 +1263,7 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
     {
         Handlescan_EnterRfidRetryOrFail(binding->channel,
                                         context,
-                                        0U); /* 每轮等到 900ms 还没有结果就记一次失败；最多等两轮，之后按空基座流程处理。 */
+                                        0U); /* 每轮等到3200ms 还没有结果就记一次失败；最多等两轮，之后按空基座流程处理。 */
     }
 
     return true; /* RFID 等待阶段已处理，调用方本轮返回。 */
@@ -1499,7 +1431,8 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
         return; /* 当前通道还没有有效 RFID 结果。 */
     }
 
-    if (result.source != Handlescan_ToRfidSource(context->tool_source))
+    if ((Handlescan_ToRfidSource(context->tool_source) != RFID_READ_SOURCE_EPC) ||
+        ((result.source != RFID_READ_SOURCE_EPC) && (result.source != RFID_READ_SOURCE_USER)))
     {
         return; /* 来源不匹配时不使用，避免非本通道 EPC 结果串用。 */
     }
@@ -2019,6 +1952,8 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
                                                raw_type_minor); /* 先重建基座缓存，清掉自动识别模式下的 RFID 刀具规格和标签倍率。 */
     message->tool_type = manual_tool_type;                    /* 手动模式的刀具能力由用户选择，不能再由 RFID 标签决定。 */
     message->raw_tool_type = 0U;                              /* 手动模式没有 RFID 原始型号，清掉旧标签码避免上位机误判。 */
+    message->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+    message->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
     message->diameter = 0U;                                   /* 手动模式没有刀具头标签规格，屏幕规格区应保持空。 */
     message->length = 0U;                                     /* 手动模式不显示 RFID 长度，防止沿用上一把刀具。 */
     message->draw = 0U;                                       /* 手动模式不显示 RFID 角度，避免旧规格残留。 */
@@ -2142,6 +2077,8 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     message->hand_type_raw_minor = 0U;                       /* 清掉 Page2 原始子类型，保持识别缓存和当前插拔状态一致。 */
     message->tool_type = 0U;
     message->raw_tool_type = 0U;                              /* 清掉刀具原始型号，避免下次上线前驱动或上位机读取旧 PXM/PXP/RFID 代号。 */
+    message->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+    message->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
     message->rfid_cache_hit = 0U;                              /* 清掉同一 EPC 重识别标志，避免普通 EEPROM 上线误继承射频调节值。 */
     message->diameter = 0U;
     message->length = 0U;

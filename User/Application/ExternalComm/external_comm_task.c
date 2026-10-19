@@ -277,6 +277,7 @@ static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵时置 1；独立停泵、保护停机或退出外控时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
 static uint8_t s_external_pump_b_manual_run_request = 0U; /* 记录上位机是否独立请求 B 泵运行，用于简易协议启停切换和小电脑图标显示。 */
+static uint8_t s_handle_injection_wait_stop = 0U; /* 缺注水首次拒绝外控启动后置1，明确停手柄或全停后清零，重复启动报文不能放行。 */
 static uint8_t s_pump_driver_wait_stop_mask = 0U; /* bit0/1表示A/B提前启动已被拒绝；须显式停止后才能重新申请，不接受持续旧启动自动复转。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
@@ -1764,6 +1765,10 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
         return 0U;
     }
 
+    if (!Pubinterface_IsRfidDirectionAllowed(dir))
+    {
+        return 0U; /* 外控不能绕过标签方向限制，拒绝时保留原方向和速度。 */
+    }
     if (Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type))
     {
         if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
@@ -2258,7 +2263,7 @@ static void ExternalComm_SetUart5PumpManualRun(uint8_t enable)
 }
 
 /*
- * 函数功能：急停、退出外控或外控失联时撤销两泵外控请求，同时取消未完成定位。
+ * 函数功能：急停、退出外控或外控失联时撤销两泵外控请求，取消定位并结束手柄等待停止命令。
  * 输入参数：无，普通单泵零速保活不调用本函数。
  * 返回参数：无。
  */
@@ -2266,6 +2271,7 @@ static void ExternalComm_ClearPumpRequests(void)
 {
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_A); /* 明确全停必须停止A定位，不能只发送仍授权校准的普通零速。 */
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_B); /* B使用独立取消槽，丢帧时由本泵任务持续确认停止。 */
+    s_handle_injection_wait_stop = 0U; /* 全停、退出或失联已撤销旧外控请求，后续新会话可重新申请手柄启动。 */
     s_pump_driver_wait_stop_mask = 0U; /* 收到全部停止命令后，清除A/B等待停止标志；之后重新启动时仍须检查驱动已就绪。 */
     s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
     s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
@@ -2743,7 +2749,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
 /*
  * 函数功能：执行上位机对当前手柄电机的启动或停止命令。
  * 输入参数：area_code 为 0x05 时启动当前手柄，为 0x06 时停止当前手柄。
- * 返回参数：true 表示命令执行成功；false 表示缺少手柄或公共接头刀具，失败应答已发送。
+ * 返回参数：true表示命令执行成功；false表示缺手柄、刀具或缺注水首次被拒等，失败应答已发送。
  */
 static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
 {
@@ -2765,6 +2771,13 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
             return false;
         }
 
+        if ((s_handle_injection_wait_stop != 0U) || (Pubinterface_CheckInjectionPumpForHandleStart() == false))
+        {
+            s_handle_injection_wait_stop = 1U; /* 首次拒绝后要求0x06停手柄或全停，连续0x05不能当成二次确认。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 明确应答本次启动未执行，保留现有协议帧格式。 */
+            return false; /* 不写运行请求，也不启动联动注水泵。 */
+        }
         Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 新启动命令允许重新尝试压力闭环运行。 */
         WorkMessage.speed_work = WorkMessage.speed_set_work; /* 启动时把当前设置转速作为待下发的转速指令。 */
         WorkMessage.runflag_work = true; /* 驱动任务下一周期发送电机启动帧。 */
@@ -2773,6 +2786,7 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
     }
     else
     {
+        s_handle_injection_wait_stop = 0U; /* 明确停手柄后才接受下次启动，普通停止不清此手柄已提醒记录。 */
         WorkMessage.runflag_work = false; /* 停止当前手柄电机。 */
         WorkMessage.speed_work = 0U; /* 停止时把转速指令设为 0，保留设置值供下次启动使用。 */
         ControlSignalMessage.HMI_control_flag = false; /* 结束外控手柄运行来源。 */
@@ -4115,71 +4129,8 @@ static uint8_t ExternalComm_GetHandleToolSource(uint8_t hand_model)
     return EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_EEPROM_PAGE3;
 }
 
-/*
- * 函数功能：把 RFID 标签中的 k rpm 速度字节转换成工程内部速度单位。
- * 输入参数：speed_k 为 RFID 标签保存的速度字节，例如 10 表示 10000 rpm。
- * 返回参数：转换后的 rpm 数值；超过 16 位范围时返回 65535。
- */
-static uint16_t ExternalComm_RfidSpeedToWorkSpeed(uint8_t speed_k)
-{
-    uint32_t speed = (uint32_t)speed_k * 1000UL; /* 标签中的 1 表示 1000 rpm，乘 1000 后与扫描任务保存的转速单位一致。 */
 
-    if (speed > 0xFFFFUL)
-    {
-        speed = 0xFFFFUL; /* 心跳速度字段只有 16 位，超过范围时限制为 65535，避免截掉高位后变成小数值。 */
-    }
 
-    return (uint16_t)speed; /* 返回可直接写入心跳 16 位速度字段的值。 */
-}
-
-/*
- * 函数功能：把 RFID x10 齿轮比字段转换为 A5 v2 心跳使用的 32 位 x100 倍率。
- * 输入参数：ratio_hi/ratio_lo 为 EPC 两字节齿轮比。
- * 返回参数：高 16 位表示 x100 增速，低 16 位表示 x100 减速；未知或不大于1.00时返回100。
- */
-static uint32_t ExternalComm_BuildRfidReductionRatio(uint8_t ratio_hi, uint8_t ratio_lo)
-{
-    uint16_t raw_ratio = (uint16_t)(((uint16_t)ratio_hi << 8) | ratio_lo); /* 保留 EPC 原始齿轮比，便于未知格式仍能追溯。 */
-    uint16_t ratio_value = (uint16_t)(raw_ratio & 0x0FFFU); /* 去掉高 4 位方向标记，剩余 12 位是比例数值。 */
-    uint16_t ratio_x100 = (uint16_t)(ratio_value * EXTERNAL_COMM_RFID_RATIO_X10_TO_X100); /* EPC x10倍率乘10转成A5 v2的x100，例如50转成500。 */
-
-    if (ratio_x100 <= EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT)
-    {
-        return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 0、1.00和小于1.00的异常倍率都按直联上报。 */
-    }
-
-    if ((ratio_hi & 0xF0U) == 0x00U)
-    {
-        return (uint32_t)ratio_x100; /* 高4位为0表示减速，x100倍率写入低16位。 */
-    }
-
-    if ((ratio_hi & 0xF0U) == 0xF0U)
-    {
-        return ((uint32_t)ratio_x100 << 16); /* 高4位为F表示增速，x100倍率写入高16位。 */
-    }
-
-    return EXTERNAL_COMM_HEARTBEAT_TOOL_RATIO_UNIT; /* 齿轮比高 4 位既不是 0 也不是 F，无法判断增速或减速，按 1.00 倍上报。 */
-}
-
-/*
- * 函数功能：把 RFID 标签方向字段转换成心跳刀具扩展方向字段。
- * 输入参数：raw_direction 为 RFID 标签方向字节，1 正转、2 反转、3 往复。
- * 返回参数：心跳扩展方向编码，0 正转、1 反转、2 往复。
- */
-static uint8_t ExternalComm_RfidDirectionToHeartbeat(uint8_t raw_direction)
-{
-    if (raw_direction == 2U)
-    {
-        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_REVERSE; /* RFID 协议 2 表示反转，心跳扩展使用 1。 */
-    }
-
-    if (raw_direction == 3U)
-    {
-        return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_OSC; /* RFID 协议 3 表示往复，心跳扩展使用 2。 */
-    }
-
-    return EXTERNAL_COMM_HEARTBEAT_TOOL_DIRECTION_FORWARD; /* RFID 协议 1 或异常值按正转处理，保持和 handlescan 默认方向一致。 */
-}
 
 /*
  * 函数功能：判断 RFID 缓存结果是否匹配当前通道和当前手柄基座类型。
@@ -4204,8 +4155,8 @@ static bool ExternalComm_RfidResultMatchesHandle(uint8_t channel,
         (handle_model == PXBA_ONLINES) ||
         (handle_model == PXBB_ONLINES))
     {
-        return (bool)((rfid_result->source == RFID_READ_SOURCE_EPC) &&
-                      (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)); /* 公共接头和 PXBA/PXBB 当前只接受 EPC 12 字节标签。 */
+        return (bool)(((rfid_result->source == RFID_READ_SOURCE_EPC) && (rfid_result->payload_length == RFID_PAYLOAD_EPC_LENGTH)) ||
+                      ((rfid_result->source == RFID_READ_SOURCE_USER) && (rfid_result->payload_length == RFID_PAYLOAD_USER_LENGTH))); /* 两类标签都必须属于本通道和对应长度。 */
     }
 
     return false; /* 普通不可拆手柄使用 EEPROM Page3，不能用 RFID 缓存代替。 */
@@ -4426,14 +4377,15 @@ static uint16_t ExternalComm_HeartbeatDefaultSpeed(const ChannelrecognizeMessage
 
 /*
  * 函数功能：判断指定通道是否具备可上报的刀具扩展信息。
- * 输入参数：online 为通道在线状态，memory 为通道记忆，recognize 为扫描层识别缓存。
+ * 输入参数：online 为通道在线状态，channel 为A/B通道，memory 为通道记忆，recognize 为扫描层识别缓存。
  * 返回参数：true 表示可以上报刀具块，false 表示跳过。
  */
 static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
+                                                uint8_t channel, /* 查询本通道最近RFID结果，不能借用另一通道的有效标志。 */
                                                 const ChannelMemoryMessage_t *memory,
                                                 const ChannelrecognizeMessage_t *recognize)
 {
-    bool is_rfid_source; /* true 表示刀具来自 RFID，只要求已识别刀具类型，不要求直径和长度都非零。 */
+    bool is_rfid_source; /* true 表示RFID基座；自动模式还须确认最新有效结果已装载，规格允许为0。 */
     uint8_t handle_model; /* 本次要上报的基座型号；MemoryMsg 未更新时可从扫描缓存读取。 */
 
     /* 通道离线时不能上报历史刀具信息，避免上位机显示已拔出的刀具头。 */
@@ -4455,7 +4407,12 @@ static bool ExternalComm_HeartbeatToolInfoValid(uint8_t online,
 
     if (is_rfid_source != false)
     {
-        return (recognize->tool_type != 0U); /* RFID 来源仍需先解析出刀具类型，避免基座刚上线时发送全 0 假刀具块。 */
+        if ((handle_model == COMMON_SOCKET_ONLINES) || (memory->auto_identify != 0U))
+        {
+            return ((recognize->tool_type != 0U) && Handlescan_IsRfidToolReady(channel) &&
+                    (memory->rfid_result_sequence == recognize->rfid_result_sequence)); /* 自动RFID识别失败或新参数尚未装载时，不把历史记忆作为当前有效刀具上报。 */
+        }
+        return (recognize->tool_type != 0U); /* PX手动模式继续上报其EEPROM刀具参数。 */
     }
 
     /* 刀具类型、直径、长度都有效时才认为刀具信息完整。 */
@@ -4499,7 +4456,8 @@ static bool ExternalComm_HeartbeatGetRfidFallback(uint8_t online,
         return false; /* RFID 任务还没有读到该通道有效标签，上位机继续显示等待 RFID。 */
     }
 
-    return ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result); /* 结果必须来自当前通道的有效 12 字节 EPC，不能借用另一通道的数据。 */
+    return (Handlescan_IsRfidToolReady(channel) &&
+            ExternalComm_RfidResultMatchesHandle(channel, handle_model, rfid_result)); /* 只补充已由扫描层装载的本通道有效EPC或USER，失败时不重新显示旧刀具。 */
 }
 
 /*
@@ -4512,8 +4470,8 @@ static void ExternalComm_AppendRfidToolBlock(uint8_t *info_area,
                                                         uint8_t channel,
                                                         const RfidToolResult_t *rfid_result)
 {
-    const uint8_t *payload; /* 指向 RFID EPC 原始 payload，按最终协议解释字段。 */
-    uint8_t source_code; /* 心跳 block byte1，当前 RFID 刀具固定上报 EPC 来源。 */
+    RfidToolParameters_t decoded; /* 与运行参数使用同一解码器，避免把CRC字节误当方向。 */
+    uint8_t source_code; /* 心跳block byte1；新EPC和老USER沿用来源编号1，保持上位机协议兼容。 */
     uint8_t tool_type; /* 心跳 block byte2，实际刀具型号来自 RFID 标签。 */
     uint8_t diameter; /* 心跳 block byte3，刀具直径来自 RFID 标签。 */
     uint16_t length; /* 心跳 block byte4~5，刀具长度按大端上报。 */
@@ -4530,33 +4488,21 @@ static void ExternalComm_AppendRfidToolBlock(uint8_t *info_area,
         return; /* 异常参数不写半截 block，保持心跳扩展格式完整。 */
     }
 
-    payload = rfid_result->payload; /* payload 长度已由调用方按 EPC 检查，这里只做字段拆解。 */
-    if ((rfid_result->source != RFID_READ_SOURCE_EPC) ||
-        (rfid_result->payload_length != RFID_PAYLOAD_EPC_LENGTH))
+    if (!Rfid_DecodeToolPayload(rfid_result->source, rfid_result->payload, rfid_result->payload_length, &decoded))
     {
-        return; /* 最终协议只允许 EPC 12 字节结果进入心跳刀具扩展。 */
+        return; /* 校验失败不输出半块刀具信息。 */
     }
-    source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC; /* 公共接头和 PXBA/PXBB 的 EPC 标签来源都显示为 RFID EPC。 */
-    tool_type = payload[0]; /* EPC byte0：刀具型号。 */
-    diameter = payload[1]; /* EPC byte1：刀具直径。 */
-    length = payload[2]; /* EPC byte2：刀具长度。 */
-    angle = payload[3]; /* EPC byte3：刀具角度。 */
-    reduction_ratio = ExternalComm_BuildRfidReductionRatio(payload[4], payload[5]); /* EPC byte4~5：齿轮比/减速比。 */
-    max_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[6]); /* EPC byte6：最高速度，按 k rpm 转工程单位。 */
-    min_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[7]); /* EPC byte7：最低速度，按 k rpm 转工程单位。 */
-    default_speed = ExternalComm_RfidSpeedToWorkSpeed(payload[8]); /* EPC byte8：默认速度，按 k rpm 转工程单位。 */
-    default_flow = payload[9]; /* EPC byte9：默认注水泵流量。 */
-    direction = ExternalComm_RfidDirectionToHeartbeat(payload[10]); /* EPC byte10：方向字段。 */
-
-    if ((max_speed != 0U) && (default_speed > max_speed))
-    {
-        default_speed = max_speed; /* 默认速度不能超过 RFID 上限，避免上位机看到不合法初值。 */
-    }
-    if (default_speed < min_speed)
-    {
-        default_speed = min_speed; /* 默认速度不能低于 RFID 下限。 */
-    }
-
+    source_code = EXTERNAL_COMM_HEARTBEAT_TOOL_SOURCE_RFID_EPC; /* 保持既有心跳来源1表示RFID基座刀具，老USER也用1，不扩展上位机来源枚举。 */
+    tool_type = decoded.model; /* 上报解出的型号1~6，不上报B0打包值。 */
+    diameter = (decoded.diameter > 255U) ? 255U : (uint8_t)decoded.diameter; /* 心跳直径字段只有1字节，超范围饱和而不回绕。 */
+    length = decoded.length; /* 两种协议均已转换为刀具长度。 */
+    angle = decoded.angle; /* 两种协议均已转换为弯曲角度。 */
+    reduction_ratio = decoded.ratio; /* 老刀明确上报200或430，单位x100。 */
+    max_speed = (decoded.max_speed > 65535U) ? 65535U : (uint16_t)decoded.max_speed; /* 旧心跳字段只有16位，超范围饱和。 */
+    min_speed = (decoded.min_speed > 65535U) ? 65535U : (uint16_t)decoded.min_speed; /* 运行参数仍保留32位rpm。 */
+    default_speed = (decoded.default_speed > 65535U) ? 65535U : (uint16_t)decoded.default_speed; /* 心跳不通过低16位截断制造错误速度。 */
+    default_flow = decoded.flow; /* 使用与主控一致的默认注水量。 */
+    direction = (uint8_t)(decoded.direction + 1U); /* 心跳仍用1正转、2反转、3往复，不改变外控编码。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, channel); /* block byte0：通道号，1 为 A，2 为 B。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, source_code); /* block byte1：RFID 刀具来源。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, tool_type); /* block byte2：RFID 刀具型号。 */
@@ -4672,9 +4618,9 @@ static void ExternalComm_HeartbeatAppendToolInfo(uint8_t *info_area, uint16_t *i
     online_a = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Aonline ? 1U : 0U, &ChannelrecognizeMessageA); /* A 基座已识别但事件未装载时，也允许上位机先显示在线。 */
     online_b = ExternalComm_HeartbeatResolveOnline(WorkMessage.Channel_Bonline ? 1U : 0U, &ChannelrecognizeMessageB); /* B 基座已识别但事件未装载时，也允许上位机先显示在线。 */
     /* 检查 A 通道是否在线且刀具数据齐全；通道记忆未更新时可读扫描缓存。 */
-    append_a = ExternalComm_HeartbeatToolInfoValid(online_a, &MemoryMsgA, &ChannelrecognizeMessageA);
+    append_a = ExternalComm_HeartbeatToolInfoValid(online_a, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA);
     /* 按相同规则检查 B 通道，不借用 A 通道的识别结果。 */
-    append_b = ExternalComm_HeartbeatToolInfoValid(online_b, &MemoryMsgB, &ChannelrecognizeMessageB);
+    append_b = ExternalComm_HeartbeatToolInfoValid(online_b, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB);
     append_a_rfid = (append_a == false) ? ExternalComm_HeartbeatGetRfidFallback(online_a, CHANNEL_A, &MemoryMsgA, &ChannelrecognizeMessageA, &rfid_a_result) : false; /* 常规 A 数据不可用时再检查 RFID 结果；tool_type 为 0 时仍拒绝上报。 */
     append_b_rfid = (append_b == false) ? ExternalComm_HeartbeatGetRfidFallback(online_b, CHANNEL_B, &MemoryMsgB, &ChannelrecognizeMessageB, &rfid_b_result) : false; /* 常规 B 数据不可用时再检查 RFID 结果；tool_type 为 0 时仍拒绝上报。 */
 

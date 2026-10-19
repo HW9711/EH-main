@@ -70,6 +70,18 @@ static void ScreenKey_InvalidateTouchKeepAlive(void)
 }
 
 /*
+ * 函数功能：启动检查拒绝触控后，要求连续无保活约420ms才能接受下一次按下。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void ScreenKey_RequireTouchRelease(void)
+{
+    ScreenKey_InvalidateTouchKeepAlive(); /* 取消已排队旧保活的有效资格，首次拒绝后不能延迟启动。 */
+    s_touch_alarm_release_required = 1U; /* 持续原始保活必须被丢弃，直到用户松开触控按钮。 */
+    s_touch_alarm_release_ticks = 0U; /* 从本次拒绝开始累计无保活时间，约420ms后才允许新按下。 */
+}
+
+/*
  * 函数功能：按住信号已成功放入按键队列后，记录它的接收时刻。
  * 输入参数：无，函数在SendKeyBehMessage确认成功后读取HAL毫秒时钟。
  * 返回参数：无。

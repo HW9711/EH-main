@@ -182,7 +182,7 @@ static void Foot_StopDoubleMotorAtReleaseBoundary(uint8_t source)
 }
 
 /*
- * 函数功能：在脚踏准备写入运行标志前验证“先松开、后重新踩下”的完整动作周期。
+ * 函数功能：写脚踏运行请求前确认已松开再踩下，新启动还须通过缺注水提醒检查。
  * 输入参数：source 为左侧或右侧踏板编号，取 FOOT_MOTOR_SOURCE_LEFT/RIGHT。
  * 返回参数：true 表示本侧允许启动或继续运行；false 表示本侧必须保持停机。
  */
@@ -205,6 +205,10 @@ static bool Foot_TryAuthorizeMotorRun(uint8_t source)
     }
 
     s_foot_motor_release_ready = false; /* 本次松脚记录只用一次，下次停机后仍需再次松脚。 */
+    if (Pubinterface_CheckInjectionPumpForHandleStart() == false) /* 只有完成松脚后的新踩踏才检查，持续踩住不能算第二次。 */
+    {
+        return false; /* 已清掉本次松脚记录；调用方撤销脚踏请求，下一次必须再次松脚。 */
+    }
     s_foot_motor_stop_latched = false; /* 取消强制停机，手柄驱动任务可以执行本次运行请求。 */
     s_foot_motor_active_source = source; /* 保存实际启动侧，双脚踏未活动一侧的释放分支不得误停本侧。 */
     DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 4U, WorkMessage.channel_work, 1U); /* 记录本次批准的踏板侧和逻辑通道。 */

@@ -64,7 +64,11 @@ static void Handle_DisableAutoIdentify(uint8_t channel, ChannelMemoryMessage_t *
 	WorkMessage.auto_identify = 0U; /* 把当前通道改为手动模式，屏幕不再显示自动识别的等待状态和结果区。 */
 	memory->auto_identify = 0U;	   /* 通道记忆同步进入手动模式，切换通道后不会再次自动恢复 RFID。 */
 	WorkMessage.raw_tool_type = 0U; /* 手动刀具不再使用 RFID 原始型号，避免驱动和上位机继续按旧标签判断。 */
+	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	memory->raw_tool_type = 0U;	   /* 通道保存的 RFID 型号也清零，切回该通道时仍按手动刀具处理。 */
+	memory->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	memory->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 
 	if (channel == CHANNEL_A) /* A 通道退出自动识别时只清理 A 的标签结果和任务。 */
 	{
@@ -243,6 +247,8 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 
 	recognize->tool_type = tool_type; /* 手动模式刀具能力由用户选择，覆盖自动识别留下的标签类型。 */
 	recognize->raw_tool_type = 0U; /* 手动模式没有 RFID 原始刀具型号，清掉旧标签码。 */
+	recognize->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	recognize->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	recognize->run_direction = direction; /* 手动刨刀默认往复、手动磨头默认正转，保持旧 UI 交互习惯。 */
 	zz_speed = Handle_ClampSpeed(recognize,
 									 ZZDIR,
@@ -259,6 +265,8 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 
 	memory->tool_type = tool_type; /* 通道记忆同步手动刀具能力，切通道后仍保持手动磨/刨选择。 */
 	memory->raw_tool_type = 0U; /* 通道记忆清 RFID 原始型号，避免上位机把手动模式当自动标签显示。 */
+	memory->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	memory->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	memory->auto_identify = 0U; /* 通道记忆进入手动模式，后续切回该通道不自动恢复 RFID。 */
 	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((recognize->meioticratio > 1U) ? ((uint32_t)recognize->meioticratio * 100U) : 100U); /* 优先用完整倍率（实际倍率 × 100）；没有完整值时，把 Page3 整数倍率乘 100；两者都没有时用 100，表示 1 倍。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 手动模式仍使用手柄 Page4 默认注水流量，保证泵显示和运行一致。 */
@@ -284,6 +292,8 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 
 	WorkMessage.tool_type = memory->tool_type; /* 更新当前刀具类型，屏幕按钮和是否允许运行都使用此值。 */
 	WorkMessage.raw_tool_type = 0U; /* 清除当前 RFID 型号，避免手动模式继续使用旧标签的类型。 */
+	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	WorkMessage.auto_identify = 0U; /* 把当前工作模式改为手动识别刀具。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 当前使用的倍率也改为手柄 EEPROM 参数，后续发电机速度时按此换算。 */
 	WorkMessage.freq_work = memory->freq; /* 更新当前往复频率，下一次手动启动刨刀时使用此值。 */
@@ -620,6 +630,8 @@ static void Handle_ClearSelection(void)
 	WorkMessage.hand_model = 0U;					   /* 没有任何手柄在线时清掉当前手柄型号，防止一体式手柄拔出后仍按旧型号刷新方向按钮。 */
 	WorkMessage.tool_type = 0U;					   /* 没有任何手柄在线时清掉当前刀具能力，防止旧刨刀能力继续打开往复入口。 */
 	WorkMessage.raw_tool_type = 0U;				   /* 同步清掉原始刀具型号，避免后续驱动或上位机继续看到旧 EEPROM/RFID 代号。 */
+	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+	WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	WorkMessage.auto_identify = 0U;				   /* 无手柄状态不属于 RFID 自动识别模式，必须清掉自动识别标志以隐藏 0x1407 按钮。 */
 	WorkMessage.dir_work = 0U;					   /* 无手柄时当前方向无效，方向区应回到灰色初始状态。 */
 	WorkMessage.freq_work = 0U;					   /* 无手柄时往复频率无效，避免频率窗口沿用旧 PXYTP/MXYTP 参数。 */
@@ -729,6 +741,8 @@ void PlugORunPLUGActive(uint8_t key_value)
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
+				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+				WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 				WorkMessage.channel_work = CHANNEL_NONE;		   /* A 运行中拔出先取消当前通道选择；按控制方式完成松开或退出、报警处理后，才允许恢复 B。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
 				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，显示值和下次实际运行目标保持一致。 */
@@ -782,6 +796,8 @@ void PlugORunPLUGActive(uint8_t key_value)
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
+				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
+				WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 				WorkMessage.channel_work = CHANNEL_NONE;		   /* B 运行中拔出先取消当前通道选择；按控制方式完成松开或退出、报警处理后，才允许恢复 A。 */
 				Pubinterface_ClearSelectedChannelDisplay();	   /* 没有当前通道时关闭参数区，避免屏幕保留离线通道信息。 */
 				Pubinterface_ApplyInjectionPumpDefaultFlow(0U);  /* 当前无选中手柄时，注水泵流量回到程序默认 30，避免拔掉最后手柄后残留 65。 */

@@ -439,7 +439,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 /*
  * 函数功能：处理手柄键的启动或停止请求，同时更新注水泵和当前控制方式。
  * 输入参数：enable true 表示启动电机，false 表示停止电机。
- * 返回参数：true 表示已写入启停状态；false 表示刀具未准备好或其它控制方式正在占用，启动被拒绝。
+ * 返回参数：true表示已写启停请求；false表示刀具未就绪、缺注水首次提醒或控制被占用，本次启动被拒绝。
  */
 static bool HandleRunKey_SetMotorRun(bool enable)
 {
@@ -454,6 +454,11 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 		{
 			return false; /* 其它控制来源正在占用时不抢占，实体键本周期启动无效。 */
 		}
+        if (Pubinterface_CheckInjectionPumpForHandleStart() == false) /* 实体键只在新按下事件进入，长按不会重复确认。 */
+        {
+            ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 本次没有写运行请求，允许其它空闲控制方式使用。 */
+            return false; /* 首次缺注水时不发送启动同步消息，必须松键后重新按下。 */
+        }
 		Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 这是一次新按下，清掉上次压力堵转停泵记录，再由泵任务检查当前压力是否允许运行。 */
 	}
 
@@ -789,7 +794,8 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     DirActive((direction == ZZDIR) ? HANDLEKey_dir_Forward : HANDLEKey_dir_Reverse); /* 使用原方向处理，同步当前方向、该方向转速和 A/B 记忆及屏幕。 */
     if ((WorkMessage.dir_work != direction) || (WorkMessage.speed_set_work == 0U) ||
         (Pubinterface_CheckCommonSocketToolReadyForRun() == false) ||
-        (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false))
+        (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false) ||
+        (Pubinterface_CheckInjectionPumpForHandleStart() == false)) /* 数字手柄新按下也通过缺注水检查，拒绝后仍需重新松手。 */
     {
         HandleGzytTest_Revoke(state, channel); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */
         return; /* 下次需重新确认两键松开并按下，不能反复尝试旧请求。 */

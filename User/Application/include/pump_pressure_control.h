@@ -12,26 +12,24 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_ENABLE 1U
 #endif
 
-/* 旧灌注压力保护开关：阀门测试关闭时，0屏蔽旧减速/停泵/提示，1启用旧逻辑；阀门测试不受此开关控制。 */
+/* 灌注压力保护总开关：0关闭灌注压力减速、停泵、提示和阀门探测；1按下面的阀门测试开关选择算法。注水和抽吸不受影响。 */
 #ifndef PUMP_PRESSURE_POUR_PROTECTION_ENABLE
-#define PUMP_PRESSURE_POUR_PROTECTION_ENABLE 1U /* 仅阀门测试关闭时使用；保留原灌注保护配置，便于结束试验后恢复。 */
+#define PUMP_PRESSURE_POUR_PROTECTION_ENABLE 0U /* 暂时关闭以采集正常和堵阀压力；恢复为1后重新启用灌注压力处理。 */
 #endif
 
-/* 灌注阀门闭环测试开关：1使用超过100mmHg持续500ms停泵、低于100mmHg后最多15秒探测流程；0恢复原来的按流量阈值逻辑。 */
+/* 灌注保护总开关为1时才执行：阀门测试开关1使用超过348mmHg持续500ms停泵、低于348mmHg后最多15秒探测流程；0恢复原来的按流量阈值逻辑。 */
 #ifndef PUMP_PRESSURE_POUR_VALVE_TEST_ENABLE
 #define PUMP_PRESSURE_POUR_VALVE_TEST_ENABLE 1U
 #endif
 
-/* 当前上位机拟合为1g约0.523572mmHg；本值放大1000000倍，调整后所有试验压力线同时改变。 */
-#define PUMP_PRESSURE_TEST_MMHG_PER_G_X1M 523572U
-/* 0.1g读数乘上面的系数后，除以10000000才是mmHg；比较时统一放大阈值，避免浮点和取整。 */
+/* 分段换算结果和mmHg阈值统一放大10000000倍，保留插值精度并避免浮点比较。 */
 #define PUMP_PRESSURE_TEST_MMHG_SCALE 10000000ULL
-/* 正常灌注和20mL/min探测的超压线，当前100mmHg；调大后更晚触发停泵。 */
-#define PUMP_PRESSURE_TEST_STOP_MMHG 100U
+/* 正常灌注和20mL/min探测的超压线，当前348mmHg；调大后更晚触发停泵。 */
+#define PUMP_PRESSURE_TEST_STOP_MMHG 348U
 /* 压力严格超过超压线的连续确认时间，当前500ms；调大后允许持续超压更久。 */
 #define PUMP_PRESSURE_TEST_STOP_CONFIRM_MS 500U
 /* 初次超压停泵后，压力严格低于此值才允许20mL/min探测，单位mmHg；调大后更早重新运行。 */
-#define PUMP_PRESSURE_TEST_PROBE_START_MMHG 100U
+#define PUMP_PRESSURE_TEST_PROBE_START_MMHG 348U
 /* 探测期间固定下发的流量，单位mL/min；它不是压力设定值，调大后向管内送水更多。 */
 #define PUMP_PRESSURE_TEST_PROBE_FLOW 20U
 /* 从首次下发20mL/min开始计时，单位ms；到时未确认开阀即撤销请求，压力变化不会重新计时。 */
@@ -45,9 +43,9 @@ extern "C" {
 /* 下降后最多剩下原压力的百分比；50表示约1秒内至少下降一半，调小后更难确认开阀。 */
 #define PUMP_PRESSURE_TEST_DROP_REMAIN_PERCENT 50U
 /* 计算下降比例前的最低压力，单位mmHg；低于此值不凭接近零点的微小变化确认开阀。 */
-#define PUMP_PRESSURE_TEST_DROP_START_MMHG 20U
-/* 下降后还须严格低于此压力，单位mmHg；当前10是待台架验证的候选值，调小后更难恢复。 */
-#define PUMP_PRESSURE_TEST_OPEN_MMHG 10U
+#define PUMP_PRESSURE_TEST_DROP_START_MMHG 68U
+/* 下降后还须严格低于此压力，单位mmHg；当前34按原10mmHg对应的g读数换算，仍待台架验证，调小后更难恢复。 */
+#define PUMP_PRESSURE_TEST_OPEN_MMHG 34U
 /* 快速降压后连续低压的确认时间，单位ms；调大后恢复原流量更晚。 */
 #define PUMP_PRESSURE_TEST_OPEN_CONFIRM_MS 1000U
 /* 一次快速降压最多可供后续低压确认使用多久，单位ms；超时须重新观察明显降压，不能沿用很早的波动。 */
@@ -61,7 +59,7 @@ extern "C" {
 
 /* 灌注测试阶段0：按原设定流量运行，等待连续超压；初始化、人工停止或恢复原流量时进入。 */
 #define PUMP_PRESSURE_TEST_NORMAL 0U
-/* 阶段1：已超压停泵，保持零速，等待有效压力低于100mmHg。 */
+/* 阶段1：已超压停泵，保持零速，等待有效压力低于348mmHg。 */
 #define PUMP_PRESSURE_TEST_WAIT_LOW 1U
 /* 阶段2：固定20mL/min探测，15秒内确认开阀则恢复，否则进入阶段3。 */
 #define PUMP_PRESSURE_TEST_PROBE 2U
@@ -178,8 +176,8 @@ typedef struct
     uint32_t condition_tick_ms; /* 注水/抽吸超限或恢复条件的开始时间；灌注只用于原始压力连续超限计时，单位 ms。 */
     uint32_t last_sample_tick_ms; /* 最近一个新压力样本时间，用于断帧后重新确认。 */
     uint32_t last_alarm_tick_ms; /* 最近一次提示时刻；注水/抽吸据此每10秒重报，灌注只记录首次停转时间。 */
-    uint16_t target_speed; /* 上次处理的设定流量；旧灌注和抽吸调速后重新确认，固定100mmHg测试和800g注水不因调速中断超压计时。 */
-    uint16_t alarm_threshold_g; /* 本次诊断阈值，单位g；灌注测试约191g但实际按100mmHg比较，旧灌注按流量查表，注水固定800g。 */
+    uint16_t target_speed; /* 上次处理的设定流量；旧灌注和抽吸调速后重新确认，固定348mmHg测试和800g注水不因调速中断超压计时。 */
+    uint16_t alarm_threshold_g; /* 本次诊断阈值，单位g；灌注测试约191g但实际按348mmHg比较，旧灌注按流量查表，注水固定800g。 */
     uint16_t last_output_speed; /* 灌注泵最近一次计算的下发流量；短时无新压力帧时保持该流量，不因旧帧恢复转动。 */
     uint64_t pour_pressure_sum; /* 当前500ms窗口内有效新压力帧之和，单位0.1g；窗口重开时清零或用当前帧重新开始，重复帧不加入。 */
     uint32_t pour_window_start_ms; /* 当前压力窗口首帧时刻，单位ms；设定改变、无效帧、长时间断帧和超压停泵后重新建立窗口。 */
@@ -194,7 +192,7 @@ typedef struct
     uint8_t mode; /* 0未使用、1抽吸提示、2注水提示、3灌注压力处理；类型改变时清掉上一用途的压力记录。 */
     uint32_t pour_test_probe_tick_ms; /* 首次进入20mL/min探测时记录；本轮固定15秒期限不因压力或设定变化延后。 */
     uint32_t pour_test_drop_tick_ms; /* 最近一次符合下降比例的时间；仅在drop_seen置1时有效，超时不允许据此恢复。 */
-    uint32_t pour_test_low_tick_ms; /* 快速降压后首次低于10mmHg的时间；压力回升或样本失效时取消低压确认。 */
+    uint32_t pour_test_low_tick_ms; /* 快速降压后首次低于34mmHg的时间；压力回升或样本失效时取消低压确认。 */
     uint32_t pour_test_raw[PUMP_PRESSURE_TEST_FILTER_COUNT]; /* 最近5份新压力，单位0.1g；进入探测、人工停止或重启时清零。 */
     uint32_t pour_test_history[PUMP_PRESSURE_TEST_HISTORY_COUNT]; /* 已滤波的探测压力，单位0.1g；只保存稳定等待结束后的样本。 */
     uint32_t pour_test_history_tick[PUMP_PRESSURE_TEST_HISTORY_COUNT]; /* 与history同下标压力的毫秒时刻，用于选择约1秒前的有效点。 */
@@ -205,8 +203,11 @@ typedef struct
     uint8_t pour_test_history_count; /* 历史有效压力点数量，最多16；不足约1秒跨度时不判断下降比例。 */
     uint8_t pour_test_history_index; /* 下一历史点的写入下标，0到15循环，覆盖最旧点。 */
     uint8_t pour_test_drop_seen; /* 检出约1秒下降至少一半后置1；2秒内未完成低压确认或过程结束时清零。 */
-    uint8_t pour_test_low_active; /* 检出快速降压后持续低于10mmHg时置1；回升或确认结束时清零。 */
+    uint8_t pour_test_low_active; /* 检出快速降压后持续低于34mmHg时置1；回升或确认结束时清零。 */
 } PumpPressureAlarmState_t;
+
+/* 按实测标定点将0.1g读数换为mmHg乘10000000；调用者须先排除6000等无效帧。 */
+uint64_t PumpPressureControl_ToMmHgScaled(uint32_t weight_x10);
 
 /* 停止或泵类型切换时清除单路压力记录，不修改开泵请求。 */
 void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state);
@@ -218,7 +219,7 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t threshold_g,
                                         uint8_t sequence,
                                         uint32_t now_ms);
-/* 灌注测试开启时执行固定压力停泵和15秒探测；关闭时使用原减速逻辑。alarm_event返回PUMP_PRESSURE_EVENT_*事件位。 */
+/* 灌注保护总开关为0时原样返回设定流量；为1时由阀门测试开关选择固定压力探测或原减速逻辑。alarm_event返回PUMP_PRESSURE_EVENT_*事件位。 */
 uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
                                        uint16_t target_speed,
                                        uint32_t weight_x10,

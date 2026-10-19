@@ -237,6 +237,8 @@ typedef struct
   volatile uint8_t   touchactive_work;//屏幕触控激活标志
   volatile uint8_t   tool_type;//控制时使用的刀具类别，例如刨刀 PLANER、磨刀 GRINDH
   volatile uint8_t   raw_tool_type;//识别到的原始刀具型号；刨刀/磨刀分类后仍保留它，供驱动和上位机区分具体刀具
+    volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
+    volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
   volatile uint8_t   auto_identify;//当前通道是否采用 RFID 自动识别；切走后记住，切回来时恢复
   volatile bool      runflag_work;//电机运行请求标志
   volatile bool      alarm_flag;//全局持续报警是否有效
@@ -291,6 +293,8 @@ typedef struct {
   volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
   volatile uint8_t   tool_type;//控制用刀具类别：刨刀 PLANER 或磨刀 GRINDH
   volatile uint8_t   raw_tool_type;//原始刀具型号；tool_type 只分刨刀/磨刀，这里仍保留具体型号
+    volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
+    volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
   volatile uint8_t   drive_type;//驱动方式：脚控、手控、外控或触控
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint8_t   auto_identify;//本通道是否采用 RFID 自动识别，切回本通道时恢复
@@ -345,6 +349,8 @@ typedef struct
     volatile uint8_t   control_mode;//控制模式
     volatile uint8_t   tool_type;//刀具类型	
     volatile uint8_t   raw_tool_type;//RFID/EEPROM 读出的原始刀具型号，保留标签编号或旧型号编号
+    volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
+    volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
     volatile uint8_t   rfid_cache_hit;//是否再次识别到同一 RFID 刀具；是则保留用户已调好的速度和频率
 }
 ChannelrecognizeMessage_t;//本通道刚读出的手柄、刀具信息
@@ -428,6 +434,7 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按当前在线状态刷新 A/B 手柄图标，已拔出的通道显示为未连接。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断此刀具是否按刨刀方式控制。 */
+bool Pubinterface_IsRfidDirectionAllowed(uint8_t direction); /* 检查当前RFID允许的显示方向，0/1/2为正/反/往复。 */
 bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type); /* 判断此手柄或 RFID 刀具是否只能用固定方向，固定后屏幕和外控都不能改。 */
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
 void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
@@ -441,10 +448,16 @@ void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow); /* 为在线注�
 void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 把指定通道 Page4 的默认注水量设给在线注水泵。 */
 bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新插入通道是否允许自动选中。 */
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
-bool Pubinterface_IsCommonSocketToolReady(void); /* 公共接头需已识别到可用刀具才返回true，非公共接头直接返回true；只查询，不发报警。 */
-bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 手柄电机启动前检查公共接头 EPC 刀具头，缺失时负责报警并拒绝运行。 */
-bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 脚踏启动前检查公共接头刀具，缺失时持续报警到松脚。 */
+bool Pubinterface_IsCommonSocketToolReady(void); /* 公共接头和自动PX需装载最近有效RFID结果才返回true；其它模式不受此检查影响，只查询不报警。 */
+bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 启动前检查公共接头或自动PX的有效RFID刀具，缺失时报警并拒绝运行。 */
+bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 脚踏启动前检查自动RFID刀具，缺失时持续报警到松脚。 */
 void Pubinterface_ReleaseFootCommonSocketToolMissingAlarm(void); /* 脚踏松开或掉线后，关闭未识别到 RFID 刀具的持续弹窗和蜂鸣。 */
+/*
+ * 函数功能：新启动时缺注水先提醒并拒绝，再次新操作提醒后允许；A/B独立记录。
+ * 输入参数：无，调用方拒绝后必须等待松开或停止命令，不能把长按当成再次启动。
+ * 返回参数：true允许继续原启动流程；false本次必须保持停止。
+ */
+bool Pubinterface_CheckInjectionPumpForHandleStart(void);
 void Pubinterface_StopTouchKeepAliveRun(void); /* 结束屏幕按住运行按钮发起的电机运行。 */
 void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void); /* 触控运行时拔柄，等用户松开按钮后退出本次触控并清除报警。 */
 void Pubinterface_LoadChannelMemory(uint8_t channel); /* 把指定通道保存的参数恢复到当前工作信息。 */

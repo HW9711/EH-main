@@ -69,6 +69,7 @@ uint8_t ScreenKey_LegacyEventTake(void);
  * 返回参数：1 表示未到 420ms；0 表示没有有效信号、信号已取消或已到 420ms。
  */
 uint8_t ScreenKey_IsAcceptedTouchKeepAliveFresh(void);
+void ScreenKey_RequireTouchRelease(void); /* 取消旧触控保活并等待约420ms无信号，防止首次拒绝后长按自动启动。 */
 
 //============================================================================
 //接收串口数据任务，收到的数据放入缓冲区

@@ -552,6 +552,12 @@ void MOTORRUN(void)
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
     uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
+    if (!Pubinterface_IsRfidDirectionAllowed((uint8_t)WorkMessage.dir_work) ||
+        !Pubinterface_IsCommonSocketToolReady())
+    {
+        WorkMessage.runflag_work = false; /* 标签未就绪或方向不被允许时，本周期禁止发送运行命令。 */
+        WorkMessage.speed_work = 0U; /* 清目标速度，后续沿原停止路径发送零速帧。 */
+    }
     if((WorkMessage.drivetype_work==JTWORK) && (Foot_IsMotorStopLatched()!=0U))
     {
         WorkMessage.runflag_work=false; /* 脚踏松开或失效锁存优先覆盖普通运行标志，防止其它业务分支把旧 RUN 重新写回。 */
