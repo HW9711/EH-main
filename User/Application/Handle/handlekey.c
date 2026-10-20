@@ -439,7 +439,7 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 /*
  * 函数功能：处理手柄键的启动或停止请求，同时更新注水泵和当前控制方式。
  * 输入参数：enable true 表示启动电机，false 表示停止电机。
- * 返回参数：true表示已写启停请求；false表示刀具未就绪、缺注水首次提醒或控制被占用，本次启动被拒绝。
+ * 返回参数：true表示已写入启停状态；false表示刀具、首次缺泵确认或控制互斥条件不满足。
  */
 static bool HandleRunKey_SetMotorRun(bool enable)
 {
@@ -454,11 +454,12 @@ static bool HandleRunKey_SetMotorRun(bool enable)
 		{
 			return false; /* 其它控制来源正在占用时不抢占，实体键本周期启动无效。 */
 		}
-        if (Pubinterface_CheckInjectionPumpForHandleStart() == false) /* 实体键只在新按下事件进入，长按不会重复确认。 */
-        {
-            ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 本次没有写运行请求，允许其它空闲控制方式使用。 */
-            return false; /* 首次缺注水时不发送启动同步消息，必须松键后重新按下。 */
-        }
+		if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_HANDLE) == false)
+		{
+			WorkMessage.speed_work = 0U; /* 首次缺泵时撤销准备阶段写入的目标速度，保持电机停止。 */
+			ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 未启动不占电机控制权，缺泵记录独立等待真实松键。 */
+			return false; /* 不发送异步启动消息，避免队列绕过本次拦截。 */
+		}
 		Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 这是一次新按下，清掉上次压力堵转停泵记录，再由泵任务检查当前压力是否允许运行。 */
 	}
 
@@ -513,6 +514,10 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 {
 	uint8_t hand_model = HandleRunKey_GetChannelModel(channel); /* 每次处理都读取通道型号，A/B 切换或重新识别后策略立即跟随当前手柄。 */
 	bool momentary_model = HandleRunKey_IsMomentaryModel(hand_model); /* LGZI 松开就停；其它支持型号需再按一次才停。 */
+	if (release_event)
+	{
+		Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_HANDLE, channel); /* 首次被拒绝且没有运行归属时，也必须接收本通道松键确认。 */
+	}
 
 	/* 当前通道已经由实体键启动时，本周期只处理强制停机、松开或再次按下，不重复走启动流程。 */
 	if (s_handle_run_key_owner_channel == channel)
@@ -611,6 +616,7 @@ static void HandleKey_ScanRunKeys(void)
  */
 static void HandleGzytTest_Revoke(GzytTestState_t *state, uint8_t channel)
 {
+    Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_HANDLE, channel); /* 数字按键异常或超时只能撤销本通道提示，不能把坏帧当作首次确认。 */
     if ((state->running == true) && (WorkMessage.channel_work == channel) &&
         (ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) == true))
     {
@@ -660,10 +666,10 @@ static void HandleGzytTest_Configure(GzytTestState_t *state, uint8_t channel,
 
 /*
  * 函数功能：校验完整数字模块 v2 帧，更新 HAL4/HAL5 的有效状态和松手计数。
- * 输入参数：state 为通道记录；received_tick 为最后一个字节的接收时刻；now 为当前 HAL 毫秒时刻。
+ * 输入参数：state为通道记录；received_tick为帧接收时刻；now为当前时刻；channel为按键所属A/B通道。
  * 返回参数：true 表示帧可接受或为不续时的重复帧；false 表示须停止、清旧缓存并重新松手，包括运行中松开或改变按钮。
  */
-static bool HandleGzytTest_AcceptFrame(GzytTestState_t *state, uint32_t received_tick, uint32_t now)
+static bool HandleGzytTest_AcceptFrame(GzytTestState_t *state, uint32_t received_tick, uint32_t now, uint8_t channel)
 {
     uint16_t crc = (uint16_t)state->frame[10] | ((uint16_t)state->frame[11] << 8U); /* CRC 低字节先发，与数字模块格式一致。 */
     uint16_t sequence = (uint16_t)state->frame[4] | ((uint16_t)state->frame[5] << 8U); /* 读取 16 位小端递增序号。 */
@@ -703,6 +709,10 @@ static bool HandleGzytTest_AcceptFrame(GzytTestState_t *state, uint32_t received
                 state->release_count = 0U; /* 原始电平仍低时不能用去抖延迟的零触发位解锁新启动。 */
             }
         }
+    }
+    if ((trigger == 0U) && (state->release_count >= GZYT_TEST_RELEASE_FRAMES))
+    {
+        Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_HANDLE, channel); /* 三帧有效松手才确认首次缺泵；重复帧、异常帧和另一通道不代为解除。 */
     }
     state->trigger = trigger; /* 保存本帧确认的按钮状态，供任务按住运行或等待新按下。 */
     state->sequence = sequence; /* 只保存新且正常的序号，下一帧必须连续。 */
@@ -759,7 +769,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
             continue; /* 尚未找到可校验的帧，本轮通信有效时间不变。 */
         }
         state->frame_size = 0U; /* 已取得完整候选帧，校验成功后可继续处理同一缓存中的下一帧。 */
-        if (HandleGzytTest_AcceptFrame(state, tick, now) == false)
+        if (HandleGzytTest_AcceptFrame(state, tick, now, channel) == false) /* 传入实际通道，数字按钮松手只确认自己的首次缺泵提示。 */
         {
             HandleGzytTest_Revoke(state, channel); /* 坏帧、松开或换键均先清请求，后面的积压按下不能在本轮再次启动。 */
             return; /* 等新的三帧松手及下一次按下，避免同轮停止后又发送非零请求。 */
@@ -794,11 +804,15 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     DirActive((direction == ZZDIR) ? HANDLEKey_dir_Forward : HANDLEKey_dir_Reverse); /* 使用原方向处理，同步当前方向、该方向转速和 A/B 记忆及屏幕。 */
     if ((WorkMessage.dir_work != direction) || (WorkMessage.speed_set_work == 0U) ||
         (Pubinterface_CheckCommonSocketToolReadyForRun() == false) ||
-        (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false) ||
-        (Pubinterface_CheckInjectionPumpForHandleStart() == false)) /* 数字手柄新按下也通过缺注水检查，拒绝后仍需重新松手。 */
+        (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false))
     {
         HandleGzytTest_Revoke(state, channel); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */
         return; /* 下次需重新确认两键松开并按下，不能反复尝试旧请求。 */
+    }
+    if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_HANDLE) == false)
+    {
+        ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 首次缺泵未起机，不保留空闲控制占用。 */
+        return; /* 保留有效数字帧接收和松手计数，不能调用Revoke提前关闭本次报警。 */
     }
     HandleRunKey_ApplyHandleMode(channel); /* 保存本通道手控方式，切换通道后仍按正常界面规则选择控制方式。 */
     Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 这是新按下，冷却泵按原规则重新检查实际压力。 */

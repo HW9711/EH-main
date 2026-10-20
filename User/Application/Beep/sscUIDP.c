@@ -29,6 +29,7 @@ typedef struct
 
 static UIDPMessage_t s_uidp_last_msg = {0};//记住上一次成功放入队列的显示消息，内容完全相同时不重复发送。
 static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
+static uint8_t s_uidp_alarm_value = WORK_ALARM_NONE; /* 当前报警区的逻辑归属，首次缺泵结束只能关闭自己的72/73号图。 */
 static UIDPMessage_t s_uidp_tool_spec_retry = {0}; /* 保存最近一次规格显示请求；enable_flag 为显隐，Value[0..5] 为长度、直径、角度和来源格式。 */
 static uint8_t s_uidp_tool_spec_retry_pending = 0U; /* 规格正文或显示长度发送失败时置 1，成功后清 0；新规格或隐藏请求会替换待重试内容。 */
 static uint32_t s_uidp_tool_spec_retry_tick = 0U; /* 记录最近一次规格发送尝试结束时的 HAL 毫秒计数，防止故障时连续占用串口。 */
@@ -846,7 +847,7 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 	}
 }
 /*
- * 函数功能：刷新报警图片并同步外控；不支持手柄未拔出时保持71号提示，系统故障仍可优先显示。
+ * 函数功能：刷新报警并同步外控，保持不支持手柄71号及首次缺泵72/73号提示，系统故障优先。
  * 输入参数：enable_flag表示显示或关窗；arm_value为持续故障或临时提示的逻辑码；picture_value为图片覆盖值，0按逻辑码选图，0xFF隐藏图片。
  * 返回参数：无。
  */
@@ -865,6 +866,21 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	{
 		return; /* 已拔出的旧消息不能重新弹窗；驱动等系统故障已接管时也不能被迟到的71号消息覆盖。 */
 	}
+	if (!enable_flag && !WorkMessage.alarm_flag &&
+		(Pubinterface_GetInjectionPumpStartAlarm() != WORK_ALARM_NONE))
+	{
+		enable_flag = true; /* 普通关窗请求不能代替控制源松开，首次缺泵期间必须保留提示。 */
+		arm_value = Pubinterface_GetInjectionPumpStartAlarm(); /* 其它临时提示退出后恢复当前仍有效的缺泵窗口。 */
+		picture_value = 0U; /* 按本次单向/往复逻辑码选72/73号图，不能继承旧故障覆盖图。 */
+	}
+	if ((arm_value == WORK_ALARM_INJECTION_MISSING_SINGLE) || (arm_value == WORK_ALARM_INJECTION_MISSING_OSC))
+	{
+		if (WorkMessage.alarm_flag || (arm_value != Pubinterface_GetInjectionPumpStartAlarm()))
+		{
+			return; /* 更高优先级故障不能被缺泵覆盖；释放后积压的缺泵消息也不能重新弹窗。 */
+		}
+	}
+	s_uidp_alarm_value = enable_flag ? arm_value : WORK_ALARM_NONE; /* 保存实际显示归属，周期维护只关闭本模块自己的报警图。 */
 	if(enable_flag)
 	{
 	  if(picture_value == MOTOR_ALARM_PICTURE_NONE)
@@ -929,6 +945,14 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,71U); /* 屏幕71号资源明确提示“不支持该手柄”。 */
 		ExternalComm_ReportScreenAlarm(arm_value, 71U); /* 外控同步16号逻辑报警及实际显示图片。 */
 		break;
+		case WORK_ALARM_INJECTION_MISSING_SINGLE:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,72U); /* 单向缺泵：刀具未按规定连接注水，可能会损坏。 */
+		ExternalComm_ReportScreenAlarm(arm_value,72U); /* 同步17号逻辑码及实际72号图片，外控也能识别首次启动失败原因。 */
+		break;
+		case WORK_ALARM_INJECTION_MISSING_OSC:
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,73U); /* 往复缺泵：刀具未注水，可能影响切削性能。 */
+		ExternalComm_ReportScreenAlarm(arm_value,73U); /* 同步18号逻辑码和73号图片，松开后由本模块统一关闭。 */
+		break;
 	  }
 
 	}
@@ -939,6 +963,26 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		ExternalComm_ReportScreenAlarm(WORK_ALARM_NONE, MOTOR_ALARM_PICTURE_NONE); /* 屏幕关窗后同步清除临时提示；持续故障仍由WorkMessage控制。 */
 	}
 }
+/*
+ * 函数功能：周期跟随首次缺泵状态显示或关闭72/73号图，不覆盖其它报警。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void UIDP_ServiceInjectionStartAlarm(void)
+{
+	uint8_t alarm = Pubinterface_GetInjectionPumpStartAlarm(); /* 直接读取待释放状态，显示队列复位不能提前结束首次提示。 */
+	if (WorkMessage.alarm_flag || ((s_uidp_alarm_value != WORK_ALARM_NONE) &&
+		(s_uidp_alarm_value != WORK_ALARM_INJECTION_MISSING_SINGLE) &&
+		(s_uidp_alarm_value != WORK_ALARM_INJECTION_MISSING_OSC)))
+	{
+		return; /* 真故障和其它临时提示已占用报警区时，缺泵释放不能将它们关掉。 */
+	}
+	if (alarm != s_uidp_alarm_value)
+	{
+		UIAIARMDP(alarm != WORK_ALARM_NONE, alarm, 0U); /* 首次拒绝时弹窗，真实释放后关窗，同次插柄后续启动保持无弹窗。 */
+	}
+}
+
 /*
  * 函数功能：刷新 A 泵启停按钮图标，按泵业务类型选择注水按钮或灌注/抽吸按钮资源。
  * 输入参数：enable_flag 表示按钮是否可用；button_type 表示当前泵业务类型；run_flag 表示泵是否处于运行态。
@@ -1052,7 +1096,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：处理显示队列和各类补刷；不支持手柄插着时可靠保持71号提示，拔出且无其它故障后关闭。
+ * 函数功能：处理显示队列、不支持手柄和首次缺泵提示，以及规格、开机、手柄连接状态补刷。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1169,6 +1213,7 @@ void UIDISPLAYBehavior()
 		unsupported_displayed = 0U; /* 其它故障接管时不强制关窗，后续恢复可重新显示71号。 */
 		unsupported_refresh_ticks = 0U; /* 下次进入拒绝状态立即补刷，不继承旧间隔。 */
 	}
+	UIDP_ServiceInjectionStartAlarm(); /* 每个显示周期维护首次缺泵提示，不能因普通清屏或丢队列消息提前关窗。 */
 	if ((s_uidp_tool_spec_retry_pending != 0U) &&
 		((uint32_t)(HAL_GetTick() - s_uidp_tool_spec_retry_tick) >= UIDP_TOOL_SPEC_RETRY_INTERVAL_MS) &&
 		(UIDPMsgQueue != NULL) && (uxQueueMessagesWaiting(UIDPMsgQueue) == 0U)) /* 先处理完新消息，避免旧规格重试覆盖刚换通道或刚拔出的显示要求。 */

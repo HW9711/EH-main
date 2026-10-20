@@ -448,16 +448,10 @@ void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow); /* 为在线注�
 void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 把指定通道 Page4 的默认注水量设给在线注水泵。 */
 bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新插入通道是否允许自动选中。 */
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
-bool Pubinterface_IsCommonSocketToolReady(void); /* 公共接头和自动PX需装载最近有效RFID结果才返回true；其它模式不受此检查影响，只查询不报警。 */
-bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 启动前检查公共接头或自动PX的有效RFID刀具，缺失时报警并拒绝运行。 */
-bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 脚踏启动前检查自动RFID刀具，缺失时持续报警到松脚。 */
+bool Pubinterface_IsCommonSocketToolReady(void); /* 仅公共接头要求有效RFID刀具；PXBA/PXBB未识别刀具也按当前参数运行，只查询不报警。 */
+bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 启动前只对公共接头缺刀具报警并拒绝运行，PXBA/PXBB不因刀具未识别而拦截。 */
+bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 公共接头缺刀具时脚踏持续报警到松脚；PXBA/PXBB未识别刀具时继续原启动检查。 */
 void Pubinterface_ReleaseFootCommonSocketToolMissingAlarm(void); /* 脚踏松开或掉线后，关闭未识别到 RFID 刀具的持续弹窗和蜂鸣。 */
-/*
- * 函数功能：新启动时缺注水先提醒并拒绝，再次新操作提醒后允许；A/B独立记录。
- * 输入参数：无，调用方拒绝后必须等待松开或停止命令，不能把长按当成再次启动。
- * 返回参数：true允许继续原启动流程；false本次必须保持停止。
- */
-bool Pubinterface_CheckInjectionPumpForHandleStart(void);
 void Pubinterface_StopTouchKeepAliveRun(void); /* 结束屏幕按住运行按钮发起的电机运行。 */
 void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void); /* 触控运行时拔柄，等用户松开按钮后退出本次触控并清除报警。 */
 void Pubinterface_LoadChannelMemory(uint8_t channel); /* 把指定通道保存的参数恢复到当前工作信息。 */
@@ -474,6 +468,10 @@ void Pubinterface_RefreshPumpADisplay(void); /* 刷新 A 泵数值和启停按�
 void Pubinterface_RefreshPumpBDisplay(void); /* 刷新 B 泵数值和启停按钮，屏幕操作和上位机操作共用。 */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void); /* 读取当前通道、当前方向在MemoryMsg中保存的速度，单位rpm；调速后保存值会更新，不一定仍是出厂默认值。 */
 void Pubinterface_SetHandleInjectionPumpRun(bool enable); /* 随手柄启动或停止注水冷却泵，只释放本次联动接管的泵。 */
+bool Pubinterface_CheckInjectionPumpForRun(uint8_t source); /* 本次插柄首次启动检查缺泵；首次拒绝后须真实松开，后续启动不再提示。 */
+void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel); /* 真实松开/明确停止完成首次确认；channel为NONE时匹配该来源当前报警。 */
+void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel); /* 异常撤销报警而不完成确认；source或channel为NONE时匹配任意来源或通道。 */
+uint8_t Pubinterface_GetInjectionPumpStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B 泵确认压力事件后蜂鸣两声并显示 89 号弹窗；灌注零速由泵任务控制。 */
 void Pubinterface_StopPumpPressureTest(uint8_t pump_channel); /* 灌注测试结束时撤销指定泵的本机及外控请求，保留原设定，等待新的人工启动。 */

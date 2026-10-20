@@ -14,6 +14,7 @@ static volatile uint8_t s_control_owner = CONTROL_OWNER_NONE;
  */
 static void ControlArbitration_StopMotionOutput(void)
 {
+	Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_NONE, CHANNEL_NONE); /* 控制来源强制切换只撤销旧缺泵动作，不代替真实释放完成首次确认。 */
 	/* 切换控制来源时先撤销电机运行请求，不能继续沿用上一次启动状态。 */
 	WorkMessage.runflag_work = false;
 	/* 实际输出速度清零，驱动任务下一周期会按停止状态下发。 */

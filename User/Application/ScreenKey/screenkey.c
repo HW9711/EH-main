@@ -22,6 +22,8 @@ static uint8_t s_screenkey_legacy_event = KEY_NONE;
 static volatile uint32_t s_touch_keepalive_accepted_tick_ms = 0U;
 /* 1 表示本次触控已有有效的按住信号；退出触控、进入外控或报警时清零。 */
 static volatile uint8_t s_touch_keepalive_accepted_valid = 0U;
+static uint32_t s_touch_raw_keepalive_tick = 0U; /* 原始按住帧最后到达时刻，队列满不能把仍在按住误算成松手确认。 */
+static uint8_t s_touch_raw_keepalive_valid = 0U; /* 首帧之前没有按住记录，不能以初始时间伪造按压。 */
 /* 触控长按过程中发生报警后置位，必须等屏幕停止发送 0x5520 一段时间才允许再次运行。 */
 static uint8_t s_touch_alarm_release_required = 0U;
 /* 报警后用于判断是否松手：收到 0x5520 就清零，一直收不到才逐渐数到松手确认值。 */
@@ -67,18 +69,6 @@ static void ScreenKey_InvalidateTouchKeepAlive(void)
 {
   s_touch_keepalive_accepted_valid = 0U; /* 先撤销有效标志，退出触控、外控或报警后旧保活不得再次启动。 */
   __DMB(); /* 保证上面的清零先完成，其他任务不能误用旧的有效标志。 */
-}
-
-/*
- * 函数功能：启动检查拒绝触控后，要求连续无保活约420ms才能接受下一次按下。
- * 输入参数：无。
- * 返回参数：无。
- */
-void ScreenKey_RequireTouchRelease(void)
-{
-    ScreenKey_InvalidateTouchKeepAlive(); /* 取消已排队旧保活的有效资格，首次拒绝后不能延迟启动。 */
-    s_touch_alarm_release_required = 1U; /* 持续原始保活必须被丢弃，直到用户松开触控按钮。 */
-    s_touch_alarm_release_ticks = 0U; /* 从本次拒绝开始累计无保活时间，约420ms后才允许新按下。 */
 }
 
 /*
@@ -154,9 +144,16 @@ static uint8_t ScreenKey_BlockAlarmKeepAlive(void)
 static void ScreenKey_ServiceKeepAlive(void)
 {
 
+  if ((s_touch_raw_keepalive_valid == 0U) ||
+      ((uint32_t)(HAL_GetTick() - s_touch_raw_keepalive_tick) >= SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS))
+  {
+    Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_SCREEN, CHANNEL_NONE); /* 首次未起机也要检测松手：连续420ms无原始按住帧后确认并关闭报警。 */
+  }
+
   if (WorkMessage.hmiactive_work != 0U) /* 外控复用 TOUCHWORK，但不属于屏幕触控保活。 */
   {
     ScreenKey_InvalidateTouchKeepAlive(); /* 外控运行时取消旧触控信号，退出外控后不能靠旧信号启动。 */
+    Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_SCREEN, CHANNEL_NONE); /* 外控接管只撤销触控动作，不把仍按住的手指记成首次确认。 */
     s_touch_alarm_release_required = 0U; /* 外控期间不等待触控松手，下次触控重新判断。 */
     s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS; /* 同步复位释放计数，避免外控结束后沿用旧触控长按状态。 */
     return; /* 外控也使用 TOUCHWORK 标志，但不能被屏幕按住信号超时而停机。 */
@@ -165,6 +162,7 @@ static void ScreenKey_ServiceKeepAlive(void)
   if ((WorkMessage.drivetype_work != TOUCHWORK) || (WorkMessage.touchactive_work != TOUCHWORK)) /* 只有本机触控已激活才进入保活状态机。 */
   {
     ScreenKey_InvalidateTouchKeepAlive(); /* 不在触控模式就取消旧信号，下次触控必须重新收到有效信号。 */
+    Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_SCREEN, CHANNEL_NONE); /* 模式失效关闭旧来源提示，未真实释放时首次记录仍未完成。 */
     s_touch_alarm_release_required = 0U; /* 退出触控后清除“报警后先松手”的要求，下次触控重新判断。 */
     s_touch_alarm_release_ticks = SCREENKEY_TOUCH_RELEASE_TIMEOUT_TICKS; /* 同步恢复释放计数到空闲态。 */
     return; /* 非触控控制源不能被本任务的保活超时逻辑停止。 */
@@ -363,6 +361,8 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
     uint8_t beep_enable = 1U; /* 默认所有有效触控按键响一声，给操作者明确反馈。 */
     if (screen_key == SCREENKey_TouchKeepAlive) /* 处理按住信号前，先确认报警后已松手。 */
     {
+      s_touch_raw_keepalive_tick = HAL_GetTick(); /* 先记录原始信号，报警过滤或入队失败均不能假装用户已松手。 */
+      s_touch_raw_keepalive_valid = 1U; /* 即使首次缺泵没有运行，也持续检测真实按压是否结束。 */
       if (s_touch_restart_release_required != 0U)
       {
         s_touch_restart_keepalive_tick = HAL_GetTick(); /* 即使图标暂不可用，持续收到旧长按仍说明尚未松手。 */

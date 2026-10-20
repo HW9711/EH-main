@@ -26,10 +26,10 @@
 #define RFID_TX_POWER_15_DBM_X100       1500U  /* 15dBm，对应模块协议功率值 1500。 */
 
 /* RFID 工作频段选择：填写上面的 RFID_REGION_* 常量。当前为中国 920 MHz 频段；A/B 模块上电时一起使用此设置，需与目标地区和模块支持范围一致。 */
-#define RFID_REGION_SELECT              RFID_REGION_EUROPE
+#define RFID_REGION_SELECT              RFID_REGION_CHINA_920
 
 /* RFID 发射功率选择：只允许上面的 0、10、13、15 dBm 常量，协议数值为 dBm × 100。当前为 10 dBm；A/B 模块上电时一起使用，改变后需实测识别距离和邻近标签误读。 */
-#define RFID_TX_POWER_SELECT            RFID_TX_POWER_10_DBM_X100
+#define RFID_TX_POWER_SELECT            RFID_TX_POWER_13_DBM_X100
 
 #if ((RFID_REGION_SELECT != RFID_REGION_CHINA_920) && \
      (RFID_REGION_SELECT != RFID_REGION_US) && \
@@ -55,11 +55,12 @@
 #define RFID_RESP_CMD_EPC               0x22U /* EPC 读取回包命令码。 */
 #define RFID_FRAME_MIN_SIZE             7U    /* 最短帧至少包含头、命令、长度、校验和尾。 */
 #define RFID_QUEUE_LENGTH               4U    /* 最多缓存 4 条开始或停止消息；队列满时新消息无法加入，增大此值只扩大排队容量，不增加同时读取的通道数。 */
-#define RFID_FAST_ATTEMPTS              10U   /* 快速识别初始最多发 10 次读命令，用于刚插入手柄或重新识别；有新快速请求合并时会重新补足次数。 */
-#define RFID_NORMAL_ATTEMPTS            3U    /* 普通监测每次请求最多发 3 次读命令；增大后会多等几次，也会推迟另一通道的读取。 */
-#define RFID_NORMAL_HARD_TIMEOUT_TICKS  5U    /* 普通读取的总超时计数上限为 5；任务周期 100 ms，启动当次计 1，约 400 ms 后到上限，不含排队；重试用完可提前结束。 */
-#define RFID_FAST_HARD_TIMEOUT_TICKS    15U   /* 快速读取的总超时计数上限为 15；任务周期 100 ms，启动当次计 1，约 1.4 s 后到上限，不含排队；给刚进入识别范围的标签留出时间。 */
-#define RFID_PARTIAL_GRACE_TICKS        1U    /* 收到数据但未拼出有效完整回包时，暂停重发 1 个任务周期（100 ms），等剩余字节到齐；总超时仍然生效。 */
+#define RFID_FAST_ATTEMPTS              6U    /* 快速阶段EPC和USER各最多发送6次；任一来源成功即结束快速读取。 */
+#define RFID_NORMAL_ATTEMPTS            3U    /* 普通阶段EPC和USER各最多发送3次，连续失败耗尽本阶段预算后才切换。 */
+#define RFID_EPC_VERIFY_ATTEMPTS        2U    /* USER成功后按普通模式补读EPC两次；全部失败才发布暂存USER。 */
+#define RFID_RESPONSE_WAIT_TICKS        1U    /* 每条命令至少等待一个100ms周期，收包检查完成后才决定是否重试。 */
+#define RFID_RESPONSE_MAX_WAIT_TICKS    2U    /* 分片或无效数据最多延长到200ms；持续噪声不能无限延长单条命令。 */
+#define RFID_PARTIAL_GRACE_TICKS        1U    /* 收到数据但未拼出有效完整回包时，暂停重发 1 个任务周期（100 ms），等剩余字节到齐；单条命令仍受200ms等待上限限制。 */
 #define RFID_DEBUG_BEEP_EVERY_UART_RESPONSE 0U /* 串口收包蜂鸣开关：0 关闭，1 在读取任务收到任意模块数据时蜂鸣；仅调试用，开启会频繁发声并增加任务处理量。 */
 #define RFID_DEBUG_BEEP_EVERY_VALID_READ 0U   /* 预留的有效标签蜂鸣开关，当前文件没有读取此宏的分支；改成 1 也不会新增蜂鸣，新刀具提示由手柄扫描程序决定。 */
 
@@ -74,7 +75,6 @@
 typedef struct
 {
     uint32_t min_speed; /* 刀头最低转速，单位rpm；老USER没有下限字段。 */
-    uint32_t max_speed; /* 已确认老型号的最高转速，单位rpm，仅用于核对标签B8。 */
     uint16_t ratio; /* 减速比乘100；刨刀430表示4.3，磨头190表示1.9。 */
     uint16_t current; /* 驱动保护电流，单位0.01A；不再取基座的通用电流值。 */
     uint16_t speed_step_small; /* 小加减键每次改变的刀头转速，单位rpm。 */
@@ -85,9 +85,16 @@ typedef struct
 
 static const RfidLegacyUserProfile_t s_legacy_user_profiles[2] =
 {
-    {500U, 6000U, 430U, 40U, 500U, 1000U, 2U, 7U}, /* USER型号01对应PXYTP：往复刨刀，保护电流0.40A。 */
-    {3000U, 13000U, 190U, 68U, 1000U, 2000U, 0U, 1U} /* USER型号02对应PXYTM：单向磨头，保护电流0.68A。 */
+    {500U, 430U, 40U, 500U, 1000U, 2U, 7U}, /* USER型号01对应PXYTP：速度直接取USER，不做固定值或范围匹配，保护电流0.40A。 */
+    {3000U, 190U, 68U, 1000U, 2000U, 0U, 1U} /* USER型号02对应PXYTM：速度直接取USER，不做固定值或范围匹配，保护电流0.68A。 */
 };
+
+typedef enum
+{
+    RFID_STAGE_INITIAL_EPC = 0U, /* 优先读取EPC；任何一次业务校验成功都直接发布。 */
+    RFID_STAGE_USER,             /* EPC连续失败后读取USER；成功结果先暂存，不交给运行或界面。 */
+    RFID_STAGE_VERIFY_EPC        /* USER成功后退出快速模式，普通复核EPC，再选择唯一发布来源。 */
+} RfidReadStage_t;
 
 typedef struct
 {
@@ -128,6 +135,10 @@ static uint16_t s_completed_ticket[2] = {0U, 0U};   /* A/B 最近一次已结束
 static RfidRequestResult_t s_completed_result[2] = {RFID_REQUEST_RESULT_UNKNOWN, RFID_REQUEST_RESULT_UNKNOWN}; /* 保存最近已结束请求的结果：成功、超时或取消。 */
 static bool s_outstanding_valid[2] = {false, false}; /* true 表示该通道已有请求在排队或读取；再请求时继续使用原编号，不另排一条。 */
 static bool s_outstanding_fast_mode[2] = {false, false}; /* 同通道追加快速请求后记为 true，开始读取时使用快速识别的次数和时限。 */
+static RfidReadStage_t s_request_stage = RFID_STAGE_INITIAL_EPC; /* 区分首次EPC、USER和复核EPC，复核失败不能再次跳回USER。 */
+static RfidToolResult_t s_pending_user; /* 当前请求已校验的USER候选；复核结束前不更新公开结果及其序号。 */
+static bool s_read_pending = false; /* 已发送一条读命令、正在等回包；每次等待结束只消耗一次重试机会。 */
+static uint8_t s_read_wait_ticks = 0U; /* 当前命令发出后经历的100ms周期数，分片也受200ms上限约束。 */
 static bool s_fallback_epc_valid = false; /* 本次EPC阶段取得标识后置位；请求结束时清零，USER必须来自同一标签。 */
 static uint8_t s_fallback_epc[RFID_PAYLOAD_EPC_LENGTH]; /* 本次失败EPC阶段读到的标签原文，防止USER回包串到另一把刀。 */
 static bool s_request_active = false;               /* true 表示任务当前有一次未完成 RFID 请求。 */
@@ -136,12 +147,10 @@ static RfidReadSource_t s_request_source = RFID_READ_SOURCE_NONE; /* 当前阶�
 static uint8_t s_request_attempts_left = 0U;        /* 当前还能发送多少次读命令；用完后仍先检查回包和等待计时，再决定超时。 */
 static bool s_request_fast_mode = false;            /* true 表示使用快速识别；即使还是同一标签，也通知手柄扫描程序重新处理刀具信息。 */
 static uint16_t s_request_ticket = 0U;               /* 正在读取的请求编号，结束时只更新这个通道、这个编号的结果。 */
-static uint8_t s_request_elapsed_ticks = 0U;         /* 本次读取已经过的 100 ms 任务周期数，用来限制最长等待时间。 */
-static uint8_t s_request_hard_timeout_ticks = 0U;    /* 本次读取的超时计数上限，由普通或快速模式决定；每次任务执行增加 1，达到上限就结束。 */
 static uint8_t s_partial_grace_ticks = 0U;           /* 收到不完整数据后暂停补发命令的剩余周期。 */
 static uint8_t s_rx_accumulator[RFID_RX_ACCUM_SIZE]; /* 保存跨任务周期到达的 RFID 分片，直到组成合法完整帧。 */
 static uint16_t s_rx_accum_length = 0U;              /* 累计接收缓存中已存的有效字节数。 */
-static bool s_request_saw_rx_data = false;           /* true 表示本次读取收到过串口字节；超时时用来区分完全无回包和有数据但未读出有效标签。 */
+static bool s_request_saw_rx_data = false;           /* true表示当前命令收到过字节；等待结束时区分无回包与无效数据。 */
 #if (RFID_LINK_STATS_ENABLE == 1U)
 static RfidLinkStatistics_t s_link_statistics[2];   /* A/B 通道请求应答、在线监测和确认掉线累计值。 */
 static bool s_link_response_pending[2] = {false, false}; /* true 表示该通道最近一条读取命令尚未收到有效回包。 */
@@ -184,7 +193,7 @@ static void Rfid_ResetReceiveAccumulator(void)
     memset(s_rx_accumulator, 0, sizeof(s_rx_accumulator)); /* 清掉上一请求已经存下的字节，避免下一请求继续解析旧数据。 */
     s_rx_accum_length = 0U; /* 新请求从空接收缓存开始拼帧。 */
     s_partial_grace_ticks = 0U; /* 清除半帧等待状态，下一请求按正常发送节拍启动。 */
-    s_request_saw_rx_data = false; /* 新请求尚未收到任何串口字节。 */
+    s_request_saw_rx_data = false; /* 新命令尚未收到字节，异常统计不能沿用上条命令。 */
 }
 
 /*
@@ -201,7 +210,7 @@ static void Rfid_AppendReceiveData(const uint8_t *data, uint16_t length)
         return; /* 本周期没有新字节时保留既有半帧，等待后续 DMA 数据。 */
     }
 
-    s_request_saw_rx_data = true; /* 记住本次已收到过数据，超时时可区分完全无回包和回包无有效标签。 */
+    s_request_saw_rx_data = true; /* 当前命令已收到数据，等待结束时可记录无效回包。 */
     s_partial_grace_ticks = RFID_PARTIAL_GRACE_TICKS; /* 收到新字节后先暂停重发，给剩余回包字节留出到达时间。 */
     if (length >= (uint16_t)sizeof(s_rx_accumulator))
     {
@@ -264,8 +273,10 @@ static void Rfid_ResetActiveRequest(void)
     s_request_attempts_left = 0U; /* 清除剩余发送次数。 */
     s_request_fast_mode = false; /* 清除快速识别模式，下一请求独立决定。 */
     s_request_ticket = 0U; /* 清除当前请求编号，避免再次记录同一请求的结果。 */
-    s_request_elapsed_ticks = 0U; /* 清除总超时计时。 */
-    s_request_hard_timeout_ticks = 0U; /* 清除当前请求超时上限。 */
+    s_request_stage = RFID_STAGE_INITIAL_EPC; /* 下一请求从首次EPC开始，不沿用上一轮复核阶段。 */
+    memset(&s_pending_user, 0, sizeof(s_pending_user)); /* 完成、取消和拔柄都必须丢弃未发布USER，禁止跨请求串用。 */
+    s_read_pending = false; /* 已结束请求不再等待最后一条命令。 */
+    s_read_wait_ticks = 0U; /* 清除单条命令等待计时。 */
     Rfid_ResetReceiveAccumulator(); /* 丢弃已完成请求的帧和噪声，不污染下一请求。 */
 }
 
@@ -567,6 +578,31 @@ static bool Rfid_IsRequestAllowed(uint8_t channel)
 
 
 /*
+ * 函数功能：按当前通道基座决定EPC连续失败后能否兼容读取PXYTP/PXYTM的老USER标签。
+ * 输入参数：channel为CHANNEL_A或CHANNEL_B；基座型号来自该通道EEPROM识别缓存。
+ * 返回参数：仅PXBA/PXBB返回true；公共接头上的MXYTP/MXYTM及其它基座只读EPC。
+ */
+static bool Rfid_IsUserFallbackAllowed(uint8_t channel)
+{
+    uint8_t handle_type; /* 使用本通道的基座身份，避免屏幕选中另一通道时改变读取区域。 */
+
+    if (channel == CHANNEL_A)
+    {
+        handle_type = ChannelrecognizeMessageA.handle_type; /* A侧识别缓存先于刀具结果建立，公共接头未识别到刀具也能禁止USER。 */
+    }
+    else if (channel == CHANNEL_B)
+    {
+        handle_type = ChannelrecognizeMessageB.handle_type; /* B侧独立取基座身份，不沿用A侧的兼容读取权限。 */
+    }
+    else
+    {
+        return false; /* 无效通道没有可确认的PXY兼容基座，禁止发送USER命令。 */
+    }
+
+    return ((handle_type == PXBA_ONLINES) || (handle_type == PXBB_ONLINES)); /* 只为PX基座保留老PXY标签回退；公共接头无响应或CRC失败时仍只读EPC。 */
+}
+
+/*
  * 函数功能：根据帧头第二字节和命令码判断当前回包来源。
  * 输入参数：frame 指向一帧起始位置。
  * 返回参数：识别出的来源；无法识别时返回 RFID_READ_SOURCE_NONE。
@@ -705,6 +741,23 @@ static bool Rfid_UpdateParsedCache(RfidToolResult_t *result)
 }
 
 /*
+ * 函数功能：开始同一次请求的指定读取阶段，分别分配次数并清除上一阶段串口残留。
+ * 输入参数：stage为首次EPC、USER或USER成功后的EPC复核。
+ * 返回参数：无。
+ */
+static void Rfid_BeginReadStage(RfidReadStage_t stage)
+{
+    s_request_stage = stage; /* 阶段单向推进，避免USER与EPC之间无限重试。 */
+    s_request_source = (stage == RFID_STAGE_USER) ? RFID_READ_SOURCE_USER : RFID_READ_SOURCE_EPC; /* 首读和复核均发送EPC命令。 */
+    s_request_attempts_left = (stage == RFID_STAGE_VERIFY_EPC) ? RFID_EPC_VERIFY_ATTEMPTS :
+                              (s_request_fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS); /* EPC与USER使用相同阶段预算，复核单独限两次。 */
+    s_read_pending = false; /* 上阶段已处理完毕，新阶段尚未发出命令。 */
+    s_read_wait_ticks = 0U; /* 每条新命令都获得完整接收窗口，不继承前阶段耗时。 */
+    Rfid_ClearChannelUartData(s_request_channel); /* 切换协议前清除物理串口残留，避免旧半帧跨阶段拼接。 */
+    Rfid_ResetReceiveAccumulator(); /* 仅清接收数据，已暂存USER和同标签校验信息仍属于本请求。 */
+}
+
+/*
  * 函数功能：空闲时从队列取一条消息；检查通道和请求是否仍有效，然后开始读取。
  * 输入参数：无。
  * 返回参数：无。
@@ -754,15 +807,11 @@ static void Rfid_ReceiveRequestMessage(void)
 
     Rfid_SelectHardwareChannel(msg.channel); /* 只在请求真正启动时切换目标 RFID 模块。 */
     s_request_channel = msg.channel; /* 保存正在执行的请求通道，解析成功后只写回同侧缓存。 */
-    s_request_source = RFID_READ_SOURCE_EPC; /* 所有读取均先尝试新版EPC，禁止从外部绕过优先级。 */
     s_fallback_epc_valid = false; /* 新请求不能使用上一把刀的EPC标识。 */
+    memset(&s_pending_user, 0, sizeof(s_pending_user)); /* 新请求没有可回退的USER候选，必须重新读取校验。 */
     s_request_ticket = msg.ticket; /* 记住本次请求编号，结束时按编号保存结果。 */
-    s_request_fast_mode = (bool)(msg.fast_mode || s_outstanding_fast_mode[index]); /* 同通道合并请求可把普通请求升级为快速识别。 */
-    s_request_attempts_left = 2U; /* 先尝试两次EPC，失败后为同一次请求保留USER读取时间。 */
-    s_request_hard_timeout_ticks = s_request_fast_mode ? RFID_FAST_HARD_TIMEOUT_TICKS : RFID_NORMAL_HARD_TIMEOUT_TICKS; /* 设置最长等待周期，即使回包一直收不齐也会按时结束。 */
-    s_request_elapsed_ticks = 0U; /* 新请求从第一个 100ms 周期开始计时。 */
-    Rfid_ClearChannelUartData(s_request_channel); /* 开始读取前清一次串口接收数据；读取过程中重复请求不会清掉未收齐的回包。 */
-    Rfid_ResetReceiveAccumulator(); /* 清空上一请求累计的字节和等待标志，本次从空缓存开始。 */
+    s_request_fast_mode = (bool)(msg.fast_mode || s_outstanding_fast_mode[index]); /* 首次识别可使用快速预算，成功读到任一来源后结束快速阶段。 */
+    Rfid_BeginReadStage(RFID_STAGE_INITIAL_EPC); /* EPC预算实际耗尽后才准许切USER，不能因一次业务校验失败提前切换。 */
     s_request_active = true; /* 标记读取正式启动，完成前下一条请求只能等待。 */
 }
 
@@ -777,7 +826,7 @@ static void RFIDQueue_Init(void)
 }
 
 /*
- * 函数功能：按当前正在执行的请求处理 RFID 命令发送、串口接收和标签解析。
+ * 函数功能：公共接头只读EPC；PX基座连续失败再读USER并普通复核EPC，最终只发布一次选定结果。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -811,78 +860,118 @@ static void SplitType_AutoModeGetData_Task(void)
         return; /* 当前状态不允许继续识别。 */
     }
 
-    if (s_request_elapsed_ticks < 0xFFU)
+    if (s_read_pending && (s_read_wait_ticks < RFID_RESPONSE_MAX_WAIT_TICKS))
     {
-        ++s_request_elapsed_ticks; /* 每个 100ms 周期只累计一次总超时计数。 */
+        ++s_read_wait_ticks; /* 只累计已发出命令的等待周期，不把队列等待和阶段切换算成失败。 */
     }
 
-    rlen = Rfid_PeekChannelUartData(s_request_channel, dat); /* 取出本周期 DMA 新字节，物理缓冲复位不影响逻辑累计缓存。 */
+    rlen = Rfid_PeekChannelUartData(s_request_channel, dat); /* 先收本周期新字节，截止周期到达的完整有效帧仍可成功。 */
     if (rlen > 0U)
     {
 #if (RFID_DEBUG_BEEP_EVERY_UART_RESPONSE == 1U)
-        SendKeyBeepMessage(1U); /* 调试开关启用时，任意模块字节到达都蜂鸣。 */
+        SendKeyBeepMessage(1U); /* 仅显式开启原始收包调试时蜂鸣，正常识别由最终发布结果触发。 */
 #endif
-        Rfid_AppendReceiveData(dat, rlen); /* 把短帧或半帧追加到跨周期缓存，不立即判定失败。 */
+        Rfid_AppendReceiveData(dat, rlen); /* 保留跨周期分片，等待到完整帧再做业务校验。 */
     }
 
-    memset(&parsed_result, 0, sizeof(parsed_result)); /* 未收到完整回包时，标签标识标志保持零。 */
+    memset(&parsed_result, 0, sizeof(parsed_result)); /* 本周期没有完整帧时不得沿用上周期的有效标志。 */
     if (s_rx_accum_length >= RFID_FRAME_MIN_SIZE)
     {
-        parsed_ok = Rfid_ParseReceivedFrame(s_rx_accumulator, s_rx_accum_length, s_request_source, &parsed_result); /* 只接受当前阶段回包。 */
+        if (s_request_source == RFID_READ_SOURCE_USER)
+        {
+            parsed_ok = Rfid_ParseReceivedFrame(s_rx_accumulator, s_rx_accum_length, RFID_READ_SOURCE_EPC, &parsed_result); /* USER等待期间若晚到有效EPC，仍优先采用EPC，含两种帧时不先发布USER。 */
+        }
+        if (!parsed_ok)
+        {
+            parsed_ok = Rfid_ParseReceivedFrame(s_rx_accumulator, s_rx_accum_length, s_request_source, &parsed_result); /* EPC无有效结果后才处理当前阶段的帧；复核期间不再接收USER结果。 */
+        }
     }
-    if ((s_request_source == RFID_READ_SOURCE_EPC) && parsed_result.tag_epc_valid)
+    if ((s_request_stage == RFID_STAGE_VERIFY_EPC) && parsed_result.tag_epc_valid &&
+        (memcmp(s_pending_user.tag_epc, parsed_result.tag_epc, RFID_PAYLOAD_EPC_LENGTH) != 0))
     {
-        memcpy(s_fallback_epc, parsed_result.tag_epc, RFID_PAYLOAD_EPC_LENGTH); /* 保存本次EPC标识，转USER后核对同一标签。 */
-        s_fallback_epc_valid = true; /* 本次请求结束前不能混入其他标签的USER。 */
+        Rfid_LinkStatsCancelPending(s_request_channel); /* 复核期间标签已经变化，本轮不能套用此前暂存USER。 */
+        Rfid_ClearChannelUartData(s_request_channel); /* 清掉换刀期间的晚到帧，下一请求重新选择来源。 */
+        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_CANCELED); /* 取消会同时清空USER候选，禁止超时后发布旧刀参数。 */
+        return;
     }
-    if (parsed_ok && (s_request_source == RFID_READ_SOURCE_USER) && s_fallback_epc_valid &&
+    if ((s_request_stage == RFID_STAGE_INITIAL_EPC) && parsed_result.tag_epc_valid)
+    {
+        memcpy(s_fallback_epc, parsed_result.tag_epc, RFID_PAYLOAD_EPC_LENGTH); /* 保存模块校验通过的EPC标识，USER必须来自同一标签。 */
+        s_fallback_epc_valid = true; /* 只用于标签核对，不能再凭此提前转USER。 */
+    }
+    if (parsed_ok && (parsed_result.source == RFID_READ_SOURCE_USER) && s_fallback_epc_valid &&
         (memcmp(s_fallback_epc, parsed_result.tag_epc, RFID_PAYLOAD_EPC_LENGTH) != 0))
     {
-        parsed_ok = false; /* 读取期间换刀，本请求拒绝混用，下一请求从EPC重读。 */
-        Rfid_ResetReceiveAccumulator(); /* 丢掉身份不符的完整USER帧，避免它一直挡住随后正确回包。 */
+        parsed_ok = false; /* USER属于另一标签时不作为候选，继续在剩余预算内等待。 */
+        Rfid_ResetReceiveAccumulator(); /* 不让身份不符的完整帧挡住后续正确帧。 */
     }
     if (parsed_ok)
     {
-        Rfid_LinkStatsRecordValidResponse(s_request_channel); /* 完整 EPC 校验通过，把最近一条读命令记为已响应。 */
-        parsed_result.channel = s_request_channel; /* 给解析出的标签补上 A/B 通道号，确保结果写回当前读取的通道。 */
-        (void)Rfid_UpdateParsedCache(&parsed_result); /* 更新标签结果；是否需要新刀具蜂鸣由手柄扫描程序判断。 */
-        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_SUCCESS); /* 记录读取成功，手柄扫描程序此后才能把本轮判为读到标签。 */
-        return; /* 成功请求本周期结束。 */
-    }
-
-    if ((s_request_source == RFID_READ_SOURCE_EPC) &&
-        ((s_request_elapsed_ticks >= 3U) || (s_fallback_epc_valid != false) || ((s_request_attempts_left == 0U) && (s_partial_grace_ticks == 0U))))
-    {
-        s_request_source = RFID_READ_SOURCE_USER; /* EPC未识别成功，使用同一通道和请求编号继续读取USER。 */
-        s_request_attempts_left = s_request_fast_mode ? RFID_FAST_ATTEMPTS : RFID_NORMAL_ATTEMPTS; /* USER允许重试，整次请求总计时不重置。 */
-        Rfid_ClearChannelUartData(s_request_channel); /* 清掉切换阶段之前的残留字节。 */
-        Rfid_ResetReceiveAccumulator(); /* 不把EPC半帧带入USER解析。 */
-    }
-    if ((s_request_elapsed_ticks >= s_request_hard_timeout_ticks) ||
-        ((s_request_attempts_left == 0U) && (s_partial_grace_ticks == 0U)))
-    {
-        Rfid_LinkStatsRecordLostResponse(s_request_channel); /* 超时后补记最后一条读命令未响应，之前重发的命令已在发送时计数。 */
-        if (s_request_saw_rx_data != false)
+        Rfid_LinkStatsRecordValidResponse(s_request_channel); /* USER暂存也证明模块已响应，不能把该命令统计为丢包。 */
+        parsed_result.channel = s_request_channel; /* 候选和最终结果均绑定当前A/B通道。 */
+        if (parsed_result.source == RFID_READ_SOURCE_EPC)
         {
-            Rfid_LinkStatsRecordInvalidFrame(s_request_channel); /* 收到过字节但始终无完整 EPC 时只累计一次异常请求。 */
+            (void)Rfid_UpdateParsedCache(&parsed_result); /* EPC任一次成功立即发布，不再读USER或等待剩余尝试。 */
+            Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_SUCCESS); /* 结束快速或普通请求，业务上线后由普通监测接管。 */
+            return;
         }
+        s_pending_user = parsed_result; /* USER只保存原文及身份，不更新公开缓存、运行参数和界面序号。 */
+        s_request_fast_mode = false; /* USER任一次成功即退出快速模式，后续EPC按普通复核处理。 */
         if (Rfid_ChannelToIndex(s_request_channel, &result_index))
         {
-            s_last_result[result_index].valid = false; /* EPC和USER均失败，自动模式不得再用上次刀具结果启动；保留历史原文用于下次比较。 */
+            s_outstanding_fast_mode[result_index] = false; /* 清掉同票据的快速标志，复核期间不得自动恢复快速预算。 */
         }
-        Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_TIMEOUT); /* 两个阶段全部结束后才记录一次失败。 */
-        return; /* 超时请求本周期结束。 */
+        Rfid_BeginReadStage(RFID_STAGE_VERIFY_EPC); /* 保留当前票据和USER候选，补读EPC后才选择最终结果。 */
     }
 
-    if (s_partial_grace_ticks > 0U)
+    if (s_read_pending)
     {
-        --s_partial_grace_ticks; /* 半帧到达后空出一个周期等待剩余字节。 */
-        return; /* 等待期间不补发新读命令，避免模块应答相互穿插。 */
+        if ((s_read_wait_ticks < RFID_RESPONSE_WAIT_TICKS) ||
+            ((s_partial_grace_ticks > 0U) && (s_read_wait_ticks < RFID_RESPONSE_MAX_WAIT_TICKS)))
+        {
+            if (s_partial_grace_ticks > 0U)
+            {
+                --s_partial_grace_ticks; /* 给分片一个额外周期，但不能越过单条命令200ms上限。 */
+            }
+            return; /* 接收窗口未结束，不重发，也不累计新的失败机会。 */
+        }
+        Rfid_LinkStatsRecordLostResponse(s_request_channel); /* 当前命令接收窗口已结束且无有效结果，只记录一次失败。 */
+        if (s_request_saw_rx_data)
+        {
+            Rfid_LinkStatsRecordInvalidFrame(s_request_channel); /* 收到无效数据的失败命令另记异常统计。 */
+        }
+        s_read_pending = false; /* 本条命令已经结算，后续任务不能重复计算同一失败。 */
+        Rfid_ClearChannelUartData(s_request_channel); /* 下一尝试前丢弃已超时命令的残留字节。 */
+        Rfid_ResetReceiveAccumulator(); /* 无效旧帧不能被下一次解析重复当成新回包。 */
+    }
+    if (s_request_attempts_left == 0U)
+    {
+        if ((s_request_stage == RFID_STAGE_INITIAL_EPC) && Rfid_IsUserFallbackAllowed(s_request_channel))
+        {
+            Rfid_BeginReadStage(RFID_STAGE_USER); /* 仅PXBA/PXBB兼容PXY老标签：EPC连续失败后读USER；公共接头直接进入下面的超时结束。 */
+        }
+        else if ((s_request_stage == RFID_STAGE_VERIFY_EPC) && s_pending_user.valid)
+        {
+            (void)Rfid_UpdateParsedCache(&s_pending_user); /* 普通EPC复核全部失败，才一次性发布已校验USER。 */
+            Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_SUCCESS); /* 有合法USER仍属于识别成功，不能累计刀具离线次数。 */
+            return;
+        }
+        else
+        {
+            if (Rfid_ChannelToIndex(s_request_channel, &result_index))
+            {
+                s_last_result[result_index].valid = false; /* 本基座允许的读取阶段全部失败，本轮不能继续上报旧识别缓存。 */
+            }
+            Rfid_CompleteActiveRequest(RFID_REQUEST_RESULT_TIMEOUT); /* 所有阶段预算均有限，持续噪声也会结束本轮请求。 */
+            return;
+        }
     }
 
-    Rfid_SelectHardwareChannel(s_request_channel); /* 每次发命令前确认共享 R200-K8 仍指向目标通道。 */
-    Rfid_SendReadCommand(s_request_channel, s_request_source); /* 在无半帧等待时发送下一次 EPC 读取。 */
-    --s_request_attempts_left; /* 每实际发送一条读命令，剩余次数减 1。 */
+    Rfid_SelectHardwareChannel(s_request_channel); /* 发命令前确认共享RFID串口仍选中目标通道。 */
+    Rfid_SendReadCommand(s_request_channel, s_request_source); /* 发送当前阶段的EPC或USER读取命令。 */
+    --s_request_attempts_left; /* 一次实际发送只消耗一个预算，接收窗口结束后才判定该次失败。 */
+    s_read_wait_ticks = 0U; /* 新命令从下一任务周期开始累计接收等待。 */
+    s_read_pending = true; /* 后续周期先接收校验，再决定重试、切阶段或发布结果。 */
 }
 
 /*
@@ -998,14 +1087,14 @@ bool Rfid_RequestToolReadTracked(uint8_t channel,
 
     if (s_outstanding_valid[index] != false)
     {
-        if (fast_mode != false)
+        if ((fast_mode != false) &&
+            !((s_request_active != false) && (s_request_channel == channel) && (s_request_stage == RFID_STAGE_VERIFY_EPC)))
         {
-            s_outstanding_fast_mode[index] = true; /* 同通道再次要求快速识别时，改用快速模式，不再排一条新请求。 */
-            if ((s_request_active != false) && (s_request_channel == channel))
+            s_outstanding_fast_mode[index] = true; /* 尚未取得有效来源时可提升排队请求；USER成功后的普通复核不得再提速。 */
+            if ((s_request_active != false) && (s_request_channel == channel) && !s_request_fast_mode)
             {
-                s_request_fast_mode = true; /* 已经在读的普通请求也立即改用快速模式。 */
-                s_request_attempts_left = RFID_FAST_ATTEMPTS; /* 重新补足快速模式的读命令次数，给刚进入识别范围的刀具继续尝试。 */
-                s_request_hard_timeout_ticks = RFID_FAST_HARD_TIMEOUT_TICKS; /* 改用快速模式的最长等待周期，已累计的周期数不清零。 */
+                s_request_fast_mode = true; /* 只在普通转快速边沿追加预算，重复请求不能无限续读。 */
+                s_request_attempts_left += RFID_FAST_ATTEMPTS - RFID_NORMAL_ATTEMPTS; /* 保留已经发送的次数，把当前阶段总预算补到6次。 */
             }
         }
         if (ticket != NULL)
@@ -1192,7 +1281,7 @@ void Rfid_RecordConfirmedDropout(uint8_t channel)
 }
 
 /*
- * 函数功能：校验新版EPC或老USER的业务CRC和字段组合，转换成共用刀具参数。
+ * 函数功能：校验EPC或USER的业务CRC、型号和方向并转换参数；速度检查仅用于EPC，PXY老USER直接取标签速度。
  * 输入参数：source为EPC或USER；payload分别至少包含12或16字节；length为实际长度；parameters为输出。
  * 返回参数：true表示全部校验通过；false表示不能用于运行，输出保持全零。
  */
@@ -1258,10 +1347,7 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
         {
             return false; /* 普通磨刀、反旋刀具和MXYTM均不允许电气往复。 */
         }
-        if ((decoded.model == RFID_TOOL_MODEL_MXYTM) && (count != 1U))
-        {
-            return false; /* MXYTM保留固定单方向机械约束，标签不能开放第二方向。 */
-        }
+        /* MXYTM允许EPC声明正转、反转或正反两方向；上面的方向掩码校验继续禁止电气往复，不再因count=2拒绝合法标签。 */
         ratio = (uint16_t)((((uint16_t)payload[4] & 0x0FU) << 8U) | payload[5]); /* 去掉减速/增速标记后得到倍率x10。 */
         if ((ratio < 10U) || (((payload[4] & 0xF0U) != 0U) && ((payload[4] & 0xF0U) != 0xF0U)))
         {
@@ -1304,19 +1390,19 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
         decoded.direction_mask = legacy_profile->direction_mask; /* 保留刨刀三方向、磨头单方向限制。 */
         decoded.ratio = legacy_profile->ratio; /* 老USER没有明确减速比，按对应一体式型号补齐。 */
         decoded.min_speed = legacy_profile->min_speed; /* 老USER没有最低转速，使用对应型号下限。 */
-        decoded.max_speed = (uint32_t)payload[8] * 500U; /* 最高转速继续读取标签，随后核对是否属于已支持型号。 */
+        decoded.max_speed = (uint32_t)payload[8] * 500U; /* 老USER的B8为最大转速，单位500rpm；直接保存标签值，不作为识别成功条件。 */
         decoded.current = legacy_profile->current; /* 老USER没有电流字段，使用该刀具的保护阈值。 */
         decoded.speed_step_small = legacy_profile->speed_step_small; /* 老USER没有小步进字段，供各方向慢调使用。 */
         decoded.speed_step_large = legacy_profile->speed_step_large; /* 老USER没有大步进字段，供各方向快调使用。 */
-        if ((decoded.max_speed != legacy_profile->max_speed) || ((payload[5] >> 4U) != ((payload[4] == 1U) ? 3U : 1U)))
+        if ((payload[5] >> 4U) != ((payload[4] == 1U) ? 3U : 1U)) /* PXYTP核对三方向、PXYTM核对单方向，不再匹配固定速度。 */
         {
-            return false; /* 老型号、最高转速及方向次数必须一致，避免把其他老产品识别成这两款。 */
+            return false; /* USER型号对应的方向次数不符时仍拒绝，取消速度判断不改变方向校验。 */
         }
         if ((payload[4] == 1U) && ((payload[10] < FreqMin) || (payload[10] > FreqMax)))
         {
             return false; /* 往复老刀频率指令超出主控5~40允许范围，不用错误值启动。 */
         }
-        decoded.default_speed = (uint32_t)payload[9] * 500U; /* 老USER默认转速单位500rpm，不能按EPC的1000rpm解释。 */
+        decoded.default_speed = (uint32_t)payload[9] * 500U; /* 老USER的B9为默认转速，单位500rpm；直接保存标签值，不要求固定值或位于最小/最大速度之间。 */
         decoded.diameter = (uint16_t)payload[1] * 5U; /* 老协议直径乘5，不能套用新EPC的原值。 */
         decoded.frequency = payload[10]; /* 老USER频率仍读取原始指令值。 */
         decoded.flow = payload[11]; /* 老USER泵流量在B11，不能误读成电流阈值。 */
@@ -1325,14 +1411,15 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
     {
         return false; /* 数据来源和长度不匹配，不尝试猜测格式。 */
     }
-    if ((decoded.max_speed == 0U) || (decoded.default_speed == 0U) || (decoded.min_speed > decoded.default_speed) || (decoded.default_speed > decoded.max_speed))
+    if ((source == RFID_READ_SOURCE_EPC) &&
+        ((decoded.max_speed == 0U) || (decoded.default_speed == 0U) || (decoded.min_speed > decoded.default_speed) || (decoded.default_speed > decoded.max_speed))) /* 仅EPC校验速度范围；PXYTP/PXYTM的USER不因速度值拒绝识别。 */
     {
-        return false; /* 非法速度组合直接拒绝，不把错误默认值钳位后继续运行。 */
+        return false; /* EPC非法速度组合仍拒绝，不把错误默认值钳位后继续运行。 */
     }
-    if (((decoded.ratio & 0xFFFFU) > 100U) &&
+    if ((source == RFID_READ_SOURCE_EPC) && ((decoded.ratio & 0xFFFFU) > 100U) &&
         (((uint64_t)decoded.max_speed * (decoded.ratio & 0xFFFFU)) > (655350ULL * 100ULL)))
     {
-        return false; /* 标签最高转速乘减速比超出驱动16位10rpm字段时拒绝，不能靠输出饱和改变实际倍率。 */
+        return false; /* EPC最高转速乘减速比超出驱动字段时仍拒绝；USER解析按要求不执行速度检查。 */
     }
     decoded.length = payload[2]; /* 两份协议均在B2保存长度。 */
     decoded.angle = payload[3]; /* 两份协议均在B3保存弯曲角度。 */
@@ -1412,7 +1499,7 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
         result->tag_epc_valid = true; /* 模块长度、PC与累加和通过后，标识才可用于同标签核对。 */
         if (!Rfid_DecodeToolPayload(source, &frame[offset], payload_length, &parameters))
         {
-            continue; /* 业务数据非法时继续找帧；调用方稍后从EPC转入USER。 */
+            continue; /* 业务数据非法时继续找帧；仅PX基座可在EPC重试耗尽后转USER，公共接头保持EPC。 */
         }
         result->source = source; /* 完整校验后保存真实来源。 */
         result->payload_length = payload_length; /* 缓存比较只覆盖真实数据长度。 */

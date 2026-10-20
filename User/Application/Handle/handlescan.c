@@ -51,7 +51,7 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_VERIFY_RETRY_DELAY_MS      200U /* 校验或读取失败后，下次快速重试前等待的 ms 数。 */
 #define HANDLESCAN_VERIFY_ALARM_RETRY_MS      1000U /* 已报校验失败后，每隔这么多 ms 重试，成功后可恢复在线。 */
 #define HANDLESCAN_VERIFY_RETRY_MAX           3U /* 连续失败累计达到 3 次后停止快速重试，转入报警后的定时重试。 */
-#define HANDLESCAN_RFID_VERIFY_RETRY_MAX      2U  /* 首次 RFID 识别最多等 2 轮；每轮最多3200ms，失败后还需重试等待和 EEPROM 校验，并非 2 秒内完成空基座上线。 */
+#define HANDLESCAN_RFID_VERIFY_RETRY_MAX      2U  /* 首次 RFID 识别最多等 2 轮；每轮最多6000ms，失败后还需重试等待和 EEPROM 校验，并非 2 秒内完成空基座上线。 */
 
 #define HANDLESCAN_INSERT_DEBOUNCE_TICKS      (HANDLESCAN_INSERT_DEBOUNCE_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS (HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS / HANDLESCAN_TASK_PERIOD_MS) /* 在线高电平需要连续出现的扫描次数，A/B 使用相同要求。 */
@@ -59,7 +59,7 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_VERIFY_START_DELAY_TICKS   (HANDLESCAN_VERIFY_START_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_RETRY_DELAY_TICKS   (HANDLESCAN_VERIFY_RETRY_DELAY_MS / HANDLESCAN_TASK_PERIOD_MS)
 #define HANDLESCAN_VERIFY_ALARM_RETRY_TICKS   (HANDLESCAN_VERIFY_ALARM_RETRY_MS / HANDLESCAN_TASK_PERIOD_MS)
-#define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       3200U /* 首次识别最多等3200ms，覆盖A/B排队及EPC转USER的两次1.4s请求；运行暂停不累计。 */
+#define HANDLESCAN_RFID_WAIT_TIMEOUT_MS       6000U /* 首次识别最多等6s，覆盖A/B串行的两次最长2.8s读取及调度余量；运行暂停不累计。 */
 #define HANDLESCAN_RFID_MONITOR_PERIOD_MS     500U  /* 空闲时两轮 RFID 检查的最短启动间隔，单位 ms；上一轮没结束就继续等。 */
 #define HANDLESCAN_RFID_MISS_MAX              6U    /* 连续 6 轮读取超时才确认刀具掉线；排队和取消不计入，实际时间还取决于每轮耗时。 */
 
@@ -1263,7 +1263,7 @@ static bool Handlescan_ProcessRfidWait(const HandlescanChannelBinding *binding,
     {
         Handlescan_EnterRfidRetryOrFail(binding->channel,
                                         context,
-                                        0U); /* 每轮等到3200ms 还没有结果就记一次失败；最多等两轮，之后按空基座流程处理。 */
+                                        0U); /* 每轮等到6000ms还没有结果就记一次失败；最多等两轮，之后按空基座流程处理。 */
     }
 
     return true; /* RFID 等待阶段已处理，调用方本轮返回。 */

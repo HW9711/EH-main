@@ -5,9 +5,9 @@
 #include "queue.h"
 #include <string.h>
 #include "sscBEEP.h"
-#include "Pubinterface.h" /* 缺注水提示不能覆盖当前真实故障蜂鸣。 */
 #include "handlescan.h" /* 不支持的手柄必须持续蜂鸣，不能由按键、限时报警或泵定位提前静音。 */
 #include "work_alarm.h" /* 用压力报警码识别两声提示，其它报警仍沿用原响停节奏。 */
+#include "Pubinterface.h" /* 首次缺泵持续蜂鸣直接读取待释放状态，普通按键和清错消息不能提前解除。 */
 #include "pump_behavior_core.h" /* 泵驱动定位时不播普通按键音；两泵各自成功后分别单响，报警蜂鸣仍可播放。 */
 #include "board.h"
 #include "delay.h"
@@ -164,7 +164,7 @@ static void BeepQueue_Init(void)
 }
 
 /*
- * 函数功能：每100ms处理蜂鸣消息；缺注水播放三声且不被普通清音截断，不支持手柄仍优先持续报警。
+ * 函数功能：每100ms处理蜂鸣；不支持手柄保持到拔出，首次缺泵保持到控制源释放。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -178,8 +178,7 @@ static uint8_t double_beep_phase = 0U; //双响剩余步骤：4=响、3=停、2=
 static uint8_t alignment_beep_phase = 0U; /* 定位结果响停步骤：成功2到0响一声，重试失败4到0响两声，每步100ms；普通按键不能打断。 */
 uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 本周期是否还有泵正在定位；用于暂停普通按键音，不阻止另一台泵播放定位结果音。 */
 uint8_t alignment_result; /* 本周期读取的定位结果：0不响、1成功单响、2重试失败双响；结果不经过普通蜂鸣队列。 */
-bool no_injection_beeping = ((alarm_flag == WORK_ALARM_GRINDING_NO_INJECTION) ||
-                             (alarm_flag == WORK_ALARM_SHAVING_NO_INJECTION)); /* 当前正在播放缺注水三声时，普通按键和清音消息不能截断。 */
+uint8_t injection_alarm = Pubinterface_GetInjectionPumpStartAlarm(); /* 每周期读取首次待释放状态，队列满或普通清错都不能丢掉持续报警。 */
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -191,7 +190,7 @@ if(BeepMsgQueue != NULL)
     if(Kernel_QueueReceive(BeepMsgQueue, &msg, 0) == pdTRUE)
     {
         /* 没有泵定位或定位结果音时，普通按键消息清掉旧报警蜂鸣，再按指定时长短响。 */
-        if((msg.msgType == BEEP_MSG_KEY) && !no_injection_beeping && (alignment_busy == 0U) && (alignment_beep_phase == 0U) && !Handlescan_HasUnsupportedHandle()) /* 拒绝手柄仍插着时丢弃普通按键音，保留其它故障原有蜂鸣状态。 */
+        if((msg.msgType == BEEP_MSG_KEY) && (alignment_busy == 0U) && (alignment_beep_phase == 0U) && !Handlescan_HasUnsupportedHandle()) /* 拒绝手柄仍插着时丢弃普通按键音，保留其它故障原有蜂鸣状态。 */
         {
             // 按键响应消息：keyBeepTime不为0表示需要按键蜂鸣
             key_flag = msg.keyBeepTime;
@@ -220,7 +219,7 @@ if(BeepMsgQueue != NULL)
             }
         }
         /* 持续报警由外部发送 0 才结束，因此清掉内部限时倒计时。 */
-        else if((msg.msgType == BEEP_MSG_ALARM) && ((msg.alarmFlag != 0U) || !no_injection_beeping)) /* 真正故障仍可抢占；普通清音不能截断三声。 */
+        else if(msg.msgType == BEEP_MSG_ALARM)
         {
             // 报警消息：alarmFlag不为0表示有报警
             alarm_flag = msg.alarmFlag;
@@ -232,27 +231,15 @@ if(BeepMsgQueue != NULL)
         /* 限时报警使用消息自带倒计时，到期后由蜂鸣任务自行关闭。 */
         else if(msg.msgType == BEEP_MSG_ALARM_TIMED)
         {
-            bool missing_injection = ((msg.alarmFlag == WORK_ALARM_GRINDING_NO_INJECTION) ||
-                                      (msg.alarmFlag == WORK_ALARM_SHAVING_NO_INJECTION)); /* 两类缺注水使用相同三声节奏。 */
-            if (!missing_injection || (!WorkMessage.alarm_flag && ((alarm_flag == 0U) || no_injection_beeping)))
+            alarm_flag = msg.alarmFlag;                   /* 限时报警和持续报警都使用相同的间歇响声。 */
+            alarm_limited_ticks = msg.alarmHoldTicks;     /* 保存倒计时，到期后本任务自己清报警蜂鸣。 */
+            if (msg.alarmFlag == WORK_ALARM_PUMP_PRESSURE_BLOCKED) /* 压力提示每次都从响声开始，不能继承其它报警的停顿阶段。 */
             {
-                if (missing_injection && no_injection_beeping)
-                {
-                    alarm_limited_ticks += msg.alarmHoldTicks; /* 第二次新操作来得较快时追加三声，保留上一组三声尚未完成的响停阶段。 */
-                }
-                else
-                {
-                    alarm_limited_ticks = msg.alarmHoldTicks; /* 新一组限时报警从消息指定的周期数开始。 */
-                    if (missing_injection || (msg.alarmFlag == WORK_ALARM_PUMP_PRESSURE_BLOCKED))
-                    {
-                        alarmCounter = 0U; /* 缺注水600ms响三声，压力400ms响两声，均从响声开始。 */
-                    }
-                }
-                alarm_flag = msg.alarmFlag; /* 保存本次限时报警类型，真实故障仍可通过持续报警消息抢占。 */
-                key_flag = 0U; /* 清旧按键音，三声期间不混入普通操作提示。 */
-                double_beep_phase = 0U; /* 缺注水或其它限时报警优先于普通双响。 */
-                alignment_beep_phase = 0U; /* 报警提示优先于定位结果音。 */
-            } /* 真实故障占用时忽略缺注水提示，不改变原报警和倒计时。 */
+                alarmCounter = 0U; /* 配合400ms限时播放响、停、响、停，保证正常情况下为两声100ms提示。 */
+            }
+            key_flag = 0;
+            double_beep_phase = 0U;                       /* 限时报警同样高于双响提示。 */
+            alignment_beep_phase = 0U;                    /* 限时报警同样打断定位结果音，报警结束后不补播被打断的声音。 */
         }
     }
 }
@@ -279,6 +266,23 @@ if(BeepMsgQueue != NULL)
 		alarm_limited_ticks = 0U; /* 清旧倒计时，后续按新的真实报警消息运行。 */
 	}
 
+	if (((alarm_flag == WORK_ALARM_INJECTION_MISSING_SINGLE) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC)) &&
+		((injection_alarm == WORK_ALARM_NONE) || WorkMessage.alarm_flag))
+	{
+		alarm_flag = WorkMessage.alarm_flag ? WorkMessage.alarm_value : WORK_ALARM_NONE; /* 缺泵释放只清自己的蜂鸣；真实故障接管时继续保留故障报警。 */
+		alarm_limited_ticks = 0U; /* 缺泵没有倒计时，不能把旧临时提示时间带给后续故障。 */
+		alarmCounter = 0U; /* 本次缺泵音已结束，下一类故障重新开始响停周期。 */
+	}
+	if ((injection_alarm != WORK_ALARM_NONE) && !WorkMessage.alarm_flag &&
+		((alarm_flag == WORK_ALARM_NONE) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_SINGLE) ||
+		 (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC)))
+	{
+		alarm_flag = injection_alarm; /* 首次未松开时恢复持续报警，普通按键和NONE消息都不能关闭。 */
+		alarm_limited_ticks = 0U; /* 不设超时，保持100ms响/100ms停直到对应控制源真实释放。 */
+		key_flag = 0U; /* 持续报警期间不混入普通按键音，也不能被按键清除。 */
+		double_beep_phase = 0U; /* 报警优先于空闲双响，不延后补播。 */
+		alignment_beep_phase = 0U; /* 泵定位结果音不能打断首次缺泵提醒。 */
+	}
 	if (alignment_busy != 0U)
 	{
 		key_flag = 0U; /* 泵开始定位后清掉正在播放的按键音，之前已排队的普通提示也不能继续响。 */
