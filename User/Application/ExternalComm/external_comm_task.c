@@ -277,7 +277,6 @@ static uint16_t s_transient_alarm_remaining_ms = 0U; /* 临时报警剩余保持
 static uint8_t s_uart5_pump_manual_run_request = 0U; /* 上位机独立启动 A 泵时置 1；独立停泵、保护停机或退出外控时清零。 */
 static uint8_t s_uart5_inject_pump_follow_run_request = 0U; /* 上位机启动手柄后触发的注水冷却跟随请求，实际目标由公共 A/B 跟随逻辑选择。 */
 static uint8_t s_external_pump_b_manual_run_request = 0U; /* 记录上位机是否独立请求 B 泵运行，用于简易协议启停切换和小电脑图标显示。 */
-static uint8_t s_handle_injection_wait_stop = 0U; /* 缺注水首次拒绝外控启动后置1，明确停手柄或全停后清零，重复启动报文不能放行。 */
 static uint8_t s_pump_driver_wait_stop_mask = 0U; /* bit0/1表示A/B提前启动已被拒绝；须显式停止后才能重新申请，不接受持续旧启动自动复转。 */
 
 static uint8_t s_rx_buf[UART2_MAX_PACKET_SIZE];      /* UART2 DMA 空闲包复制到这里后再解析。 */
@@ -2271,7 +2270,6 @@ static void ExternalComm_ClearPumpRequests(void)
 {
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_A); /* 明确全停必须停止A定位，不能只发送仍授权校准的普通零速。 */
     PumpBehavior_CancelAlignment(PUMP_BEHAVIOR_CHANNEL_B); /* B使用独立取消槽，丢帧时由本泵任务持续确认停止。 */
-    s_handle_injection_wait_stop = 0U; /* 全停、退出或失联已撤销旧外控请求，后续新会话可重新申请手柄启动。 */
     s_pump_driver_wait_stop_mask = 0U; /* 收到全部停止命令后，清除A/B等待停止标志；之后重新启动时仍须检查驱动已就绪。 */
     s_uart5_pump_manual_run_request = 0U;        /* 急停/全停时清除上位机独立运行请求。 */
     s_uart5_inject_pump_follow_run_request = 0U; /* 急停/全停时清除手柄冷却跟随请求。 */
@@ -2315,6 +2313,7 @@ static void ExternalComm_ClearHandleLostAlarm(void)
  */
 static void ExternalComm_ApplyHostExit(void)
 {
+    Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_EXTERNAL, CHANNEL_NONE); /* 上位机明确退出结束本次启动动作，可完成首次缺泵确认。 */
     s_external_restart_stop_required = 0U; /* 上位机明确退出已确认停止，下一次登录后的新操作可以恢复原控制流程。 */
     ExternalComm_ResetProtocolSession(); /* 清除已登录协议和未完成的申请记录，下次登录必须重新收齐三帧。 */
     /* 先清除外控保存的独立泵和手柄冷却请求，避免后续刷新又启动泵。 */
@@ -2345,6 +2344,7 @@ static void ExternalComm_ServiceLocalExit(void)
     if (s_local_exit_requested != 0U)
     {
         s_local_exit_requested = 0U; /* 当前请求已由通信任务接管，避免下个 10ms 周期重复退出和回包。 */
+        Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_EXTERNAL, CHANNEL_NONE); /* 屏幕明确退出外控同样结束本次动作，关闭首次缺泵报警。 */
         s_local_exit_guard = 1U; /* 先禁止重新申请，再交还控制权，避免已排队的旧保活帧立即重连。 */
         s_local_exit_quiet_ms = 0U; /* 从本次退出开始，计算连续未收到申请帧的时间。 */
         ExternalComm_DisableMotorTelemetry(); /* 屏幕退出外控时立即停止50ms上传，不能继续占用已经离开的上位机链路。 */
@@ -2439,6 +2439,7 @@ static void ExternalComm_RefreshIdleLinkDisplay(void)
  */
 static void ExternalComm_StopOutputForLinkSilent(void)
 {
+    Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_EXTERNAL, CHANNEL_NONE); /* 断链撤销报警但不完成首次确认，重连不能把重复启动当成已确认。 */
     ExternalComm_DisableMotorTelemetry(); /* 2秒无合法下行帧视为通信失效，先停50ms主动遥测并等待重新订阅。 */
     /* 短超时只处理安全输出，不改变 WorkMessage.hmiactive_work，避免上位机外控状态被误释放。 */
     WorkMessage.runflag_work = false;
@@ -2550,6 +2551,7 @@ static void ExternalComm_CheckLinkWatchdog(void)
  */
 static void ExternalComm_StopAllWork(void)
 {
+    Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_EXTERNAL, CHANNEL_NONE); /* 上位机明确全停等价于结束本次动作，允许完成首次缺泵确认。 */
     /* 清除当前手柄运行标志。 */
     WorkMessage.runflag_work = false;
     /* 清零电机转速指令，驱动任务下一周期发送停止命令；不修改实测转速。 */
@@ -2749,7 +2751,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
 /*
  * 函数功能：执行上位机对当前手柄电机的启动或停止命令。
  * 输入参数：area_code 为 0x05 时启动当前手柄，为 0x06 时停止当前手柄。
- * 返回参数：true表示命令执行成功；false表示缺手柄、刀具或缺注水首次被拒等，失败应答已发送。
+ * 返回参数：true表示命令执行成功；false表示缺少手柄、刀具或首次缺泵尚未确认，已发送失败应答。
  */
 static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
 {
@@ -2771,12 +2773,12 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
             return false;
         }
 
-        if ((s_handle_injection_wait_stop != 0U) || (Pubinterface_CheckInjectionPumpForHandleStart() == false))
+        if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_EXTERNAL) == false)
         {
-            s_handle_injection_wait_stop = 1U; /* 首次拒绝后要求0x06停手柄或全停，连续0x05不能当成二次确认。 */
-            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED, area_code,
-                                     EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 明确应答本次启动未执行，保留现有协议帧格式。 */
-            return false; /* 不写运行请求，也不启动联动注水泵。 */
+            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
+                                     area_code,
+                                     EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 首次缺泵沿用设备失败应答，具体缺泵图号通过屏幕报警同步上传。 */
+            return false; /* 连续0x05一直拦截，必须先收到0x06停止或明确退出才能确认。 */
         }
         Pubinterface_ClearPressureBlockStopLatchForNewTrigger(); /* 新启动命令允许重新尝试压力闭环运行。 */
         WorkMessage.speed_work = WorkMessage.speed_set_work; /* 启动时把当前设置转速作为待下发的转速指令。 */
@@ -2786,7 +2788,7 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
     }
     else
     {
-        s_handle_injection_wait_stop = 0U; /* 明确停手柄后才接受下次启动，普通停止不清此手柄已提醒记录。 */
+        Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_EXTERNAL, CHANNEL_NONE); /* 首次没有起机也接收停止确认，下一次启动不再蜂鸣和弹窗。 */
         WorkMessage.runflag_work = false; /* 停止当前手柄电机。 */
         WorkMessage.speed_work = 0U; /* 停止时把转速指令设为 0，保留设置值供下次启动使用。 */
         ControlSignalMessage.HMI_control_flag = false; /* 结束外控手柄运行来源。 */

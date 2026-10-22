@@ -23,7 +23,7 @@
 #define PUMP_INJECTWATER_SPEED_MAX 70U
 #endif
 
-/* 灌注泵接入及零设定启动时的默认流量，单位mL/min；调大后默认出液量增加，必须保持在1~300。 */
+/* 右侧灌注泵本次开机首次识别及零设定启动时的默认流量，单位mL/min；当前120，模块重连保留已有设定，必须保持在1~300。 */
 #define PUMP_POURWATER_DEFAULT_FLOW 120U
 
 /*

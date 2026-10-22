@@ -33,7 +33,7 @@ uint16_t Pubinterface_GetPumpStartSpeed(const pumpMessage_t *pump_message)
 	case INJECTWATER:
 		return Pubinterface_GetInjectionPumpStartFlow(); /* 注水泵沿用当前通道 Page4 默认流量，非法值回退 30。 */
 	case POURWATER:
-		return PUMP_POURWATER_START_SPEED; /* 灌注泵零流量启动时补为120mL/min，与重新接泵默认值一致。 */
+		return PUMP_POURWATER_START_SPEED; /* 灌注泵零流量启动时补为120mL/min，与本次开机首次识别的默认值一致。 */
 	default:
 		return 0U; /* 未识别泵不能补速度，避免屏幕或上位机误启动未知设备。 */
 	}
@@ -522,7 +522,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 }
 
 /*
- * 函数功能：脚踏短按循环调整对应泵流量；注水20/25/30，灌注100/120/140，首次从首档开始。
+ * 函数功能：脚踏短按循环调整对应泵流量；注水保持20/25/30，仅右侧B泵灌注模式使用90/120/180，首次从首档开始。
  * 输入参数：key_value为左或右脚踏短按键值，分别调整A泵或B泵。
  * 返回参数：无；只改变流量和脚踏档位，不改变启停或排空请求。
  */
@@ -546,6 +546,10 @@ static void Pump_HandleGearKey(uint8_t key_value)
 	{
 		return; /* 没有识别到在线注水或灌注泵时，不记录本次按键；接入后仍从首档开始。 */
 	}
+	if ((pump_message->type == POURWATER) && (key_value != JTKey_right_short))
+	{
+		return; /* 灌注快捷档只允许右侧B泵使用；左侧A固定注水，不推进灌注档位或改写流量。 */
+	}
 	if ((pump_message->type == INJECTWATER) && (pump_message->timingDrainage_flag == true))
 	{
 		return; /* 屏幕定时排空期间不改流量或推进档位，排空结束后才能继续调节。 */
@@ -558,8 +562,11 @@ static void Pump_HandleGearKey(uint8_t key_value)
 	}
 	else
 	{
-		pump_message->speed_work = 100U + (uint16_t)(pump_message->step_value - 1U) * 20U; /* 灌注三档固定100、120、140，不与屏幕分段步进混用。 */
-		pump_message->speed_step_value = 20U; /* 诊断记录灌注相邻脚踏档位相差20mL/min。 */
+		static const uint16_t pour_flow_gears[3] = {90U, 120U, 180U}; /* 右侧灌注三档间隔不同，按档位查表，第三档后回到90mL/min。 */
+		uint16_t previous_flow = pump_message->speed_work; /* 保留切档前设定，诊断调节量不能继续沿用固定50mL/min。 */
+		pump_message->speed_work = pour_flow_gears[pump_message->step_value - 1U]; /* 仅右侧B泵灌注分支使用该表，注水仍走20/25/30。 */
+		pump_message->speed_step_value = (pump_message->speed_work >= previous_flow) ?
+			(pump_message->speed_work - previous_flow) : (previous_flow - pump_message->speed_work); /* 记录本次实际调节量，兼容非等距档位及180回90。 */
 	}
 	if (key_value == JTkey_left_short)
 	{

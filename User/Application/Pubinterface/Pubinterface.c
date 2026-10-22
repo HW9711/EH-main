@@ -17,7 +17,6 @@
 #include "handlekey.h" /* GZYT 临时测试开启时，屏幕允许选中手柄按钮控制。 */
 #include "motoruartdata.h"
 #include "external_comm_task.h"
-#include "screenkey.h" /* 缺注水首次拒绝触控后，必须确认松手才能再次启动。 */
 
 ChannelrecognizeMessage_t ChannelrecognizeMessageA;
 ChannelrecognizeMessage_t ChannelrecognizeMessageB;
@@ -58,11 +57,11 @@ static uint8_t s_common_socket_tool_missing_wait_foot_release = 0U;
 static uint8_t s_running_handle_unplug_transient_alarm_value = 0U;
 /* 手控运行中拔手柄临时弹窗开始时间，用于周期服务到 3 秒后关闭屏幕报警。 */
 static uint32_t s_running_handle_unplug_transient_alarm_tick = 0U;
-/* 泵临时弹窗显示后置1，到时清零；72/73缺注水、79定位失败和89压力提示共用此计时。 */
+/* 泵临时弹窗显示后置1，显示到时后清零；用于保护定位失败79号图或压力报警89号图不被其它提示提前关闭。 */
 static uint8_t s_pump_transient_alarm_active = 0U;
-/* 本次泵弹窗开始时间，保持指定毫秒数后关闭当前泵提示图。 */
+/* 本次泵弹窗开始时间，保持指定毫秒数后关闭79号或89号图。 */
 static uint32_t s_pump_transient_alarm_tick = 0U;
-static uint32_t s_pump_transient_alarm_duration = ALARM_PRESSURE_MS; /* 本次泵弹窗保持毫秒数：压力按原设置，缺注水与定位失败为3000ms。 */
+static uint32_t s_pump_transient_alarm_duration = ALARM_PRESSURE_MS; /* 本次泵弹窗保持毫秒数：压力按原设置，定位失败为3000ms。 */
 /* 冷却泵记录的 bit0：1 表示 A 泵由手柄联动启动；停手柄时据此停 A 泵，不是可调参数。 */
 #define HANDLE_INJECTION_FOLLOW_PUMP_A 0x01U
 /* 冷却泵记录的 bit1：1 表示 B 泵由手柄联动启动；可与 A 泵标志组合，不是可调参数。 */
@@ -71,15 +70,17 @@ static uint32_t s_pump_transient_alarm_duration = ALARM_PRESSURE_MS; /* 本次�
 static uint8_t s_handle_injection_pump_follow_mask = 0U;
 /* bit0/bit1分别禁止A/B故障泵继续联动；松开或新启动时清零，仅限制泵，不限制手柄。 */
 static uint8_t s_injection_pump_fault_hold_mask = 0U;
-/* 缺注水弹窗保持时间，单位ms；增大会延长72/73号提示，不改变手柄是否允许运行。 */
-#define HANDLE_NO_INJECTION_ALARM_MS 3000U
-/* 六个100ms响停步骤为三声；只控制蜂鸣时长，与弹窗的3秒独立。 */
-#define HANDLE_NO_INJECTION_BEEP_MS 600U
-/* 下标0为A、1为B；首次提醒后置1，换柄或接入注水泵时清零，普通停机不清零。 */
-static uint8_t s_no_injection_warned[2] = {0U, 0U};
-/* 保存A/B已检查的插拔计数，同型号重新插入也必须重新执行首次拦截。 */
-static uint32_t s_no_injection_generation[2] = {0U, 0U};
 
+
+typedef struct
+{
+	uint32_t identity; /* 本通道真实插拔代数；同型号重新插入也必须重新进行首次检查。 */
+	bool first_start_done; /* 本次插入已正常首次启动或已松开确认缺泵，后续启动不再报警。 */
+} InjectionStartChannel_t;
+static InjectionStartChannel_t s_injection_start_channel[2]; /* A/B分别记录首次，不能在A确认后直接放行B的首次。 */
+static uint8_t s_injection_start_source = CONTROL_OWNER_NONE; /* 正在等待真实释放的控制来源，连续启动命令仍属本次动作。 */
+static uint8_t s_injection_start_channel_id = CHANNEL_NONE; /* 本次报警对应的手柄通道，另一只手柄松键不能代为确认。 */
+static uint8_t s_injection_start_alarm = WORK_ALARM_NONE; /* 实时供屏幕和蜂鸣使用，不写全局故障以免普通清错绕过确认。 */
 
 /* 默认冷却流量，单位 mL/min；Page4 流量为 0、超过允许范围或未读取时使用，修改会改变这些情况下的启动流量。 */
 #define HANDLE_INJECTION_PUMP_DEFAULT_FLOW 30U
@@ -804,19 +805,18 @@ static bool IsCommonSocketReserved(uint8_t hand_model)
 }
 
 /*
- * 函数功能：检查公共接头和自动模式PX通道是否已完整装载最近有效的EPC或USER刀具参数。
+ * 函数功能：仅检查公共接头是否已装载有效RFID刀具参数；PXBA/PXBB自动或手动模式均按当前参数运行。
  * 输入参数：无，直接读取 WorkMessage 和当前通道 MemoryMsg。
- * 返回参数：true表示不使用自动RFID或刀具参数已就绪；false表示标签失败、刀具未上线或新参数尚未同步。
+ * 返回参数：true表示非公共接头或其刀具参数已就绪；false表示公共接头标签失败、刀具未上线或参数尚未同步。
  */
 bool Pubinterface_IsCommonSocketToolReady(void)
 {
 	ChannelMemoryMessage_t *memory = NULL; /* 当前通道记忆用于复核刀具类型，避免 WorkMessage 切换过程中的短暂字段不一致。 */
 	ChannelrecognizeMessage_t *recognize = NULL; /* 扫描层缓存表示当前 RFID 刀具头是否仍被在线监测确认，不能只看历史 MemoryMsg。 */
 
-	if ((WorkMessage.hand_model != COMMON_SOCKET_ONLINES) &&
-        !(((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) && (WorkMessage.auto_identify != 0U)))
+	if (WorkMessage.hand_model != COMMON_SOCKET_ONLINES)
 	{
-		return true; /* EEPROM手柄和PX手动模式仍按原参数启动，不受RFID读取影响。 */
+		return true; /* PXBA/PXBB未识别刀具也沿用当前参数，不触发缺刀具报警；在线、缺泵及故障检查仍由原流程处理。 */
 	}
 
 	if (WorkMessage.channel_work == CHANNEL_A)
@@ -852,7 +852,7 @@ bool Pubinterface_IsCommonSocketToolReady(void)
             (recognize->rfid_direction_mask == WorkMessage.rfid_direction_mask) &&
 			(memory->tool_type != 0U) &&
 			(recognize->tool_type != 0U) &&
-            Handlescan_IsRfidToolReady(WorkMessage.channel_work)); /* 参数已装载且最近完整识别成功后才放行自动RFID刀具。 */
+            Handlescan_IsRfidToolReady(WorkMessage.channel_work)); /* 公共接头仍须装载最近有效刀具参数才能启动，不放宽其RFID检查。 */
 }
 
 /*
@@ -907,6 +907,117 @@ bool Pubinterface_CheckCommonSocketToolReadyForRun(void)
 	}
 
 	return true; /* 非公共接头或 EPC 刀具已装载时，保持原有脚踏/手柄/屏幕/外控启动路径。 */
+}
+
+/*
+ * 函数功能：撤销指定来源/通道的缺泵报警，通信异常不能代替操作者完成首次确认。
+ * 输入参数：source为CONTROL_OWNER_*，channel为CHANNEL_*；各自为NONE时匹配任意来源或通道。
+ * 返回参数：无；保留本次插柄的首次检查记录。
+ */
+void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel)
+{
+	if (((source != CONTROL_OWNER_NONE) && (source != s_injection_start_source)) ||
+		((channel != CHANNEL_NONE) && (channel != s_injection_start_channel_id)))
+	{
+		return; /* 其它来源掉线或另一只手柄重新配置不能撤销当前提示。 */
+	}
+	s_injection_start_source = CONTROL_OWNER_NONE; /* 结束本次等待动作，下次启动重新检查是否仍需首次确认。 */
+	s_injection_start_channel_id = CHANNEL_NONE; /* 释放报警归属，避免旧手柄的松键误确认新手柄。 */
+	s_injection_start_alarm = WORK_ALARM_NONE; /* 显示及蜂鸣任务按实时状态关闭自己的提示，不排队清除其它故障。 */
+}
+
+/*
+ * 函数功能：按真实插拔代数维护A/B首次记录；换方向、换控制源和泵重新接入均不重置。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void InjectionStart_Service(void)
+{
+	uint8_t channel; /* 两通道均检查插拔，未选中的手柄换新后也必须恢复首次。 */
+	for (channel = CHANNEL_A; channel <= CHANNEL_B; ++channel)
+	{
+		InjectionStartChannel_t *state = &s_injection_start_channel[channel - CHANNEL_A]; /* 固定通道1/2映射为数组0/1。 */
+		uint32_t identity = Handle_GetIdentityGeneration(channel); /* 使用真实插拔代数，不能按型号判断是否换柄。 */
+		bool online = (channel == CHANNEL_A) ? WorkMessage.Channel_Aonline : WorkMessage.Channel_Bonline; /* 确认离线时同步撤销旧手柄提示。 */
+		if (!online || (state->identity != identity))
+		{
+			state->identity = identity; /* 保存本次识别代数，下一次插入重新比较。 */
+			state->first_start_done = false; /* 新手柄或已拔出手柄不继承上一次确认。 */
+			Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_NONE, channel); /* 只清理被拔出或更换的通道，不影响另一只手柄的首次提示。 */
+		}
+	}
+}
+
+/*
+ * 函数功能：四种控制来源共用首次缺泵启动检查；首次拦截，释放确认后本次插柄后续启动不再提示。
+ * 输入参数：source为CONTROL_OWNER_FOOT/HANDLE/SCREEN/EXTERNAL；调用方先完成刀具、故障和控制互斥检查。
+ * 返回参数：true允许写入运行请求；false保持停机并等待原控制源真实松开。
+ */
+bool Pubinterface_CheckInjectionPumpForRun(uint8_t source)
+{
+	InjectionStartChannel_t *state; /* 当前选中手柄的首次记录，确认不能跨A/B通道共享。 */
+	InjectionStart_Service(); /* 启动前同步真实插拔，防止同型号换柄继承旧许可。 */
+	if (WorkMessage.alarm_flag || Handlescan_HasUnsupportedHandle())
+	{
+		return false; /* 保留新版故障门禁；已确认缺泵不能绕过驱动故障或不支持手柄锁存。 */
+	}
+	if ((source < CONTROL_OWNER_EXTERNAL) || (source > CONTROL_OWNER_HANDLE) ||
+		((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B)))
+	{
+		return false; /* 无效来源或空通道不能取得启动许可。 */
+	}
+	if (((WorkMessage.channel_work == CHANNEL_A) && !WorkMessage.Channel_Aonline) ||
+		((WorkMessage.channel_work == CHANNEL_B) && !WorkMessage.Channel_Bonline))
+	{
+		return false; /* 尚未识别或已经拔出的手柄不建立缺泵首次记录，仍由原在线检查处理。 */
+	}
+	if (s_injection_start_source != CONTROL_OWNER_NONE)
+	{
+		return false; /* 首次动作未释放时，重复按住、接上泵或切换来源都不能自动起机。 */
+	}
+	state = &s_injection_start_channel[WorkMessage.channel_work - CHANNEL_A]; /* 仅修改当前手柄记录，另一通道仍独立判断首次。 */
+	if (state->first_start_done)
+	{
+		return true; /* 本次插柄已完成首次处理，后续既不蜂鸣也不弹窗。 */
+	}
+	if ((pumpMessageA.online_flag && (pumpMessageA.type == INJECTWATER)) ||
+		(pumpMessageB.online_flag && (pumpMessageB.type == INJECTWATER)))
+	{
+		state->first_start_done = true; /* 首次启动有已识别注水泵则正常放行；同次插入后续掉泵不再当成首次。 */
+		return true; /* 只判断泵识别，不把压力或驱动未就绪误报成缺管。 */
+	}
+	s_injection_start_source = source; /* 保存本次被拦截来源，只接受对应来源的真实释放。 */
+	s_injection_start_channel_id = WorkMessage.channel_work; /* 保存触发手柄，另一通道松键不能关闭此次报警。 */
+	s_injection_start_alarm = (WorkMessage.dir_work == OSCDIR) ?
+		WORK_ALARM_INJECTION_MISSING_OSC : WORK_ALARM_INJECTION_MISSING_SINGLE; /* 沿用单向72/往复73号图，保持到释放，不设置5秒自动关闭。 */
+	return false; /* 首次缺泵只报警，调用方不得写入电机或联动泵运行请求。 */
+}
+
+/*
+ * 函数功能：真实松开或明确停止后确认首次缺泵报警，本次插柄后续启动不再产生提示。
+ * 输入参数：source为释放来源；channel为实体键所属通道，NONE表示该来源的明确停止。
+ * 返回参数：无。
+ */
+void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel)
+{
+	InjectionStart_Service(); /* 先废弃旧插拔上下文，拔出后的延迟松键不能确认新手柄。 */
+	if ((s_injection_start_source == CONTROL_OWNER_NONE) || (source != s_injection_start_source) ||
+		((channel != CHANNEL_NONE) && (channel != s_injection_start_channel_id)))
+	{
+		return; /* 没有待确认提示、其它来源释放或另一通道松键均不改变首次记录。 */
+	}
+	s_injection_start_channel[s_injection_start_channel_id - CHANNEL_A].first_start_done = true; /* 仅真实释放完成确认，后续所有控制方式共用该手柄许可。 */
+	Pubinterface_CancelInjectionPumpStart(source, channel); /* 立即撤销缺泵状态，蜂鸣和显示任务各自结束自己的提示。 */
+}
+
+/*
+ * 函数功能：提供等待释放期间的缺泵提示码，显示和蜂鸣独立读取，避免队列丢消息后提前解除。
+ * 输入参数：无。
+ * 返回参数：17/18为单向/往复缺泵；NONE表示当前不提示。
+ */
+uint8_t Pubinterface_GetInjectionPumpStartAlarm(void)
+{
+	return s_injection_start_alarm; /* 只有真实释放、手柄拔出或来源异常撤销才能结束本次报警。 */
 }
 
 /*
@@ -1509,17 +1620,16 @@ static void StopDriverFaultPumps(uint8_t blocked_mask)
 }
 
 /*
- * 函数功能：显示缺注水、泵压力或定位失败的限时弹窗；其它报警占用时保留原报警。
- * 输入参数：picture为屏幕图片号，72磨削缺注水、73刨削缺注水、79定位失败、89压力超限；duration为显示毫秒数。
+ * 函数功能：显示泵压力或定位失败的限时弹窗；其它报警占用时保留原报警。
+ * 输入参数：picture为屏幕图片号，79定位失败、89压力超限；duration为显示毫秒数。
  * 返回参数：无。
  */
 static void RaisePumpAlarm(uint8_t picture, uint32_t duration)
 {
 	uint8_t display_value[10] = {0U}; /* 报警显示参数先清零，再填写泵提示逻辑码及指定图片。 */
 
-	display_value[0] = (picture == 72U) ? WORK_ALARM_GRINDING_NO_INJECTION :
-        ((picture == 73U) ? WORK_ALARM_SHAVING_NO_INJECTION : WORK_ALARM_PUMP_PRESSURE_BLOCKED); /* 缺注水使用独立逻辑码，外控不会把72/73号图误报为压力堵塞。 */
-	display_value[1] = picture; /* UIAIARMDP使用指定的72、73、79或89号图，共用现有报警显示区。 */
+	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按79或89号图片区分，不能把本次提示当成无报警。 */
+	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，79和89共用现有报警显示区。 */
 	s_pump_transient_alarm_tick = HAL_GetTick(); /* 记录本次提示开始时间，不改变泵运行请求。 */
 	s_pump_transient_alarm_duration = duration; /* 保存本次保持时长，压力提示仍使用原时长。 */
 	if ((WorkMessage.alarm_flag == false) &&
@@ -1533,79 +1643,6 @@ static void RaisePumpAlarm(uint8_t picture, uint32_t duration)
 	{
 		s_pump_transient_alarm_active = 0U; /* 本次没有显示泵弹窗，不得在到时后关闭其它报警。 */
 	}
-}
-
-/*
- * 函数功能：有注水泵接入或手柄插拔计数变化时，清掉对应手柄已提醒记录。
- * 输入参数：无，读取A/B泵在线类型和A/B手柄插拔计数。
- * 返回参数：true表示至少一台在线注水泵；false表示没有在线注水泵。
- */
-static bool RefreshNoInjectionConfirmation(void)
-{
-    bool connected = ((pumpMessageA.online_flag == true) && (pumpMessageA.type == INJECTWATER)) ||
-                     ((pumpMessageB.online_flag == true) && (pumpMessageB.type == INJECTWATER)); /* 吸引泵、灌注泵以及离线泵的旧类型不能代替冷却注水泵。 */
-    uint8_t index; /* 0检查A手柄，1检查B手柄，切换选中通道不会清掉另一侧记录。 */
-    for (index = 0U; index < 2U; ++index) /* 同时维护两侧，即使未选中也能识别换柄。 */
-    {
-        uint32_t generation = Handle_GetIdentityGeneration((index == 0U) ? CHANNEL_A : CHANNEL_B); /* 同型号重新插拔也会改变此计数。 */
-        if (connected || (generation != s_no_injection_generation[index])) /* 接入注水泵后清记录，之后拔掉泵便重新要求首次确认。 */
-        {
-            s_no_injection_warned[index] = 0U; /* 清掉此手柄的首次提醒记录，普通停机不进入本分支。 */
-        }
-        s_no_injection_generation[index] = generation; /* 保存已检查的插拔计数，后续启动不会把同一次插入反复当成换柄。 */
-    }
-    return connected; /* 启动检查直接使用本轮连接判断，避免把未在线的泵算作已接入。 */
-}
-
-/*
- * 函数功能：新启动时检查指定系列手柄是否缺注水泵；首次提醒并拒绝，再次新启动提醒后放行。
- * 输入参数：无；调用方必须确认这是新操作，拒绝后持续按住或重复启动报文不得再次调用。
- * 返回参数：true表示此项检查允许继续；false表示首次缺注水或当前有报警，本次不得写运行请求。
- */
-bool Pubinterface_CheckInjectionPumpForHandleStart(void)
-{
-    uint8_t picture; /* 本次提醒图片：磨削72，刨削73，其它型号不增加此项提醒。 */
-    uint8_t index; /* 当前选中手柄在独立确认数组中的下标。 */
-    bool warned; /* 保存本次提醒之前是否已经提示过，用于决定本次启动是否放行。 */
-    bool connected = RefreshNoInjectionConfirmation(); /* 启动前再次检查泵和换柄，避免仅依赖周期任务的旧结果。 */
-    if (WorkMessage.alarm_flag || Handlescan_HasUnsupportedHandle()) /* 真实故障和不支持手柄仍按原停机规则处理。 */
-    {
-        return false; /* 不允许用第二次缺注水确认绕过原有故障。 */
-    }
-    if (connected || WorkMessage.runflag_work) /* 正在运行时的保持命令及实体键的同步消息，不算新的启动操作。 */
-    {
-        return true; /* 有注水泵或原运行请求仍有效，不重复提醒，也不改变已在执行的请求。 */
-    }
-    switch (WorkMessage.hand_model) /* 只对需求指定的TM/EM和PX/PXY系列增加检查，不扩大可支持型号。 */
-    {
-    case TMBA_ONLINES:
-    case TMBB_ONLINES:
-    case EMBA_ONLINES:
-    case EMBB_ONLINES:
-    case EMBC_ONLINES:
-    case EMBD_ONLINES:
-        picture = 72U; /* 磨削提示：泵管未连接，请检查，刀具未按规定连接注水，可能会损坏。 */
-        break;
-    case PXBA_ONLINES:
-    case PXBB_ONLINES:
-    case PX_YIP_ONLINES:
-    case PX_YIM_ONLINES:
-        picture = 73U; /* 刨削提示：泵管未连接，请检查，刀具未注水，可能影响切削性能。 */
-        break;
-    default:
-        return true; /* 其它型号保留原启动检查，不新增本次缺注水提醒。 */
-    }
-    if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
-    {
-        return false; /* 无有效通道时不能记录确认或启动，需先正确识别并选中手柄。 */
-    }
-    index = (WorkMessage.channel_work == CHANNEL_A) ? 0U : 1U; /* A/B分别记录，确认A不能放行B的首次启动。 */
-    warned = (s_no_injection_warned[index] != 0U); /* 先取旧记录，首次调用必须返回false。 */
-    s_no_injection_warned[index] = 1U; /* 记住此手柄已收到提醒，调用方负责等待松开后才能再次尝试。 */
-    SendAlarmMessageTimed((picture == 72U) ? WORK_ALARM_GRINDING_NO_INJECTION : WORK_ALARM_SHAVING_NO_INJECTION,
-                          HANDLE_NO_INJECTION_BEEP_MS); /* 每次新启动播放三声，不把弹窗3秒误用为持续蜂鸣时长。 */
-    RaisePumpAlarm(picture, HANDLE_NO_INJECTION_ALARM_MS); /* 每次新启动重新保持3秒，提示期间不设置全局报警停机标志。 */
-    return warned; /* 首次拒绝；已提醒过则允许调用方继续原启动流程。 */
 }
 
 /*
@@ -1911,15 +1948,15 @@ static void ServiceUnplugAlarm(void)
 }
 
 /*
- * 函数功能：周期维护各限时报警，并在接入注水泵或换柄后清掉缺注水提醒记录。
+ * 函数功能：周期维护手柄插拔首次缺泵记录及公共接头、泵故障、运行中拔手柄的提示。
  * 输入参数：无。
  * 返回参数：无。
  */
 void Pubinterface_ServiceTransientAlarms(void)
 {
-	(void)RefreshNoInjectionConfirmation(); /* 无启动操作时也检查接泵和换柄，接上再拔掉后必须重新首次确认。 */
+	InjectionStart_Service(); /* 真实拔出立即废弃本通道首次记录和缺泵报警，下一只手柄重新判断首次。 */
 	ServiceCommonSocketToolAlarm(); /* 维护公共接头缺刀具弹窗的保持和退出时机。 */
-	ServicePumpAlarm(); /* 缺注水与定位失败显示3秒，压力超限按原时长，到时关闭对应提示。 */
+	ServicePumpAlarm(); /* 定位失败显示3秒，压力超限按原时长，到时关闭对应提示；缺泵独立等待松开。 */
 	ServiceUnplugAlarm(); /* 维护运行中拔手柄弹窗的保持和退出时机。 */
 	if (s_running_handle_unplug_transient_alarm_value == 0U)
 	{
@@ -2813,12 +2850,12 @@ void ControlTypeActive(uint8_t key_value)
 		{
 			return; /* 其它来源占用时忽略本次保活，避免触控抢占脚踏/手柄/外控。 */
 		}
-        if (Pubinterface_CheckInjectionPumpForHandleStart() == false) /* 首次缺注水不允许运行，连续保活不算再次按下。 */
-        {
-            ScreenKey_RequireTouchRelease(); /* 取消已接受的旧保活，必须先松开触控按钮。 */
-            Pubinterface_StopTouchKeepAliveRun(); /* 保持触控界面，撤销电机和联动泵请求。 */
-            return; /* 后续新按下才会再次提醒并允许启动。 */
-        }
+		if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_SCREEN) == false)
+		{
+			Pubinterface_StopTouchKeepAliveRun(); /* 首次缺泵保持待运行；此停机函数不能确认松手，仍须检测真实保活间隔。 */
+			ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_SCREEN); /* 未启动不保留电机占用，缺泵动作独立等待释放。 */
+			return; /* 持续保活只能继续被拦截，不能自行变成第二次启动。 */
+		}
 		WorkMessage.touchactive_work = TOUCHWORK; /* 收到 0x5520 表示触控仍在按压，保持触控占用。 */
 		WorkMessage.drivetype_work = TOUCHWORK; /* 保活期间驱动方式固定为触控，屏幕图标保持触控高亮。 */
 		if (WorkMessage.channel_work == CHANNEL_A)
@@ -2844,6 +2881,7 @@ void ControlTypeActive(uint8_t key_value)
 		Pubinterface_RefreshControlModeDisplay(); /* 同步主运行页触控高亮，避免其它刷新把触控误刷白。 */
 		break;
 	case SCREENKey_TouchEXIT: // 停止
+		Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_SCREEN, CHANNEL_NONE); /* 用户明确退出等价于结束本次控制动作，关闭首次缺泵报警。 */
 		if ((WorkMessage.touchactive_work != TOUCHWORK) &&
 			(WorkAlarm_Is(WORK_ALARM_HANDLE_NOT_CONNECTED) == false))
 		{

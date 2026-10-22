@@ -140,13 +140,12 @@ void HMIkeyBehanior(uint8_t key_value)
 }
 
 /*
- * 函数功能：处理手柄按键；新启动检查刀具、控制方式和缺注水确认，启停时同步控制联动注水泵。
+ * 函数功能：处理手柄按键；启动前检查刀具、控制方式和首次缺泵确认，启停时同步跟随注水泵。
  * 输入参数：key_value 为手柄按键编号。
  * 返回参数：无。
  */
 void HANDLEKeyBehavior(uint8_t key_value)
 {
-    static bool wait_stop = false; /* 队列启动首次被拒后置1，停止消息或实体键已批准的新运行清零，重复启动消息不放行。 */
 	switch(key_value)
 	{
 		case HANDLEKey_speed_add: 
@@ -166,22 +165,17 @@ void HANDLEKeyBehavior(uint8_t key_value)
 		if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)return; /* 手柄队列启动电机前检查公共接头 EPC 刀具头，缺失时只报警不运行。 */
 		/* 即使启动消息不是由实体按键扫描产生，也要确认当前允许手柄控制。 */
 		if(ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)return;
-        if (WorkMessage.runflag_work == false) /* 实体键已经批准的运行同步消息不再执行首次检查。 */
-        {
-            if (wait_stop || (Pubinterface_CheckInjectionPumpForHandleStart() == false))
-            {
-                wait_stop = true; /* 本次队列启动被拒，收到停止消息前不能靠重复启动绕过。 */
-                ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 未写运行请求时释放空闲控制权限。 */
-                return; /* 保持电机停止，不联动注水泵。 */
-            }
-        }
-        wait_stop = false; /* 已批准运行，结束此前队列等待停止的记录。 */
+		if(Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_HANDLE) == false)
+		{
+			ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_HANDLE); /* 直接投递队列的手柄启动也必须通过首次缺泵检查。 */
+			return; /* 首次拒绝后不写运行请求，等待手柄真实松开。 */
+		}
 		WorkMessage.runflag_work = true;
 		ControlSignalMessage.handle_control_flag = true;
 		Pubinterface_SetHandleInjectionPumpRun(true); /* 手柄队列启动电机时按泵类型和当前通道同步启动 A/B 注水冷却泵，保证绕过实体键直发消息时也保持联动。 */
 		break;
 		case HANDLEKey_motor_stop: 
-        wait_stop = false; /* 明确停止后允许下一次新的启动消息，缺注水的手柄提醒记录仍保留。 */
+		Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_HANDLE, WorkMessage.channel_work); /* 明确停止消息结束本通道动作，允许确认被拒绝的首次启动。 */
 		WorkMessage.runflag_work = false;
 		ControlSignalMessage.handle_control_flag = false;
 		Pubinterface_SetHandleInjectionPumpRun(false); /* 手柄队列停止电机时同步关闭本次跟随的 A/B 注水冷却泵，避免手柄停转后冷却泵继续运行。 */

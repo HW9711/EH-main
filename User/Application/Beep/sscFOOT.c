@@ -140,6 +140,7 @@ static void Foot_LatchMotorStopUntilRelease(void)
  */
 static void Foot_MarkMotorReleased(void)
 {
+    Pubinterface_ReleaseInjectionPumpStart(CONTROL_OWNER_FOOT, CHANNEL_NONE); /* 真实退回非电机区才确认首次缺泵，启动失败本身不算松脚。 */
     s_foot_motor_stop_latched = true; /* 踏板一退出电机运行区就要求停机，不等待后面的松脚确认计数。 */
     s_foot_motor_release_ready = true; /* 已检测到退出电机运行区，下一次有效深踩可以重新申请启动。 */
     s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 本次踩踏结束，清掉启动侧记录。 */
@@ -182,7 +183,7 @@ static void Foot_StopDoubleMotorAtReleaseBoundary(uint8_t source)
 }
 
 /*
- * 函数功能：写脚踏运行请求前确认已松开再踩下，新启动还须通过缺注水提醒检查。
+ * 函数功能：脚踏启动前验证先松后踩，并检查本次插入手柄的首次缺泵确认。
  * 输入参数：source 为左侧或右侧踏板编号，取 FOOT_MOTOR_SOURCE_LEFT/RIGHT。
  * 返回参数：true 表示本侧允许启动或继续运行；false 表示本侧必须保持停机。
  */
@@ -204,11 +205,11 @@ static bool Foot_TryAuthorizeMotorRun(uint8_t source)
         return false; /* 上电、通信中断或启动检查失败后还没松脚，不能直接按旧踩踏值重启。 */
     }
 
-    s_foot_motor_release_ready = false; /* 本次松脚记录只用一次，下次停机后仍需再次松脚。 */
-    if (Pubinterface_CheckInjectionPumpForHandleStart() == false) /* 只有完成松脚后的新踩踏才检查，持续踩住不能算第二次。 */
+    if(Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_FOOT) == false)
     {
-        return false; /* 已清掉本次松脚记录；调用方撤销脚踏请求，下一次必须再次松脚。 */
+        return false; /* 首次缺泵拒绝运行；调用方锁住本次踩踏，持续高AD不能自行变成第二次启动。 */
     }
+    s_foot_motor_release_ready = false; /* 本次松脚记录只用一次，下次停机后仍需再次松脚。 */
     s_foot_motor_stop_latched = false; /* 取消强制停机，手柄驱动任务可以执行本次运行请求。 */
     s_foot_motor_active_source = source; /* 保存实际启动侧，双脚踏未活动一侧的释放分支不得误停本侧。 */
     DIAG_EVENT(DIAG_EVENT_FOOT_GATE, source, 4U, WorkMessage.channel_work, 1U); /* 记录本次批准的踏板侧和逻辑通道。 */
@@ -545,6 +546,7 @@ static void Foot_StopRunOnRealtimeTimeout(void)
     bool foot_output_active; /* 记录当前电机或轻踩泵是否确实由脚踏来源占用，避免误停其它控制方式。 */
 
     s_foot_runtime_frame_valid = false; /* 标记实时数据不可用，必须收到新的完整且 CRC 正确的实时帧后才能继续判断踩踏。 */
+    Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_FOOT, CHANNEL_NONE); /* 失去控制源撤销提示但不完成首次确认，重连仍需真实松脚和新启动。 */
     Foot_LatchMotorStopUntilRelease(); /* 实时AD失效后即使恢复为旧高值也不能自动起机，必须先收到真实松脚。 */
     MotorUart_ReleaseFootDriverAlarm(); /* 通信超时按脚踏已松开处理；驱动错误 Err 仍需恢复为 0 才能清除驱动报警。 */
     foot_output_active = (s_foot_handle_pump_source != FOOT_MOTOR_SOURCE_NONE) ||
@@ -1015,6 +1017,7 @@ static void Foot_HandleConnectionUpdate(const FootMessage_t *msg)
 
     if(msg->connect_flag==false)
     {
+        Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_FOOT, CHANNEL_NONE); /* 拔出脚踏只撤销当前动作，不能当作已确认手柄缺泵。 */
         Foot_LatchMotorStopUntilRelease(); /* 脚踏掉线后禁止重连旧高AD直接起机，必须先收到一帧真实松脚位置。 */
         MotorUart_ReleaseFootDriverAlarm(); /* 对驱动报警恢复来说，脚踏掉线按已松脚处理，仍需等待驱动错误消失。 */
         if( WorkMessage.drivetype_work==JTWORK)// 掉线前选中脚控时，需要重新选择还能使用的控制方式。

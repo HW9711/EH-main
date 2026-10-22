@@ -23,9 +23,9 @@
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U /* A/B 两通道手柄参数均校验异常。 */
 #define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U /* 泵压力达到报警条件，显示 89 号图；编号本身不表示停泵动作。 */
 #define WORK_ALARM_HANDLE_UNSUPPORTED    16U /* 当前功能模式不支持该手柄，显示71号图，确认拔出后才解除。 */
+#define WORK_ALARM_INJECTION_MISSING_SINGLE 17U /* 首次单向启动缺注水泵，72号图，报警保持到控制源松开。 */
+#define WORK_ALARM_INJECTION_MISSING_OSC    18U /* 首次往复启动缺注水泵，73号图，报警保持到控制源松开。 */
 
-#define WORK_ALARM_GRINDING_NO_INJECTION 17U /* 磨削手柄缺注水泵的限时提醒，显示72号图，不设置持续停机报警。 */
-#define WORK_ALARM_SHAVING_NO_INJECTION  18U /* 刨削手柄缺注水泵的限时提醒，显示73号图，不设置持续停机报警。 */
 
 void WorkAlarm_Set(uint8_t alarm_value); /* 写入报警码并同步报警有效标志。 */
 void WorkAlarm_Clear(void); /* 清除当前工作报警。 */
