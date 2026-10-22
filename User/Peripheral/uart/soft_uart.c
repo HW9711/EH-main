@@ -8,7 +8,7 @@
 #include "tim.h"
 #include "bsp_uart.h"
 #include "Pubinterface.h"
-#include "pump.h" /* 泵接入默认流量与启动补速共用定义，保持右侧灌注默认120。 */
+#include "pump.h" /* 首次识别流量与启动补速共用定义，右侧灌注默认120mL/min，模块重连保留原设定。 */
 #include "sscBEEP.h"
 
 #include <stdbool.h>
@@ -129,6 +129,7 @@ static uint8_t s_rx_timers_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
 static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 每路最近一次通过检查的压力帧时间，单位：ms；用于判断是否掉线。 */
 static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 每路开始怀疑掉线的时间，单位：ms；0 表示当前没有等待确认。 */
+static bool s_cs1237_flow_initialized[SIM_UART_COUNT]; /* A/B本次开机是否已设置首次识别流量；模块掉线不清零，重连保留speed_work，包含用户设为0的情况。 */
 static uint8_t s_cs1237_recovery_valid_count[SIM_UART_COUNT]; /* 数值越界后累计通过检查的帧数；再次越界就清零重数。 */
 static bool s_cs1237_recovery_required[SIM_UART_COUNT]; /* true 表示该路出现过数值越界，暂时不接受单个正常帧恢复更新。 */
 
@@ -915,7 +916,7 @@ static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device
 }
 
 /*
- * 函数功能：用通过检查的压力帧更新对应泵的数据；识别或掉线状态变化时刷新屏幕并提示。
+ * 函数功能：用通过检查的压力帧更新泵状态；A/B仅首次识别写默认流量，模块掉线重连保留已有设定并刷新屏幕。
  * 输入参数：channel 表示模拟串口通道，frame 指向已通过帧头、长度和 CRC 校验的 21 字节帧。
  * 返回参数：无。
  */
@@ -971,17 +972,14 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
                             pump_online_changed); /* 泵类型或在线状态改变才刷新该泵区域，A 在左、B 在右。 */
     taskEXIT_CRITICAL();
 
-    /* 只在泵类型或在线状态改变时设置默认流量/档位，不覆盖用户之后手动调整的值。 */
+    /* 状态变化时刷新界面和脚踏档位；默认流量只在本次开机首次有效识别时写入。 */
     if (pump_display_changed)
     {
         pump_message->step_value = 0U; /* 识别接入或离线后清脚踏档位，重新接泵的第一次短按固定进入首档。 */
-        if(pump_message->type==INJECTWATER)
+        if (new_online_flag && !s_cs1237_flow_initialized[(uint32_t)channel])
         {
-        pump_message->speed_work = 30U; /* 注水泵刚识别时默认 30mL/min，之后仍可调速。 */
-        }
-        else if(pump_message->type==POURWATER)
-        {
-        pump_message->speed_work = PUMP_POURWATER_DEFAULT_FLOW; /* 右侧灌注泵刚接入默认120mL/min，后续调节不被周期识别覆盖。 */
+            pump_message->speed_work = (pump_type == INJECTWATER) ? 30U : PUMP_POURWATER_DEFAULT_FLOW; /* 左注水首次30、右灌注首次120mL/min；普通回包和重连均不覆盖已有设定。 */
+            s_cs1237_flow_initialized[(uint32_t)channel] = true; /* 只记录本通道已完成首次识别；掉线仍停泵，但不再重新赋默认流量。 */
         }
         Cs1237_RefreshPumpUi(channel); /* 把新的泵类型和在线状态显示到对应泵区。 */
     }
