@@ -5,7 +5,7 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 
-/* 开机下发两泵零速，cancel_alignment为1时同时取消定位；不访问任务队列或刷新屏幕。 */
+/* 开机下发两路零速；异常重启或未装配侧同时取消定位，不访问任务队列或刷新屏幕。 */
 void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment);
 
 /* PumpBehaviorChannel_t 只表示逻辑 A/B 通道，不能用它推断物理 UART 或压力传感器接线。 */
@@ -68,9 +68,9 @@ uint8_t PumpBehavior_CopyDriverFeedbackSnapshot(PumpBehaviorChannel_t channel,
 uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel);
 
 /*
- * 函数功能：检查A/B是否还有泵正在定位或准备重试定位；用于暂停普通按键提示音。
+ * 函数功能：检查已装配泵是否仍在定位或准备重试定位；仅用于定位与普通故障双响仲裁。
  * 输入参数：无。
- * 返回参数：有泵尚未结束定位返回1，否则返回0；报警蜂鸣不受本函数影响。
+ * 返回参数：已装配泵尚未结束定位返回1，否则返回0；普通按键音和报警蜂鸣不受本函数影响。
  */
 uint8_t PumpBehavior_IsAlignmentBusy(void);
 

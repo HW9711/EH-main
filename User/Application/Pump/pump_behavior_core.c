@@ -24,6 +24,7 @@
 #define PUMP_DRIVER_CANCEL_COMMAND          0x03U   /* 命令第2字节为0x03时取消定位，同时速度必须为0；未收到取消确认时继续发送，不要求驱动重新定位。 */
 #define PUMP_DRIVER_REALIGN_ACK_MS          500U    /* 从本次重试申请起最多等500ms；期间收不到定位中状态就放弃请求，调大后等待更久，但不会重发定位命令。 */
 #define PUMP_DRIVER_STARTUP_RETRY_MS       2000U   /* 上电定位失败回包到达后等待2000ms再申请一次定位；调大后重试间隔更长，等待期间仍按25ms周期发送零速。 */
+#define PUMP_DRIVER_STARTUP_TIMEOUT_MS    30000U   /* 从泵任务首次处理起最多等待30秒；无回包或失败重试受阻时取消定位，不放宽驱动启动条件。 */
 #define PUMP_DRIVER_COLOR_FAULT             0xF800U /* RGB565红色，用于表示正常运行故障或定位结束后的反馈失联；定位中和定位失败不使用红色。 */
 #define PUMP_DRIVER_FEEDBACK_RX_BUFFER_SIZE   UART5_MAX_PACKET_SIZE /* A/B 解析缓存按现有 UART5/7 共同 DMA 容量分配。 */
 
@@ -48,7 +49,7 @@ typedef struct
 /* PumpBehaviorRuntime_t 保存每路任务自己的跨周期状态，A/B 不能互相覆盖。 */
 typedef struct
 {
-    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护压力确认；灌注据此减速和停转，注水只产生提示事件。 */
+    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护压力确认；灌注据此分级调流且检测失效保持当前输出，注水和抽吸只产生超压或检测失效提示事件。 */
     uint16_t output_color;       /* 记住最近发送的RGB565颜色；定位过程保持停止白色，正常开泵仍显示黄色。 */
     uint8_t business_direction;  /* 保存本泵按类型选定的方向，发送普通零速命令时也使用该方向。 */
     volatile uint8_t driver_fault_hold; /* 1表示暂不允许启动；驱动已就绪、没有故障且旧运行/排空请求都清零后改为0。 */
@@ -56,6 +57,8 @@ typedef struct
     volatile uint8_t alignment_notice_state; /* 保存已处理的定位中、成功或失败状态；用它避免同一结果每次回包都重复蜂鸣。 */
     volatile uint8_t alignment_beep_result; /* 0无提示、1成功单响、2上电重试失败双响；蜂鸣任务取走后清零，A/B分别保存。 */
     volatile uint8_t startup_alignment_active; /* 普通上电置1，首次失败允许自动重试一次；成功、重试失败或取消后清零。 */
+    uint8_t startup_timer_started; /* 首次进入泵周期任务才开始定位等待计时，避免启动页或定标停留消耗时限。 */
+    uint32_t startup_tick; /* 本次上电定位等待起点，30秒内包含首次定位和唯一一次自动重试。 */
     volatile uint8_t startup_retry_state; /* 0尚未发出上电重试命令，1已发出唯一一次重试，2重试失败；仅重新上电清零。 */
     uint8_t startup_retry_wait; /* 收到上电定位失败结果后置1并开始计时；定位开始、成功、取消或登记重试后清零。 */
     uint32_t startup_retry_tick; /* 本轮首次收到定位失败结果的主控毫秒数；重复失败回包不重置，防止一直等不到2秒。 */
@@ -246,23 +249,42 @@ static uint8_t PumpBehavior_GetFreshFeedback(PumpBehaviorChannel_t channel,
 }
 
 /*
- * 函数功能：检查A/B是否还有泵正在定位或准备重新定位；有时暂停普通按键提示音。
+ * 函数功能：按当前机型装配配置判断逻辑泵通道是否参与识别、定位和输出。
+ * 输入参数：channel为逻辑A/B通道，不能用物理串口号代替。
+ * 返回参数：已配置启用返回1；未装配或通道无效返回0。
+ */
+static uint8_t PumpBehavior_ChannelEnabled(PumpBehaviorChannel_t channel)
+{
+    if (channel == PUMP_BEHAVIOR_CHANNEL_A)
+    {
+        return PUMP_CHANNEL_A_ENABLE; /* A通道装配状态固定于编译配置，不随设备码或驱动回包改变。 */
+    }
+    if (channel == PUMP_BEHAVIOR_CHANNEL_B)
+    {
+        return PUMP_CHANNEL_B_ENABLE; /* B通道独立配置，单泵机型不会等待未装配侧定位。 */
+    }
+    return 0U; /* 无效通道不能访问运行数组或被判定为可开泵。 */
+}
+
+/*
+ * 函数功能：检查已装配泵是否仍在定位或准备重新定位，供定位故障提示仲裁使用。
  * 输入参数：无。
- * 返回参数：任一路定位未结束返回1，两路都结束返回0；报警蜂鸣不受本函数影响。
+ * 返回参数：任一已装配泵定位未结束返回1，否则返回0；普通按键音和报警蜂鸣均不受影响。
  */
 uint8_t PumpBehavior_IsAlignmentBusy(void)
 {
-    uint8_t channel; /* 逐路检查，任一泵上电定位未结束时暂停普通按键提示；成功单响单独处理。 */
+    uint8_t channel; /* 逐路检查已装配泵的定位进度；成功单响仍按通道独立处理。 */
     for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
+        if (PumpBehavior_ChannelEnabled((PumpBehaviorChannel_t)channel) == 0U){ continue; } /* 未装配侧不参与整机定位状态。 */
         if ((s_pump_runtime[channel].alignment_notice_state == PUMP_DRIVER_ALIGNING) ||
             (s_pump_runtime[channel].realign_phase != 0U) ||
             (s_pump_runtime[channel].startup_alignment_active != 0U))
         {
-            return 1U; /* 准备发送定位命令、等待定位中回包及实际定位期间，都先不播放普通按键音。 */
+            return 1U; /* 已装配通道仍在处理定位；普通按键音不再使用此结果作为门禁。 */
         }
     }
-    return 0U; /* 两路均不再等待上电定位或重试，允许普通按键提示。 */
+    return 0U; /* 所有已装配通道均已结束定位等待，解除普通故障双响的定位限制。 */
 }
 
 /*
@@ -277,6 +299,7 @@ uint8_t PumpBehavior_TakeAlignmentBeepResult(void)
     taskENTER_CRITICAL(); /* 读取并清零同一台泵的提示时禁止任务切换，避免丢失刚登记的定位结果。 */
     for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
+        if (PumpBehavior_ChannelEnabled((PumpBehaviorChannel_t)channel) == 0U){ continue; } /* 禁用侧的残留结果不能占用蜂鸣器。 */
         if (s_pump_runtime[channel].alignment_beep_result != 0U)
         {
             result = s_pump_runtime[channel].alignment_beep_result; /* 保留本泵成功单响或重试失败双响的类型。 */
@@ -362,9 +385,9 @@ static void PumpBehavior_RecordAlignmentNotice(PumpBehaviorRuntime_t *runtime,
 uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel)
 {
     PumpDriverFeedbackSnapshot_t snapshot; /* 使用同一帧反馈检查故障和就绪状态，避免把两次回包的数据混在一起。 */
-    if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT)
+    if (PumpBehavior_ChannelEnabled(channel) == 0U)
     {
-        return 0U; /* 不是A/B泵通道时直接返回不允许启动，避免数组越界。 */
+        return 0U; /* 未装配或通道无效时禁止启动；已装配通道仍检查新鲜反馈、就绪状态和故障。 */
     }
     return ((PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U) &&
             (snapshot.alignment_state == PUMP_DRIVER_READY) && (snapshot.raw_error == PUMP_DRIVER_ERROR_NONE) &&
@@ -383,10 +406,10 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
     PumpDriverFeedbackSnapshot_t snapshot; /* 保存最近有效回包，只允许定位失败的泵执行这次重试。 */
     PumpBehaviorRuntime_t *runtime; /* 指向本泵的定位步骤和计时记录，不修改另一台泵。 */
     uint8_t accepted = 0U; /* 先按未接受处理，只有全部条件通过后才改为1。 */
-    if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT ||
+    if (PumpBehavior_ChannelEnabled(channel) == 0U ||
         PumpBehavior_GetFreshFeedback(channel, &snapshot) == 0U || snapshot.alignment_state != PUMP_DRIVER_ALIGN_FAILED)
     {
-        return 0U; /* 通道错误、反馈过期或并非定位失败时，不登记重试。 */
+        return 0U; /* 未装配、通道错误、反馈过期或并非定位失败时，不登记重试。 */
     }
     runtime = &s_pump_runtime[channel]; /* 已确认通道号有效，取出该泵专用的定位记录。 */
     taskENTER_CRITICAL(); /* 禁止任务切换，保证泵任务读到配套的步骤和开始时间；这里不发送串口数据。 */
@@ -410,13 +433,27 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
 }
 
 /*
- * 函数功能：上电定位收到失败结果后等待2秒，条件允许时申请一次重试；本泵成功或被取消后不再自动申请。
+ * 函数功能：上电定位失败后等待2秒申请一次重试；总等待达到30秒则取消，防止缺驱动或未识别泵时一直挂起。
  * 输入参数：channel为逻辑A/B泵通道；runtime为本泵独立的失败计时和定位记录。
  * 返回参数：无；只登记定位步骤，不阻塞等待，不发送非零速度。
  */
 static void PumpBehavior_ServiceStartupRetry(PumpBehaviorChannel_t channel, PumpBehaviorRuntime_t *runtime)
 {
-    if ((runtime->startup_alignment_active == 0U) || (runtime->startup_retry_wait == 0U) ||
+    if (runtime->startup_alignment_active == 0U)
+    {
+        return; /* 已成功、失败终止或取消时，不再安排本次上电定位。 */
+    }
+    if (runtime->startup_timer_started == 0U)
+    {
+        runtime->startup_tick = HAL_GetTick(); /* 从周期任务可处理反馈时开始计时，启动页停留不算驱动等待。 */
+        runtime->startup_timer_started = 1U; /* 同一轮仅建立一次起点，连续无回包也不能重置超时。 */
+    }
+    if ((uint32_t)(HAL_GetTick() - runtime->startup_tick) >= PUMP_DRIVER_STARTUP_TIMEOUT_MS)
+    {
+        PumpBehavior_CancelAlignment(channel); /* 无回包、定位未结束或重试条件长期不满足时取消本泵定位，继续保持禁止开泵。 */
+        return; /* 超时当周期不再申请重试，后续只等待真实就绪和新的启动请求。 */
+    }
+    if ((runtime->startup_retry_wait == 0U) ||
         ((uint32_t)(HAL_GetTick() - runtime->startup_retry_tick) < PUMP_DRIVER_STARTUP_RETRY_MS))
     {
         return; /* 没有本轮上电失败或未满2秒时，继续原周期通信，不申请定位。 */
@@ -434,10 +471,11 @@ static void PumpBehavior_ServiceStartupRetry(PumpBehaviorChannel_t channel, Pump
  */
 void PumpBehavior_CancelAlignment(PumpBehaviorChannel_t channel)
 {
-    if (channel >= PUMP_BEHAVIOR_CHANNEL_COUNT){ return; } /* 非法通道不访问其它泵的控制状态。 */
+    if (PumpBehavior_ChannelEnabled(channel) == 0U){ return; } /* 未装配通道由周期任务固定发送零速取消帧，不登记定位流程。 */
     taskENTER_CRITICAL(); /* 禁止任务切换，确保取消定位、清除重试和禁止启动这三项记录一起更新。 */
     s_pump_runtime[channel].startup_alignment_active = 0U; /* 全停、报警或通信异常取消后停止自动重试，不能在2秒后自行恢复定位。 */
     s_pump_runtime[channel].startup_retry_wait = 0U; /* 清掉尚未到期的失败计时。 */
+    s_pump_runtime[channel].startup_timer_started = 0U; /* 本轮等待已终止，后续回包不能续接旧计时。 */
     s_pump_runtime[channel].alignment_beep_result = 0U; /* 已取消本次定位，不再补播取消前的结果。 */
     s_pump_runtime[channel].alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 取消后等待新操作，不把随后的就绪回包当作本次成功提示。 */
     s_pump_runtime[channel].realign_phase = 0U; /* 清掉尚未发出或尚未应答的重定位，恢复条件后也不能继续旧请求。 */
@@ -650,9 +688,9 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：按泵用途处理压力；灌注保护关闭时保留设定流量，开启时灌注测试使用固定压力和限时探测，旧灌注算法只在测试关闭时参与。
+ * 函数功能：按泵用途处理压力；灌注按固定g阈值分级降流、保压和单次提示；注水与抽吸保留原提示逻辑。
  * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
- * 返回参数：本周期应下发的业务速度；测试可返回原流量、20或0，彻底停机事件还会撤销本泵运行请求。
+ * 返回参数：本周期应下发的业务速度；灌注超压和压力检测失效均不清运行请求，失效时保持当前输出并独立提示。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
@@ -660,10 +698,10 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            uint16_t pump_speed)
 {
     uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
-    uint16_t threshold_g; /* 压力帧中0表示无效；灌注测试用固定348mmHg，注水/抽吸和旧灌注仍用各自配置。 */
+    uint16_t threshold_g; /* 压力帧中0表示无效；灌注使用固定0.1g整数阈值，注水/抽吸保留原配置。 */
     uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
-    uint8_t alarm_event; /* 事件位分别表示报警、彻底停机和恢复原流量；恢复事件不能误触发蜂鸣。 */
-    uint16_t output_speed; /* 灌注泵可被压力降低或归零；注水和抽吸保持原设定速度。 */
+    uint8_t alarm_event; /* 事件位区分89号超压提示与74号检测失效提示，均不撤销运行请求。 */
+    uint16_t output_speed; /* 灌注真实超压按策略调流，检测失效保持当前输出；注水和抽吸保持原设定速度。 */
     uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
 
 #if (PUMP_PRESSURE_POUR_PROTECTION_ENABLE == 0U)
@@ -685,7 +723,7 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
     {
         output_speed = PumpPressureControl_ApplyPour(&runtime->pressure_alarm, pump_speed,
                                                       weight_x10, threshold_g, sequence, now_ms,
-                                                      &alarm_event); /* 固定压力测试或旧灌注算法返回本周期流量及待处理事件。 */
+                                                      &alarm_event); /* 动态调流返回本周期流量及独立事件，保留speed_work中的用户设定。 */
     }
     else
     {
@@ -694,21 +732,16 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                                        (pump_type == INJECTWATER) ? 1U : 0U,
                                                        weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
     }
-    if ((alarm_event & PUMP_PRESSURE_EVENT_FINAL_STOP) != 0U)
+    if ((alarm_event & PUMP_PRESSURE_EVENT_SENSOR_FAULT) != 0U) /* 检测失效使用独立74号图窗，不将保持输出改为零速。 */
     {
-        Pubinterface_StopPumpPressureTest(binding->public_channel); /* 15秒到时、探测再超压或压力失效时，清本机及外控旧请求，等待新的手动启动。 */
-        output_speed = 0U; /* 清请求后本周期也只能向指定泵发送零速，不能等下一周期才停。 */
+        Pubinterface_HandlePumpPressureSensorFault(binding->public_channel); /* A/B泵共用三声蜂鸣和2秒74号提示，不撤销任何运行请求。 */
     }
-    else if ((alarm_event & PUMP_PRESSURE_EVENT_RESTORE_FLOW) != 0U)
+    else if ((alarm_event & PUMP_PRESSURE_EVENT_ALARM) != 0U) /* 正常压力超限仍沿用独立的本轮一次提示。 */
     {
-        binding->message->speed_work = output_speed; /* 确认开阀后把设定恢复为超压时保存的原流量，探测中的临时设定不覆盖它。 */
-    }
-    if ((alarm_event & PUMP_PRESSURE_EVENT_ALARM) != 0U)
-    {
-        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* 初次超压或探测再次持续超压时弹89号图2秒并蜂鸣两声，不影响另一台泵。 */
+        Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* A/B泵超压蜂鸣三声并显示89号图窗3秒。 */
     }
 
-    return output_speed; /* 灌注测试遇到无效压力会结束并撤销请求；注水和抽吸仍执行原提示逻辑。 */
+    return output_speed; /* 灌注真实超压及检测失效均保留运行请求；注水和抽吸仍执行原提示逻辑。 */
 }
 
 /*
@@ -844,7 +877,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 测试开启时按固定压力停泵及限时探测；关闭测试后才受旧灌注保护开关控制。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注按逐档g阈值调流；超压及检测失效均仅提示，失效时保持当前输出。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 
@@ -926,8 +959,8 @@ static void PumpBehavior_SendFrame(const PumpBehaviorBinding_t *binding,
 }
 
 /*
- * 函数功能：正常业务和定标循环开始前向两泵发送停止帧，异常重启时还取消正在执行的定位。
- * 输入参数：cancel_alignment为1时发送0x03零速取消帧，为0时发送普通零速并保留上电定位。
+ * 函数功能：业务和定标循环开始前向两路发送停止帧；异常重启或机型未装配侧同时取消定位。
+ * 输入参数：cancel_alignment为1时发送零速取消帧；为0时仅已装配侧保留上电定位，禁用侧仍发送取消帧。
  * 返回参数：无；下发零速不等于已经收到停转反馈，驱动失联停机仍须单独验证。
  */
 void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment)
@@ -935,15 +968,17 @@ void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment)
     uint32_t channel; /* 逐一覆盖逻辑A/B，物理UART继续使用工程已有映射。 */
     for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
     {
-        s_pump_runtime[channel].startup_alignment_active = (cancel_alignment == 0U) ? 1U : 0U; /* 普通上电允许失败后重试；看门狗等异常重启沿用取消定位保护。 */
+        uint8_t cancel_this_channel = ((cancel_alignment != 0U) || (PumpBehavior_ChannelEnabled((PumpBehaviorChannel_t)channel) == 0U)) ? 1U : 0U; /* 未装配侧只发取消帧，不能因驱动误接入而开始定位。 */
+        s_pump_runtime[channel].startup_alignment_active = (cancel_this_channel == 0U) ? 1U : 0U; /* 仅已装配通道的正常上电允许首次定位和一次重试。 */
+        s_pump_runtime[channel].startup_timer_started = 0U; /* 待泵任务实际开始处理时启动30秒等待窗口。 */
         s_pump_runtime[channel].startup_retry_state = 0U; /* 本次启动尚未重试，清除上次启动的次数和失败记录。 */
         s_pump_runtime[channel].startup_retry_wait = 0U; /* 上电尚未收到失败结果，不提前启动2秒计时。 */
-        if (cancel_alignment != 0U)
+        if (cancel_this_channel != 0U)
         {
             s_pump_runtime[channel].alignment_notice_state = PUMP_DRIVER_ALIGN_FAILED; /* 异常重启取消后不把就绪回包误报为上电定位成功。 */
         }
         PumpBehavior_SendFrame(&s_pump_binding[channel], 0U, 0U,
-                               (cancel_alignment != 0U) ? PUMP_DRIVER_CANCEL_COMMAND : 0U); /* 开机停止只能携带零速，不能继承任何旧泵请求。 */
+                               (cancel_this_channel != 0U) ? PUMP_DRIVER_CANCEL_COMMAND : 0U); /* 开机停止只能携带零速，不能继承任何旧泵请求。 */
     }
 }
 
@@ -1006,6 +1041,19 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     runtime = &s_pump_runtime[channel]; /* 取出本泵上周期保存的停机、定位和计时记录。 */
 
     PumpBehavior_ReceiveSpeed(binding, message_queue); /* 每周期最多取一条速度消息，等待时间保持 0。 */
+    if (PumpBehavior_ChannelEnabled(channel) == 0U)
+    {
+        if (binding->message->run_flag || binding->message->timingDrainage_flag)
+        {
+            Pubinterface_ServicePumpDriverFaultHold(binding->public_channel); /* 配置禁用时清掉屏幕、脚踏或外控残留的本泵请求。 */
+        }
+        runtime->driver_fault_hold = 1U; /* 即使误接驱动已回报就绪，未装配侧仍禁止开泵。 */
+        binding->message->online_flag = false; /* 禁用侧不向界面或联动业务报告泵在线。 */
+        binding->message->type = 0U; /* 禁用侧保持无泵类型，避免残留识别信息使按钮可用。 */
+        binding->publish_output_speed(0U); /* 对外报告停止设定，不保留之前的非零输出。 */
+        PumpBehavior_SendFrame(binding, 0U, 0U, PUMP_DRIVER_CANCEL_COMMAND); /* 最终硬件出口只允许零速取消帧，不解析定位或压力业务。 */
+        return; /* 未装配侧不参与定位等待、自动重试或运行换算。 */
+    }
 
     request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 先记住是否还有运行或排空请求，故障处理清标志后仍用此值判断是否允许重启。 */
     PumpBehavior_ParseDriverFeedback(channel, binding, runtime); /* 发送下一命令前先解析上一条命令的驱动回包。 */
@@ -1061,12 +1109,12 @@ void PumpBehavior_CopyDiagnosticState(uint8_t channel, DiagnosticPumpBehaviorSta
     out->realign_tick = runtime->realign_tick; /* 本次请求泵重新定位时的主控毫秒数，用于判断等待驱动确认是否超时。 */
     out->pressure_condition_tick = runtime->pressure_alarm.condition_tick_ms; /* 开始连续确认压力超限或恢复正常时的主控毫秒数，配合 pressure_timing 判断是否正在计时。 */
     out->pressure_sample_tick = runtime->pressure_alarm.last_sample_tick_ms; /* 上次处理新压力样本时的主控毫秒数；间隔过长时重新确认超限或恢复，不能把断帧前后合成连续时间。 */
-    out->pressure_alarm_tick = runtime->pressure_alarm.last_alarm_tick_ms; /* 上次发出压力报警提示时的主控毫秒数，用于限制连续提示的间隔。 */
-    out->pressure_target = runtime->pressure_alarm.target_speed; /* 保存的用户设定；灌注测试不据此改变348mmHg，注水/灌注单位mL/min，吸引为内部档值。 */
-    out->pressure_threshold_g = runtime->pressure_alarm.alarm_threshold_g; /* 诊断阈值单位g；灌注测试显示约191g，实际停泵比较仍按348mmHg整数倍率执行。 */
+    out->pressure_alarm_tick = runtime->pressure_alarm.last_alarm_tick_ms; /* 上次压力提示时刻；注水/抽吸用于限制重报间隔，灌注仅记录本轮首次提示。 */
+    out->pressure_target = runtime->pressure_alarm.target_speed; /* 保存的用户设定；灌注自动调流不覆盖它，注水/灌注单位mL/min，吸引为内部档值。 */
+    out->pressure_threshold_g = runtime->pressure_alarm.alarm_threshold_g; /* 诊断只显示最近判定的整g启动线；灌注随当前输出选档，实际比较0.1g，不执行mmHg换算。 */
     out->pressure_sequence = runtime->pressure_alarm.last_sequence; /* 压力报警计算上次处理的压力帧序号，用于识别是否收到新样本。 */
     out->pressure_valid = runtime->pressure_alarm.sequence_valid; /* 收到可用于报警计算的首个压力样本后置 1；重置压力报警记录后清零。 */
-    out->pressure_alarm = runtime->pressure_alarm.alarm_active; /* 注水/抽吸已提示或灌注已下发零速时为 1，恢复确认或停泵重置后清零。 */
+    out->pressure_alarm = runtime->pressure_alarm.alarm_active; /* 已提示时为1；灌注须恢复原设定后再稳定低压1秒才清零，此位不表示停泵。 */
     out->pressure_timing = runtime->pressure_alarm.timing_active; /* 1：正在连续确认压力超限或恢复；条件中断、确认结束或重置报警后清零。 */
     out->can_run = PumpBehavior_DriverCanRun((PumpBehaviorChannel_t)(channel - 1U)); /* 1：反馈未超时、驱动就绪且无故障、停机限制已解除、无定位或取消请求；否则为 0。 */
 }

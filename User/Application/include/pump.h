@@ -14,6 +14,18 @@
 #define PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE 0U
 #endif
 
+/* 机型装配配置按逻辑A/B定义，0为未装配、1为启用；默认双泵，单A泵设1/0，单B泵设0/1。
+ * 禁用通道不建立泵在线状态、不接受启动或定位重试，只保持零速取消命令；不改变物理串口映射。 */
+#ifndef PUMP_CHANNEL_A_ENABLE
+#define PUMP_CHANNEL_A_ENABLE 1U /* 逻辑A泵装配开关；当前压力识别对应SIM_UART_1/PE4。 */
+#endif
+#ifndef PUMP_CHANNEL_B_ENABLE
+#define PUMP_CHANNEL_B_ENABLE 1U /* 逻辑B泵装配开关；当前压力识别对应SIM_UART_2/PE6。 */
+#endif
+#if ((PUMP_CHANNEL_A_ENABLE > 1U) || (PUMP_CHANNEL_B_ENABLE > 1U))
+#error "Pump channel enable must be 0 or 1"
+#endif
+
 /*
  * 注水泵正常运行和手柄联动时的最大设定流量，单位 mL/min，当前允许 0~70。
  * 修改后会改变屏幕、脚踏和上位机注水请求的上限；还应核对驱动换算和实测出液量。

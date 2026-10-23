@@ -3,6 +3,7 @@
 #include "stm32f4xx_hal.h"
 #include "delay.h"
 #include "pump.h"
+#include "pump_behavior_core.h" /* 旧直发接口也必须服从机型装配和驱动就绪门禁。 */
 #include "data.h"
 #include "board.h"
 #include "common.h"
@@ -76,12 +77,16 @@ uint16_t PumpStartUp[25] =
 
 
 /*
- * 函数功能：旧直发接口把 B 泵速度限制到协议范围后发送命令并刷新颜色；压力由周期泵任务处理。
+ * 函数功能：旧直发接口先检查 B 泵装配与驱动就绪，再限幅发送并刷新颜色；压力由周期泵任务处理。
  * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_B(uint32_t s)
 {
+	if ((s != 0U) && (PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_B) == 0U))
+	{
+		s = 0U; /* 未装配、未就绪或反馈失效时只允许零速，旧接口不能绕过周期任务的开泵保护。 */
+	}
 	s = (uint16_t)s; /* 旧直发接口仍只使用命令低 16 位，特殊压力读数不再使速度归零。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{
@@ -137,13 +142,17 @@ void Pump_SetSpeed_B(uint32_t s)
 }
 
 /*
- * 函数功能：旧直发接口把 A 泵速度限制到协议范围后发送命令并刷新颜色；压力由周期泵任务处理。
+ * 函数功能：旧直发接口先检查 A 泵装配与驱动就绪，再限幅发送并刷新颜色；压力由周期泵任务处理。
  * 输入参数：s 为协议速度整数，0 表示停止；不是流量值，不在此换算。
  * 返回参数：无。
  */
 void Pump_SetSpeed_A(uint32_t s)
 {
  static	uint8_t repeat_data; /* 旧接口只保存上次命令的低 8 位；大于 255 的速度仍会被重复发送。 */
+	if ((s != 0U) && (PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) == 0U))
+	{
+		s = 0U; /* 未装配、未就绪或反馈失效时只允许零速，旧接口不能绕过周期任务的开泵保护。 */
+	}
 	s = (uint16_t)s; /* 旧直发接口仍只使用命令低 16 位，特殊压力读数不再使速度归零。 */
 	if (s > PUMP_DRIVER_COMMAND_SPEED_MAX)
 	{

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* 以下数值是蜂鸣队列消息编号，不是时长或功能开关；发送方和蜂鸣任务必须使用同一编号。 */
-#define BEEP_MSG_KEY    1   //播放普通按键音，并结束已有报警蜂鸣和双响。
+#define BEEP_MSG_KEY    1   //无报警且未播放定位结果音时播放普通按键音；可结束普通双响，不清除报警。
 #define BEEP_MSG_ALARM  2   //持续间歇报警；报警码为 0 时停止。
 #define BEEP_MSG_ALARM_TIMED 3 //限时的间歇报警，到期自动停止蜂鸣，不清除设备报警状态。
 #define BEEP_MSG_KEY_IF_IDLE 4 //无报警时才播放普通提示音，有报警就丢弃，不在事后补响。

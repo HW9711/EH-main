@@ -43,8 +43,8 @@ static uint8_t s_screen_external_exit_pending = 0U;
 static uint32_t s_screen_external_exit_first_tick = 0U;
 /* 压力提示所用报警编号；此接口只负责限时蜂鸣和 89 号弹窗，灌注泵零速由泵任务单独决定。 */
 #define PUMP_PRESSURE_BLOCKED_BEEP_ALARM WORK_ALARM_PUMP_PRESSURE_BLOCKED
-/* 压力蜂鸣按100ms响、100ms停执行四步，正常播放两声；与2秒弹窗时长分开设置。 */
-#define PUMP_PRESSURE_BEEP_MS 400U
+/* 压力蜂鸣按100ms响、100ms停执行六步，正常播放三声；与89号3秒、74号2秒图窗分别计时。 */
+#define PUMP_PRESSURE_BEEP_MS 600U
 /* 1 表示公共接头缺刀具提示尚未结束；用于定时关闭提示，并限制重复提示频率。 */
 static uint8_t s_common_socket_tool_missing_alarm_active = 0U;
 /* 公共接头缺刀具提示是否实际占用了屏幕报警区，只有占用过才允许到期清屏。 */
@@ -1621,17 +1621,17 @@ static void StopDriverFaultPumps(uint8_t blocked_mask)
 
 /*
  * 函数功能：显示泵压力或定位失败的限时弹窗；其它报警占用时保留原报警。
- * 输入参数：picture为屏幕图片号，79定位失败、89压力超限；duration为显示毫秒数。
+ * 输入参数：picture为屏幕图片号，74压力检测失效、79定位失败、89压力超限；duration为显示毫秒数。
  * 返回参数：无。
  */
 static void RaisePumpAlarm(uint8_t picture, uint32_t duration)
 {
 	uint8_t display_value[10] = {0U}; /* 报警显示参数先清零，再填写泵提示逻辑码及指定图片。 */
 
-	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按79或89号图片区分，不能把本次提示当成无报警。 */
-	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，79和89共用现有报警显示区。 */
+	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按74、79或89号图片区分，不能把本次提示当成无报警。 */
+	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，74、79和89共用现有报警显示区。 */
 	s_pump_transient_alarm_tick = HAL_GetTick(); /* 记录本次提示开始时间，不改变泵运行请求。 */
-	s_pump_transient_alarm_duration = duration; /* 保存本次保持时长，压力提示仍使用原时长。 */
+	s_pump_transient_alarm_duration = duration; /* 保存本次保持时长，超压3秒、检测失效2秒。 */
 	if ((WorkMessage.alarm_flag == false) &&
 		(s_common_socket_tool_missing_alarm_active == 0U) &&
 		(s_running_handle_unplug_transient_alarm_value == 0U))
@@ -1709,17 +1709,22 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 }
 
 /*
- * 函数功能：灌注压力测试结束后清除指定泵的本机和外控运行请求，保持原设定值供下次人工启动。
- * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不修改任何泵。
- * 返回参数：无；只撤销软件请求，零速命令由当前泵任务发送，不表示已经确认硬件停转。
+ * 函数功能：A/B泵压力检测失效时仅蜂鸣三声并显示74号图窗2秒，保持本泵运行请求。
+ * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不产生提示。
+ * 返回参数：无；不修改泵速、本机、联动或外控运行请求。
  */
-void Pubinterface_StopPumpPressureTest(uint8_t pump_channel)
+void Pubinterface_HandlePumpPressureSensorFault(uint8_t pump_channel)
 {
-	HandlePumpDriverFaultStop(pump_channel); /* 复用已有单泵请求清理：清运行、排空、联动和外控请求，刷新本泵按钮，保留手柄及另一台泵。 */
+    if ((pump_channel != CHANNEL_A) && (pump_channel != CHANNEL_B)) /* 拒绝非法通道，避免误占用报警显示区。 */
+    {
+        return; /* 不产生蜂鸣、图窗或任何运行状态变化。 */
+    }
+    SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 600ms响停六步播放三声，A/B泵节奏一致。 */
+    RaisePumpAlarm(74U, ALARM_PRESSURE_SENSOR_MS); /* 独立74号图窗保持2秒，仅提示检测失效，不执行停泵。 */
 }
 
 /*
- * 函数功能：压力处理报告提示事件时蜂鸣两声并显示 2 秒的 89 号弹窗；灌注停转期间不重复调用。
+ * 函数功能：压力处理报告提示事件时蜂鸣三声并显示3秒的89号弹窗；灌注同一轮仅调用一次，不控制泵启停。
  * 输入参数：pump_channel 为压力超限的逻辑通道，CHANNEL_A 表示 A 泵，CHANNEL_B 表示 B 泵。
  * 返回参数：无。
  */
@@ -1730,8 +1735,8 @@ void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel)
 		return; /* 非法通道不能产生压力提示，避免错误调用占用报警区。 */
 	}
 
-	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 四个 100ms 响停步骤播放两声，不操作泵或手柄请求。 */
-	RaisePumpAlarm(89U, ALARM_PRESSURE_MS); /* 显示 89 号提示 2 秒；灌注泵零速已在本轮压力处理时决定。 */
+	SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 六个100ms响停步骤播放三声，不操作泵或手柄请求。 */
+	RaisePumpAlarm(89U, ALARM_PRESSURE_MS); /* 显示89号提示3秒；A/B泵共用此接口，超压提示不清运行请求。 */
 }
 
 /*

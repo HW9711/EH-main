@@ -69,7 +69,8 @@
 #define ALARM_SOCKET_MS        2000U //公共接头未识别到 RFID 刀具，限时蜂鸣和上位机报警保持 2 秒
 #define ALARM_SOCKET_REPEAT_MS 1000U //缺刀具提示两次触发至少间隔 1 秒；调小会增加重复提示次数
 #define ALARM_UNPLUG_MS        2000U //手控运行时拔出手柄，屏幕、蜂鸣和上位机临时提示保持 2 秒
-#define ALARM_PRESSURE_MS      2000U //压力提示89号弹窗保持2秒；蜂鸣单独播放两声，灌注泵是否停转由泵任务决定
+#define ALARM_PRESSURE_MS      3000U //A/B泵超压显示89号弹窗3秒；蜂鸣单独播放三声，不清运行请求
+#define ALARM_PRESSURE_SENSOR_MS 2000U //A/B泵压力检测失效显示74号图窗2秒；仅提示，保持当前输出
 
 
 #define PLANER      1U//刨头
@@ -369,11 +370,11 @@ typedef struct
   volatile uint16_t timingDrainage_times;//屏幕排空已累计的 25ms 周期数，400 次约 10 秒，须用 16 位避免溢出
   volatile uint16_t type;//泵用途编号：吸引、注水或灌注；不是压力板发来的原始霍尔设备码
   volatile uint16_t speed_work;//用户设置流量或吸引速度值，普通运行和手柄联动都使用它
-  volatile uint16_t speed_output;//本周期最终输出设置值，运行时屏幕和上位机显示它；灌注确认超压后为0，注水提示不改变它
+  volatile uint16_t speed_output;//本周期最终输出设置值，运行时屏幕和上位机显示它；灌注超压逐档降流，检测失效才归零，注水提示不改变它
   volatile uint16_t speed_Max;//本泵允许的设置上限，单位与 speed_work 相同
   volatile uint16_t speed_Min;//本泵允许的设置下限，单位与 speed_work 相同
   volatile uint16_t speed_step_value;//加减键每次改变的量，单位与 speed_work 相同
-  volatile uint16_t pressure_threshold;//压力板上报字段，单位g；主控只检查0表示无效，灌注测试按固定100mmHg处理，关闭测试后才使用旧标定表
+  volatile uint16_t pressure_threshold;//压力板上报字段，单位g；主控只检查0表示无效，灌注直接比较固定0.1g阈值，注水/抽吸保留原规则
 
   /* 本泵档位、识别结果和运行请求。 */
   volatile uint8_t  step_value; /* 脚踏流量档位：0为尚未调节，1/2/3为三档；开机、泵上下线、屏幕/外控或手柄默认流量改写后归0，下次短按从首档开始。 */
@@ -473,8 +474,8 @@ void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel); /*
 void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel); /* 异常撤销报警而不完成确认；source或channel为NONE时匹配任意来源或通道。 */
 uint8_t Pubinterface_GetInjectionPumpStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
-void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B 泵确认压力事件后蜂鸣两声并显示 89 号弹窗；灌注零速由泵任务控制。 */
-void Pubinterface_StopPumpPressureTest(uint8_t pump_channel); /* 灌注测试结束时撤销指定泵的本机及外控请求，保留原设定，等待新的人工启动。 */
+void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B泵压力提示只蜂鸣三声并显示89号弹窗3秒；灌注同一轮一次，不撤销运行请求。 */
+void Pubinterface_HandlePumpPressureSensorFault(uint8_t pump_channel); /* A/B泵压力检测失效仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
 /*
  * 函数功能：上电定位重试失败时显示79号报警图，3秒后自动关闭。
  * 输入参数：无。

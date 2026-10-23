@@ -38,11 +38,11 @@
 #define CS1237_DEVICE_CODE_DRAW_WATER   0x0DU  /* 原抽吸设备码继续接受；接A口按注水泵处理，接B口按灌注泵处理，不再识别为抽吸泵。 */
 #define CS1237_PUMP_LOSS_SUSPECT_MS     1500U  /* 单位：ms；距上次有效帧超过 1500ms 时开始怀疑掉线，但暂不改变在线状态。 */
 #define CS1237_PUMP_LOSS_CONFIRM_MS     3000U  /* 单位：ms；距上次有效帧超过 3000ms 才确认离线并清运行请求，不是疑似后再等 3 秒。 */
-#define CS1237_RAW_MIN_VALUE            (-8388608L) /* 24 位有符号 ADC 原始计数的最小值，不是重量；低于此值的帧不使用。 */
-#define CS1237_RAW_MAX_VALUE            8388607L /* 24 位有符号 ADC 原始计数的最大值；高于此值的帧不使用。 */
-#define CS1237_WEIGHT_MAX_X10           500000U /* 接收重量上限，单位：0.1g，即 50000.0g；超过后不更新泵数据，不是报警阈值。 */
-#define CS1237_THRESHOLD_MAX_G          50000U /* 压力板上报的阈值最大允许 50000g；用于拒绝异常数据，不是当前设定阈值。 */
-#define CS1237_RECOVERY_VALID_FRAMES    3U /* 单位：帧；数值越界后需连续通过 3 次数值检查才恢复更新；新的越界帧会清零计数。 */
+#define CS1237_RAW_MIN_VALUE            (-8388608L) /* 24 位有符号 ADC 原始计数的最小值，不是重量；低于此值时压力字段无效，设备码仍可用。 */
+#define CS1237_RAW_MAX_VALUE            8388607L /* 24 位有符号 ADC 原始计数的最大值；高于此值时压力字段无效，设备码仍可用。 */
+#define CS1237_WEIGHT_MAX_X10           500000U /* 接收重量上限，单位：0.1g，即 50000.0g；超过后只标记压力无效，设备码仍独立更新，不是报警阈值。 */
+#define CS1237_THRESHOLD_MAX_G          50000U /* 压力板上报的阈值最大允许 50000g；用于标记压力数据无效，不影响合法设备码更新。 */
+#define CS1237_RECOVERY_VALID_FRAMES    3U /* 单位：帧；数值越界后需连续通过 3 次数值检查才恢复压力更新；设备码不受该等待影响。 */
 
 /* 位级接收状态机阶段定义。
  * 采用“起始位确认 -> 8 位数据 -> 停止位确认”的 8N1 接收流程。 */
@@ -127,7 +127,7 @@ static uint8_t s_dwt_ready = 0U;
 static uint8_t s_tim7_ready = 0U;
 static uint8_t s_rx_timers_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
-static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 每路最近一次通过检查的压力帧时间，单位：ms；用于判断是否掉线。 */
+static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 每路最近一次格式、CRC及设备码有效的帧时间；压力值可失效，用于独立判断泵掉线。 */
 static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 每路开始怀疑掉线的时间，单位：ms；0 表示当前没有等待确认。 */
 static bool s_cs1237_flow_initialized[SIM_UART_COUNT]; /* A/B本次开机是否已设置首次识别流量；模块掉线不清零，重连保留speed_work，包含用户设为0的情况。 */
 static uint8_t s_cs1237_recovery_valid_count[SIM_UART_COUNT]; /* 数值越界后累计通过检查的帧数；再次越界就清零重数。 */
@@ -162,7 +162,7 @@ static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t
 static pumpMessage_t *Cs1237_GetPump(sim_uart_channel_t channel);
 static void Cs1237_BeepOnceIfNoAlarm(void);
 static void Cs1237_RefreshPumpUi(sim_uart_channel_t channel);
-static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame);
+static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame, bool pressure_trusted);
 static void Cs1237_CheckPumpTimeout(void);
 static void Cs1237_ParserResync(Cs1237FrameParser *parser);
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data);
@@ -236,7 +236,7 @@ static void Cs1237_BeepOnceIfNoAlarm(void)
 {
     if (WorkMessage.alarm_flag == false)
     {
-        SendKeyBeepMessage(1U); /* 普通提示音会清除蜂鸣任务的报警状态，所以有报警时不能用它提示泵接入或掉线。 */
+        SendKeyBeepMessage(1U); /* 仅在业务无报警时提示泵接入或掉线；蜂鸣任务仍独立保证普通提示不能打断报警。 */
     }
 }
 
@@ -838,7 +838,7 @@ static bool Cs1237_FrameValid(const uint8_t *frame)
 /*
  * 函数功能：检查压力帧中的数值是否越界；出现越界后，要连续通过 3 次数值检查才恢复更新。
  * 输入参数：channel 为A/B压力软串口通道；frame 指向已通过固定字段和CRC校验的21字节帧。
- * 返回参数：可以使用当前帧时返回 true；数值越界或正常帧数量还不够时返回 false。
+ * 返回参数：当前压力字段可信时返回true；越界或恢复帧不足时返回false，不代表设备码失效。
  */
 static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t *frame)
 {
@@ -867,7 +867,7 @@ static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t
     {
         s_cs1237_recovery_required[channel_index] = true; /* 该路出现数值越界，后面只收到 1 个正常帧还不能恢复更新。 */
         s_cs1237_recovery_valid_count[channel_index] = 0U; /* 新异常会打断已有恢复计数，必须重新连续确认。 */
-        return false; /* 不使用越界帧更新泵数据，在线超时计时也不会被它重置。 */
+        return false; /* 压力字段不更新；调用方仍可使用CRC正确且高4位为0的设备码刷新在线状态。 */
     }
 
     if (s_cs1237_recovery_required[channel_index] == false)
@@ -890,9 +890,9 @@ static bool Cs1237_BusinessDataTrusted(sim_uart_channel_t channel, const uint8_t
 }
 
 /*
- * 函数功能：先用设备码确认泵已接入，再按左右插口固定用途；左侧A为注水，右侧B为灌注。
+ * 函数功能：先检查机型装配和设备接入码，再按固定用途识别；已启用的A为注水、B为灌注。
  * 输入参数：channel为压力模拟串口，SIM_UART_1对应A、SIM_UART_2对应B；device_code为frame[16]。
- * 返回参数：支持的接入码在A返回INJECTWATER、在B返回POURWATER；未知码或无效通道返回0。
+ * 返回参数：支持的接入码在A返回INJECTWATER、在B返回POURWATER；禁用通道、未知码或无效通道返回0。
  */
 static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device_code)
 {
@@ -903,11 +903,11 @@ static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device
         case CS1237_DEVICE_CODE_DRAW_WATER:
             if (channel == SIM_UART_1)
             {
-                return INJECTWATER; /* 左侧收到任一受支持泵接入码后统一执行注水功能，显示也使用此类型。 */
+                return (PUMP_CHANNEL_A_ENABLE != 0U) ? INJECTWATER : 0U; /* 仅装配A泵的机型允许左侧上线，禁用侧保持无泵状态。 */
             }
             if (channel == SIM_UART_2)
             {
-                return POURWATER; /* 右侧收到任一受支持泵接入码后统一执行灌注功能，不参与手柄冷却联动。 */
+                return (PUMP_CHANNEL_B_ENABLE != 0U) ? POURWATER : 0U; /* 仅装配B泵的机型允许右侧上线，禁用侧不能被设备码重新启用。 */
             }
             return 0U; /* 无效串口不能映射到任何泵，不建立在线状态。 */
         default:
@@ -916,11 +916,11 @@ static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device
 }
 
 /*
- * 函数功能：用通过检查的压力帧更新泵状态；A/B仅首次识别写默认流量，模块掉线重连保留已有设定并刷新屏幕。
- * 输入参数：channel 表示模拟串口通道，frame 指向已通过帧头、长度和 CRC 校验的 21 字节帧。
+ * 函数功能：独立更新设备在线状态与压力有效性；压力故障不清泵在线，A/B仅首次识别写默认流量。
+ * 输入参数：channel为模拟串口；frame为格式、CRC及设备码高位已校验的21字节帧；pressure_trusted表示压力字段已通过范围与恢复检查。
  * 返回参数：无。
  */
-static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame)
+static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *frame, bool pressure_trusted)
 {
     pumpMessage_t *pump_message;
     int32_t raw_cs1237 = (int32_t)Cs1237_ReadU32Le(&frame[6]);
@@ -941,15 +941,22 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
         return; /* 非法通道不能写泵状态，也不能刷新屏幕，保持原有运行状态不变。 */
     }
 
-    s_cs1237_last_valid_tick[(uint32_t)channel] = now_tick; /* 记下本次有效帧时间，之后从这里开始计算多久没收到有效数据。 */
+    s_cs1237_last_valid_tick[(uint32_t)channel] = now_tick; /* 设备码仍在可信帧中更新就维持接入；压力故障不能触发3秒拔泵计时。 */
     s_cs1237_loss_suspect_tick[(uint32_t)channel] = 0U; /* 已收到有效帧，取消之前的掉线怀疑。 */
 
     taskENTER_CRITICAL();
     old_pump_type = pump_message->type; /* 记下原泵类型，后面比较是否变化，避免每收到一帧都要求刷新屏幕。 */
     old_online_flag = pump_message->online_flag; /* 记录本帧前在线状态，未识别/重新识别时需要让屏幕可用状态同步变化。 */
-    pump_message->pressure_value = raw_cs1237; /* 保存压力板的 ADC 原始计数，不是换算后的重量。 */
-    pump_message->weight_x10 = weight_x10; /* 保存 0.1g 重量值，供屏幕或外部通信读取压力模块当前重量。 */
-    pump_message->pressure_threshold = threshold_g; /* 保存压力板上报阈值，单位：g，供泵控制任务读取。 */
+    if (pressure_trusted != false) /* 数值可信才替换压力读数，设备码更新不依赖此条件。 */
+    {
+        pump_message->pressure_value = raw_cs1237; /* 保存本次有效ADC原始值，供压力显示与诊断读取。 */
+        pump_message->weight_x10 = weight_x10; /* 更新有效0.1g读数；正常零压力仍是有效测量，不按传感器故障处理。 */
+        pump_message->pressure_threshold = threshold_g; /* 保留压力板的有效性字段，0仍由泵任务识别为检测失败。 */
+    }
+    else
+    {
+        pump_message->pressure_threshold = 0U; /* 只标记压力检测无效，保留上次读数供诊断；泵任务仅提示74号图窗。 */
+    }
     pump_message->type = pump_type; /* 有效接入固定左注水、右灌注；离线为0，显示、联动和驱动换算均读取该类型。 */
     pump_message->seq = frame[5]; /* 保存下位机帧序号，便于后续诊断压力模块是否连续上报。 */
     pump_message->online_flag = new_online_flag; /* 只有设备码映射到业务泵类型时才认为泵在线，备用码不允许启动泵。 */
@@ -1099,13 +1106,14 @@ static void Cs1237_ParserResync(Cs1237FrameParser *parser)
 }
 
 /*
- * 函数功能：逐字节收齐 21 字节压力帧，通过检查就更新泵数据；格式错误就重新寻找帧头。
+ * 函数功能：逐字节收齐21字节帧；设备码与压力可信度分开处理，格式或CRC错误时重新寻找帧头。
  * 输入参数：channel 为字节所属模拟串口通道；data 为本次收到的原始字节。
  * 返回参数：无。
  */
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
 {
-    Cs1237FrameParser *parser;
+    Cs1237FrameParser *parser; /* 每路独立保存接收进度，不能串用A/B设备码。 */
+    bool pressure_trusted; /* 仅决定是否更新压力值，不决定设备码是否保活。 */
 
     if (!SoftUart_ChannelValid(channel))
     {
@@ -1141,9 +1149,10 @@ static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
     DIAG_WIRE((uint8_t)(11U + channel), 0U, 0x100U, parser->frame, CS1237_FRAME_LENGTH); /* 11为PE4/A、12为PE6/B；候选帧尚未校验。 */
     if (Cs1237_FrameValid(parser->frame))
     {
-        if (Cs1237_BusinessDataTrusted(channel, parser->frame))
+        pressure_trusted = Cs1237_BusinessDataTrusted(channel, parser->frame); /* 压力越界仍执行原连续3帧恢复检查，但不再丢弃合法设备码。 */
+        if ((parser->frame[16] & 0xF0U) == 0U) /* 设备码只允许低4位；高位异常的帧不能刷新在线状态。 */
         {
-            Cs1237_UpdatePumpMessage(channel, parser->frame); /* 结构、CRC和业务范围全部可信后才写入泵状态。 */
+            Cs1237_UpdatePumpMessage(channel, parser->frame, pressure_trusted); /* CRC及设备码格式有效即更新接入，压力失效单独标记且不停泵。 */
         }
         parser->length = 0U; /* 本帧已处理完，清长度并等待下一帧。 */
     }
