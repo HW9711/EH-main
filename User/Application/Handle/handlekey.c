@@ -439,17 +439,14 @@ static bool HandleRunKey_DebouncePressEvent(HandleRunKeyDebounce_t *filter, GPIO
 /*
  * 函数功能：处理手柄键的启动或停止请求，同时更新注水泵和当前控制方式。
  * 输入参数：enable true 表示启动电机，false 表示停止电机。
- * 返回参数：true表示已写入启停状态；false表示刀具、首次缺泵确认或控制互斥条件不满足。
+ * 返回参数：true表示已写入启停状态；false表示首次缺泵确认或控制互斥条件不满足。
  */
 static bool HandleRunKey_SetMotorRun(bool enable)
 {
-	/* 启动前检查刀具和控制方式；停止不受这些检查限制，避免无法停机。 */
+	/* 启动前检查控制方式和首次缺泵确认；停止不受这些检查限制，避免无法停机。 */
 	if (enable)
 	{
-		if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
-		{
-			return false; /* 公共接头缺 EPC 刀具头时拒绝实体运行键，避免没有刀具参数仍启动电机。 */
-		}
+		/* 公共接头不按RFID识别状态拦截启动，继续执行控制权、缺泵和驱动故障检查。 */
 		if (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)
 		{
 			return false; /* 其它控制来源正在占用时不抢占，实体键本周期启动无效。 */
@@ -803,7 +800,6 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     direction = (state->trigger == GZYT_TEST_FORWARD_MASK) ? ZZDIR : FZDIR; /* HAL4 使用主控正转语义，HAL5 使用反转语义。 */
     DirActive((direction == ZZDIR) ? HANDLEKey_dir_Forward : HANDLEKey_dir_Reverse); /* 使用原方向处理，同步当前方向、该方向转速和 A/B 记忆及屏幕。 */
     if ((WorkMessage.dir_work != direction) || (WorkMessage.speed_set_work == 0U) ||
-        (Pubinterface_CheckCommonSocketToolReadyForRun() == false) ||
         (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false))
     {
         HandleGzytTest_Revoke(state, channel); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */

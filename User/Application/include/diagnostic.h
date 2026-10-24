@@ -33,7 +33,7 @@ typedef struct
     uint32_t left_drain_pump; /* 左脚轻踩请求使用的泵：0 无，1 A 泵，2 B 泵；撤销左脚轻踩请求后清零。 */
     uint32_t right_drain_pump; /* 右脚轻踩请求使用的泵：0 无，1 A 泵，2 B 泵；撤销右脚轻踩请求后清零。 */
     uint32_t switch_wait_release; /* 切换成功后仍需先松脚的通道：0 无，1 A，2 B；该侧松脚确认后清零。 */
-    uint32_t missing_tool_release; /* 缺刀具报警后置 1，阻止同一次长踩反复报警；确认松脚后清零。 */
+    uint32_t missing_tool_release; /* 保留原诊断字段位置；RFID缺刀具等待已取消，当前固定为0。 */
     uint32_t restart_release; /* 异常重启后置 1，禁止踩踏启动；连续三轮确认脚踏完全松开后清零。 */
     uint32_t restart_ticks; /* 异常重启后连续完全松脚的次数，每轮 25ms；任一侧踩下或实时帧失效时清零。 */
     uint32_t left_low; /* 脚踏报文解析函数保存的左侧松开定标 AD 值；控制任务已采用的值另记在组 24。 */

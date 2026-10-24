@@ -30,6 +30,9 @@ typedef struct
 static UIDPMessage_t s_uidp_last_msg = {0};//记住上一次成功放入队列的显示消息，内容完全相同时不重复发送。
 static uint8_t s_uidp_last_valid = 0U;//上一次 UI 消息是否有效，避免上电第一帧被误判为重复消息。
 static uint8_t s_uidp_alarm_value = WORK_ALARM_NONE; /* 当前报警区的逻辑归属，首次缺泵结束只能关闭自己的72/73号图。 */
+static uint8_t s_uidp_verify_alarm_retry_pending = 0U; /* 校验提示写屏未成功时置1，显示任务直接重试，不依赖消息队列。 */
+static uint32_t s_uidp_verify_alarm_retry_tick = 0U; /* 最近一次校验提示写屏时间，控制失败后的重试间隔。 */
+#define UIDP_VERIFY_ALARM_RETRY_MS 100U /* 校验提示显示或关闭失败后至少间隔100ms重试，避免占满屏幕串口。 */
 static UIDPMessage_t s_uidp_tool_spec_retry = {0}; /* 保存最近一次规格显示请求；enable_flag 为显隐，Value[0..5] 为长度、直径、角度和来源格式。 */
 static uint8_t s_uidp_tool_spec_retry_pending = 0U; /* 规格正文或显示长度发送失败时置 1，成功后清 0；新规格或隐藏请求会替换待重试内容。 */
 static uint32_t s_uidp_tool_spec_retry_tick = 0U; /* 记录最近一次规格发送尝试结束时的 HAL 毫秒计数，防止故障时连续占用串口。 */
@@ -847,7 +850,52 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 	}
 }
 /*
- * 函数功能：刷新报警并同步外控，保持不支持手柄71号及首次缺泵72/73号提示，系统故障优先。
+ * 函数功能：跟随实际校验报警显示或关闭90号图，队列丢消息及串口发送失败后仍能收尾。
+ * 输入参数：无。
+ * 返回参数：无；只有整帧发送成功才更新显示归属，不能代替屏幕回读确认。
+ */
+static void UIDP_ServiceHandleVerifyAlarm(void)
+{
+    uint8_t alarm = Handlescan_GetVerifyAlarmForDisplay(); /* 持续报警和运行中临时提示统一读取当前状态，不采用队列中的旧报警码。 */
+    uint8_t displayed_verify = (uint8_t)((s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
+                                       (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
+                                       (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)); /* 只收尾本功能的90号图，不关闭压力、缺泵或驱动提示。 */
+    if (Handlescan_HasUnsupportedHandle() || ((WorkMessage.alarm_flag != false) && (alarm == WORK_ALARM_NONE)))
+    {
+        return; /* 不支持手柄及其它持续故障优先，旧校验提示不能覆盖或关闭它们。 */
+    }
+    if ((alarm == WORK_ALARM_NONE) && (displayed_verify == 0U))
+    {
+        s_uidp_verify_alarm_retry_pending = 0U; /* 已无校验提示占用窗口，取消旧重试，防止后续误关其它提示。 */
+        return; /* 迟到的旧报警消息不能重新打开已恢复通道的窗口。 */
+    }
+    if ((alarm != WORK_ALARM_NONE) && (WorkMessage.alarm_flag == false) &&
+        (s_uidp_alarm_value != WORK_ALARM_NONE) && (displayed_verify == 0U))
+    {
+        return; /* 运行中另一侧的临时校验提示不抢占已经显示的其它报警。 */
+    }
+    if ((alarm == s_uidp_alarm_value) && (s_uidp_verify_alarm_retry_pending == 0U))
+    {
+        return; /* 当前校验提示已成功发送且来源未变化，不重复占用串口。 */
+    }
+    if ((s_uidp_verify_alarm_retry_pending != 0U) &&
+        ((uint32_t)(HAL_GetTick() - s_uidp_verify_alarm_retry_tick) < UIDP_VERIFY_ALARM_RETRY_MS))
+    {
+        return; /* 写屏失败后等待到重试间隔，不阻塞显示任务处理其它区域。 */
+    }
+    s_uidp_verify_alarm_retry_tick = HAL_GetTick(); /* 记录本次实际尝试时间，毫秒回绕按无符号差处理。 */
+    s_uidp_verify_alarm_retry_pending = 1U; /* 先保留待处理标志，发送失败不能提前丢掉旧窗口归属。 */
+    if (LCD_Show_2byte_Number(UIDP_LCD_VP_ALARM_TIP, (alarm != WORK_ALARM_NONE) ? 90U : 0xFFFFU) == 0U)
+    {
+        return; /* 复用已有返回发送结果的DWIN单字写接口，下次显示周期继续尝试显示或关闭。 */
+    }
+    s_uidp_alarm_value = alarm; /* 整帧已发送完成才更新归属；关闭失败期间仍记住需要清理的90号图。 */
+    s_uidp_verify_alarm_retry_pending = 0U; /* 本次发送成功，后续只在报警来源改变时刷新。 */
+    ExternalComm_ReportScreenAlarm(alarm, (alarm != WORK_ALARM_NONE) ? 90U : MOTOR_ALARM_PICTURE_NONE); /* 外控显示与成功发出的屏幕命令同步，关闭时报告无报警。 */
+}
+
+/*
+ * 函数功能：刷新报警并同步外控，校验提示跟随实际状态；保持71/72/73号提示，系统故障优先。
  * 输入参数：enable_flag表示显示或关窗；arm_value为持续故障或临时提示的逻辑码；picture_value为图片覆盖值，0按逻辑码选图，0xFF隐藏图片。
  * 返回参数：无。
  */
@@ -880,6 +928,17 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 			return; /* 更高优先级故障不能被缺泵覆盖；释放后积压的缺泵消息也不能重新弹窗。 */
 		}
 	}
+	if (((arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
+         (arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
+         (arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)) ||
+        (!enable_flag && ((s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
+                          (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
+                          (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB))))
+    {
+        UIDP_ServiceHandleVerifyAlarm(); /* 校验显示及关窗只按当前来源执行，另一侧仍失败时不会被旧关闭消息清掉。 */
+        return; /* 该路径已按发送结果维护归属，不能再落入下方不带重试的普通显示。 */
+    }
+    s_uidp_verify_alarm_retry_pending = 0U; /* 其它提示已接管窗口，取消旧校验写屏重试。 */
 	s_uidp_alarm_value = enable_flag ? arm_value : WORK_ALARM_NONE; /* 保存实际显示归属，周期维护只关闭本模块自己的报警图。 */
 	if(enable_flag)
 	{
@@ -930,12 +989,6 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,86U);//HALL 值错误使用 EX8 86 号报警图
 		ExternalComm_ReportScreenAlarm(arm_value, 86U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
-		break;
-		case WORK_ALARM_HANDLE_MODEL_ERROR_A:
-		case WORK_ALARM_HANDLE_MODEL_ERROR_B:
-		case WORK_ALARM_HANDLE_MODEL_ERROR_AB:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,90U);//手柄校验失败统一显示 EX8 90 号“手柄校验异常”报警图
-		ExternalComm_ReportScreenAlarm(arm_value, 90U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_PUMP_PRESSURE_BLOCKED:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,89U);//泵压力达到阈值时显示屏幕新增 89 号压力报警图
@@ -1096,7 +1149,7 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：处理显示队列、不支持手柄和首次缺泵提示，以及规格、开机、手柄连接状态补刷。
+ * 函数功能：处理显示队列并维护校验报警可靠收尾、不支持手柄和首次缺泵提示，以及规格与连接状态补刷。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1213,6 +1266,7 @@ void UIDISPLAYBehavior()
 		unsupported_displayed = 0U; /* 其它故障接管时不强制关窗，后续恢复可重新显示71号。 */
 		unsupported_refresh_ticks = 0U; /* 下次进入拒绝状态立即补刷，不继承旧间隔。 */
 	}
+	UIDP_ServiceHandleVerifyAlarm(); /* 即使关窗消息未入队或被清队列，校验恢复后也按实际状态直接关闭旧90号图。 */
 	UIDP_ServiceInjectionStartAlarm(); /* 每个显示周期维护首次缺泵提示，不能因普通清屏或丢队列消息提前关窗。 */
 	if ((s_uidp_tool_spec_retry_pending != 0U) &&
 		((uint32_t)(HAL_GetTick() - s_uidp_tool_spec_retry_tick) >= UIDP_TOOL_SPEC_RETRY_INTERVAL_MS) &&

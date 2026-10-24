@@ -55,11 +55,11 @@ typedef struct
     volatile uint8_t driver_fault_hold; /* 1表示暂不允许启动；驱动已就绪、没有故障且旧运行/排空请求都清零后改为0。 */
     uint8_t last_feedback_error; /* 保存上次处理的故障码，用来判断本次是否刚出现故障；定位失败会统一记为6。 */
     volatile uint8_t alignment_notice_state; /* 保存已处理的定位中、成功或失败状态；用它避免同一结果每次回包都重复蜂鸣。 */
-    volatile uint8_t alignment_beep_result; /* 0无提示、1成功单响、2上电重试失败双响；蜂鸣任务取走后清零，A/B分别保存。 */
-    volatile uint8_t startup_alignment_active; /* 普通上电置1，首次失败允许自动重试一次；成功、重试失败或取消后清零。 */
+    volatile uint8_t alignment_beep_result; /* 0无提示、1成功单响、2本轮重试失败双响；蜂鸣任务取走后清零，A/B分别保存。 */
+    volatile uint8_t startup_alignment_active; /* 上电或接受手动重试时置1；仅首次上电失败允许自动重试一次，成功、失败终止或取消后清零。 */
     uint8_t startup_timer_started; /* 首次进入泵周期任务才开始定位等待计时，避免启动页或定标停留消耗时限。 */
-    uint32_t startup_tick; /* 本次上电定位等待起点，30秒内包含首次定位和唯一一次自动重试。 */
-    volatile uint8_t startup_retry_state; /* 0尚未发出上电重试命令，1已发出唯一一次重试，2重试失败；仅重新上电清零。 */
+    uint32_t startup_tick; /* 本轮定位等待起点；上电包含首次定位和一次自动重试，手动重试单独计时。 */
+    volatile uint8_t startup_retry_state; /* 0尚未安排上电重试，1自动重试已发送或手动重试已登记，2本轮失败并等待新的屏幕重试请求。 */
     uint8_t startup_retry_wait; /* 收到上电定位失败结果后置1并开始计时；定位开始、成功、取消或登记重试后清零。 */
     uint32_t startup_retry_tick; /* 本轮首次收到定位失败结果的主控毫秒数；重复失败回包不重置，防止一直等不到2秒。 */
     volatile uint8_t realign_phase; /* 重新定位步骤：0空闲；3、2各发一帧普通零速；1发一次0x02定位命令；4等待驱动报告定位中。 */
@@ -324,7 +324,7 @@ static void PumpBehavior_RecordAlignmentNotice(PumpBehaviorRuntime_t *runtime,
     if (runtime->startup_retry_state == 2U)
     {
         taskEXIT_CRITICAL(); /* 重试失败后保留停机记录，重复回包不能再次响铃或恢复启动。 */
-        return; /* 需重启主机后重新执行上电定位。 */
+        return; /* 等待屏幕重新申请定位，重复回包不能自行解除失败状态。 */
     }
     if ((snapshot->alignment_state == PUMP_DRIVER_ALIGNING) &&
         (snapshot->raw_error == PUMP_DRIVER_ERROR_NONE) && (runtime->cancel_phase == 0U))
@@ -343,7 +343,7 @@ static void PumpBehavior_RecordAlignmentNotice(PumpBehaviorRuntime_t *runtime,
             runtime->realign_phase = 0U; /* 新命令后直接收到失败结果时也结束应答等待，不必等到500ms超时。 */
             if (runtime->startup_retry_state == 1U)
             {
-                runtime->startup_retry_state = 2U; /* 唯一一次重试也收到失败结果，本次上电不再允许定位或开泵。 */
+                runtime->startup_retry_state = 2U; /* 本轮重试失败，保持停机并等待下一次屏幕重试请求。 */
                 runtime->startup_alignment_active = 0U; /* 结束上电定位流程，不能再进入2秒自动重试。 */
                 runtime->driver_fault_hold = 1U; /* 保持本泵停止，弹窗关闭也不能解除故障。 */
                 runtime->alignment_beep_result = 2U; /* 只登记一次双响，另一台泵定位不会吞掉这次提示。 */
@@ -413,8 +413,7 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
     }
     runtime = &s_pump_runtime[channel]; /* 已确认通道号有效，取出该泵专用的定位记录。 */
     taskENTER_CRITICAL(); /* 禁止任务切换，保证泵任务读到配套的步骤和开始时间；这里不发送串口数据。 */
-    if ((runtime->startup_retry_state != 2U) && /* 上电重试失败后必须重启，屏幕按键不能再次申请定位。 */
-        ((runtime->startup_alignment_active == 0U) ||
+    if (((runtime->startup_alignment_active == 0U) ||
          ((runtime->startup_retry_state == 0U) && (runtime->startup_retry_wait != 0U) &&
           ((uint32_t)(HAL_GetTick() - runtime->startup_retry_tick) >= PUMP_DRIVER_STARTUP_RETRY_MS))) && /* 上电阶段屏幕重试也须等待首次失败满2秒。 */
         (runtime->realign_phase == 0U) && (runtime->cancel_phase == 0U) && (s_pump_binding[channel].message->online_flag != false) &&
@@ -422,6 +421,13 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
         (s_pump_binding[channel].message->timingDrainage_flag == false) &&
         (WorkMessage.runflag_work == false) && (WorkMessage.alarm_flag == false))
     {
+        if (runtime->startup_alignment_active == 0U) /* 上一轮已结束时，仅由本次新操作开启独立重试，重复失败回包不能自行启动。 */
+        {
+            runtime->startup_alignment_active = 1U; /* 纳入原定位结果和超时处理，成功或失败后都结束本轮等待。 */
+            runtime->startup_retry_state = 1U; /* 本次只允许一次手动重试，失败后不再追加2秒自动重试。 */
+            runtime->startup_timer_started = 0U; /* 新一轮重新建立30秒等待起点，不能沿用上次失败计时。 */
+            runtime->startup_retry_wait = 0U; /* 清除旧自动重试等待，命令仅按本次两帧零速步骤发送。 */
+        }
         runtime->realign_tick = HAL_GetTick(); /* 从本次重试申请开始计算500ms等待时间，不随泵任务运行而延后。 */
         runtime->driver_fault_hold = 1U; /* 重新定位期间禁止普通开泵，避免旧运行请求使泵开始输液。 */
         runtime->realign_phase = 3U; /* 两个零速周期之后只发送一次独立校准帧，不自动重发。 */
@@ -433,7 +439,7 @@ uint8_t PumpBehavior_RequestRealign(PumpBehaviorChannel_t channel)
 }
 
 /*
- * 函数功能：上电定位失败后等待2秒申请一次重试；总等待达到30秒则取消，防止缺驱动或未识别泵时一直挂起。
+ * 函数功能：上电首次定位失败后等待2秒自动重试一次；上电或手动定位等待达到30秒则取消，防止流程一直挂起。
  * 输入参数：channel为逻辑A/B泵通道；runtime为本泵独立的失败计时和定位记录。
  * 返回参数：无；只登记定位步骤，不阻塞等待，不发送非零速度。
  */
@@ -581,7 +587,7 @@ static uint8_t PumpBehavior_ServiceDriverFaultHold(PumpBehaviorChannel_t channel
     }
     if ((fresh == 0U) || (snapshot.alignment_state != PUMP_DRIVER_READY) ||
         (snapshot.raw_error != PUMP_DRIVER_ERROR_NONE) || (runtime->realign_phase != 0U) || (runtime->cancel_phase != 0U) ||
-        (runtime->startup_retry_state == 2U)) /* 上电重试失败后即使随后收到就绪，也保持本泵停止到重启。 */
+        (runtime->startup_retry_state == 2U)) /* 本轮重试失败后即使随后收到就绪，也保持停机直到用户明确申请新一轮定位。 */
     {
         if ((fresh == 0U) && (runtime->driver_fault_hold == 0U) && (snapshot.valid != 0U))
         {

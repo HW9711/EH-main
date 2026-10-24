@@ -50,7 +50,7 @@ static volatile uint8_t s_motor_uart_driver_recovered = 0U; /* 驱动回包 Err=
 static volatile uint8_t s_motor_uart_wait_foot_release = 0U; /* 任意驱动故障首次发生于脚踏运行时置位，禁止按固定时间自动清报警。 */
 static volatile uint8_t s_motor_uart_foot_release_observed = 0U; /* 记录本次脚踏来源故障是否已观察到松脚、掉线或实时数据失效。 */
 static uint8_t s_motor_uart_picture_pending = 0U; /* 驱动报警建立后等待50ms再决定是否向屏幕发送图片，安全报警状态已经立即生效。 */
-static uint8_t s_motor_uart_pending_picture_value = MOTOR_ALARM_PICTURE_NONE; /* 保存本次待显示的84/86/87或91~99图片号。 */
+static uint8_t s_motor_uart_pending_picture_value = MOTOR_ALARM_PICTURE_NONE; /* 保存本次待显示的84/86/87图片号。 */
 static uint32_t s_motor_uart_picture_start_tick = 0U; /* 保存驱动报警图片延迟起点，不参与故障保护和报警退出计时。 */
 static MotorUartFeedbackSnapshot_t s_motor_uart_feedback_snapshot; /* 保存最近一包 CRC 正确的速度、电流和错误码，三者必须来自同一包。 */
 static volatile uint32_t s_motor_uart_feedback_version = 0U; /* 偶数表示反馈记录可以读取，奇数表示UART1接收任务正在修改记录。 */
@@ -131,7 +131,7 @@ static void MotorUart_ServicePendingAlarmPicture(void)
 	}
 
 	display_value[0] = s_motor_uart_alarm_owned; /* 物理连接仍稳定时按驱动真实逻辑报警码显示84/86/87等生产图片。 */
-	display_value[1] = s_motor_uart_pending_picture_value; /* 调试宏开启时保留91~99覆盖图号，关闭时由原映射显示公用图片。 */
+	display_value[1] = s_motor_uart_pending_picture_value; /* 原91~99细分故障统一使用87号图，逻辑报警码仍按真实Err保留。 */
 	SendUIDSMessage(UI_AIARM_ID, true, display_value); /* 此处只补发图片；报警和蜂鸣已设置，故障首帧也已发送 A 泵零速并撤销 A/B 泵运行请求。 */
 	s_motor_uart_picture_pending = 0U; /* 图片已经成功投递，本次故障不再重复刷屏。 */
 }
@@ -169,9 +169,9 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 }
 
 /*
- * 函数功能：根据驱动原始 Err 和调试宏选择屏幕报警图片。
+ * 函数功能：根据驱动原始 Err 选择屏幕报警图片，原91~99细分图片统一映射为87。
  * 输入参数：driver_error 为驱动板回包 dat1[7] 的原始错误码。
- * 返回参数：84~99 的有效图片号；MOTOR_ALARM_PICTURE_NONE 表示不显示误导图片。
+ * 返回参数：84/86/87 的有效图片号；MOTOR_ALARM_PICTURE_NONE 表示不显示误导图片。
  */
 static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
 {
@@ -185,38 +185,38 @@ static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
 
 		case MOTOR_UART_DRIVER_ERR_OC1:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 92U; /* 内部调试时把过流 Err=2 细分为 92 号“手柄过流保护”。 */
+			return 87U; /* 原92号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 #else
 			return 87U; /* 生产模式下过流与堵转共用 87 号过载图片。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_NOHALL:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 93U; /* 内部调试时把 Err=11 显示为 93 号“手柄霍尔断线”。 */
+			return 87U; /* 原93号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 #else
 			return 86U; /* 生产模式下霍尔断线与学习错误共用 86 号 HALL 图片。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_SDAHALL:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 94U; /* 内部调试时把 Err=12 显示为 94 号“手柄霍尔学习错误”。 */
+			return 87U; /* 原94号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 #else
 			return 86U; /* 生产模式下霍尔学习错误与断线共用 86 号 HALL 图片。 */
 #endif
 
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
 		case MOTOR_UART_DRIVER_ERR_ENOC:
-			return 91U; /* 编码器错误 Err=9 使用内部调试图片 91。 */
+			return 87U; /* 原91号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 		case MOTOR_UART_DRIVER_ERR_START:
-			return 95U; /* 开环启动检测错误 Err=10 使用内部调试图片 95。 */
+			return 87U; /* 原95号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 		case MOTOR_UART_DRIVER_ERR_OV:
-			return 96U; /* 母线过压 Err=3 使用内部调试图片 96。 */
+			return 87U; /* 原96号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 		case MOTOR_UART_DRIVER_ERR_TEMP:
-			return 97U; /* 驱动器过温 Err=6 使用内部调试图片 97。 */
+			return 87U; /* 原97号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 		case MOTOR_UART_DRIVER_ERR_POSDRAG:
-			return 98U; /* 有霍尔拖动错误 Err=15 使用内部调试图片 98。 */
+			return 87U; /* 原98号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 		case MOTOR_UART_DRIVER_ERR_OVR:
-			return 99U; /* 制动时间过长 Err=8 使用内部调试图片 99。 */
+			return 87U; /* 原99号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_FAIL:

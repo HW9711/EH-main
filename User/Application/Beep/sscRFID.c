@@ -22,14 +22,15 @@
 
 #define RFID_TX_POWER_0_DBM_X100        0U     /* 0dBm，对应模块协议功率值 0。 */
 #define RFID_TX_POWER_10_DBM_X100       1000U  /* 10dBm，对应模块协议功率值 1000。 */
+#define RFID_TX_POWER_12_DBM_X100       1200U  /* 12dBm，对应协议值1200（0x04B0），功率命令数据为04 B0，校验为6C。 */
 #define RFID_TX_POWER_13_DBM_X100       1300U  /* 13dBm，对应模块协议功率值 1300。 */
 #define RFID_TX_POWER_15_DBM_X100       1500U  /* 15dBm，对应模块协议功率值 1500。 */
 
 /* RFID 工作频段选择：填写上面的 RFID_REGION_* 常量。当前为中国 920 MHz 频段；A/B 模块上电时一起使用此设置，需与目标地区和模块支持范围一致。 */
 #define RFID_REGION_SELECT              RFID_REGION_CHINA_920
 
-/* RFID 发射功率选择：只允许上面的 0、10、13、15 dBm 常量，协议数值为 dBm × 100。当前为 10 dBm；A/B 模块上电时一起使用，改变后需实测识别距离和邻近标签误读。 */
-#define RFID_TX_POWER_SELECT            RFID_TX_POWER_13_DBM_X100
+/* RFID 发射功率选择：可选上面的 0、10、12、13、15 dBm 常量，协议数值为 dBm × 100，具体档位由下方宏选择；A/B 模块上电时一起使用，改变后需实测识别距离和邻近标签误读。 */
+#define RFID_TX_POWER_SELECT            RFID_TX_POWER_12_DBM_X100
 
 #if ((RFID_REGION_SELECT != RFID_REGION_CHINA_920) && \
      (RFID_REGION_SELECT != RFID_REGION_US) && \
@@ -41,6 +42,7 @@
 
 #if ((RFID_TX_POWER_SELECT != RFID_TX_POWER_0_DBM_X100) && \
      (RFID_TX_POWER_SELECT != RFID_TX_POWER_10_DBM_X100) && \
+     (RFID_TX_POWER_SELECT != RFID_TX_POWER_12_DBM_X100) && \
      (RFID_TX_POWER_SELECT != RFID_TX_POWER_13_DBM_X100) && \
      (RFID_TX_POWER_SELECT != RFID_TX_POWER_15_DBM_X100))
 #error "RFID_TX_POWER_SELECT is invalid"

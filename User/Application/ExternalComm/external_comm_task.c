@@ -2751,7 +2751,7 @@ static bool ExternalComm_ApplyPumpBControl(uint8_t area_code)
 /*
  * 函数功能：执行上位机对当前手柄电机的启动或停止命令。
  * 输入参数：area_code 为 0x05 时启动当前手柄，为 0x06 时停止当前手柄。
- * 返回参数：true表示命令执行成功；false表示缺少手柄、刀具或首次缺泵尚未确认，已发送失败应答。
+ * 返回参数：true表示命令执行成功；false表示缺少在线手柄、控制条件不满足或首次缺泵尚未确认，已发送失败应答。
  */
 static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
 {
@@ -2765,13 +2765,7 @@ static bool ExternalComm_ApplyHandleRunControl(uint8_t area_code)
                                      EXTERNAL_COMM_REASON_NO_CHANNEL); /* 没有选中且在线的手柄时禁止启动电机。 */
             return false;
         }
-        if (Pubinterface_CheckCommonSocketToolReadyForRun() == false)
-        {
-            ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_CONTROL_FAILED,
-                                     area_code,
-                                     EXTERNAL_COMM_REASON_NOT_SUPPORT); /* 公共接头缺少 EPC 刀具时保留原失败原因。 */
-            return false;
-        }
+        /* 公共接头不按RFID识别状态拦截启动，继续执行控制权、缺泵和驱动故障检查。 */
 
         if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_EXTERNAL) == false)
         {

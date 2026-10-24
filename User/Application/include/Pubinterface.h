@@ -66,8 +66,6 @@
 #define ALARM_DRV_MS           3000U //驱动板故障提示至少保持 3 秒，故障很快恢复也能看清提示
 #define ALARM_MODE_MS          2000U //已选脚控时按手柄键，82 号提示保持 2 秒
 #define ALARM_VERIFY_MS        2000U //运行时另一手柄校验失败，屏幕、蜂鸣和上位机临时提示保持 2 秒
-#define ALARM_SOCKET_MS        2000U //公共接头未识别到 RFID 刀具，限时蜂鸣和上位机报警保持 2 秒
-#define ALARM_SOCKET_REPEAT_MS 1000U //缺刀具提示两次触发至少间隔 1 秒；调小会增加重复提示次数
 #define ALARM_UNPLUG_MS        2000U //手控运行时拔出手柄，屏幕、蜂鸣和上位机临时提示保持 2 秒
 #define ALARM_PRESSURE_MS      3000U //A/B泵超压显示89号弹窗3秒；蜂鸣单独播放三声，不清运行请求
 #define ALARM_PRESSURE_SENSOR_MS 2000U //A/B泵压力检测失效显示74号图窗2秒；仅提示，保持当前输出
@@ -440,7 +438,6 @@ bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type); /* 判
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
 void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
 void Pubinterface_ClearSelectedChannelDisplay(void); /* 无当前手柄时关闭运行参数区。 */
-void Pubinterface_ClearCommonSocketToolMissingAlarm(void); /* 刀具重新识别后清除公共接头缺刀报警。 */
 void Pubinterface_RefreshSelectedChannelDisplay(uint8_t channel); /* 用指定通道保存的参数刷新主运行页。 */
 bool Pubinterface_ClearHandleNotConnectedAlarm(void); /* 清除当前手柄未连接报警。 */
 void Pubinterface_RefreshHandleUnplugAlarmDisplay(void); /* 清屏后补发仍有效的拔手柄报警。 */
@@ -449,10 +446,6 @@ void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow); /* 为在线注�
 void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 把指定通道 Page4 的默认注水量设给在线注水泵。 */
 bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新插入通道是否允许自动选中。 */
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
-bool Pubinterface_IsCommonSocketToolReady(void); /* 仅公共接头要求有效RFID刀具；PXBA/PXBB未识别刀具也按当前参数运行，只查询不报警。 */
-bool Pubinterface_CheckCommonSocketToolReadyForRun(void); /* 启动前只对公共接头缺刀具报警并拒绝运行，PXBA/PXBB不因刀具未识别而拦截。 */
-bool Pubinterface_CheckCommonSocketToolReadyForFootRun(void); /* 公共接头缺刀具时脚踏持续报警到松脚；PXBA/PXBB未识别刀具时继续原启动检查。 */
-void Pubinterface_ReleaseFootCommonSocketToolMissingAlarm(void); /* 脚踏松开或掉线后，关闭未识别到 RFID 刀具的持续弹窗和蜂鸣。 */
 void Pubinterface_StopTouchKeepAliveRun(void); /* 结束屏幕按住运行按钮发起的电机运行。 */
 void Pubinterface_ReleaseTouchHandleNotConnectedAlarm(void); /* 触控运行时拔柄，等用户松开按钮后退出本次触控并清除报警。 */
 void Pubinterface_LoadChannelMemory(uint8_t channel); /* 把指定通道保存的参数恢复到当前工作信息。 */

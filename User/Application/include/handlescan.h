@@ -19,10 +19,12 @@
 #error "HANDLE_FUNCTION_MODE must be 1, 2 or 3"
 #endif
 
+uint8_t Handlescan_GetVerifyAlarmForDisplay(void); /* 返回当前有效的A/B/AB校验提示；已恢复或其它持续故障占用时返回0，供显示任务可靠收尾。 */
+
 bool Handlescan_HasUnsupportedHandle(void); /* 任一通道拒绝的手柄尚未确认拔出时为 true，按键或清报警命令不能解除。 */
 
 void HandlescanTaskInit(void); /* 创建并启动每 10ms 检查 A/B 手柄插拔和识别状态的任务。 */
-bool Handlescan_IsRfidToolReady(uint8_t channel); /* 当前RFID结果已经完整装载且最近一次读取未失败时，才允许自动模式启动。 */
+bool Handlescan_IsRfidToolReady(uint8_t channel); /* 查询当前有效RFID是否已完整装载，供外控数据有效性判断，不作为启动门禁。 */
 bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_tool_type); /* 切回手动模式时，从该手柄 EEPROM 恢复倍率、转速范围和每次调速的增减量。 */
 void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 重新启用自动识别前清掉旧 RFID 结果编号和计数，保留当前刀具参数。 */
 bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel); /* 取出并清掉关窗请求；插拔任务清空屏幕队列后须重新发送关闭 90 号报警窗的消息。 */

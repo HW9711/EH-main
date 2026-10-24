@@ -140,7 +140,7 @@ void HMIkeyBehanior(uint8_t key_value)
 }
 
 /*
- * 函数功能：处理手柄按键；启动前检查刀具、控制方式和首次缺泵确认，启停时同步跟随注水泵。
+ * 函数功能：处理手柄按键；启动前检查控制方式和首次缺泵确认，启停时同步跟随注水泵。
  * 输入参数：key_value 为手柄按键编号。
  * 返回参数：无。
  */
@@ -162,7 +162,7 @@ void HANDLEKeyBehavior(uint8_t key_value)
 		SpeedActive(key_value);
 		break;
 		case HANDLEKey_motor_start: 
-		if(Pubinterface_CheckCommonSocketToolReadyForRun() == false)return; /* 手柄队列启动电机前检查公共接头 EPC 刀具头，缺失时只报警不运行。 */
+		/* 公共接头与PX均按当前参数处理启动，不因缺少RFID发出手柄未连接报警。 */
 		/* 即使启动消息不是由实体按键扫描产生，也要确认当前允许手柄控制。 */
 		if(ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false)return;
 		if(Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_HANDLE) == false)
