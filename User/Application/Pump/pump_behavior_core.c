@@ -397,6 +397,36 @@ uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel)
 }
 
 /*
+ * 函数功能：汇总已识别泵的开机定位进度，供启动页决定继续等待或显示运行／故障界面。
+ * 输入参数：无；仅检查机型启用且已经识别在线的泵，未接入侧不延长启动等待。
+ * 返回参数：0全部就绪或未接入，1仍在定位／自动重试，2等待已结束但至少一路未就绪。
+ */
+uint8_t PumpBehavior_GetStartupState(void)
+{
+    uint8_t channel; /* 分别检查A/B，任何一路仍在准备都要保持启动页。 */
+    uint8_t failed = 0U; /* 先记录已结束的失败，不能因此跳过另一台仍在定位的泵。 */
+    for (channel = 0U; channel < PUMP_BEHAVIOR_CHANNEL_COUNT; ++channel)
+    {
+        if ((PumpBehavior_ChannelEnabled((PumpBehaviorChannel_t)channel) == 0U) ||
+            (s_pump_binding[channel].message->online_flag == false) ||
+            (s_pump_binding[channel].message->type == 0U))
+        {
+            continue; /* 禁用或尚未识别的空接口不作为必须准备的设备。 */
+        }
+        if ((s_pump_runtime[channel].startup_alignment_active != 0U) ||
+            (s_pump_runtime[channel].realign_phase != 0U))
+        {
+            return 1U; /* 首次失败的2秒自动重试仍属于准备过程，不能提前切页。 */
+        }
+        if (PumpBehavior_DriverCanRun((PumpBehaviorChannel_t)channel) == 0U)
+        {
+            failed = 2U; /* 重试失败、取消或30秒超时后进入故障界面；原启动门禁继续拒绝开泵。 */
+        }
+    }
+    return failed; /* 全部检查完成才返回就绪或失败，切页不修改任何泵运行请求。 */
+}
+
+/*
  * 函数功能：屏幕操作或上电失败延时到达时，登记先发两帧零速、再发一次定位命令的步骤；本次不启动输液。
  * 输入参数：channel 为逻辑 A/B 通道；供屏幕失败恢复或上电失败延时重试调用。
  * 返回参数：已记下重新定位请求返回1；泵状态不允许或已有待处理请求时返回0。
@@ -451,7 +481,7 @@ static void PumpBehavior_ServiceStartupRetry(PumpBehaviorChannel_t channel, Pump
     }
     if (runtime->startup_timer_started == 0U)
     {
-        runtime->startup_tick = HAL_GetTick(); /* 从周期任务可处理反馈时开始计时，启动页停留不算驱动等待。 */
+        runtime->startup_tick = HAL_GetTick(); /* 从周期任务可处理反馈时开始计时，任务启动前的显示延时不计入驱动等待。 */
         runtime->startup_timer_started = 1U; /* 同一轮仅建立一次起点，连续无回包也不能重置超时。 */
     }
     if ((uint32_t)(HAL_GetTick() - runtime->startup_tick) >= PUMP_DRIVER_STARTUP_TIMEOUT_MS)

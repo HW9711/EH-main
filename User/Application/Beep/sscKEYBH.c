@@ -6,6 +6,7 @@
 #include "Pubinterface.h"
 #include "screenkey.h"
 #include "sscKEYBH.h"
+#include "sscUIDP.h" /* 启动页期间只允许设备插拔消息，不缓存操作等待切页后执行。 */
 #include "diagnostic.h" /* 按键队列记录在独立模块内去重和导出。 */
 
   kernel_task_t    KeyBehaviorsHandle;
@@ -22,12 +23,16 @@ static void KeyBehivQueue_Init(void)
     KeyBehivQueue = Kernel_QueueCreate(20, sizeof(KeyBehMessage_t), "KeyBehivQueue");
 }
 /*
- * 函数功能：把按键或插拔消息放进队列；队列满就立即返回失败，不在当前业务任务里等待。
+ * 函数功能：把按键或插拔消息放进队列；启动页只接收插拔，队列满立即返回，不阻塞业务任务。
  * 输入参数：control_type 为事件来源类型；control_key 为该来源下的具体按键或插拔事件值。
- * 返回参数：true表示消息已入队；false表示队列未创建或已满，手柄扫描任务会保留必须发送的拔出消息并重试。
+ * 返回参数：true表示消息已入队；false表示启动页操作被拒绝、队列未创建或已满；必要插拔消息仍由扫描任务保留重试。
  */
 bool SendKeyBehMessage(uint8_t control_type,uint8_t control_key)
 {
+    if ((UIDP_IsStartupWaiting() != 0U) && (control_type != PLUGunPLUG))
+    {
+        return false; /* 开机准备时丢弃运行及调节按键，保留识别装载消息，防止切页后执行旧操作。 */
+    }
 	// static uint8_t control_types=0;
 	// static uint8_t control_keys=0;
 	// if(control_types==control_type&&control_keys==control_key)return;

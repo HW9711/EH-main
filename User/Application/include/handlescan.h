@@ -19,6 +19,8 @@
 #error "HANDLE_FUNCTION_MODE must be 1, 2 or 3"
 #endif
 
+bool Handlescan_IsStartupPending(void); /* 已插入手柄尚在识别或参数装载时为true，明确失败或空接口不阻塞切页。 */
+
 uint8_t Handlescan_GetVerifyAlarmForDisplay(void); /* 返回当前有效的A/B/AB校验提示；已恢复或其它持续故障占用时返回0，供显示任务可靠收尾。 */
 
 bool Handlescan_HasUnsupportedHandle(void); /* 任一通道拒绝的手柄尚未确认拔出时为 true，按键或清报警命令不能解除。 */

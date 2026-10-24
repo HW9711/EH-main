@@ -383,12 +383,16 @@ bool ControlArbitration_IsBusyByOther(uint8_t owner)
 }
 
 /*
- * 函数功能：尝试让指定控制源取得电机控制权。
+ * 函数功能：主运行页开放后尝试让指定控制源取得电机控制权。
  * 输入参数：owner 申请控制权的来源编号。
- * 返回参数：true 表示申请成功或已经持有；false 表示无效来源或被其它来源阻塞。
+ * 返回参数：true 表示申请成功或已经持有；false 表示启动页未开放、无效来源或被其它来源阻塞。
  */
 bool ControlArbitration_TryEnter(uint8_t owner)
 {
+    if (UIDP_IsStartupWaiting() != 0U)
+    {
+        return false; /* 主运行页尚未开放时拒绝手控、脚控、触控和外控启动，不能绕过开机准备。 */
+    }
 	/* 先检查来源编号，无效来源不能取得控制权。 */
 	if (ControlArbitration_IsValidOwner(owner) == false)
 	{

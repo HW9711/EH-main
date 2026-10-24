@@ -399,6 +399,34 @@ static const HandlescanChannelBinding *Handlescan_GetBinding(uint8_t channel)
 }
 
 /*
+ * 函数功能：检查已插入手柄是否仍在首次认证、参数装载或首读RFID，供启动页等待识别收尾。
+ * 输入参数：无。
+ * 返回参数：任一已插入通道尚未上线且未明确认证失败时返回true；空接口不参与等待。
+ */
+bool Handlescan_IsStartupPending(void)
+{
+    uint8_t channel; /* 按真实插口逐侧判断，不能只等待当前选中的手柄。 */
+    for (channel = CHANNEL_A; channel <= CHANNEL_B; ++channel)
+    {
+        const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 使用同一套引脚和扫描状态。 */
+        if (Handlescan_IsChannelPhysicallyInserted(channel) == false)
+        {
+            continue; /* 未插手柄不阻塞启动页，也不要求用户把所有接口接满。 */
+        }
+        if (binding->context->stage == HANDLESCAN_STAGE_VERIFY_FAIL)
+        {
+            continue; /* 已明确认证失败或型号不支持时允许显示故障，不在启动页无限等待。 */
+        }
+        if ((binding->context->stage != HANDLESCAN_STAGE_ONLINE) ||
+            ((channel == CHANNEL_A) ? (WorkMessage.Channel_Aonline == false) : (WorkMessage.Channel_Bonline == false)))
+        {
+            return true; /* 扫描完成后还要等上线消息装入通道记忆，避免切页时显示旧参数。 */
+        }
+    }
+    return false; /* 已插入的手柄均已识别完成或明确失败，空基座不要求一直等到有RFID刀具。 */
+}
+
+/*
  * 函数功能：确认指定通道最近有效RFID结果已装载，供外控区分当前有效刀具和历史锁存参数。
  * 输入参数：channel为CHANNEL_A或CHANNEL_B。
  * 返回参数：true表示该通道刀具在线且已装载最新有效结果；false表示未识别、读取失败或仍待装载。

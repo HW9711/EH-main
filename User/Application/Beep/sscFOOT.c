@@ -74,7 +74,7 @@ static uint8_t s_double_right_gently_pump_channel = CHANNEL_NONE; /* 记录右�
 static volatile bool s_foot_runtime_frame_valid = false; /* 只有收到完整且 CRC 正确的实时帧才为 true；为 false 时不能沿用旧踩踏值启动。 */
 static volatile bool s_foot_motor_stop_latched = true; /* 上电默认禁止脚踏起机，必须先观察到真实松脚再允许新的踩下周期。 */
 static bool s_foot_motor_release_ready = false; /* 停机后已检测到松脚时为 true；必须先满足此条件，下次踩下才能启动。 */
-static bool s_foot_restart_release_required = false; /* 异常重启时置true，已连接脚踏连续三轮完全松开后清除。 */
+static bool s_foot_restart_release_required = false; /* 异常重启或启动页等待时置true，已连接脚踏连续三轮完全松开后清除。 */
 static uint8_t s_foot_restart_release_ticks = 0U; /* 重启后完整松脚计数，每25ms一次；任一侧踩着即清零。 */
 static uint8_t s_foot_motor_active_source = FOOT_MOTOR_SOURCE_NONE; /* 记录真正启动电机的踏板侧，未踩的另一侧释放不能误停当前运行。 */
 static uint8_t s_foot_handle_pump_source = FOOT_MOTOR_SOURCE_NONE; /* 记住哪侧脚踏启动了手柄联动泵；即使异常处理先清了 jtL/jtR，松脚时仍能找到要停的泵。 */
@@ -821,7 +821,7 @@ static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
 }
 
 /*
- * 函数功能：异常重启后同时拦住深踩电机和轻踩泵，直到当前脚踏连续三轮完全松开。
+ * 函数功能：启动页等待或异常重启后同时拦住深踩电机和轻踩泵，直到当前脚踏连续三轮完全松开。
  * 输入参数：msg为已收到的脚踏连接和定标信息；仅在本轮实时AD有效时调用。
  * 返回参数：true表示本周期仍禁止脚踏动作；false表示可执行原脚踏逻辑。
  */
@@ -830,7 +830,7 @@ static bool Foot_BlockRestartUntilReleased(const FootMessage_t *msg)
     bool released = false; /* 未识别类型或未连接都不能当作真实松脚。 */
     if (!s_foot_restart_release_required)
     {
-        return false; /* 普通上电或已经完成松脚确认时，原单/双脚踏逻辑继续执行。 */
+        return false; /* 未要求松脚或已完成确认时，原单/双脚踏逻辑继续执行。 */
     }
     Foot_LatchMotorStopUntilRelease(); /* 重启后未松脚时不允许保留任何深踩启动资格。 */
     if (msg->connect_flag)
@@ -1757,7 +1757,7 @@ static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
 }
 
 /*
- * 函数功能：每 25ms 读取脚踏连接消息，并按踏板类型处理本次泵和电机动作。
+ * 函数功能：每25ms更新脚踏连接；启动页期间保持停止，切页后先松脚，再按踏板类型处理动作。
  * 输入参数：event 为调度器事件值，当前任务不使用。
  * 返回参数：无。
  */
@@ -1780,6 +1780,14 @@ void FootControlTask(uint32_t event)
     if ((FootMsgQueue != NULL) && (Kernel_QueueReceive(FootMsgQueue, &msg, 0) == pdTRUE))
     {
         Foot_HandleConnectionUpdate(&msg); /* 收到新连接消息才更新接入或掉线状态。 */
+    }
+
+    if (UIDP_IsStartupWaiting() != 0U)
+    {
+        s_foot_restart_release_required = true; /* 启动页期间不接受轻踩或深踩，切页后仍须先完整松脚再操作。 */
+        s_foot_restart_release_ticks = 0U; /* 等待期间的踩踏不能预先消耗切页后的松脚确认。 */
+        Foot_LatchMotorStopUntilRelease(); /* 保持电机停止且不保留旧踩踏许可，后台串口及上线识别继续运行。 */
+        return; /* 已处理连接消息，但本周期不得启动电机、泵或切换通道。 */
     }
 
     if(s_foot_runtime_frame_valid == false)
@@ -1842,6 +1850,20 @@ typedef struct
 
 /* UART4 解析状态只由 10ms 解析任务维护，集中存放便于插拔时一次清理。 */
 static FootParserState_t s_foot_parser_state = {0U};
+
+/*
+ * 函数功能：检查已收到有效实时帧的脚踏是否还在读取定标或等待上线消息处理。
+ * 输入参数：无。
+ * 返回参数：有效脚踏尚未完成上线时返回1；未接入、已上线或已报定标错误时返回0。
+ */
+uint8_t Foot_IsStartupPending(void)
+{
+    if ((s_foot_runtime_frame_valid == false) || WorkAlarm_Is(WORK_ALARM_FOOT_VALUE_ERROR))
+    {
+        return 0U; /* 空串口或明确定标失败不永久占用启动页，原故障提示与运行限制继续生效。 */
+    }
+    return ((s_foot_parser_state.connected == 0U) || (ControlSignalMessage.jt_enable_flag == false)) ? 1U : 0U; /* 定标和上线消息均完成后才允许切页。 */
+}
 
 /*
  * 函数功能：处理 UART4 本周期没有完整脚踏帧的掉线确认。

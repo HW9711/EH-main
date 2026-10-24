@@ -6,6 +6,8 @@
 #include "queue.h"
 
 /* 开机下发两路零速；异常重启或未装配侧同时取消定位，不访问任务队列或刷新屏幕。 */
+uint8_t PumpBehavior_GetStartupState(void); /* 已识别泵的开机状态：0就绪或未接入，1仍准备，2已结束但失败；不改变启停。 */
+
 void PumpBehaviorCore_StopOnStartup(uint8_t cancel_alignment);
 
 /* PumpBehaviorChannel_t 只表示逻辑 A/B 通道，不能用它推断物理 UART 或压力传感器接线。 */

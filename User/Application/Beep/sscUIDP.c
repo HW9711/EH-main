@@ -7,6 +7,8 @@
 #include "diagnostic.h" /* 只观测相关UI消息，不改显示参数。 */
 #include "lcd.h"
 #include "Pubinterface.h"
+#include "pump_behavior_core.h" /* 启动页等待已接入泵的定位结果，不能只按固定时间切页。 */
+#include "sscFOOT.h" /* 脚踏定标和上线消息完成后再结束开机准备。 */
 #include "pump.h" /* 注水泵进度条与流量调节共用最大流量，避免70已到上限却仍显示部分进度。 */
 #include "screen_address.h"
 #include "sscBEEP.h"
@@ -55,6 +57,9 @@ static uint32_t s_uidp_tool_spec_retry_tick = 0U; /* 记录最近一次规格发
 #define UIDP_PUMP_GEAR_FRAME_COUNT 5U
 /* 泵档位图片表的行数，固定 11 行，对应 0~10 档；不是泵流量上限，修改须同步图片表。 */
 #define UIDP_PUMP_GEAR_COUNT 11U
+#define UIDP_STARTUP_DISCOVERY_MS 2000U /* 业务任务启动后至少留2秒接收外设首帧；随后按实际准备状态等待，不按此时长强制切页。 */
+static volatile uint8_t s_uidp_startup_phase = 0U; /* 0未预写，1等待识别定位，2等待显示队列写完，3主运行页已开放。 */
+static uint32_t s_uidp_startup_tick_ms = 0U; /* 显示任务首次预写时刻，独立于任务启动前的脚踏定标窗口。 */
 static uint16_t s_uidp_startup_replay_ticks = 0U; /* 开机状态补刷剩余调度次数，倒计时结束后不再重发。 */
 static uint16_t s_uidp_startup_replay_period = 0U; /* 补刷间隔计数，确保 UI 队列有时间处理上一批消息。 */
 static volatile uint8_t s_uidp_handle_replay_remaining = 0U; /* 拔出后还要补发几次 A/B 连接状态；插拔任务设置，显示任务每发一次减一。 */
@@ -1149,7 +1154,87 @@ void UITOUCHDP(bool enable_flag,bool run_flag)
 	}
 }
 /*
- * 函数功能：处理显示队列并维护校验报警可靠收尾、不支持手柄和首次缺泵提示，以及规格与连接状态补刷。
+ * 函数功能：显示任务首周期预写运行页初始控件，但继续保持启动页等待外设准备。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void UIDP_InitializeStartupDisplay(void)
+{
+    UIDP_DrawPumpDisplaySnapshot(UI_PUMPA_ID, UI_PUMPABUTTON_ID, &pumpMessageA);//切页前先按 pumpMessageA 写好 A 泵显示，减少切页后的加载过程。
+    UIDP_DrawPumpDisplaySnapshot(UI_PUMPB_ID, UI_PUMPBBUTTON_ID, &pumpMessageB);//切页前先按 pumpMessageB 写好 B 泵显示，两侧采用相同处理方式。
+    UICONTROLDP(0,0,0); /* 未装载前先关闭控制方式图标，真实连接状态随后由队列覆盖。 */
+    LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//开机先隐藏触控工作区，不在此处改触控主按钮的图片。
+    UIDIRDP(0,0,0); /* 初始隐藏方向控件，等待识别出的方向许可。 */
+    UIHANDLEDP(0,0,1,0);//上电未插手柄时先画出 A 通道未连接状态，避免空白区域
+    UIHANDLEDP(0,0,2,0);//上电未插手柄时先画出 B 通道未连接状态，后续插拔事件再覆盖
+    UITOOLDP(0,0); /* 先隐藏刀具类型，避免展示上次关机残留。 */
+    UITOOLSPECDP(0,30,20,10,0); /* 仅按原接口隐藏规格区，占位值不会作为已识别刀具显示。 */
+    UIORALDP(0); /* 初始关闭开口定位控件，后续按真实刀具能力刷新。 */
+    UIFREQDP(0,0,0); /* 清除未识别前的频率显示，后续使用本通道参数。 */
+    UISPEEDDP(0,0,0,0); /* 清除初始速度显示，避免切页前残留上一通道的数值。 */
+    UIAIARMDP(WorkMessage.alarm_flag,WorkMessage.alarm_value,0U); /* 初始预写不能清掉已建立的真实故障。 */
+    UIMANUALBUTTONDP(0,0,0,0); /* 先关闭手动设置入口，待识别后的状态快照恢复合法控件。 */
+    s_uidp_startup_tick_ms = HAL_GetTick(); /* 从任务可推进设备识别时建立首帧观察窗口，不延长前置阻塞延时。 */
+    s_uidp_startup_phase = 1U; /* 初始化仅执行一次，之后持续处理真实设备状态和显示队列。 */
+}
+
+/*
+ * 函数功能：查询主运行页是否仍未开放，供输入和控制权入口拒绝开机期间的运行操作。
+ * 输入参数：无。
+ * 返回参数：1表示仍在启动页准备，0表示已经完成主运行页切换。
+ */
+uint8_t UIDP_IsStartupWaiting(void)
+{
+    return (s_uidp_startup_phase != 3U) ? 1U : 0U; /* 初值即为等待，不能在显示任务首次执行前提前开放控制。 */
+}
+
+/*
+ * 函数功能：后台识别及定位完成或明确失败后切入运行页，等待期间不阻塞任何业务任务。
+ * 输入参数：无。
+ * 返回参数：无；准备完成后预写当前参数再切页，失败泵仍受原驱动门禁限制。
+ */
+static void UIDP_ServiceStartupTransition(void)
+{
+    uint8_t pump_state; /* 0全部就绪或未接入，1仍准备，2明确失败后需要在运行页显示提示。 */
+    if ((s_uidp_startup_phase == 0U) || (s_uidp_startup_phase == 3U))
+    {
+        return; /* 未初始化显示或已经切页时，不重复执行一次性的开机交接。 */
+    }
+    pump_state = PumpBehavior_GetStartupState(); /* 原泵任务继续收发零速和定位命令，显示任务只读取结果。 */
+    if (((uint32_t)(HAL_GetTick() - s_uidp_startup_tick_ms) < UIDP_STARTUP_DISCOVERY_MS) ||
+        (pump_state == 1U) || Handlescan_IsStartupPending() || (Foot_IsStartupPending() != 0U))
+    {
+        s_uidp_startup_phase = 1U; /* 预写期间若出现新的准备工作，返回等待并在完成后重新获取当前显示。 */
+        return; /* 不使用Delay_ms，保证手柄识别、泵定位、脚踏接收及看门狗任务正常调度。 */
+    }
+    if (s_uidp_startup_phase == 1U)
+    {
+        Pubinterface_RefreshRuntimeDisplaySnapshot(); /* 把已识别的手柄、刀具及控制方式排入显示队列，避免切页时先显示空参数。 */
+        Pubinterface_RefreshPumpADisplay(); /* 用本轮真实识别状态刷新A泵流量和按钮。 */
+        Pubinterface_RefreshPumpBDisplay(); /* B泵单独刷新，不能沿用初始化时的未连接画面。 */
+        s_uidp_startup_phase = 2U; /* 下一显示周期处理完上述消息后才能实际切页。 */
+        return; /* 先留在启动页等待预写，不在同一周期抢先显示主运行页。 */
+    }
+    if ((UIDPMsgQueue == NULL) || (uxQueueMessagesWaiting(UIDPMsgQueue) != 0U))
+    {
+        return; /* 当前参数尚未写完，继续由正常显示队列推进，不能阻塞等待清队列。 */
+    }
+    LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN); /* 已识别设备准备结束且参数预写完成，再向屏幕发送主运行页切换。 */
+    s_uidp_startup_phase = 3U; /* 切页命令发送后才开放新的控制请求，之前的按键不补执行。 */
+    s_uidp_startup_replay_ticks = UIDP_STARTUP_REPLAY_TOTAL_TICKS; /* 保留原3秒补刷窗口，覆盖刚完成识别后的后续显示更新。 */
+    s_uidp_startup_replay_period = 0U; /* 下一周期可立即补刷当前状态。 */
+    if (WorkMessage.alarm_flag != false)
+    {
+        UIAIARMDP(true, WorkMessage.alarm_value, 0U); /* 主界面显示当前真实系统故障，不能被泵定位提示覆盖。 */
+    }
+    else if (pump_state == 2U)
+    {
+        Pubinterface_ReportPumpAlignmentFailure(); /* 在可见运行页重新保持79号图3秒，避免失败提示在启动页期间已经到期。 */
+    }
+}
+
+/*
+ * 函数功能：处理显示队列、报警和连接补刷；开机等待设备准备结束并预写当前参数后再切入运行页。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -1157,6 +1242,10 @@ void UIDISPLAYBehavior()
 {
 	static uint8_t unsupported_displayed = 0U; /* 记录周期维护是否显示过71号，最后拔出后负责可靠关窗。 */
 	static uint8_t unsupported_refresh_ticks = 0U; /* 每20个10ms周期补刷一次，防止队列复位丢失提示且不每周期占用串口。 */
+	if (s_uidp_startup_phase == 0U)
+	{
+		UIDP_InitializeStartupDisplay(); /* 首周期直接预写，不能依赖可能被插拔清队列丢弃的初始化消息。 */
+	}
 	if(UIDPMsgQueue != NULL)
 	{
 		UIDPMessage_t msg;
@@ -1222,24 +1311,7 @@ void UIDISPLAYBehavior()
 					UIPUMPBBUTTONDP(msg.enable_flag,msg.Value[0],msg.Value[1]);
 					break;
 					case UI_POWERINIT_ID:
-					UIDP_DrawPumpDisplaySnapshot(UI_PUMPA_ID, UI_PUMPABUTTON_ID, &pumpMessageA);//切页前先按 pumpMessageA 写好 A 泵显示，减少切页后的加载过程。
-					UIDP_DrawPumpDisplaySnapshot(UI_PUMPB_ID, UI_PUMPBBUTTON_ID, &pumpMessageB);//切页前先按 pumpMessageB 写好 B 泵显示，两侧采用相同处理方式。
-					UICONTROLDP(0,0,0);
-					LCD_Disappear_Picture(UIDP_LCD_VP_TOUCH_WORK);//开机先隐藏触控工作区，不在此处改触控主按钮的图片。
-					UIDIRDP(0,0,0);
-					UIHANDLEDP(0,0,1,0);//上电未插手柄时先画出 A 通道未连接状态，避免空白区域
-					UIHANDLEDP(0,0,2,0);//上电未插手柄时先画出 B 通道未连接状态，后续插拔事件再覆盖
-					UITOOLDP(0,0);
-					UITOOLSPECDP(0,30,20,10,0);
-					UIORALDP(0);
-					UIFREQDP(0,0,0);
-					UISPEEDDP(0,0,0,0);
-					UIAIARMDP(0,0,0);
-					UIMANUALBUTTONDP(0,0,0,0);
-					LCD_ForceShow_Which_Map(UIDP_LCD_PAGE_MAIN_RUN);//主运行页 VP 全部预写完成后再切到 page4，减少控件逐个出现的可见过程
-					/* 切入主运行页不表示泵已标定成功；提示音统一等驱动READY或FAILED结果，避免提前单响。 */
-					s_uidp_startup_replay_ticks = UIDP_STARTUP_REPLAY_TOTAL_TICKS; /* 进入主运行页后开启短窗口补刷，等待 A/B 手柄识别和 RFID 首包完成。 */
-					s_uidp_startup_replay_period = 0U; /* 首次调度允许立即检查当前状态，避免 B 手柄已经在线但仍显示未连接。 */
+                    /* 开机预写由显示任务首周期直接执行，迟到或丢失的队列通知不再提前切页。 */
 					break;
 					default:
 					break;
@@ -1308,6 +1380,7 @@ void UIDISPLAYBehavior()
 			Pubinterface_RefreshOnlineHandleDisplay(); /* 只读取当前 A/B 在线态和选中态，不重复触发插拔业务、报警或蜂鸣。 */
 		}
 	}
+    UIDP_ServiceStartupTransition(); /* 队列及报警正常推进后再检查切页，不影响后台识别和定位时序。 */
 }
 
 void UIDISPLAYBehaviorTask(uint32_t event)
