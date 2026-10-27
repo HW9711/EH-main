@@ -23,6 +23,9 @@
 #define motor_frem_length  11 /* 电机控制帧共 11 字节，含末尾 2 字节 CRC；修改长度必须同步驱动协议。 */
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 往复频率字段允许 0~100，超过时按 100 发送；这是协议值，不直接表示 Hz。 */
 #define MOTOR_DRIVE_RATIO_X100_UNIT 100U /* 倍率放大 100 倍保存：100=1.00 倍、525=5.25 倍；须与 EEPROM/RFID 定义一致。 */
+/* 仅影响屏幕B通道的有刷手柄：下发保护电流=原阈值/(本宏/100)，不修改屏幕A、无刷手柄或原始设定。
+ * 按系数乘100填写：114U表示除以1.14，110U表示除以1.10，100U表示不修正；数值越大，下发阈值越低。 */
+#define MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100 114U /* 屏幕B有刷电流校准系数，使用整数百分数避免浮点运算。 */
 #define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* 每个速度单位为 10rpm：3000rpm 发 300；修改会改变所有手柄的下发转速。 */
 #define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* 速度字段最多 65535（16 位）；这是协议容量，不是手柄允许的工作转速。 */
 #define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 协议最多表示 655350rpm，仅防止数值溢出；实际工作上限由手柄参数限制。 */
@@ -36,6 +39,7 @@
 kernel_task_t MOTORRUNTaskHandle;
 static const uint8_t s_motor_stop_fallback[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00}; /* 上电尚未形成运行模板时只发送历史兼容零速帧，此状态下主控从未授权本次电机运行。 */
 static uint8_t s_motor_stop_template[motor_frem_length]; /* 保存最近一份真实 RUN 帧除速度外的全部协议字段，STOP 必须沿用同一物理通道、方向和运行方式。 */
+static volatile uint8_t s_motor_stop_tx_pending = 1U; /* STOP未成功送入UART1前，任何新RUN都必须先补发零速。 */
 static uint8_t s_motor_stop_template_valid = 0U; /* 首次组装真实 RUN 帧后置 1，防止未初始化模板被周期停机任务使用。 */
 
 typedef struct {
@@ -415,13 +419,13 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
         memcpy(s_motor_drive_last_command, command, motor_frem_length); /* 保存完整实际帧，方向、电机类型或电流变化也会触发新序号。 */
         s_motor_drive_last_command_valid = 1U; /* 首份命令记录完成后开放后续逐字节判重。 */
         s_motor_drive_command_snapshot.sequence = (uint16_t)(s_motor_drive_command_snapshot.sequence + 1U); /* 不同命令序号按16位自然回绕。 */
-        s_motor_drive_command_snapshot.sent_tick_ms = evaluated_tick_ms; /* 记录本次命令改变的时刻；具体在发送前还是发送后记录，由调用位置决定。 */
+        s_motor_drive_command_snapshot.sent_tick_ms = evaluated_tick_ms; /* 记录本次命令改变的时刻；仅在底层UART返回成功后记录。 */
         s_motor_drive_command_snapshot.command_speed_rpm = command_speed_rpm; /* 保存机械倍率和协议量化后的实际命令rpm。 */
         s_motor_drive_command_snapshot.channel = logical_channel; /* 保存形成本帧时的逻辑通道，避免仅凭物理电机类型反推A/B。 */
         s_motor_drive_command_snapshot.run_state = run_state; /* 启动帧写1，周期停止帧和零速重装帧写0。 */
         s_motor_drive_command_snapshot.direction = command[1]; /* 直接保存实际帧byte1，包含机械方向换算后的控制模式。 */
         s_motor_drive_command_snapshot.motor_type = command[3]; /* 直接保存实际帧byte3，反映板级A/B映射和有刷/无刷类型。 */
-        s_motor_drive_command_snapshot.valid = 1U; /* 已生成并保存一份UART1命令，之后允许其它任务读取这份记录。 */
+        s_motor_drive_command_snapshot.valid = 1U; /* 已成功送入UART1并保存命令，之后允许其它任务读取这份记录。 */
     }
     __DMB(); /* 保证所有字段完成后才发布最终偶数版本。 */
     ++s_motor_drive_snapshot_version; /* 写完后将版本恢复为偶数，其它任务才可复制这份命令记录。 */
@@ -488,9 +492,17 @@ static void MotorStops(uint8_t requested_run_state,
  motor_stopcode[4] = 0U; /* 发送前再次强制速度高字节为 0，避免任何模板异常产生非零停止帧。 */
  motor_stopcode[5] = 0U; /* 发送前再次强制速度低字节为 0，与高字节共同形成零速命令。 */
  MotorDrive_UpdateCommandCrc(motor_stopcode); /* 最终零速字段确定后重新生成 CRC。 */
- MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
-                                  requested_run_state, drive_type, source_speed_rpm, zero_speed_blocked); /* 实际STOP和原始请求同源记录后再送入UART1。 */
- (void)Uart1_SendPacket(motor_stopcode, motor_frem_length); /* 周期停止帧按最近 RUN 的完整配置下发，所有手柄类型共用同一路径。 */
+ s_motor_stop_tx_pending = 1U; /* 先保存待发送STOP约束，发送失败不能被下一次RUN跳过。 */
+ if (Uart1_SendPacket(motor_stopcode, motor_frem_length) == HAL_OK)
+ {
+     s_motor_stop_tx_pending = 0U; /* 只有UART真实发送成功才允许解除补发要求。 */
+     MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
+                                      requested_run_state, drive_type, source_speed_rpm, zero_speed_blocked); /* 诊断只记录实际成功发送的STOP，不能把白色速度显示当作送达证据。 */
+ }
+ else
+ {
+     MotorUart_NotifyStopTransmitFailure(); /* STOP发送失败立即撤销运行并报警，后续周期继续补发。 */
+ }
 }
 
 /*
@@ -502,12 +514,13 @@ static void MotorStart(uint32_t command_speed_rpm,
                        uint8_t drive_type,
                        uint32_t source_speed_rpm)
 {
-    /* msg.pro_current_h/l 已在 MOTORRUN() 中由 WorkMessage.current_work 拆分，发送前不能再改写，否则会覆盖 EEPROM/上位机设置的保护电流。 */
+    /* msg.pro_current_h/l 已在 MOTORRUN() 中完成屏幕B有刷电流校准并拆分，此处直接组帧，避免重复校准。 */
     uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
       ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0x00 ,0x00};
     uint8_t motor_rearmcode[motor_frem_length]; /* 启动前先发同通道、同模式的零速帧，让驱动解除“必须先收到停止命令才能再启动”的限制。 */
     HAL_StatusTypeDef transmit_status; /* 保存安全零速帧和 RUN 帧的 UART1 实际发送结果。 */
-    bool zero_rearm_required = ((s_motor_drive_command_snapshot.valid == 0U) ||
+    bool zero_rearm_required = ((s_motor_stop_tx_pending != 0U) || /* 前次STOP发送失败必须先补零速，不能沿用旧RUN记录。 */
+                                (s_motor_drive_command_snapshot.valid == 0U) ||
                                 (s_motor_drive_command_snapshot.run_state == 0U)); /* 仅从未发送或停止态进入运行时重装，运行中的速度更新不能插入零速。 */ 
     MotorDrive_UpdateCommandCrc(motor_startcode); /* 启动帧只在全部业务字段确定后计算 CRC，避免速度或电流更新使校验失效。 */
     MotorDrive_UpdateStopTemplate(motor_startcode); /* 所有手柄 RUN 字段确定后生成同配置 STOP 模板，松脚时只允许速度归零。 */
@@ -520,11 +533,20 @@ static void MotorStart(uint32_t command_speed_rpm,
         transmit_status = Uart1_SendPacket(motor_rearmcode, motor_frem_length); /* 新启动沿先下发同配置零速帧，并取得底层真实发送结果。 */
         if (transmit_status != HAL_OK)
         {
-            return; /* 安全零速帧发送失败时禁止紧接着发送非零 RUN，下一 50ms 周期重新尝试。 */
+            s_motor_stop_tx_pending = 1U; /* 保存零速补发要求，失败后不能被下一份RUN绕过。 */
+            MotorUart_NotifyStopTransmitFailure(); /* 复用驱动通信报警并撤销业务运行请求。 */
+            return; /* 本周期不允许发送非零RUN，后续周期继续发STOP。 */
         }
+        s_motor_stop_tx_pending = 0U; /* 同配置零速已经成功发送，后续仍须再次检查脚踏停止状态。 */
         MotorDrive_RecordCommandSnapshot(motor_rearmcode, WorkMessage.channel_work, 0U, 0U,
                                          1U, drive_type, source_speed_rpm, 0U); /* 发送成功后才发布重装 STOP，失败时保持原状态以便下周期继续重装。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
+    }
+    if ((WorkMessage.runflag_work == false) || (WorkMessage.alarm_flag != false) ||
+        ((drive_type == JTWORK) && (Foot_IsMotorStopLatched() != 0U)))
+    {
+        MotorStops(0U, drive_type, 0U, 0U); /* 5ms重装间隔内松脚或发生报警时，最终发送点必须再次转为STOP。 */
+        return; /* 不把间隔前组装的旧RUN发给驱动。 */
     }
     transmit_status = Uart1_SendPacket(motor_startcode, motor_frem_length); /* 非零速度的RUN命令发送后，再保存供上位机读取的命令记录。 */
     if (transmit_status == HAL_OK)
@@ -534,7 +556,7 @@ static void MotorStart(uint32_t command_speed_rpm,
     }
 }
 /*
- * 函数功能：根据当前 WorkMessage 运行态组装电机驱动帧，向 UART1 电机驱动板下发启动或停止命令。
+ * 函数功能：根据当前 WorkMessage 运行态组帧，对屏幕B通道有刷保护电流校准后，向 UART1 下发启动或停止命令。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -549,6 +571,7 @@ void MOTORRUN(void)
     uint32_t display_speed_value=WorkMessage.speed_set_work; /* 非脚踏控制时，屏幕继续显示用户设定的目标速度。 */
     uint32_t ssc_speed_value=0U; /* 保存倍率换算后的电机实际 rpm，后续再按 GE2433 协议除以 10 下发。 */
     uint16_t command_speed_value=0U; /* 保存写入 GE2433 启动帧 byte4~5 的协议速度字段，单位为 10rpm。 */
+    uint16_t command_current_value=0U; /* 保存本帧保护电流，单位0.01A；通道校准仅影响发送值，不回写手柄设定。 */
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
     uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
@@ -724,8 +747,13 @@ void MOTORRUN(void)
         }
       msg.speed_h=command_speed_value/256;
       msg.speed_l=(command_speed_value)%256;//速度
-      msg.pro_current_h=WorkMessage.current_work/256; /* 保护电流来自手柄 EEPROM Page4[21..22]，单位 0.01A；0 表示驱动板使用内部默认保护。 */
-      msg.pro_current_l=WorkMessage.current_work%256;//电流
+      command_current_value=WorkMessage.current_work; /* 每次组帧都取原始保护设定，避免50ms周期内反复缩小阈值；0仍表示驱动内部默认保护。 */
+      if((WorkMessage.channel_work==CHANNEL_B) && ((msg.motor_type==0x03U) || (msg.motor_type==0x04U))) /* 以屏幕B判断校准对象；有刷类型已完成物理A/B映射，无刷和屏幕A不校准。 */
+      {
+          command_current_value=(uint16_t)(((uint32_t)command_current_value*100U+MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100/2U)/MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100); /* 按宏指定系数相除，半分母随系数变化以保持0.01A四舍五入；默认114U与原1.14换算一致。 */
+      }
+      msg.pro_current_h=(uint8_t)(command_current_value/256U); /* 写入校准后保护电流高字节，后续RUN与STOP模板沿用同一阈值。 */
+      msg.pro_current_l=(uint8_t)(command_current_value%256U); /* 写入保护电流低字节，EEPROM、通道记忆和WorkMessage保留原始设定。 */
       MotorStart((uint32_t)command_speed_value * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM,
                  WorkMessage.drivetype_work,
                  motor_source_speed); /* 同时记录控制来源、原始速度和驱动16位字段可表达的最终rpm。 */

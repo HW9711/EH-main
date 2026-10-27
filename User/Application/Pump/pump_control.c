@@ -89,6 +89,48 @@ static uint16_t Pump_GetSpeedMin(const pumpMessage_t *pump_message)
 }
 
 /*
+ * 函数功能：供简易外控按屏幕步进循环增加泵流量，到上限后的下一次操作回到配置下限。
+ * 输入参数：screen_key 为 SCREENKey_APUMP_Add 或 SCREENKey_BPUMP_Add。
+ * 返回参数：接受调节返回1；键值无效或当前泵不可调节时返回0，供调用方决定是否蜂鸣。
+ */
+uint8_t Pump_CycleFlow(uint8_t screen_key)
+{
+	pumpMessage_t *pump_message; /* 指向本次调节的泵，保证循环上下限与该泵配置一致。 */
+
+	if ((screen_key != SCREENKey_APUMP_Add) && (screen_key != SCREENKey_BPUMP_Add))
+	{
+		return 0U; /* 循环入口只接受两路加流量键，不能将减速或启停键误当成循环操作。 */
+	}
+	if (ScreenKey_CanUse(screen_key) == false)
+	{
+		return 0U; /* 离线、未配置、报警或排空时沿用屏幕门禁，不改流量也不提示按键成功。 */
+	}
+	pump_message = (screen_key == SCREENKey_APUMP_Add) ? &pumpMessageA : &pumpMessageB; /* 仅操作键值对应通道，不改变另一泵。 */
+	if ((pump_message->type != DRAWWATER) && (pump_message->type != INJECTWATER) && (pump_message->type != POURWATER))
+	{
+		return 0U; /* 无效类型没有可靠步进和上限，不能利用残留参数循环调速。 */
+	}
+	if (pump_message->speed_work >= Pump_GetSpeedMax(pump_message))
+	{
+		pump_message->speed_work = Pump_GetSpeedMin(pump_message); /* 已处于上限时回到同一泵的配置下限；本次不再额外加一个步进。 */
+		pump_message->step_value = 0U; /* 与屏幕调节一致，清除旧脚踏档位进度，使下次脚踏短按从首档开始。 */
+		if (screen_key == SCREENKey_APUMP_Add)
+		{
+			Pubinterface_RefreshPumpADisplay(); /* A 泵回到下限后立即同步显示，不改变启停请求。 */
+		}
+		else
+		{
+			Pubinterface_RefreshPumpBDisplay(); /* B 泵独立刷新下限设定，不串改 A 泵显示。 */
+		}
+	}
+	else
+	{
+		PUMPActive(screen_key); /* 未到上限时完整复用屏幕步进、限幅和刷新；本次刚到上限仍保留上限值。 */
+	}
+	return 1U; /* 普通递增和上限回绕都属于有效操作，调用方均应给一次按键音。 */
+}
+
+/*
  * 函数功能：按当前注水流量和本次调节方向取得分段步进值。
  * 输入参数：current_flow 为当前 speed_work 流量，单位 mL/min；increase 为 true 表示增加，false 表示减少。
  * 返回参数：每次调整 2、5、10 或 20 mL/min；在 30/100/200 分界值，加键用上一区间的步长，减键用下一区间的步长。

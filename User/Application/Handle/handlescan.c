@@ -1,6 +1,7 @@
 // handlescan.c
 
 #include "handlescan.h"
+#include "handlekey.h" /* GZYT 临时上线许可与数字按钮测试共用同一开关，关闭后恢复型号禁用。 */
 #include "diagnostic.h" /* 独立诊断开关及只读副本接口。 */
 #include "board.h"
 #include "board_profile.h"
@@ -340,14 +341,16 @@ bool Handlescan_HasUnsupportedHandle(void)
 }
 
 /*
- * 函数功能：按编译配置限定可上线的手柄型号，双功能模式也拒绝名单之外的型号。
+ * 函数功能：按产品模式限定可上线型号，并由数字按钮测试开关临时开放 GZYT，A/B 共用此规则。
  * 输入参数：mapped_model 为 Page2 双字节映射得到的内部型号，0表示未知型号。
- * 返回参数：属于当前模式允许的磨削或刨削名单时返回 true，其余返回 false。
+ * 返回参数：属于当前模式名单或已开启临时测试的 GZYT 时返回 true，其余返回 false。
  */
 static bool Handlescan_IsModelSupported(uint8_t mapped_model)
 {
     switch (mapped_model)
     {
+    case GZYT_ONLINES: /* GZYT 临时开放独立于正式产品名单，不影响其它型号的模式限制。 */
+        return (GZYT_DIGITAL_TEST_ENABLE == 1U); /* 测试开关开启时允许 A/B 上线；关闭后恢复拒绝，EEPROM 校验仍须通过。 */
     case TMBB_ONLINES:
     case TMBA_ONLINES:
     case EMBA_ONLINES:

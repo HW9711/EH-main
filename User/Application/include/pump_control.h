@@ -10,4 +10,11 @@
  */
 void PUMPActive(uint8_t key_value);
 
+/*
+ * 函数功能：供简易外控按屏幕步进循环增加流量，已到上限时回到配置下限。
+ * 输入参数：screen_key 为 SCREENKey_APUMP_Add 或 SCREENKey_BPUMP_Add。
+ * 返回参数：接受调节返回1；键值无效或当前状态不允许调节时返回0。
+ */
+uint8_t Pump_CycleFlow(uint8_t screen_key);
+
 #endif

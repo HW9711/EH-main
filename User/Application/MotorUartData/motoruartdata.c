@@ -29,6 +29,9 @@ kernel_task_t MOTORUARTTaskHandle;
 #define MOTOR_UART_DRIVER_ERR_PHASELOSS  14U /* 参考驱动 Err=14：缺相，主控按电机相位错误处理。 */
 #define MOTOR_UART_DRIVER_ERR_POSDRAG    15U /* 参考驱动 Err=15：有 Hall 拖动错误，归入驱动板故障。 */
 
+#define MOTOR_UART_DRIVER_ERR_STOP_TIMEOUT 16U /* 驱动停机超过期限并已强制关断，故障锁存到驱动复位。 */
+#define MOTOR_UART_DRIVER_ERR_STOP_PARAM   17U /* 驱动拒绝不能建立有限停机期限的参数组。 */
+
 /* 上方 Err 数值与驱动回包 byte7 一一对应，是协议编号，不是可调整的报警门限。 */
 #define MOTOR_UART_DRIVER_PARAMETER_ADDRESS 0xFDU /* 参数读写固定地址；改动须同步驱动板，不能与 0xAA 电机控制帧混用。 */
 #define MOTOR_UART_DRIVER_PARAMETER_REQUEST_LEN 8U /* 0x03 读参数、0x06 写参数请求都为 8 字节，包含 CRC；改动须同步协议。 */
@@ -157,6 +160,8 @@ static uint8_t MotorUart_MapDriverErrorToAlarm(uint8_t driver_error)
 		case MOTOR_UART_DRIVER_ERR_SDAHALL:
 			return MOTOR_UART_ALARM_HALL; /* 霍尔断线/学习错误统一使用报警码 9，屏幕公用 86 号图且不再误判为过载。 */
 
+		case MOTOR_UART_DRIVER_ERR_STOP_TIMEOUT: /* 停机锁存属于驱动控制故障，不能误报过载。 */
+		case MOTOR_UART_DRIVER_ERR_STOP_PARAM: /* 参数无法保证停机时同样禁止继续运行。 */
 		case MOTOR_UART_DRIVER_ERR_PHASELOSS:
 			return MOTOR_UART_ALARM_DRIVER_BOARD; /* 缺相没有独立对外报警码，逻辑层使用驱动板故障，屏幕层按原始 Err 显示 84。 */
 
@@ -219,6 +224,8 @@ static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
 			return 87U; /* 原99号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
 #endif
 
+		case MOTOR_UART_DRIVER_ERR_STOP_TIMEOUT: /* 屏幕没有对应图片时保留蜂鸣和报警码，不能显示刀具卡死。 */
+		case MOTOR_UART_DRIVER_ERR_STOP_PARAM: /* 保留原始16/17供日志和维护诊断。 */
 		case MOTOR_UART_DRIVER_ERR_FAIL:
 		case MOTOR_UART_DRIVER_ERR_UV:
 		case MOTOR_UART_DRIVER_ERR_SAVE:
@@ -275,6 +282,8 @@ static void MotorUart_SetDriverAlarm(uint8_t driver_error)
 	s_motor_uart_alarm_start_tick = HAL_GetTick(); /* 非脚踏驱动报警沿用最少显示时间；脚踏来源故障只用松脚和恢复条件。 */
 	MotorUart_SetAlarm(alarm_value, picture_value); /* 同步安全报警状态，并按宏选择公用或内部调试图片。 */
 }
+
+
 
 /*
  * 函数功能：决定是否清除驱动报警；脚踏启动时发生的故障，要等松脚且 Err=0，其他来源还要满足最短显示时间。
@@ -381,6 +390,17 @@ static void MotorUart_StopAllWork(void)
 	ControlSignalMessage.jtL_control_flag = false; /* 清除左脚踏运行来源，要求用户松开后重新踩下。 */
 	ControlSignalMessage.jtR_control_flag = false; /* 清除右脚踏运行来源，保持双脚踏停机状态一致。 */
 	
+}
+
+/*
+ * 函数功能：停止帧UART发送失败时立即撤销业务运行并建立驱动通信报警。
+ * 输入参数：无。
+ * 返回参数：无；后续50ms输出任务继续补发STOP，驱动自身失联保护仍独立生效。
+ */
+void MotorUart_NotifyStopTransmitFailure(void)
+{
+    MotorUart_SetDriverAlarm(MOTOR_UART_DRIVER_ERR_HANDSHAKE); /* 沿用现有通信故障及去重逻辑，明确STOP未成功发送。 */
+    MotorUart_StopAllWork(); /* 不允许其它控制来源在STOP发送失败期间继续保持运行请求。 */
 }
 
 /*

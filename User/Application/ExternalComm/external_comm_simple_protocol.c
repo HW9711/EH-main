@@ -20,8 +20,8 @@
 #define EXT_SIMPLE_FUN_HANDLE_SWITCH      0x07U /* 在当前 A/B 手柄之间切换。 */
 #define EXT_SIMPLE_FUN_PUMP_A_TOGGLE      0x08U /* 切换 A 泵外控独立运行请求。 */
 #define EXT_SIMPLE_FUN_PUMP_B_TOGGLE      0x09U /* 切换 B 泵外控独立运行请求。 */
-#define EXT_SIMPLE_FUN_PUMP_A_GEAR        0x0AU /* 循环切换 A 泵 0～5 流量档。 */
-#define EXT_SIMPLE_FUN_PUMP_B_GEAR        0x0BU /* 循环切换 B 泵 0～5 流量档。 */
+#define EXT_SIMPLE_FUN_PUMP_A_FLOW_CYCLE        0x0AU /* A 泵按屏幕步进递增，已到上限时回到下限。 */
+#define EXT_SIMPLE_FUN_PUMP_B_FLOW_CYCLE        0x0BU /* B 泵按屏幕步进递增，已到上限时回到下限。 */
 #define EXT_SIMPLE_FUN_CLEAR_REMINDER     0x0CU /* 关闭蜂鸣和报警弹窗，不清除用于禁止启动的故障状态。 */
 
 #define EXT_SIMPLE_LEGACY_LOGIN           0x01U /* 复用原外控申请功能码，不把授权逻辑复制到本模块。 */
@@ -151,6 +151,35 @@ static void ExtSimple_TogglePump(uint8_t pump_channel)
 }
 
 /*
+ * 函数功能：按屏幕可用性规则调节当前手柄转速，并对有效按键给出单响反馈。
+ * 输入参数：screen_key 为 SCREENKey_SPEED_Add 或 SCREENKey_SPEED_Sub。
+ * 返回参数：无。
+ */
+static void ExtSimple_AdjustHandleSpeed(uint8_t screen_key)
+{
+    if (ScreenKey_CanUse(screen_key) == false) /* 复用屏幕门禁，当前手柄离线、未识别、报警或方向无效时不接受调速。 */
+    {
+        return; /* 无效操作既不修改转速，也不提示按键成功。 */
+    }
+
+    SpeedActive(screen_key); /* 普通屏幕加减键与原HMI键共用当前通道的小步进、方向上下限及速度记忆。 */
+    SendKeyBeepMessage(1U); /* 有效调速给100ms单响；到达上下限时仍反馈按键已接受，不重复改变运行状态。 */
+}
+
+/*
+ * 函数功能：按屏幕步进循环调整指定泵流量，并对有效操作给出按键单响。
+ * 输入参数：screen_key 为 SCREENKey_APUMP_Add 或 SCREENKey_BPUMP_Add。
+ * 返回参数：无。
+ */
+static void ExtSimple_CyclePumpFlow(uint8_t screen_key)
+{
+    if (Pump_CycleFlow(screen_key) != 0U) /* 泵控制模块统一检查门禁并完成递增或回绕，协议层不复制上下限。 */
+    {
+        SendKeyBeepMessage(1U); /* 每次有效流量切换给100ms单响，到达上限和回到下限都给反馈。 */
+    }
+}
+
+/*
  * 函数功能：在共用 UART2 FIFO 中查找简易协议帧头，并判断固定 6 字节是否已经收全。
  * 输入参数：available 为接收缓存已有字节数；reader 读取缓存但不移除数据；head_offset 返回帧头位置。
  * 返回参数：返回未找到帧头、帧未收全或 6 字节已收全；已收全不代表帧尾正确。
@@ -262,10 +291,10 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
                                    0U); /* 复用原手柄停止及联动泵清理路径。 */
             break;
         case EXT_SIMPLE_FUN_SPEED_DOWN:
-            SpeedActive(HMIkey_SPEED_Sub); /* 使用当前 Page6 小步进和原方向上下限，不在协议层写死转速。 */
+            ExtSimple_AdjustHandleSpeed(SCREENKey_SPEED_Sub); /* 按当前通道小步进减速，并对有效按键补齐单响。 */
             break;
         case EXT_SIMPLE_FUN_SPEED_UP:
-            SpeedActive(HMIkey_SPEED_Add); /* 使用当前 Page6 小步进和原方向上下限，不在协议层写死转速。 */
+            ExtSimple_AdjustHandleSpeed(SCREENKey_SPEED_Add); /* 按当前通道小步进加速，并对有效按键补齐单响。 */
             break;
         case EXT_SIMPLE_FUN_HANDLE_SWITCH:
             ExtSimple_SwitchHandle(); /* 只在原通道切换安全条件满足时真正切换。 */
@@ -276,11 +305,11 @@ uint8_t ExtSimple_HandleFrame(const uint8_t *frame, uint16_t frame_len)
         case EXT_SIMPLE_FUN_PUMP_B_TOGGLE:
             ExtSimple_TogglePump(CHANNEL_B); /* B 泵未配置或被压力保护阻止时由原控制入口保持停机。 */
             break;
-        case EXT_SIMPLE_FUN_PUMP_A_GEAR:
-            PUMPActive(JTkey_left_short); /* 复用 A 泵类型对应的 0～5 档循环和显示刷新。 */
+        case EXT_SIMPLE_FUN_PUMP_A_FLOW_CYCLE:
+            ExtSimple_CyclePumpFlow(SCREENKey_APUMP_Add); /* A 泵按屏幕步进循环流量，并对有效操作给按键音。 */
             break;
-        case EXT_SIMPLE_FUN_PUMP_B_GEAR:
-            PUMPActive(JTKey_right_short); /* 复用 B 泵类型对应的 0～5 档循环和显示刷新。 */
+        case EXT_SIMPLE_FUN_PUMP_B_FLOW_CYCLE:
+            ExtSimple_CyclePumpFlow(SCREENKey_BPUMP_Add); /* B 泵独立执行流量递增和上限回绕，不使用脚踏预设档位。 */
             break;
         case EXT_SIMPLE_FUN_CLEAR_REMINDER:
             SendAlarmMessage(WORK_ALARM_NONE); /* 只关闭蜂鸣提醒，WorkMessage 中阻止再次启动的故障状态仍保留。 */

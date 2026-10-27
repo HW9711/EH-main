@@ -87,8 +87,8 @@ typedef struct
 
 static const RfidLegacyUserProfile_t s_legacy_user_profiles[2] =
 {
-    {500U, 430U, 40U, 500U, 1000U, 2U, 7U}, /* USER型号01对应PXYTP：速度直接取USER，不做固定值或范围匹配，保护电流0.40A。 */
-    {3000U, 190U, 68U, 1000U, 2000U, 0U, 1U} /* USER型号02对应PXYTM：速度直接取USER，不做固定值或范围匹配，保护电流0.68A。 */
+    {500U, 500U, 200U, 500U, 1000U, 2U, 7U}, /* USER型号01对应PXYTP：速度直接取USER，不做固定值或范围匹配，保护电流2.00A。 */
+    {3000U, 190U, 400U, 1000U, 2000U, 0U, 1U} /* USER型号02对应PXYTM：速度直接取USER，不做固定值或范围匹配，保护电流4.00A。 */
 };
 
 typedef enum

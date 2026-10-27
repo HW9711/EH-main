@@ -49,6 +49,13 @@ typedef enum
 void MotorUartData_Init(void);
 
 /*
+ * 函数功能：上报STOP发送失败并撤销业务运行，等待后续周期成功补发零速。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+void MotorUart_NotifyStopTransmitFailure(void);
+
+/*
  * 函数功能：读取最近一次有效驱动反馈，读取途中发生更新时重试，避免混用新旧数据。
  * 输入参数：snapshot指向接收反馈记录的结构体，复制后调用方读取自己的这份数据。
  * 返回参数：已有有效反馈记录且复制期间未被修改时返回1，否则返回0。

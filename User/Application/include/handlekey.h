@@ -4,7 +4,7 @@
 #include "bsp_gpio.h"
 #include <stdbool.h> /* 串口中断处理接口返回是否由临时测试接收，头文件自行提供 bool 定义。 */
 
-/* GZYT 数字按钮临时测试开关：1 开启 HAL4 正转、HAL5 反转；0 关闭收帧和测试启动，恢复原 30ms 按键任务。 */
+/* GZYT 临时支持开关：1 允许 A/B 识别上线并开启 HAL4 正转、HAL5 反转；0 拒绝 GZYT 上线、关闭收帧和测试启动，恢复原 30ms 按键任务。 */
 #ifndef GZYT_DIGITAL_TEST_ENABLE
 #define GZYT_DIGITAL_TEST_ENABLE 1U
 #endif
