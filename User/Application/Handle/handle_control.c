@@ -274,6 +274,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	memory->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	memory->auto_identify = 0U; /* 通道记忆进入手动模式，后续切回该通道不自动恢复 RFID。 */
 	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((recognize->meioticratio > 1U) ? ((uint32_t)recognize->meioticratio * 100U) : 100U); /* 优先用完整倍率（实际倍率 × 100）；没有完整值时，把 Page3 整数倍率乘 100；两者都没有时用 100，表示 1 倍。 */
+	memory->current_work = recognize->overloadThresholdFor; /* 手动切换时恢复本通道 EEPROM 通用保护电流，避免旧版手柄继续沿用上一次 RFID 阈值。 */
 	memory->eeprom_profile = recognize->eeprom_profile; /* 重新读取的方向及三档电流保存到本通道，不能继承旧RFID参数。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 手动模式仍使用手柄 Page4 默认注水流量，保证泵显示和运行一致。 */
 	memory->speed_alarm_for = recognize->speed_alarm_for; /* 手动模式同步手柄 EEPROM 正转速度报警阈值。 */
@@ -301,6 +302,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
 	WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	WorkMessage.auto_identify = 0U; /* 把当前工作模式改为手动识别刀具。 */
+	WorkMessage.current_work = memory->current_work; /* 同步当前工作态的 EEPROM 通用电流；新版手动三档阈值仍由驱动按刀具和设定速度选择。 */
 	WorkMessage.eeprom_profile = memory->eeprom_profile; /* 当前运行态同时切换到本手柄EEPROM许可和手动电流。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 当前使用的倍率也改为手柄 EEPROM 参数，后续发电机速度时按此换算。 */
 	WorkMessage.freq_work = memory->freq; /* 更新当前往复频率，下一次手动启动刨刀时使用此值。 */
