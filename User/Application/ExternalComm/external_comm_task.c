@@ -99,8 +99,8 @@ static uint8_t s_external_restart_stop_required = 0U; /* 异常重启置1，明�
 #define EXTERNAL_COMM_HANDLE_MODE_OSC       0x03U   /* 心跳手柄工作模式：当前手柄往复。 */
 #define EXTERNAL_COMM_HANDLE_MODE_UNKNOWN   0xFFU   /* 心跳手柄工作模式：当前没有可识别方向。 */
 #define EXTERNAL_COMM_HEARTBEAT_RUNTIME_MAGIC 0xA7U /* 运行参数扩展标记，放在刀具信息之后、RFID统计之前；未申请外控也必须发送。 */
-#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION 0x02U /* 版本2在频率之后增加控制模式和最近定位状态；上位机仍兼容只有频率的版本1。 */
-#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN 9U /* 运行参数共9字节：标记和版本各1字节、频率2字节，控制模式及定位状态/通道/方向/步长各1字节。 */
+#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION 0x03U /* 版本3保留版本2字段顺序，末尾增加A/B各自的可选方向位图和设置方向；上位机须按13字节解析。 */
+#define EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN 13U /* A7段共13字节：原9字节运行参数，加A方向位图/A设置/B方向位图/B设置；满配含RFID统计的整帧恰为160字节。 */
 #define EXTERNAL_COMM_HEARTBEAT_CONTROL_FOOT 0x01U /* 心跳当前控制模式：脚踏；只定义上报编码，不改变下发控制命令。 */
 #define EXTERNAL_COMM_HEARTBEAT_CONTROL_HANDLE 0x02U /* 心跳当前控制模式：手柄按键控制。 */
 #define EXTERNAL_COMM_HEARTBEAT_CONTROL_TOUCH 0x03U /* 心跳当前控制模式：本机触摸控制，外控标志必须未激活。 */
@@ -154,7 +154,7 @@ static uint8_t s_external_restart_stop_required = 0U; /* 异常重启置1，明�
 #define EXTERNAL_COMM_DOWN_READ_NAV_PAGE    0x08U   /* 下行命令：读取导航 EEPROM 单页数据。 */
 #define EXTERNAL_COMM_DOWN_READ_NAV_BATCH   0x09U   /* 下行命令：按实际页号范围批量读取导航 EEPROM。 */
 #define EXTERNAL_COMM_DOWN_WRITE_NAV_PAGE   0x0AU   /* 下行命令：写入导航 EEPROM 单页数据。 */
-#define EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION 0x0BU /* 下行命令：读取主控板 AT24C32 Page1 软件版本记录。 */
+#define EXTERNAL_COMM_DOWN_READ_SOFTWARE_VERSION 0x0BU /* 读取软件版本：Area FF主控、01手柄驱动、02A泵、03B泵，各占主控独立页。 */
 #define EXTERNAL_COMM_DOWN_WRITE_NAV_BATCH  0x0CU   /* 下行命令：把同一份 30 字节模板批量写入导航页范围。 */
 #define EXTERNAL_COMM_DOWN_HOST_EXIT        0xBBU   /* 下行命令：上位机主动退出外部控制，释放互斥控制权。 */
 #define EXTERNAL_COMM_DOWN_PERMISSION       0xFAU   /* 下行命令：功能升级或权限开放。 */
@@ -1764,11 +1764,11 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
         return 0U;
     }
 
-    if (!Pubinterface_IsRfidDirectionAllowed(dir))
+    if (!Pubinterface_IsDirectionAllowed(dir))
     {
-        return 0U; /* 外控不能绕过标签方向限制，拒绝时保留原方向和速度。 */
+        return 0U; /* 外控必须同时满足EEPROM和标签方向许可，拒绝时保留原方向和速度。 */
     }
-    if (Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type))
+    if (Pubinterface_IsDirLocked(WorkMessage.hand_model, WorkMessage.raw_tool_type, WorkMessage.eeprom_profile.direction_mask))
     {
         if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
         {
@@ -3658,37 +3658,64 @@ static uint8_t ExternalComm_ServiceEepromBatch(void)
     return 1U;
 }
 
+static uint8_t s_version_query_area; /* 1手柄、2A泵、3B泵，0表示没有版本查询。 */
+static uint8_t s_version_query_upload; /* 1为上位机主动读取，0为启动自动同步，只入EEPROM。 */
+static uint8_t s_version_boot_next = 1U; /* 启动后依次同步三块驱动，各只尝试一次，失败可手动重读。 */
 /*
- * 函数功能：读取主控板 AT24C32 Page1 中的软件版本记录并上传给上位机。
- * 输入参数：frame 为外部设备下发的 0x0B 读取命令。
- * 返回参数：无。
+ * 函数功能：读取主控或启动指定驱动的软件版本查询，所有记录保持33字节响应。
+ * 输入参数：frame为0B命令；FF主控，01手柄驱动，02A泵，03B泵，不带数据。
+ * 返回参数：无；驱动读取由周期服务完成，失败有明确状态。
  */
 static void ExternalComm_ReadSoftwareVersion(const ExternalCommFrame_t *frame)
 {
-    uint8_t payload[MAINBOARD_SW_VERSION_PAYLOAD_SIZE]; /* byte0 为读取/校验状态，byte1~32 为主控板 EEPROM Page1 原始记录。 */
-    uint16_t payload_len = 0U; /* 上传数据字节数，当前为 1 字节状态加 32 字节版本记录，共 33 字节。 */
-
-    if ((frame->area_code != EXTERNAL_COMM_AREA_NONE) || (frame->info_len != 0U))
+    uint8_t payload[MAINBOARD_SW_VERSION_PAYLOAD_SIZE] = {0U}; /* 失败时不回填旧EEPROM版本。 */
+    uint16_t payload_len = 33U; /* 状态1字节、版本记录32字节。 */
+    if (frame->info_len != 0U || (frame->area_code != EXTERNAL_COMM_AREA_NONE && (frame->area_code < 1U || frame->area_code > 3U)))
     {
-        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
-                                 frame->fun_code,
-                                 EXTERNAL_COMM_REASON_BAD_LENGTH); /* 软件版本读取不接受 AreaCode 和 InforArea，防止误当 EEPROM 页命令。 */
+        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED, frame->fun_code, EXTERNAL_COMM_REASON_BAD_LENGTH); /* 拒绝未知目标和多余数据。 */
         return;
     }
-
-    if (MainboardSoftwareVersion_ReadPayload(payload, sizeof(payload), &payload_len) == 0U)
+    if (frame->area_code == EXTERNAL_COMM_AREA_NONE)
     {
-        ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_MEMORY_FAILED,
-                                 frame->fun_code,
-                                 EXTERNAL_COMM_REASON_DEVICE_FAIL); /* 本地组包参数异常时返回设备失败，避免发送空版本帧。 */
-        return;
+        (void)MainboardSoftwareVersion_ReadPayload(payload, sizeof(payload), &payload_len); /* 主控原协议与Page1布局保持兼容。 */
     }
-
-    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_SOFTWARE_VERSION,
-                           EXTERNAL_COMM_AREA_NONE,
-                           EXTERNAL_COMM_INFO_NONE,
-                           payload,
-                           payload_len); /* 上传主控软件版本记录；状态非 0 时上位机显示具体 EEPROM/Page1 问题。 */
+    else if (ExternalComm_IsEepromRuntimeIdle() == 0U || WorkMessage.driver_speed_feedback != 0U)
+    {
+        payload[0] = 10U; /* 运行时拒绝驱动维护查询，不改变速度与启停状态。 */
+    }
+    else if (s_version_query_area != 0U || DriverSoftwareVersion_Request(frame->area_code) == 0U)
+    {
+        payload[0] = 7U; /* 已有版本或调参事务时回忙，不能覆盖请求归属。 */
+    }
+    else
+    {
+        s_version_query_area = frame->area_code; s_version_query_upload = 1U; /* 保存回应目标，不依赖界面当前选择。 */
+        return; /* 不阻塞等待串口，周期任务稍后发最终结果。 */
+    }
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_SOFTWARE_VERSION, frame->area_code, EXTERNAL_COMM_INFO_NONE, payload, payload_len); /* 各目标使用独立AreaCode。 */
+}
+/*
+ * 函数功能：推进驱动版本查询及启动同步，并在主动查询完成时上传最终结果。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void ExternalComm_ServiceSoftwareVersion(void)
+{
+    uint8_t payload[33]; /* 一个响应只携带一个目标的记录，避免串口超长。 */
+    uint8_t idle = (ExternalComm_IsEepromRuntimeIdle() != 0U && WorkMessage.driver_speed_feedback == 0U) ? 1U : 0U; /* 实测手柄停稳才允许维护口。 */
+    DriverSoftwareVersion_Service(idle); /* 运行请求优先，模块会取消查询而非阻塞控制。 */
+    if (s_version_query_area != 0U && DriverSoftwareVersion_Poll(payload) != 0U)
+    {
+        if (s_version_query_upload != 0U) ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_SOFTWARE_VERSION, s_version_query_area, EXTERNAL_COMM_INFO_NONE, payload, sizeof(payload)); /* 回给原目标，失败不显示历史版本。 */
+        s_version_query_area = 0U; s_version_query_upload = 0U; /* 释放这笔外部事务。 */
+    }
+    if (s_version_query_area == 0U && s_version_boot_next <= 3U && HAL_GetTick() >= 5000U && idle != 0U)
+    {
+        if (DriverSoftwareVersion_Request(s_version_boot_next) != 0U)
+        {
+            s_version_query_area = s_version_boot_next++; s_version_query_upload = 0U; /* 上电只同步一次，避免旧驱动反复超时占口。 */
+        }
+    }
 }
 
 /*
@@ -4843,13 +4870,15 @@ static void ExternalComm_HeartbeatAppendOfflinePressure(uint8_t *info_area, uint
 }
 
 /*
- * 函数功能：在普通心跳中追加当前频率、控制模式和最近定位信息，待机或未申请外控时也可读取。
- * 输入参数：info_area为本次心跳数据缓存；info_len为已写入长度，成功后增加9字节。
+ * 函数功能：在普通心跳中追加当前频率、控制模式、最近定位和A/B方向信息，待机或未申请外控时也可读取。
+ * 输入参数：info_area为本次心跳数据缓存；info_len为已写入长度，成功后增加13字节。
  * 返回参数：无；缓存不足或参数为空时保留原数据和长度，不写入残缺扩展。
  */
 static void ExternalComm_HeartbeatAppendRuntime(uint8_t *info_area, uint16_t *info_len)
 {
     MotorToolPositionStatus_t position_status; /* 接收最近定位指令和主控等待状态，组帧时不向驱动查询绝对角度。 */
+    uint8_t direction_mask; /* 当前待上传通道的方向集合，bit0正转、bit1反转、bit2往复；运行和报警不清能力位。 */
+    uint8_t set_direction; /* 当前待上传通道的内部设置方向0/1/2，离线或未知为FF；上传时转成既有心跳1/2/3。 */
 
     if ((info_area == NULL) || (info_len == NULL))
     {
@@ -4857,11 +4886,11 @@ static void ExternalComm_HeartbeatAppendRuntime(uint8_t *info_area, uint16_t *in
     }
     if (*info_len > (EXTERNAL_COMM_HEARTBEAT_INFO_MAX_LEN - EXTERNAL_COMM_HEARTBEAT_RUNTIME_LEN))
     {
-        return; /* 必须一次放下整段频率、控制模式和定位信息，避免上位机读取残缺扩展。 */
+        return; /* 必须一次放下整段运行参数和两通道方向，避免上位机读取残缺扩展。 */
     }
 
     ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RUNTIME_MAGIC); /* 写入A7标记，上位机据此识别运行参数的起点。 */
-    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION); /* 写入版本2，接收方按9字节布局读取频率、控制模式和定位信息。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, EXTERNAL_COMM_HEARTBEAT_RUNTIME_VERSION); /* 写入版本3，接收方按13字节布局读取原运行参数和新增方向字段。 */
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, WorkMessage.freq_work); /* 当前往复频率按16位大端原值上传，与屏幕参数一致，不换算为Hz。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, ExternalComm_CurrentControlMode()); /* 上传脚踏、手控、触控或外控的当前选择，待机时也不省略。 */
     (void)MotorDrive_CopyToolPositionStatus(&position_status); /* 读取最近定位指令；没有记录时函数写入状态0、通道/方向FF和步长0。 */
@@ -4869,6 +4898,12 @@ static void ExternalComm_HeartbeatAppendRuntime(uint8_t *info_area, uint16_t *in
     ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.channel); /* 最近定位的逻辑通道单独上传，避免切换A/B后误认最近方向的归属。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.direction); /* 最近定位帧方向4为向左、5为向右；没有定位记录时上传FF。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, position_status.step); /* 最近定位帧步长原样上传，现有左右按钮发送1，不累加成绝对角度。 */
+    Pubinterface_GetChannelDirectionInfo(CHANNEL_A, &direction_mask, &set_direction); /* A7[9..10]读取A通道实际能力和设置，当前通道用实时值，其余用通道记忆。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, direction_mask); /* A7[9]为A可选方向：01正转、02反转、04往复，可按位组合；00表示无可用方向。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, (set_direction <= OSCDIR) ? (uint8_t)(set_direction + 1U) : EXTERNAL_COMM_HANDLE_MODE_UNKNOWN); /* A7[10]为A设置方向：01正转、02反转、03往复，FF离线或未知；不使用驱动补偿方向。 */
+    Pubinterface_GetChannelDirectionInfo(CHANNEL_B, &direction_mask, &set_direction); /* A7[11..12]独立读取B通道，避免两路方向随当前选择一起变化。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, direction_mask); /* A7[11]为B可选方向，位定义与A相同，离线或异常配置为00。 */
+    ExternalComm_HeartbeatAppendU8(info_area, info_len, (set_direction <= OSCDIR) ? (uint8_t)(set_direction + 1U) : EXTERNAL_COMM_HANDLE_MODE_UNKNOWN); /* A7[12]为B设置方向，编码与A相同，待机或未申请外控也上传。 */
 }
 
 /*
@@ -5625,6 +5660,7 @@ static void ExternalCommTaskFunc(uint32_t event)
 
     /* 检查驱动调参是否已有最终结果；没有正在等待的请求时不上传数据。 */
     ExternalComm_ServiceDriverParameter();
+    ExternalComm_ServiceSoftwareVersion(); /* 周期推进独立版本事务，保护控制任务不被串口等待阻塞。 */
 
     /* 外控有效时监控上位机保活；RS485 拔线后收不到下行帧，超时会释放外控并停止电机/泵。 */
     ExternalComm_CheckLinkWatchdog();

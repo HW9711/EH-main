@@ -13,6 +13,7 @@
 #include "sscBEEP.h"
 #include "uart5.h"
 #include "uart7.h"
+#include "mainboard_software_version.h" /* 版本记录统一由主控EEPROM模块管理。 */
 
 #define PUMP_DRIVER_FEEDBACK_FRAME_HEAD       0xAAU /* 步进驱动回包首字节固定为 0xAA。 */
 #define PUMP_DRIVER_FEEDBACK_FRAME_SIZE       7U    /* 7字节回包依次为帧头、方向、实际速度高低字节、状态/故障字节和CRC低高字节。 */
@@ -545,6 +546,11 @@ static void PumpBehavior_ParseDriverFeedback(PumpBehaviorChannel_t channel,
         uint16_t received_crc; /* 候选帧 byte5~6 按低字节在前还原的驱动 CRC。 */
         uint8_t driver_error; /* 本帧的驱动故障码；新协议从第5字节低4位取出，定位失败另外按故障6处理。 */
 
+        if (rx_data[offset] == 0xABU)
+        {
+            offset += DriverSoftwareVersion_CapturePump((uint8_t)channel, &rx_data[offset], (uint16_t)(received_len - offset)); /* 版本记录整段隔离，内部AA字节不得误报驱动故障。 */
+            continue; /* 后续普通反馈仍按原7字节协议解析。 */
+        }
         if (rx_data[offset] != PUMP_DRIVER_FEEDBACK_FRAME_HEAD)
         {
             ++offset; /* 非 0xAA 字节不可能是帧起点，只跳一字节继续寻找。 */
@@ -1122,7 +1128,16 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active); /* 灌注按压力减速或归零，注水包含排空仅提示；驱动故障仍优先输出零速。 */
     PumpBehavior_ServiceDrainage(binding->message, drainage_active, &pump_speed, &uart_data); /* 处理屏幕排空的10秒计时；到时清掉排空请求和待发送速度，不按压力值提前结束。 */
     binding->publish_output_speed(pump_speed); /* 先保存本周期输出设定，再发送驱动帧和刷新颜色；该值不是实测转速。 */
-    PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction, control); /* 周期帧长度不变，明确校准或取消均强制独立零速帧。 */
+    {
+        uint8_t version_query[6]; /* 独立只读查询与原控制帧同长，不增加本周期发送次数。 */
+        if (request_active == 0U && uart_data == 0U && control == 0U && runtime->realign_phase == 0U &&
+            PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U && snapshot.actual_speed == 0U && snapshot.alignment_state != PUMP_DRIVER_ALIGNING &&
+            DriverSoftwareVersion_TakePumpQuery((uint8_t)channel, version_query) != 0U)
+        {
+            binding->send_packet(version_query, 6U); /* 仅替换一次停止帧，下一25ms周期恢复控制；定位和取消命令始终优先。 */
+        }
+        else PumpBehavior_SendFrame(binding, uart_data, runtime->business_direction, control); /* 无查询或仍在运行/定位时保持原控制时序。 */
+    }
     PumpBehavior_UpdateColor(channel, binding, runtime, uart_data); /* 定位时保持白色，正常运行按命令启停刷新泵颜色。 */
 }
 

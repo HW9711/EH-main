@@ -122,6 +122,10 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
 #define HANDLESCAN_INITIAL_REV_ALARM_OFFSET   12U /* Page4[12..13] 保存反转速度报警阈值，单位 rpm，低字节在前。 */
 #define HANDLESCAN_INITIAL_OSC_ALARM_OFFSET   14U /* 当前只读取 Page4[14] 作为往复频率蜂鸣阈值，不读取第 15 字节。 */
 #define HANDLESCAN_INITIAL_CURRENT_THRESHOLD_OFFSET 21U /* Page4[21..22] 保存驱动过流保护阈值，单位 0.01A；0 表示驱动板使用自身默认保护值。 */
+#define HANDLESCAN_CONTROL_PROFILE_OFFSET 23U /* Page4[23]：00旧版，01仅默认方向，10正反转，11正反往复；均为十六进制。 */
+#define HANDLESCAN_MANUAL_GRIND_LOW_OFFSET 24U /* Page4[24..25]保存PX手动磨头设定转速<30000的电流，LE16、0.01A。 */
+#define HANDLESCAN_MANUAL_GRIND_HIGH_OFFSET 26U /* Page4[26..27]保存PX手动磨头设定转速>=30000的电流，LE16、0.01A。 */
+#define HANDLESCAN_MANUAL_PLANER_CURRENT_OFFSET 28U /* Page4[28..29]保存PX手动刨刀电流，LE16、0.01A。 */
 #define HANDLESCAN_PX_PLANER_PROFILE_MARK_OFFSET 17U /* Page3[17..20] 保存ASCII“PX01”，明确标识PX手动刨刀24位速度扩展。 */
 #define HANDLESCAN_PX_PLANER_PROFILE_DEFAULT_OFFSET 21U /* Page3[21..23] 小端保存手动刨刀默认转速，单位rpm。 */
 #define HANDLESCAN_PX_PLANER_PROFILE_MIN_OFFSET 24U /* Page3[24..26] 小端保存手动刨刀最小转速，单位rpm。 */
@@ -957,7 +961,11 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     keep_speed_oscstep_large = message->speed_oscstep_large; /* 暂存往复大步进，等待刀具能力确认后继续使用。 */
 
     payload = rfid_result->payload; /* 原文只用于PX普通刨刀最低转速特例。 */
-    memset(message, 0, sizeof(*message)); /* RFID 刀具头重新识别时先清旧识别缓存，避免旧 EEPROM 字段残留。 */
+    {
+        HandleEepromProfile_t eeprom_profile = message->eeprom_profile; /* RFID只更新刀具，先保留本通道手柄自身方向和手动电流。 */
+        memset(message, 0, sizeof(*message)); /* 清理旧标签字段，防止新刀具继承上一标签参数。 */
+        message->eeprom_profile = eeprom_profile; /* 恢复已通过EEPROM校验的本体配置，不被换刀或射频重识别清除。 */
+    }
 
     message->handle_type = mapped_model; /* 手柄基座型号仍来自 EEPROM 第二页，RFID 只更新刀具头信息。 */
     message->hand_type_raw_major = raw_type_major; /* 保存 EEPROM 第二页原始主类型，上位机心跳仍按基座身份显示。 */
@@ -1101,6 +1109,7 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
     }
 
     memset(message, 0, sizeof(*message)); /* 先清空刀具字段，确保上位机只显示“等待 RFID”，不会看到全 0 假刀具。 */
+    message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 未读到本手柄Page4前禁止运行，不能把未初始化值当旧版。 */
     message->handle_type = mapped_model; /* 保存基座型号，插拔事件链会把它搬到 MemoryMsgA/B。 */
     message->hand_type_raw_major = raw_type_major; /* 保存 EEPROM 第二页原始主类型，上位机手柄卡片按该值显示 PXBA/PXBB。 */
     message->hand_type_raw_minor = raw_type_minor; /* 保存 EEPROM 第二页原始子类型，便于区分 PXBA、PXBB 和公共接头。 */
@@ -1729,12 +1738,17 @@ static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t mi
 }
 
 /*
- * 函数功能：解析EEPROM Page4默认运动方向，并按EEPROM手柄能力限制电气往复。
+ * 函数功能：解析EEPROM默认方向；新版按本体许可，旧版保留原型号往复限制。
  * 输入参数：message为当前通道识别缓存；raw_direction为EEPROM Page4方向字节。
  * 返回参数：项目内部方向值；MXYTP/MXYTM不再进入本函数，统一由公共接头RFID EPC路径解析。
  */
 static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t *message, uint8_t raw_direction)
 {
+    if ((message != NULL) && (message->eeprom_profile.direction_mask != 0U))
+    {
+        return ((raw_direction >= 1U) && (raw_direction <= 3U)) ? (uint8_t)(raw_direction - 1U) : ZZDIR; /* 新版默认方向已由扩展检查，非法扩展保持锁定，不再按型号改方向。 */
+    }
+
     if (raw_direction == HANDLESCAN_INITIAL_DIRECTION_REVERSE)
     {
         return FZDIR; /* Page4[8]=0x02表示默认反转；固定方向EEPROM手柄上线后会锁住该方向。 */
@@ -1752,6 +1766,64 @@ static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t 
 
     return ZZDIR; /* Page4[8]=0x01或异常值按正转处理，保持普通EEPROM手柄安全默认。 */
 }
+/*
+ * 函数功能：解析手柄Page4的方向和PX手动电流扩展；异常格式保持禁止运行。
+ * 输入参数：message为已识别Page2型号的通道缓存；initial_info_buf为通过页校验的Page4。
+ * 返回参数：无；旧版标记0保留旧规则，新版有效时发布方向许可及三档电流。
+ */
+static void Handlescan_UpdateEepromControlProfile(ChannelrecognizeMessage_t *message, const uint8_t *initial_info_buf)
+{
+    uint8_t mode = initial_info_buf[HANDLESCAN_CONTROL_PROFILE_OFFSET]; /* 直接读取01/10/11三档许可，不再混合版本标记。 */
+    uint8_t mask; /* 把三档协议值转换为运行态方向位，后续入口统一检查正转、反转和往复。 */
+    uint8_t default_direction = initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]; /* Page4默认方向按1/2/3编码。 */
+
+    message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 先锁住，所有格式和电流检查完成后才开放方向。 */
+    message->eeprom_profile.manual_grind_current_low = 0U; /* 清掉旧低速电流，避免换柄后沿用上一只配置。 */
+    message->eeprom_profile.manual_grind_current_high = 0U; /* 清掉旧高速电流，读取失败不能使用残留值。 */
+    message->eeprom_profile.manual_planer_current = 0U; /* 清掉旧刨刀电流，异常配置不回退到驱动默认保护。 */
+    if (mode == 0U)
+    {
+        message->eeprom_profile.direction_mask = 0U; /* 明确的旧版Page4才保留原型号方向和原电流规则。 */
+        return; /* 旧版剩余保留字节不解释为新电流。 */
+    }
+    if ((default_direction < 1U) || (default_direction > 3U))
+    {
+        return; /* 默认方向必须是1正转、2反转或3往复，非法值保持禁止运行。 */
+    }
+    if (mode == 0x01U)
+    {
+        mask = (uint8_t)(1U << (default_direction - 1U)); /* 单方向只开放本页默认方向，默认正转、反转或往复均可。 */
+    }
+    else if (mode == 0x10U)
+    {
+        if (default_direction == 3U)
+        {
+            return; /* 双方向只允许正反转，默认往复与本档冲突时禁止运行。 */
+        }
+        mask = 0x03U; /* 双方向开放正转和反转，不开放往复。 */
+    }
+    else if (mode == 0x11U)
+    {
+        mask = HANDLE_EEPROM_DIRECTION_BITS; /* 三方向开放正转、反转和往复，RFID仍可进一步限制。 */
+    }
+    else
+    {
+        return; /* 未定义的档位保持禁止运行，不能当作旧版或全部开放。 */
+    }
+
+    message->eeprom_profile.manual_grind_current_low = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_MANUAL_GRIND_LOW_OFFSET); /* Page4[24..25]保存低速磨头0.01A阈值。 */
+    message->eeprom_profile.manual_grind_current_high = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_MANUAL_GRIND_HIGH_OFFSET); /* Page4[26..27]保存高速磨头0.01A阈值，30000归此档。 */
+    message->eeprom_profile.manual_planer_current = Handlescan_ReadUint16LE(initial_info_buf, HANDLESCAN_MANUAL_PLANER_CURRENT_OFFSET); /* Page4[28..29]保存手动刨刀0.01A阈值。 */
+    if (((message->handle_type == PXBA_ONLINES) || (message->handle_type == PXBB_ONLINES)) &&
+        ((message->eeprom_profile.manual_grind_current_low == 0U) ||
+         (message->eeprom_profile.manual_grind_current_high == 0U) ||
+         (message->eeprom_profile.manual_planer_current == 0U)))
+    {
+        return; /* 新版PX必须完整配置三档电流，零值不得被驱动解释为内部默认保护。 */
+    }
+    message->eeprom_profile.direction_mask = mask; /* 所有检查通过后最后发布本手柄的有效方向能力。 */
+}
+
 /*
  * 函数功能：把 EEPROM Page4 初始值信息解析到通道识别结构，供插入事件装载默认速度、频率、注水流量和阈值。
  * 输入参数：message 目标通道识别结构；initial_info_buf 已通过页尾校验的 Page4 缓存。
@@ -1793,7 +1865,8 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 
     
 
-    message->run_direction = Handlescan_ParseInitialDirection(message, initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 按 Page4 默认方向解析，往复方向会先校验手柄能力。 */
+    Handlescan_UpdateEepromControlProfile(message, initial_info_buf); /* 必须先解析版本、许可和PX电流，随后默认方向才可按新版装载。 */
+    message->run_direction = Handlescan_ParseInitialDirection(message, initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]); /* 新版按EEPROM默认方向；旧版继续执行型号能力保护。 */
     message->freq_default = initial_info_buf[HANDLESCAN_INITIAL_FREQ_OFFSET]; /* 原样保存 Page4 默认频率指令值，往复启动时使用，不在这里换算 Hz。 */
     message->freq_min = FreqMin;                             /* Page4 未提供频率下限，沿用现有 UI 频率下限宏保持调节边界。 */
     message->freq_max = FreqMax;                             /* Page4 未提供频率上限，沿用现有 UI 频率上限宏保持调节边界。 */
@@ -1943,6 +2016,20 @@ static void Handlescan_LoadPage6SpeedStep(const HandlescanChannelBinding *bindin
 }
 
 /*
+ * 函数功能：为公共接头读取手柄本体方向许可，不覆盖尚待RFID提供的刀具速度和电流。
+ * 输入参数：binding为已确认身份的通道绑定。
+ * 返回参数：无；Page4读取失败时禁止本通道全部方向。
+ */
+static void Handlescan_LoadRfidBaseControlProfile(const HandlescanChannelBinding *binding)
+{
+    binding->message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 读取失败不能被误当作旧版无限制。 */
+    if (Handlescan_ReadEepromPage(binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX, binding->context->initial_info_buf) != 0U)
+    {
+        Handlescan_UpdateEepromControlProfile(binding->message, binding->context->initial_info_buf); /* 只装载手柄自身许可，RFID仍负责刀具默认参数。 */
+    }
+}
+
+/*
  * 函数功能：按通道重新读取分体式手柄自身 EEPROM 的运行参数。
  * 输入参数：binding 指定 A/B 通道、该通道的 EEPROM 和识别缓存。
  * 返回参数：true 表示 Page3 和 Page4 都读取成功；false 表示至少一页失败，调用方继续使用读取失败时设置的默认参数。
@@ -1964,6 +2051,7 @@ static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding
     AT24CS32_ClearLastDebugInfo();                            /* 读取 Page3 前清调试缓存，现场排查时可直接看到本次失败页。 */
     tool_read_status = Handlescan_ReadEepromBytes(binding, HANDLESCAN_TOOL_INFO_ADDR, context->tool_info_buf, HANDLESCAN_TOOL_INFO_SIZE); /* 从绑定通道读取Page3完整业务区，倍率和PX01速度扩展必须一次读全。 */
     AT24CS32_ClearLastDebugInfo();                            /* Page3 读取结束后切换到 Page4 调试上下文。 */
+    message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 本次Page4读取失败必须保持禁止运行，不能沿用旧许可或默认基座参数。 */
     initial_read_status = Handlescan_ReadEepromPage(binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX, context->initial_info_buf); /* 从绑定通道读取 Page4 运行参数。 */
     Handlescan_UpdateToolRatioMessage(message, (tool_read_status != 0U) ? context->tool_info_buf : NULL); /* Page3 失败时按 1 倍保护。 */
     if (initial_read_status != 0U)
@@ -2129,6 +2217,7 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
         return;
     }
 
+    memset((void *)&message->eeprom_profile, 0, sizeof(message->eeprom_profile)); /* 真实拔柄或无效插入清除本体配置，RFID掉线路径不得执行此清理。 */
     message->handle_type = 0U;
     message->hand_type_raw_major = 0U;                       /* 清掉 Page2 原始主类型，避免下一次上线前外部通信读到旧手柄编码。 */
     message->hand_type_raw_minor = 0U;                       /* 清掉 Page2 原始子类型，保持识别缓存和当前插拔状态一致。 */
@@ -3008,6 +3097,9 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
       (void)Handlescan_LoadSplitBaseEepromRuntime(
           binding); /* PXBA/PXBB 继续从自身 EEPROM 装载 Page3/Page4，行为与运行中插入 TM 一致。 */
     }
+    else {
+      Handlescan_LoadRfidBaseControlProfile(binding); /* 公共接头同样读取EEPROM方向许可，保留RFID刀具参数来源。 */
+    }
     Handlescan_LoadPage6SpeedStep(
         binding); /* 从新插入手柄 EEPROM 装载本通道调速步进，不修改正在运行通道的 WorkMessage。 */
     context->offline_event_required = 1U; /* 运行期间识别到另一通道基座后已经请求显示在线，后续拔出不得静默回到空闲态。 */
@@ -3048,6 +3140,9 @@ static bool Handlescan_ProcessRfidBase(const HandlescanChannelBinding *binding,
     if ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) {
       (void)Handlescan_LoadSplitBaseEepromRuntime(
           binding); /* 分体式进入 RFID 等待时先恢复本通道 EEPROM 参数。 */
+    }
+    else {
+      Handlescan_LoadRfidBaseControlProfile(binding); /* 公共接头首读RFID前先取得自身方向许可，后续刀具只能进一步限制。 */
     }
     Handlescan_LoadPage6SpeedStep(
         binding); /* 可拆式基座先装入本通道 Page6 步进。 */

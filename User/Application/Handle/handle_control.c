@@ -249,7 +249,12 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	recognize->raw_tool_type = 0U; /* 手动模式没有 RFID 原始刀具型号，清掉旧标签码。 */
 	recognize->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
 	recognize->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
-	recognize->run_direction = direction; /* 手动刨刀默认往复、手动磨头默认正转，保持旧 UI 交互习惯。 */
+	if ((recognize->eeprom_profile.direction_mask != 0U) &&
+        ((recognize->eeprom_profile.direction_mask & (1U << direction)) == 0U))
+    {
+        direction = recognize->run_direction; /* 手动默认方向被EEPROM禁止时改用同页合法默认方向；异常扩展仍由运行门禁阻止。 */
+    }
+	recognize->run_direction = direction; /* 保留磨头正转、刨刀往复习惯，但新版必须属于本手柄许可集合。 */
 	zz_speed = Handle_ClampSpeed(recognize,
 									 ZZDIR,
 									 Handle_GetDirectionDefaultSpeed(recognize, ZZDIR),
@@ -269,6 +274,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	memory->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	memory->auto_identify = 0U; /* 通道记忆进入手动模式，后续切回该通道不自动恢复 RFID。 */
 	memory->tool_reduction_ratio = (recognize->tool_reduction_ratio != 0U) ? recognize->tool_reduction_ratio : ((recognize->meioticratio > 1U) ? ((uint32_t)recognize->meioticratio * 100U) : 100U); /* 优先用完整倍率（实际倍率 × 100）；没有完整值时，把 Page3 整数倍率乘 100；两者都没有时用 100，表示 1 倍。 */
+	memory->eeprom_profile = recognize->eeprom_profile; /* 重新读取的方向及三档电流保存到本通道，不能继承旧RFID参数。 */
 	memory->default_injection_flow = recognize->default_injection_flow; /* 手动模式仍使用手柄 Page4 默认注水流量，保证泵显示和运行一致。 */
 	memory->speed_alarm_for = recognize->speed_alarm_for; /* 手动模式同步手柄 EEPROM 正转速度报警阈值。 */
 	memory->speed_alarm_rev = recognize->speed_alarm_rev; /* 手动模式同步手柄 EEPROM 反转速度报警阈值。 */
@@ -295,6 +301,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
 	WorkMessage.rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
 	WorkMessage.auto_identify = 0U; /* 把当前工作模式改为手动识别刀具。 */
+	WorkMessage.eeprom_profile = memory->eeprom_profile; /* 当前运行态同时切换到本手柄EEPROM许可和手动电流。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 当前使用的倍率也改为手柄 EEPROM 参数，后续发电机速度时按此换算。 */
 	WorkMessage.freq_work = memory->freq; /* 更新当前往复频率，下一次手动启动刨刀时使用此值。 */
 	WorkMessage.dir_work = memory->dir; /* 更新当前手动方向，显示速度和下一次启动速度都按这个方向选择。 */
@@ -628,6 +635,7 @@ void Handle_SelectRemainingOnlineAfterUnplug(void)
 static void Handle_ClearSelection(void)
 {
 	WorkMessage.hand_model = 0U;					   /* 没有任何手柄在线时清掉当前手柄型号，防止一体式手柄拔出后仍按旧型号刷新方向按钮。 */
+	memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
 	WorkMessage.tool_type = 0U;					   /* 没有任何手柄在线时清掉当前刀具能力，防止旧刨刀能力继续打开往复入口。 */
 	WorkMessage.raw_tool_type = 0U;				   /* 同步清掉原始刀具型号，避免后续驱动或上位机继续看到旧 EEPROM/RFID 代号。 */
 	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
@@ -737,6 +745,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 					Pubinterface_StopRunningHandleOnUnplug();  /* A 运行中拔出时立即请求停电机、停随手柄运行的注水泵，并按当前控制方式显示掉线报警。 */
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
+				memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
@@ -792,6 +801,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 					Pubinterface_StopRunningHandleOnUnplug();  /* B 运行中拔出时立即请求停电机、停随手柄运行的注水泵，并按当前控制方式显示掉线报警。 */
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
+				memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */

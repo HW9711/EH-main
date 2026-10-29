@@ -6,6 +6,17 @@
 #include "pump_control.h"
 #include "handle_control.h"
 
+#define HANDLE_EEPROM_DIRECTION_BITS 0x07U /* 手柄方向许可bit0正转、bit1反转、bit2往复；0仅表示已确认的旧EEPROM。 */
+#define HANDLE_EEPROM_PROFILE_INVALID 0x80U /* 新版参数非法或Page4读取失败时锁住全部方向，不能退回旧规则。 */
+
+typedef struct
+{
+    uint16_t manual_grind_current_low; /* PXBA/PXBB手动磨头设定转速<30000rpm的保护电流，单位0.01A。 */
+    uint16_t manual_grind_current_high; /* PXBA/PXBB手动磨头设定转速>=30000rpm的保护电流，单位0.01A。 */
+    uint16_t manual_planer_current; /* PXBA/PXBB手动刨刀保护电流，单位0.01A，不随速度和方向分档。 */
+    uint8_t direction_mask; /* Page4的01/10/11档位转换后的运行态许可位，非EEPROM原字节；0旧版，0x80异常禁止运行。 */
+} HandleEepromProfile_t; /* 参数属于手柄本体，RFID刷新只改刀具参数，不能清除此配置。 */
+
 /* 手柄型号固定编号：识别、控制和屏幕显示共用，不能当作可调参数修改。 */
 #define TMBB_ONLINES 1 //TMBB 手柄编号
 #define TMBA_ONLINES 2 //TMBA 手柄编号
@@ -28,7 +39,7 @@
 #define COMMON_SOCKET_ONLINES 19U//公共接头编号；接头没有实体按键，运行前还要识别 RFID 刀具
 #define EMBD_ONLINES         20U//EMBD 6 万增速手柄编号，用于 EEPROM 识别和屏幕显示
 #define EMBC_ONLINES         21U//EMBC 普通电动手柄编号，用于 EEPROM 识别和屏幕显示
-#define DHYTM_ONLINES        22U//DHYTM 反旋增速手柄编号；屏幕固定反转，电机实际正转，使用无霍尔无刷驱动
+#define DHYTM_ONLINES        22U//DHYTM反旋增速手柄编号；旧EEPROM固定反转，新版按方向许可及反旋机械关系输出，无霍尔无刷驱动
 #define GZYT_ONLINES         23U//GZYT 手柄编号；Page2 为 6B 11，在线后按钮脚切为串口接收，运行参数由 EEPROM 单独配置
 
 
@@ -236,6 +247,7 @@ typedef struct
   volatile uint8_t   touchactive_work;//屏幕触控激活标志
   volatile uint8_t   tool_type;//控制时使用的刀具类别，例如刨刀 PLANER、磨刀 GRINDH
   volatile uint8_t   raw_tool_type;//识别到的原始刀具型号；刨刀/磨刀分类后仍保留它，供驱动和上位机区分具体刀具
+    volatile HandleEepromProfile_t eeprom_profile; /* 本通道手柄EEPROM的方向和手动电流配置，随通道装载且不受RFID清理影响。 */
     volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
     volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
   volatile uint8_t   auto_identify;//当前通道是否采用 RFID 自动识别；切走后记住，切回来时恢复
@@ -292,6 +304,7 @@ typedef struct {
   volatile uint8_t   hand_type_raw_minor;//手柄EEPROM原始类型低字节，来自Page2第1字节，外部通信心跳在线时直接上传
   volatile uint8_t   tool_type;//控制用刀具类别：刨刀 PLANER 或磨刀 GRINDH
   volatile uint8_t   raw_tool_type;//原始刀具型号；tool_type 只分刨刀/磨刀，这里仍保留具体型号
+    volatile HandleEepromProfile_t eeprom_profile; /* 本通道手柄EEPROM的方向和手动电流配置，随通道装载且不受RFID清理影响。 */
     volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
     volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
   volatile uint8_t   drive_type;//驱动方式：脚控、手控、外控或触控
@@ -348,6 +361,7 @@ typedef struct
     volatile uint8_t   control_mode;//控制模式
     volatile uint8_t   tool_type;//刀具类型	
     volatile uint8_t   raw_tool_type;//RFID/EEPROM 读出的原始刀具型号，保留标签编号或旧型号编号
+    volatile HandleEepromProfile_t eeprom_profile; /* 本通道手柄EEPROM的方向和手动电流配置，随通道装载且不受RFID清理影响。 */
     volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
     volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
     volatile uint8_t   rfid_cache_hit;//是否再次识别到同一 RFID 刀具；是则保留用户已调好的速度和频率
@@ -433,8 +447,9 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按当前在线状态刷新 A/B 手柄图标，已拔出的通道显示为未连接。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断此刀具是否按刨刀方式控制。 */
-bool Pubinterface_IsRfidDirectionAllowed(uint8_t direction); /* 检查当前RFID允许的显示方向，0/1/2为正/反/往复。 */
-bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type); /* 判断此手柄或 RFID 刀具是否只能用固定方向，固定后屏幕和外控都不能改。 */
+bool Pubinterface_IsDirectionAllowed(uint8_t direction); /* 检查EEPROM与RFID共同允许的显示方向，0/1/2为正/反/往复；异常扩展全部禁止。 */
+bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type, uint8_t eeprom_mask); /* 新EEPROM按许可位判断是否单向锁定；旧版保持型号规则，RFID机械刀具限制仍生效。 */
+void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_mask, uint8_t *set_direction); /* 读取A/B各自方向集合和设置值；集合bit0/1/2为正/反/往复，设置0/1/2，离线0/FF，不代表运行中允许换向。 */
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */
 void Pubinterface_SetLastRfidToolType(uint8_t channel, uint8_t tool_type); /* 保存指定通道最近一次 RFID 刀具类型。 */
 void Pubinterface_ClearSelectedChannelDisplay(void); /* 无当前手柄时关闭运行参数区。 */

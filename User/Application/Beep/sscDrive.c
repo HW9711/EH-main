@@ -26,6 +26,7 @@
 /* 仅影响屏幕B通道的有刷手柄：下发保护电流=原阈值/(本宏/100)，不修改屏幕A、无刷手柄或原始设定。
  * 按系数乘100填写：114U表示除以1.14，110U表示除以1.10，100U表示不修正；数值越大，下发阈值越低。 */
 #define MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100 114U /* 屏幕B有刷电流校准系数，使用整数百分数避免浮点运算。 */
+#define MOTOR_DRIVE_PX_MANUAL_CURRENT_SPLIT_RPM 30000U /* PXBA/PXBB手动磨头按屏幕设定转速分档，等于此值使用高速电流。 */
 #define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* 每个速度单位为 10rpm：3000rpm 发 300；修改会改变所有手柄的下发转速。 */
 #define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* 速度字段最多 65535（16 位）；这是协议容量，不是手柄允许的工作转速。 */
 #define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 协议最多表示 655350rpm，仅防止数值溢出；实际工作上限由手柄参数限制。 */
@@ -556,6 +557,32 @@ static void MotorStart(uint32_t command_speed_rpm,
     }
 }
 /*
+ * 函数功能：选择本次发送的原始保护电流，PX新版手动模式按刀具和屏幕设定转速分档。
+ * 输入参数：无，读取当前通道工作参数；不使用脚踏行程速度或倍率换算后的电机速度。
+ * 返回参数：0.01A单位阈值；新版手动刀具无效返回0，由最终发送入口拒绝运行。
+ */
+static uint16_t MotorDrive_GetConfiguredCurrent(void)
+{
+    if ((WorkMessage.eeprom_profile.direction_mask != 0U) &&
+        ((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) &&
+        (WorkMessage.auto_identify == 0U))
+    {
+        if (WorkMessage.tool_type == PLANER)
+        {
+            return WorkMessage.eeprom_profile.manual_planer_current; /* 手动刨刀只用EEPROM刨刀阈值，不随速度和方向切档。 */
+        }
+        if (WorkMessage.tool_type == GRINDH)
+        {
+            return (WorkMessage.speed_set_work < MOTOR_DRIVE_PX_MANUAL_CURRENT_SPLIT_RPM) ?
+                WorkMessage.eeprom_profile.manual_grind_current_low :
+                WorkMessage.eeprom_profile.manual_grind_current_high; /* 磨头严格以屏幕设定转速分档，30000rpm本身取高速阈值。 */
+        }
+        return 0U; /* 新版PX手动模式未选有效刀具时不得沿用自动RFID或驱动默认电流。 */
+    }
+    return WorkMessage.current_work; /* 自动识别、其它手柄和旧EEPROM继续使用既有保护参数。 */
+}
+
+/*
  * 函数功能：根据当前 WorkMessage 运行态组帧，对屏幕B通道有刷保护电流校准后，向 UART1 下发启动或停止命令。
  * 输入参数：无。
  * 返回参数：无。
@@ -575,7 +602,14 @@ void MOTORRUN(void)
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
     uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
-    if (!Pubinterface_IsRfidDirectionAllowed((uint8_t)WorkMessage.dir_work)) /* 只约束已装载参数允许的方向，RFID未识别或掉线不再撤销运行请求。 */
+    command_current_value = MotorDrive_GetConfiguredCurrent(); /* 每周期重新取原始配置，之后才做屏幕B有刷校准，避免累计缩小。 */
+    if ((WorkMessage.eeprom_profile.direction_mask != 0U) &&
+        ((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) &&
+        (WorkMessage.auto_identify == 0U) && (command_current_value == 0U))
+    {
+        WorkMessage.runflag_work = false; /* 新版PX手动电流无效时最终入口禁止RUN，不能把0下发为驱动默认保护。 */
+    }
+    if (!Pubinterface_IsDirectionAllowed((uint8_t)WorkMessage.dir_work)) /* EEPROM和RFID取交集，非法扩展或禁止方向必须最终转为STOP。 */
     {
         WorkMessage.runflag_work = false; /* 当前方向不被已装载参数允许时，本周期仍禁止发送运行命令。 */
         WorkMessage.speed_work = 0U; /* 清目标速度，后续沿原停止路径发送零速帧。 */
@@ -623,7 +657,14 @@ void MOTORRUN(void)
     if((requested_run_state!=0U) && (motor_source_speed!=0U))
     {
         motor_output_run_state=1U; /* 只有RUN和非零原始速度同时成立，才允许进行机械倍率与启动补偿。 */
-        ssc_speed_value=MotorDrive_ApplyToolReductionRatio(motor_source_speed); /* 合法非零目标统一按EEPROM/RFID倍率换算成电机实际rpm。 */
+        ssc_speed_value=motor_source_speed; /* 单独保存实际输出目标，不改屏幕设定、脚踏显示和原始速度记录。 */
+        if(((WorkMessage.hand_model==PXBA_ONLINES)||(WorkMessage.hand_model==PXBB_ONLINES)) &&
+           (MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify)==OSCDIR) &&
+           (ssc_speed_value<700U))
+        {
+            ssc_speed_value=700U; /* 分体手柄电气往复的非零目标最低按刀具端700rpm运行；零速已由上方门禁排除。 */
+        }
+        ssc_speed_value=MotorDrive_ApplyToolReductionRatio(ssc_speed_value); /* 最低运行速度先按刀具端处理，再沿用原减速比和驱动协议换算。 */
     }
     // if(WorkMessage.hand_model==PX_YIP_ONLINES) /* 仅 PXYTP 临时启用 5 倍减速验证，避免影响其它手柄和后续 EEPROM 正式方案。 */
     // {
@@ -688,9 +729,20 @@ void MOTORRUN(void)
                 effective_dir_work=ZZDIR; /* 单向正反转互换；往复命令保持原值，不改变 RFID 的往复限制。 */
             }
         }
-        else if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM屏幕固定显示反转，但内部反旋机械结构要求电机始终正转。 */
+        else if(WorkMessage.hand_model==DHYTM_ONLINES) /* DHYTM保留反旋机械关系；新版方向选择由EEPROM决定。 */
         {
-            effective_dir_work=ZZDIR; /* 只覆盖本次驱动帧方向，不回写屏幕和通道记忆，确保界面仍固定显示反转。 */
+            if(WorkMessage.eeprom_profile.direction_mask==0U)
+            {
+                effective_dir_work=ZZDIR; /* 旧EEPROM继续固定电机正转，保持已验证的历史行为。 */
+            }
+            else if(effective_dir_work==ZZDIR)
+            {
+                effective_dir_work=FZDIR; /* 新版允许显示正转时，反旋结构需要实际电机反转。 */
+            }
+            else if(effective_dir_work==FZDIR)
+            {
+                effective_dir_work=ZZDIR; /* 新版显示反转仍对应实际电机正转；许可往复时保持往复模式。 */
+            }
         }
         else if(WorkMessage.hand_model==EMBD_ONLINES) /* EMBD 现场电机实际方向与协议方向相反，只针对该手柄在驱动帧前取反。 */
         {
@@ -747,7 +799,7 @@ void MOTORRUN(void)
         }
       msg.speed_h=command_speed_value/256;
       msg.speed_l=(command_speed_value)%256;//速度
-      command_current_value=WorkMessage.current_work; /* 每次组帧都取原始保护设定，避免50ms周期内反复缩小阈值；0仍表示驱动内部默认保护。 */
+      /* command_current_value已按本周期刀具和设定转速选好，以下只校准发送值，不回写EEPROM或通道记忆。 */
       if((WorkMessage.channel_work==CHANNEL_B) && ((msg.motor_type==0x03U) || (msg.motor_type==0x04U))) /* 以屏幕B判断校准对象；有刷类型已完成物理A/B映射，无刷和屏幕A不校准。 */
       {
           command_current_value=(uint16_t)(((uint32_t)command_current_value*100U+MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100/2U)/MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100); /* 按宏指定系数相除，半分母随系数变化以保持0.01A四舍五入；默认114U与原1.14换算一致。 */
