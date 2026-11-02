@@ -1504,15 +1504,15 @@ static void StopDriverFaultPumps(uint8_t blocked_mask)
 
 /*
  * 函数功能：显示泵压力或定位失败的限时弹窗；其它报警占用时保留原报警。
- * 输入参数：picture为屏幕图片号，74压力检测失效、79定位失败、89压力超限；duration为显示毫秒数。
+ * 输入参数：picture为屏幕图片号，74压力检测失效、76无液体输入、79定位失败、89压力超限；duration为显示毫秒数。
  * 返回参数：无。
  */
 static void RaisePumpAlarm(uint8_t picture, uint32_t duration)
 {
 	uint8_t display_value[10] = {0U}; /* 报警显示参数先清零，再填写泵提示逻辑码及指定图片。 */
 
-	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按74、79或89号图片区分，不能把本次提示当成无报警。 */
-	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，74、79和89共用现有报警显示区。 */
+	display_value[0] = WORK_ALARM_PUMP_PRESSURE_BLOCKED; /* 泵定位失败与压力提示共用15号逻辑码，上位机再按74、76、79或89号图片区分，不能把本次提示当成无报警。 */
+	display_value[1] = picture; /* UIAIARMDP优先使用Value[1]指定的图片号，74、76、79和89共用现有报警显示区。 */
 	s_pump_transient_alarm_tick = HAL_GetTick(); /* 记录本次提示开始时间，不改变泵运行请求。 */
 	s_pump_transient_alarm_duration = duration; /* 保存本次保持时长，超压3秒、检测失效2秒。 */
 	if ((WorkMessage.alarm_flag == false) &&
@@ -1587,6 +1587,22 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 	s_handle_injection_pump_follow_mask &= (uint8_t)~blocked_mask; /* 清掉故障泵已联动的记录，保留另一台泵记录。 */
 	StopDriverFaultPumps(blocked_mask); /* 撤销本泵运行及排空请求，由本泵任务发送零速。 */
 	ExternalComm_ClearPumpRunRequest(pump_channel); /* 只撤销对应泵的外控请求，避免旧请求重新启动故障泵。 */
+}
+
+/*
+ * 函数功能：灌注建压后持续失压4秒时停止本泵，清除旧请求并播放三声蜂鸣、显示76号图3秒。
+ * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不修改任何状态。
+ * 返回参数：无；不停止手柄和另一台泵，重新启动须由新的控制操作发起。
+ */
+void Pubinterface_HandlePumpNoLiquid(uint8_t pump_channel)
+{
+    if ((pump_channel != CHANNEL_A) && (pump_channel != CHANNEL_B)) /* 只处理明确的泵通道，防止错误调用影响其它设备。 */
+    {
+        return; /* 非法通道不停止设备、不播放报警。 */
+    }
+    HandlePumpDriverFaultStop(pump_channel); /* 复用单泵停机入口清运行、排空、联动和外控请求；不建立驱动故障码。 */
+    SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 复用六个100ms响停步骤，准确播放三声蜂鸣。 */
+    RaisePumpAlarm(76U, ALARM_PRESSURE_MS); /* 显示“灌注泵无液体流入，请检查！”3秒，沿用其它报警优先规则。 */
 }
 
 /*

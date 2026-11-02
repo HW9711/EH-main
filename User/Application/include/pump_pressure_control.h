@@ -70,6 +70,12 @@ extern "C" {
 #define PUMP_PRESSURE_EVENT_ALARM 0x01U
 /* 返回事件位1：压力检测失效，仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
 #define PUMP_PRESSURE_EVENT_SENSOR_FAULT 0x02U
+/* 返回事件位2：灌注正常建压后持续失压，要求本周期零速、撤销运行请求并提示76号图3秒。 */
+#define PUMP_PRESSURE_EVENT_NO_LIQUID 0x04U
+/* P90-MEDIAN-PIECEWISE-20261021-V1中10mmHg约为0.809934g；0.1g整数读数不超过8即严格低于10mmHg。 */
+#define PUMP_PRESSURE_POUR_NO_LIQUID_MAX_X10 8U
+/* 建压后连续低于10mmHg满4000ms才判无液体输入，任何有效回升或检测中断重新计时。 */
+#define PUMP_PRESSURE_POUR_NO_LIQUID_CONFIRM_MS 4000U
 
 /*
  * 旧版 UART10 压力调试开关，保留 0=关闭、1=开启的历史定义。
@@ -166,6 +172,10 @@ typedef struct
     uint8_t pour_last_high; /* 上一新样本是否达到当时输出流量的启动线；用户改设定时据此避免跳回高流量。 */
     uint8_t pour_low_timing_active; /* 连续低于或等于当前输出流量的恢复线时置1，回升或调档后重新确认。 */
     uint8_t sensor_fault_active; /* 本通道检测失效已提示标志；持续失效不重报，有效新帧恢复后清零。 */
+    uint32_t pour_no_liquid_tick_ms; /* 建压后首个连续失压新样本时刻，单位ms；按无符号差支持时钟回绕。 */
+    uint8_t pour_pressure_established; /* 本次非零流量运行曾有有效压力达到10mmHg，防止启动未建压被判脱管。 */
+    uint8_t pour_no_liquid_timing; /* 有效新压力连续低于10mmHg时置1，回升或传感器故障立即清零。 */
+    uint8_t pour_no_liquid_latched; /* 无液体输入确认后保持零输出，直到停止复位；恢复压力本身不能重新启动。 */
 } PumpPressureAlarmState_t;
 
 /* 停止或泵类型切换时清除单路压力记录，不修改开泵请求。 */

@@ -483,6 +483,7 @@ void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel); /* 
 uint8_t Pubinterface_GetInjectionPumpStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B泵压力提示只蜂鸣三声并显示89号弹窗3秒；灌注同一轮一次，不撤销运行请求。 */
+void Pubinterface_HandlePumpNoLiquid(uint8_t pump_channel); /* 灌注无液体输入时撤销本泵请求、蜂鸣三声并显示76号图3秒，另一泵和手柄不受影响。 */
 void Pubinterface_HandlePumpPressureSensorFault(uint8_t pump_channel); /* A/B泵压力检测失效仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
 /*
  * 函数功能：上电定位重试失败时显示79号报警图，3秒后自动关闭。

@@ -732,7 +732,7 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 /*
  * 函数功能：按泵用途处理压力；灌注按固定g阈值分级降流、保压和单次提示；注水与抽吸保留原提示逻辑。
  * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
- * 返回参数：本周期应下发的业务速度；灌注超压和压力检测失效均不清运行请求，失效时保持当前输出并独立提示。
+ * 返回参数：本周期应下发的业务速度；灌注超压和压力检测失效均不清运行请求，失效时保持当前输出并独立提示；无液体输入立即返回零并撤销本泵请求。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
@@ -742,7 +742,7 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
     uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
     uint16_t threshold_g; /* 压力帧中0表示无效；灌注使用固定0.1g整数阈值，注水/抽吸保留原配置。 */
     uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
-    uint8_t alarm_event; /* 事件位区分89号超压提示与74号检测失效提示，均不撤销运行请求。 */
+    uint8_t alarm_event; /* 事件位区分89号超压、74号检测失效及76号无液体输入；仅无液体输入撤销本泵运行请求。 */
     uint16_t output_speed; /* 灌注真实超压按策略调流，检测失效保持当前输出；注水和抽吸保持原设定速度。 */
     uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
 
@@ -773,6 +773,11 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
         alarm_event = PumpPressureControl_UpdateAlarm(&runtime->pressure_alarm, pump_speed,
                                                        (pump_type == INJECTWATER) ? 1U : 0U,
                                                        weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
+    }
+    if ((alarm_event & PUMP_PRESSURE_EVENT_NO_LIQUID) != 0U) /* 无液体输入必须优先撤销本泵请求，不能只将本周期流量暂时降为零。 */
+    {
+        Pubinterface_HandlePumpNoLiquid(binding->public_channel); /* 清除运行、排空及旧外控请求，并提示76号图3秒和三声蜂鸣。 */
+        return 0U; /* 本周期直接发送零速，避免等待下一25ms任务才停泵。 */
     }
     if ((alarm_event & PUMP_PRESSURE_EVENT_SENSOR_FAULT) != 0U) /* 检测失效使用独立74号图窗，不将保持输出改为零速。 */
     {
@@ -919,7 +924,7 @@ static uint16_t PumpBehavior_ConvertOutput(const PumpBehaviorBinding_t *binding,
             {
                 *pump_speed = 300U; /* 灌注设定流量最多为 300 mL/min。 */
             }
-            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注按逐档g阈值调流；超压及检测失效均仅提示，失效时保持当前输出。 */
+            *pump_speed = PumpBehavior_ApplyPressure(binding, runtime, pump_type, *pump_speed); /* 灌注按逐档g阈值调流；超压及检测失效仅提示，无液体输入确认后零速停泵。 */
             uart_data = PumpBehavior_ConvertWaterFlowToUart(*pump_speed); /* 灌注和注水共用流量曲线，高流量按本轮A/B平均实测修正。 */
             break;
 

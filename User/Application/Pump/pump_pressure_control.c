@@ -103,6 +103,7 @@ static uint8_t PumpPressure_ReportSensorFault(PumpPressureAlarmState_t *state, u
 {
     if (state->sensor_fault_active == 0U) /* 每路泵每次连续失效只提示一次，不能每25ms重复弹窗。 */
     {
+        state->pour_no_liquid_timing = 0U; /* 断帧或无效压力不能累计无液体时间，恢复新样本后重新确认完整4秒。 */
         state->sensor_fault_active = 1U; /* 独立于超压提示锁存，检测故障与本轮超压不会互相吞掉提示。 */
         state->timing_active = 0U; /* 无效压力不能延续超压确认，恢复后必须重新取得连续样本。 */
         state->pour_low_timing_active = 0U; /* 检测中断不能被误算为稳定低压，防止恢复后直接加速。 */
@@ -373,10 +374,10 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
 }
 
 /*
- * 函数功能：灌注按逐档g阈值确认超压，20档观察500ms仍未恢复则进入5并提示；试升后持续高于恢复线即退回5等待再次恢复，检测失效保持输出，停止请求优先。
+ * 函数功能：灌注按逐档g阈值确认超压，20档观察500ms仍未恢复则进入5并提示；试升后持续高于恢复线即退回5等待再次恢复，检测失效保持输出；建压后持续失压4秒停泵，停止请求优先。
  * 输入参数：state为单路独立状态；target_speed为用户设定mL/min；weight_x10为压力板0.1g读数；threshold_g只检查0表示无效。
- *           sequence为压力帧序号；now_ms为当前毫秒时刻；alarm_event接收本周期超压或检测失效提示事件，指针不能为NULL。
- * 返回参数：本周期应下发的流量目标；不修改用户设定，0仅表示用户停止请求。
+ *           sequence为压力帧序号；now_ms为当前毫秒时刻；alarm_event接收本周期超压、检测失效或无液体停机事件，指针不能为NULL。
+ * 返回参数：本周期应下发的流量目标；不修改用户设定，0表示用户停止或已确认无液体输入。
  */
 uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
                                        uint16_t target_speed,
@@ -415,6 +416,10 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
         state->target_speed = target_speed; /* 保存用户设定，保护过程只改变last_output_speed。 */
         state->last_output_speed = target_speed; /* 首次运行从用户设定建立输出，立即检查本周期压力有效性。 */
         state->pour_adjust_tick_ms = now_ms; /* 建立调档观察起点，后续慢调按实际时刻推进。 */
+    }
+    if (state->pour_no_liquid_latched != 0U) /* 无液体输入已确认时，后续压力回升或调速都不能恢复输出。 */
+    {
+        return 0U; /* 等待上层撤销运行请求及停止复位，不重复报警。 */
     }
     previous_output = state->last_output_speed; /* 后续判断用户是否实际改变了输出，而不因仅改设定清除本轮超压记录。 */
     if (state->target_speed != target_speed) /* 屏幕、脚踏和外控修改设定都保持同一压力过程。 */
@@ -463,6 +468,26 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     state->last_sequence = sequence; /* 保存本次新帧序号，255回到0也按新帧处理。 */
     state->sequence_valid = 1U; /* 首帧序号为0时也建立有效样本状态。 */
     state->last_sample_tick_ms = now_ms; /* 只有新有效帧刷新超时基准，旧值不能延长允许运行时间。 */
+    if (weight_x10 > PUMP_PRESSURE_POUR_NO_LIQUID_MAX_X10) /* 有效压力达到10mmHg才允许监测本次运行后续的失压。 */
+    {
+        state->pour_pressure_established = 1U; /* 所有非零流量共用建压记录，用户改流量或保护调流不清除。 */
+        state->pour_no_liquid_timing = 0U; /* 压力已回升，之前低于10mmHg的片段不能继续累计。 */
+    }
+    else if (state->pour_pressure_established != 0U) /* 启动后一直低压不属于从正常工作压力下降，不启动此项报警。 */
+    {
+        if (state->pour_no_liquid_timing == 0U) /* 从本段首个有效低压新帧开始计时。 */
+        {
+            state->pour_no_liquid_tick_ms = now_ms; /* 不能把此前正常压力或断帧时间算入连续失压。 */
+            state->pour_no_liquid_timing = 1U; /* 本通道进入4秒失压确认，不影响另一泵的计时。 */
+        }
+        else if ((uint32_t)(now_ms - state->pour_no_liquid_tick_ms) >= PUMP_PRESSURE_POUR_NO_LIQUID_CONFIRM_MS) /* 只在新有效帧上确认满4秒，支持毫秒计数回绕。 */
+        {
+            state->pour_no_liquid_latched = 1U; /* 锁存本轮无液体输入，避免压力回升后自动恢复运行。 */
+            state->last_output_speed = 0U; /* 本周期立即输出零流量，不经过原超压降档和自动恢复分支。 */
+            *alarm_event = PUMP_PRESSURE_EVENT_NO_LIQUID; /* 上层撤销运行请求，并播放三声蜂鸣及76号图3秒。 */
+            return 0U; /* 无液体停机优先于超压调流，原设定保留供排查后重新启动。 */
+        }
+    }
     is_high = (weight_x10 >= high_x10) ? 1U : 0U; /* 使用当前流量的离线g启动线，不执行mmHg曲线换算。 */
     if ((is_high != 0U) ||
         ((state->pour_phase == PUMP_PRESSURE_POUR_RECOVER) && (weight_x10 > recover_x10))) /* 首次降流仍按原分档启动线；试升必须保持在本档恢复线以下，进入保持区也算恢复失败候选。 */
