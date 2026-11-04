@@ -68,6 +68,7 @@ uint8_t ScreenKey_LegacyEventTake(void);
  * 输入参数：无，读取当前HAL毫秒时钟和最近接受时刻。
  * 返回参数：1 表示未到 420ms；0 表示没有有效信号、信号已取消或已到 420ms。
  */
+void ScreenKey_OnHandleChannelChanged(void); /* 换通道撤销旧触控保活；原按住尚未结束时须先松手，不能跨通道启动。 */
 uint8_t ScreenKey_IsAcceptedTouchKeepAliveFresh(void);
 
 //============================================================================

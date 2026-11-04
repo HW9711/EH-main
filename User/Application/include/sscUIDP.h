@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 extern uint8_t DisPlayData[10];
+void UIDP_RequestExternalControlHint(void); /* 本地启动被外控拒绝时请求88号短时提示，不改变电机和泵输出。 */
 
 uint8_t UIDP_IsStartupWaiting(void); /* 主运行页尚未切入时返回1，后台识别继续运行但不接受操作启动。 */
 

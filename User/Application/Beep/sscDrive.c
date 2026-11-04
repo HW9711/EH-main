@@ -543,7 +543,8 @@ static void MotorStart(uint32_t command_speed_rpm,
                                          1U, drive_type, source_speed_rpm, 0U); /* 发送成功后才发布重装 STOP，失败时保持原状态以便下周期继续重装。 */
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
-    if ((WorkMessage.runflag_work == false) || (WorkMessage.alarm_flag != false) ||
+    if (Pubinterface_IsRfidRunBlocked(WorkMessage.channel_work) || /* UART发帧前再拦截CRC锁定，避免前面检查后状态发生变化。 */
+        (WorkMessage.runflag_work == false) || (WorkMessage.alarm_flag != false) ||
         ((drive_type == JTWORK) && (Foot_IsMotorStopLatched() != 0U)))
     {
         MotorStops(0U, drive_type, 0U, 0U); /* 5ms重装间隔内松脚或发生报警时，最终发送点必须再次转为STOP。 */
@@ -602,6 +603,11 @@ void MOTORRUN(void)
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
     uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
+    if (Pubinterface_IsRfidRunBlocked(WorkMessage.channel_work))
+    {
+        WorkMessage.runflag_work = false; /* CRC故障或尚未松开的旧启动动作在最终输出处必须转STOP，77隐藏不能绕过。 */
+        WorkMessage.speed_work = 0U; /* 清实际运行目标，不改显示设定及另一通道参数。 */
+    }
     command_current_value = MotorDrive_GetConfiguredCurrent(); /* 每周期重新取原始配置，之后才做屏幕B有刷校准，避免累计缩小。 */
     if ((WorkMessage.eeprom_profile.direction_mask != 0U) &&
         ((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) &&
@@ -649,6 +655,8 @@ void MOTORRUN(void)
         motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
         display_speed_value=MotorDrive_QuantizeFootDisplaySpeed(WorkMessage.speed_work); /* 屏幕只显示 100rpm 整数倍；电机仍使用上方未量化的完整速度。 */
     }
+    motor_source_speed=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, motor_source_speed); /* 最终出口按本通道电气往复范围限速；配置无效会得到0并沿下方STOP路径处理。 */
+    display_speed_value=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, display_speed_value); /* 显示使用同一限幅结果，不把已截断的超限请求显示成实际运行速度。 */
     requested_run_state=(WorkMessage.runflag_work!=false)?1U:0U; /* 在任何倍率和低速补偿前冻结本周期原始启停请求。 */
     if((requested_run_state!=0U) && (motor_source_speed==0U))
     {

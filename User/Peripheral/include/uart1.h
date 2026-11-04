@@ -16,7 +16,7 @@ void Uart1_Init(void);
  */
 HAL_StatusTypeDef Uart1_SendPacket(uint8_t *pData, uint16_t Length);
 
-uint16_t Uart1_DMARecvDataPeek(uint8_t *data);
+uint16_t Uart1_DMARecvDataPeek(uint8_t *data, uint32_t *rx_window_start_ms); /* 取包时同时返回对应DMA接收窗口的起始时刻。 */
 
 void Uart1_DeInit(void);
 

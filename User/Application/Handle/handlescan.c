@@ -540,9 +540,7 @@ uint8_t Handlescan_GetVerifyAlarmForDisplay(void)
 {
     if (WorkMessage.alarm_flag != false) /* 持续报警优先，临时校验提示不能覆盖驱动等真实故障。 */
     {
-        if ((WorkMessage.alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
-            (WorkMessage.alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
-            (WorkMessage.alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB))
+        if (WorkAlarm_IsHandleEepromError(WorkMessage.alarm_value)) /* 75与90都由实际故障状态驱动，71仍走独立显示。 */
         {
             return WorkMessage.alarm_value; /* 另一通道仍校验失败时沿用合并后的实际报警归属。 */
         }
@@ -562,6 +560,7 @@ static uint8_t Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding
                                          uint8_t *page_buf);
 static bool Handlescan_IsManualSplitMode(const HandlescanChannelBinding *binding);
 static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding *binding);
+static uint32_t Handlescan_ClampDefaultSpeed(uint32_t default_speed, uint32_t min_speed, uint32_t max_speed); /* RFID往复默认值也须落在标签与本体的交集内。 */
 static void Handlescan_ReloadSpeedStepMessage(const HandlescanChannelBinding *binding);
 static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *binding,
                                            uint8_t mapped_model,
@@ -1017,7 +1016,24 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->speed_oscmax = max_speed; /* 往复上限使用 RFID 上限。 */
     message->speed_zzdefault = default_speed; /* 正转默认速度来自 RFID。 */
     message->speed_fzdefault = default_speed; /* 反转默认速度来自 RFID。 */
-    message->speed_oscdefault = default_speed; /* 往复默认速度来自 RFID。 */
+    message->speed_oscdefault = default_speed; /* 先保留标签默认值，PX电气往复随后按本体许可范围再次限制。 */
+    if (((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES)) &&
+        (tool_model != RFID_TOOL_MODEL_MXYTP)) /* MXYTP由机械机构往复，电机单向，不套用电气往复转速限制。 */
+    {
+        uint32_t osc_min = message->eeprom_profile.px_osc_speed_min; /* 取已经校验的本体下限，不能从上一次刀具的范围反推。 */
+        uint32_t osc_max = message->eeprom_profile.px_osc_speed_max; /* 本体上限随EEPROM配置保存，RFID memset后仍保留。 */
+        if (osc_min < min_speed) osc_min = min_speed; /* 有效刀具下限更高时收紧下限，禁止超出标签工作区。 */
+        if (osc_max > max_speed) osc_max = max_speed; /* 有效刀具上限更低时收紧上限，标签高上限不能扩大本体范围。 */
+        if ((message->eeprom_profile.px_osc_speed_min == 0U) ||
+            (osc_max < osc_min))
+        {
+            osc_min = 0U; /* 专用配置无效或交集为空时撤销往复资格，不能回退到Page4的70000。 */
+            osc_max = 0U; /* 清掉往复上限，统一限速入口会把该方向的任何非零请求改为0。 */
+        }
+        message->speed_oscmin = osc_min; /* 往复调速读取交集下限；正反转仍保持标签范围。 */
+        message->speed_oscmax = osc_max; /* 往复调速读取交集上限，A/B各自保留本体配置。 */
+        message->speed_oscdefault = (osc_min != 0U) ? Handlescan_ClampDefaultSpeed(default_speed, osc_min, osc_max) : 0U; /* 默认值也必须在交集内，避免识别后未调速就超限启动。 */
+    }
     message->speed_zzstep = keep_speed_zzstep; /* 先恢复正转基础步进；老 USER 在下方按型号覆盖，新 EPC 按有效转速范围覆盖。 */
     message->speed_fzstep = keep_speed_fzstep; /* 先恢复反转基础步进，固定转速刀具不分档时仍保留原配置。 */
     message->speed_oscstep = keep_speed_oscstep; /* 先恢复往复基础步进，后续与正反转一起按本次标签来源覆盖。 */
@@ -1884,13 +1900,13 @@ static void Handlescan_UpdateInitialInfoMessage(ChannelrecognizeMessage_t *messa
 }
 
 /*
- * 函数功能：为PXBA/PXBB手动刨刀装载Page3的24位速度扩展；格式缺失或数值异常时清零速度并禁止启动。
- * 输入参数：message为目标通道识别缓存；tool_info_buf为Page3业务区；pages_valid表示Page3/Page4已完整读取。
+ * 函数功能：装载PXBA/PXBB的Page3 PX01刨刀速度；初插仅替换往复范围，手动刨刀替换三方向范围；无效时对应速度清零。
+ * 输入参数：message为本通道识别缓存；tool_info_buf为Page3业务区；pages_valid表示Page3/Page4完整；osc_only为true时只改往复。
  * 返回参数：true表示专用速度配置有效；false表示配置不可用且速度字段已清零。
  */
-static bool Handlescan_ApplyPxManualPlanerSpeedProfile(ChannelrecognizeMessage_t *message,
-                                                       const uint8_t *tool_info_buf,
-                                                       bool pages_valid)
+static bool Handlescan_ApplyPxPlanerSpeedProfile(ChannelrecognizeMessage_t *message,
+                                                const uint8_t *tool_info_buf,
+                                                bool pages_valid, bool osc_only)
 {
     uint32_t default_speed = 0U; /* 默认保持不可运行，只有完整合法的EEPROM扩展才能赋予实际速度。 */
     uint32_t min_speed = 0U; /* 不在主控固化产品下限，后续范围完全由EEPROM配置。 */
@@ -1924,17 +1940,22 @@ static bool Handlescan_ApplyPxManualPlanerSpeedProfile(ChannelrecognizeMessage_t
         }
     }
 
-    message->speed_min = min_speed; /* 通用边界同步为手动刨刀范围，屏幕和外控调速使用同一限制。 */
-    message->speed_max = max_speed; /* 通用最大速度来自手动刨刀EEPROM扩展。 */
-    message->speed_zzmin = min_speed; /* 手动刨刀切到正转时也必须遵守EEPROM范围。 */
-    message->speed_zzmax = max_speed; /* 正转上限同步手动刨刀上限。 */
-    message->speed_fzmin = min_speed; /* 手动刨刀切到反转时也必须遵守刨刀范围。 */
-    message->speed_fzmax = max_speed; /* 反转上限同步手动刨刀上限。 */
+    message->eeprom_profile.px_osc_speed_min = min_speed; /* 保存本体专用下限，供RFID覆盖后继续收紧电气往复范围。 */
+    message->eeprom_profile.px_osc_speed_max = max_speed; /* 仅由已校验的PX01配置生成本体上限，无效时保持0。 */
+    if (osc_only == false) /* 手动刨刀沿用原有三方向专用范围；初插自动等待不能把单向70000上限一并改小。 */
+    {
+        message->speed_min = min_speed; /* 手动刨刀通用下限与专用配置同步。 */
+        message->speed_max = max_speed; /* 手动刨刀通用上限与专用配置同步。 */
+        message->speed_zzmin = min_speed; /* 手动刨刀正转继续使用专用下限。 */
+        message->speed_zzmax = max_speed; /* 手动刨刀正转继续使用专用上限。 */
+        message->speed_fzmin = min_speed; /* 手动刨刀反转继续使用专用下限。 */
+        message->speed_fzmax = max_speed; /* 手动刨刀反转继续使用专用上限。 */
+        message->speed_zzdefault = default_speed; /* 手动刨刀正转默认速度不回退到Page4通用值。 */
+        message->speed_fzdefault = default_speed; /* 手动刨刀反转默认速度保持原有专用参数规则。 */
+    }
     message->speed_oscmin = min_speed; /* 往复调速下限使用专用配置。 */
     message->speed_oscmax = max_speed; /* 往复调速上限使用专用配置。 */
-    message->speed_zzdefault = default_speed; /* 三个方向共用同一手动刨刀默认速度，避免切方向恢复通用30000rpm。 */
-    message->speed_fzdefault = default_speed; /* 反转默认值保持在专用刨刀范围内。 */
-    message->speed_oscdefault = default_speed; /* 手动刨刀默认往复速度只接受EEPROM配置；无效时保持0并形成停机帧。 */
+    message->speed_oscdefault = default_speed; /* 初插和手动刨刀的往复默认值均来自PX01；配置无效时保持0。 */
 
     return profile_valid; /* 调用方可据此判断本次Page3扩展是否完整可用。 */
 }
@@ -2034,7 +2055,7 @@ static void Handlescan_LoadRfidBaseControlProfile(const HandlescanChannelBinding
 }
 
 /*
- * 函数功能：按通道重新读取分体式手柄自身 EEPROM 的运行参数。
+ * 函数功能：按通道重读分体手柄Page3/Page4，并在基座阶段装载PX01专用往复范围；手动模式继续复用。
  * 输入参数：binding 指定 A/B 通道、该通道的 EEPROM 和识别缓存。
  * 返回参数：true 表示 Page3 和 Page4 都读取成功；false 表示至少一页失败，调用方继续使用读取失败时设置的默认参数。
  */
@@ -2063,6 +2084,8 @@ static bool Handlescan_LoadSplitBaseEepromRuntime(const HandlescanChannelBinding
         Handlescan_UpdateInitialInfoMessage(message, context->initial_info_buf); /* Page4 成功时恢复本通道默认运行参数。 */
     }
 
+    (void)Handlescan_ApplyPxPlanerSpeedProfile(message, context->tool_info_buf,
+                                             (bool)((tool_read_status != 0U) && (initial_read_status != 0U)), true); /* Page4之后立即替换往复专用范围，初插自动等待也不能沿用通用70000。 */
     return (bool)((tool_read_status != 0U) && (initial_read_status != 0U)); /* 返回完整恢复结果，调用方当前只作诊断。 */
 }
 
@@ -2109,9 +2132,9 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
     eeprom_loaded = Handlescan_LoadSplitBaseEepromRuntime(binding); /* 恢复本通道手柄 EEPROM Page3/Page4。 */
     if (manual_tool_type == PLANER)
     {
-        if (Handlescan_ApplyPxManualPlanerSpeedProfile(message,
-                                                       binding->context->tool_info_buf,
-                                                       eeprom_loaded) == false)
+        if (Handlescan_ApplyPxPlanerSpeedProfile(message,
+                                                binding->context->tool_info_buf,
+                                                eeprom_loaded, false) == false)
         {
             eeprom_loaded = false; /* 手动刨刀专用字段缺失时保持0速度并报告恢复失败，绝不使用通用Page4或主控固定值。 */
         }
@@ -2345,7 +2368,7 @@ static uint8_t Handlescan_GetChannelHandleAlarm(uint8_t channel)
 }
 
 /*
- * 函数功能：在 A/B 两通道都处于校验失败时，把全局报警升级为 AB。
+ * 函数功能：合并A/B故障，同类合并为AB，通信与校验混合时优先显示校验故障。
  * 输入参数：channel_alarm 当前通道报警码；peer_alarm 另一通道仍保持的报警码。
  * 返回参数：需要写入 WorkMessage 或临时上传的报警码。
  */
@@ -2354,6 +2377,18 @@ static uint8_t Handlescan_CombineHandleAlarm(uint8_t channel_alarm, uint8_t peer
     if ((channel_alarm == WORK_ALARM_HANDLE_UNSUPPORTED) || (peer_alarm == WORK_ALARM_HANDLE_UNSUPPORTED))
     {
         return WORK_ALARM_HANDLE_UNSUPPORTED; /* 任一侧不受支持时保留71号提示，不能合并成普通校验异常图。 */
+    }
+    if (WorkAlarm_IsHandleIicError(channel_alarm) || WorkAlarm_IsHandleIicError(peer_alarm)) /* 先分故障类别，禁止把双路通信故障合并成90号。 */
+    {
+        if (WorkAlarm_IsHandleIicError(channel_alarm) && WorkAlarm_IsHandleIicError(peer_alarm))
+        {
+            return (channel_alarm == peer_alarm) ? channel_alarm : WORK_ALARM_HANDLE_IIC_ERROR_AB; /* 两侧均通信失败才合并为75号双路码。 */
+        }
+        if ((peer_alarm != WORK_ALARM_NONE) && WorkAlarm_IsHandleEepromError(peer_alarm))
+        {
+            return WorkAlarm_IsHandleIicError(channel_alarm) ? peer_alarm : channel_alarm; /* 混合故障优先显示90；各侧归属仍保存，校验故障恢复后继承75。 */
+        }
+        return channel_alarm; /* 仅当前侧失败时保留其通信来源。 */
     }
     if ((Handlescan_IsHandleVerifyAlarm(channel_alarm) != 0U) &&
         (Handlescan_IsHandleVerifyAlarm(peer_alarm) != 0U) &&
@@ -2408,7 +2443,7 @@ static void Handlescan_SendHandleVerifyAlarmUi(uint8_t alarm_value, bool enable_
             return;                                          /* 只处理手柄 EEPROM 校验系列报警，避免运行中插拔等其它码误占用 90 号弹窗。 */
         }
 
-        display_value[0] = alarm_value;                      /* 把 A/B/AB 来源报警码送给 UIAIARMDP，当前屏幕统一映射到 90 号手柄校验异常图。 */
+        display_value[0] = alarm_value;                      /* 把 A/B/AB 来源报警码送给 UIAIARMDP，屏幕按通信或数据校验故障分别映射75/90号图。 */
         SendUIDSMessage(UI_AIARM_ID, true, display_value);   /* 持续报警建立后立即弹窗，避免只有蜂鸣和上位机报警但屏幕无提示。 */
         return;                                              /* 显示路径已经完成，不再执行关闭弹窗分支。 */
     }
@@ -2709,23 +2744,27 @@ static void Handlescan_EnterRetryOrFail(uint8_t channel,
 /*
  * 函数功能：把 EEPROM 校验结果换成该通道的报警码，是否已达到报警次数由调用方判断。
  * 输入参数：channel 为 A/B 通道；verify_status 为 EEPROM 校验结果。
- * 返回参数：校验成功返回 0，其它结果返回对应通道的手柄校验报警码。
+ * 返回参数：读失败返回75号系列，页和或CRC失败返回90号系列；成功、未完成及参数异常返回0。
  */
 static uint8_t Handlescan_MapVerifyStatusToAlarm(uint8_t channel, AT24CS32_CRC_Status verify_status)
 {
     switch (verify_status)
     {
-        case AT24CS32_CRC_STATUS_OK:
-            return 0U;
-
-        case AT24CS32_CRC_STATUS_DATA_READ_FAILED:
-        case AT24CS32_CRC_STATUS_BAD_PARAM:
         case AT24CS32_CRC_STATUS_PAGE1_READ_FAILED:
-        case AT24CS32_CRC_STATUS_PAGE1_CHECKSUM_FAILED:
         case AT24CS32_CRC_STATUS_SN_READ_FAILED:
+        case AT24CS32_CRC_STATUS_DATA_READ_FAILED:
+            return (channel == CHANNEL_A) ? WORK_ALARM_HANDLE_IIC_ERROR_A : WORK_ALARM_HANDLE_IIC_ERROR_B; /* IIC未完成读取时显示75，保留短接已接通的故障通道。 */
+
+        case AT24CS32_CRC_STATUS_PAGE1_CHECKSUM_FAILED:
+        case AT24CS32_CRC_STATUS_DATA_CHECKSUM_FAILED:
         case AT24CS32_CRC_STATUS_CRC_MISMATCH:
+            return Handlescan_GetChannelHandleAlarm(channel); /* 读取成功但页和或最终CRC错误时继续显示90。 */
+
+        case AT24CS32_CRC_STATUS_OK:
+        case AT24CS32_CRC_STATUS_PENDING:
+        case AT24CS32_CRC_STATUS_BAD_PARAM:
         default:
-            return Handlescan_GetChannelHandleAlarm(channel); /* A/B 通道使用不同报警码，供上位机弹窗直接区分来源。 */
+            return WORK_ALARM_NONE; /* 未完成或软件调用异常不伪装成接触/CRC故障；失败调用仍由上层保持未上线并重试。 */
     }
 }
 
@@ -2887,6 +2926,8 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
                     (WorkMessage.alarm_flag == true) &&
                     (Handlescan_IsHandleVerifyAlarm(WorkMessage.alarm_value) != 0U)); /* 只有本次拔出前确有持续校验报警，才允许建立关窗交接。 */
       context->unsupported_latched = 0U; /* 仅在拔出消抖完成且离线事件成功入队后解除本通道锁存。 */
+      Rfid_ResetToolCrcFault(binding->channel); /* 仅真实拔柄解除该侧CRC故障，普通刀具离线或切模式不得绕过。 */
+      Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_NONE, binding->channel); /* 同步撤销该侧旧启动动作提示，另一侧保持。 */
       Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* A
                                                                               通道坏手柄拔出后，释放本通道手柄型号错误报警。
                                                                             */

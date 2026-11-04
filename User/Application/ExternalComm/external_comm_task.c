@@ -1978,6 +1978,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
     switch (frame->area_code)
     {
         case 0x01U:
+            value = (uint16_t)Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, value); /* PX电气往复直接设置也要限幅，后面的屏幕、通道记忆和ACK均使用最终合法速度。 */
             /* 设置当前手柄速度。 */
             ExternalComm_SaveCurrentSpeed(value);
             break;

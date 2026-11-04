@@ -4,15 +4,15 @@
 #include <stdint.h>
 
 #ifndef MAINCTRL_DIAG_ENABLE
-#define MAINCTRL_DIAG_ENABLE 0U /* 诊断编译开关：0 不编译记录和读日志功能；1 记录脚踏、手柄、泵并允许 UART2 读取。改值后须重新编译。 */
+#define MAINCTRL_DIAG_ENABLE 0U /* 正常固件默认关闭UART2综合诊断；需要采集脚踏、手柄和泵日志时改为1后重新编译。 */
 #endif
 #if (MAINCTRL_DIAG_ENABLE != 0U) && (MAINCTRL_DIAG_ENABLE != 1U)
 #error "MAINCTRL_DIAG_ENABLE must be 0 or 1"
 #endif
 
-#define DIAG_PROTOCOL_VERSION 1U /* 诊断数据版本为 1；修改字段顺序或命令含义时，主控和上位机必须同时更新。 */
+#define DIAG_PROTOCOL_VERSION 2U /* 诊断数据版本为 1；修改字段顺序或命令含义时，主控和上位机必须同时更新。 */
 #define DIAG_FUNCTION_CODE 0x0EU /* 外部串口正式帧的诊断功能码；收到它只处理日志，不取得外控权限，也不延长外控在线时间。 */
-#define DIAG_RECORD_CAPACITY 1024U /* 最多保留 1024 条、每条 48 字节；满后覆盖最旧记录。调大可保留更多记录，但会增加 RAM 占用。 */
+#define DIAG_RECORD_CAPACITY 2048U /* 总计 96KiB；ARM 后最多滚动保留 1536 条事前记录，余量用于首次拦截后的记录。 */
 #define DIAG_RECORD_WORDS 9U /* 每条记录最多保存 9 个 32 位整数；串口传输时每个整数的低字节在前。 */
 
 /* 脚踏任务处理结束后复制的 AD、连接和启停判断数据；全部用 32 位字段，按声明顺序写入诊断记录。 */
@@ -112,7 +112,7 @@ typedef struct
     uint32_t can_run; /* 1：反馈未超时、驱动就绪且无故障、停机限制已解除、无定位或取消请求；否则为 0。 */
 } DiagnosticPumpBehaviorState_t;
 
-/* 日志组号须与上位机一致：1～89 为设备数据，90～93 为统计，110～120 为操作记录，128～147 为串口分段数据。 */
+/* 日志组号须与上位机一致：1～89 为设备数据，90～93 为统计，110～123 为操作记录，128～147 为串口分段数据。 */
 #define DIAG_EVENT_FOOT_GATE 110U /* 脚踏启动检查；channel 为踏板侧（1 左、2 右），没有指定侧时为 0。
  * a=1：踏板编号无效；b 为此前启动侧，c 为是否已确认松脚。
  * a=2：电机已有启动侧；b 为该启动侧，c=1 允许同侧继续，c=0 拒绝另一侧。
@@ -120,6 +120,8 @@ typedef struct
  * a=4：启动检查通过；b 为当前手柄通道，c=1，随后才处理运行请求。
  * a=5：其它控制方式占用；6 实时帧失效；7 异常重启待松脚；8 驱动故障后禁止启动。
  * a=5～8 时，b 为当前手柄通道，c=0。
+ * a=9：共用启动检查拒绝；b 为当前手柄通道，c=0；结合组 32 的 CRC 限制和报警状态区分原因。
+ * a=10：申请脚控权失败；a=11：当前模式或通道检查拒绝；b 为当前通道，c 为 0 或当前控制方式。
  */
 #define DIAG_EVENT_KEY_QUEUE 111U /* 按键队列：a 为控制方式，b 为键值，channel 表示消息处理到哪一步。
  * channel=0：尝试入队，c=0 失败、1 成功。
@@ -139,6 +141,10 @@ typedef struct
  * a=1：准备提出开泵请求；b 为选中的泵（1 A、2 B），c 为当前手柄通道。
  * a=2：撤销本侧请求；b 为本侧此前请求的泵，c 为另一侧仍请求的泵，0 表示无泵。
  */
+
+#define DIAG_EVENT_CAPTURE 121U /* 首次拦截锁存：依次为阶段(1触发/2自动锁存/3人工冻结)、原因、触发ms、触发序号、事前条数、事后条数、结束原因(0计时/1容量/2人工)、触发后ms、总容量。 */
+#define DIAG_EVENT_FOOT_PERMIT 122U /* 脚踏许可变化：a=0撤销/1松脚/2批准；b/c为旧/新状态，位0要求停机、位1已松脚、位8～15为启动侧；只在变化时记。 */
+#define DIAG_EVENT_OWNER 123U /* 控制权变化：a为旧来源，b为新来源，c=1空闲释放/2取得/3主动释放/4强制释放；channel为当时手柄通道。 */
 
 /* 压力解析任务结束后复制的收帧时间和恢复计数；只读已保存数据，不取走串口接收字节。 */
 typedef struct
@@ -165,7 +171,7 @@ uint8_t Diagnostic_IsCompleteRequest(const uint8_t *data, uint16_t length); /* �
 void Diagnostic_TransportService(void); /* 检查 UART2 发送完成或超时，再选取下一帧；普通通信帧优先于诊断应答。 */
 void Diagnostic_Checkpoint(void); /* 同一任务处理连续操作时，在操作之间记录手柄与 A/B 泵请求，保留中间的启停变化。 */
 void Diagnostic_Ui(uint8_t stage, uint8_t area, uint8_t enabled, const uint8_t *data, uint8_t result); /* 保存屏幕消息入队或取出记录；data 最多读取 10 字节，为 NULL 时按全零参数记录。 */
-void Diagnostic_FootConfig(uint8_t connected, uint8_t type, uint16_t ll, uint16_t lm, uint16_t lh, uint16_t rl, uint16_t rm, uint16_t rh); /* 记录脚踏控制任务已取出的配置；ll/lm/lh 为左侧低中高 AD，rl/rm/rh 为右侧低中高 AD。 */
+void Diagnostic_FootConfig(uint8_t connected, uint8_t type, uint16_t ll, uint16_t lm, uint16_t lh, uint16_t rl, uint16_t rm, uint16_t rh, uint16_t threshold); /* 记录控制任务实际配置和踩下余量，不能用解析层的新值替代。 */
 void SimUart_CopyDiagnosticState(uint8_t channel, DiagnosticPressureState_t *out); /* channel=1 A 压力板、2 B 压力板；out 接收已保存的收帧时间和计数，不取走接收字节。 */
 void Diagnostic_SendNormal(const uint8_t *data, uint16_t length); /* 复制完整普通外部通信帧并排队；data 不能为空，length 为 1～160 字节。 */
 uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, uint8_t info, const uint8_t *data, uint16_t length); /* CRC 校验通过后调用；返回 1 表示诊断帧到此处理结束，0 表示普通帧应继续原控制流程。 */
@@ -178,7 +184,7 @@ uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, ui
 #define DIAG_SERVICE() Diagnostic_TransportService() /* 编译开启时，由外部通信任务处理待发帧及发送超时。 */
 #define DIAG_CHECKPOINT() Diagnostic_Checkpoint() /* 编译开启时，记录同一任务内每次操作完成后的运行请求。 */
 #define DIAG_UI(stage, area, enabled, data, result) Diagnostic_Ui((stage), (area), (enabled), (data), (result)) /* 编译开启时，记录屏幕消息是否入队或已取出。 */
-#define DIAG_FOOT_CONFIG(msg) Diagnostic_FootConfig((msg)->connect_flag, (msg)->pedalType, (msg)->LValue_Left, (msg)->MValue_Left, (msg)->HValue_Left, (msg)->LValue_Right, (msg)->MValue_Right, (msg)->HValue_Right) /* 编译开启时，记录本条脚踏消息的连接标志、类型及定标 AD 值。 */
+#define DIAG_FOOT_CONFIG(msg, threshold) Diagnostic_FootConfig((msg)->connect_flag, (msg)->pedalType, (msg)->LValue_Left, (msg)->MValue_Left, (msg)->HValue_Left, (msg)->LValue_Right, (msg)->MValue_Right, (msg)->HValue_Right, (threshold)) /* 编译开启时，记录本条脚踏消息的连接标志、类型及定标 AD 值。 */
 #define DIAG_COMMAND(direction, function, area, info, data, length) Diagnostic_Command((direction), (function), (area), (info), (data), (length)) /* 编译开启时，识别并处理 UART2 诊断命令，返回值决定是否继续普通命令处理。 */
 void Foot_CopyDiagnosticState(DiagnosticFootState_t *out); /* out 接收脚踏解析和控制变量的副本；不重新解析报文，不修改踩踏请求。 */
 void Handlescan_CopyDiagnosticState(uint8_t channel, DiagnosticHandlescanState_t *out); /* channel=1 A、2 B；out 接收手柄识别记录和当前插入电平，不重新读取 EEPROM。 */
@@ -195,7 +201,7 @@ void PumpBehavior_CopyDiagnosticState(uint8_t channel, DiagnosticPumpBehaviorSta
 #define DIAG_SERVICE() ((void)0) /* 关闭诊断发送处理。 */
 #define DIAG_CHECKPOINT() ((void)0) /* 关闭连续操作之间的请求采集。 */
 #define DIAG_UI(stage, area, enabled, data, result) ((void)0) /* 关闭屏幕消息记录，不读取参数。 */
-#define DIAG_FOOT_CONFIG(msg) ((void)0) /* 关闭脚踏配置记录，不读取参数。 */
+#define DIAG_FOOT_CONFIG(msg, threshold) ((void)0) /* 关闭脚踏配置记录，不读取参数。 */
 #define DIAG_COMMAND(direction, function, area, info, data, length) 0U /* 返回 0，让原有外部通信代码继续判断收到的帧。 */
 #endif
 

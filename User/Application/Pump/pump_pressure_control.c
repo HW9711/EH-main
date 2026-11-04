@@ -103,7 +103,6 @@ static uint8_t PumpPressure_ReportSensorFault(PumpPressureAlarmState_t *state, u
 {
     if (state->sensor_fault_active == 0U) /* 每路泵每次连续失效只提示一次，不能每25ms重复弹窗。 */
     {
-        state->pour_no_liquid_timing = 0U; /* 断帧或无效压力不能累计无液体时间，恢复新样本后重新确认完整4秒。 */
         state->sensor_fault_active = 1U; /* 独立于超压提示锁存，检测故障与本轮超压不会互相吞掉提示。 */
         state->timing_active = 0U; /* 无效压力不能延续超压确认，恢复后必须重新取得连续样本。 */
         state->pour_low_timing_active = 0U; /* 检测中断不能被误算为稳定低压，防止恢复后直接加速。 */
@@ -191,7 +190,7 @@ static uint16_t PumpPressure_EnterPourLow(PumpPressureAlarmState_t *state, uint1
     state->pour_adjust_tick_ms = now_ms; /* 从低流量命令下发时刻开始观察新的压力响应。 */
     state->condition_tick_ms = now_ms; /* 新的低流量阶段从当前时刻观察，后续试升不能借用上一档的异常持续时间。 */
     state->timing_active = 0U; /* 进入5时压力可能已低于100mmHg，不能把历史堵塞误标成当前仍连续超压。 */
-    state->pour_low_timing_active = 0U; /* 进入低流量后必须重新取得稳定低压1秒，不能沿用之前的低谷。 */
+    state->pour_low_timing_active = 0U; /* 进入低流量后必须重新取得稳定低压500ms，不能沿用之前的低谷。 */
     PumpPressure_NotifyPourOnce(state, now_ms, alarm_event); /* 进入5表明已确认的堵塞未在一级解除，即使减速后压力低于100mmHg也补发本轮一次提示。 */
     return state->last_output_speed; /* 继续灌注低流量，不产生检测失效提示事件。 */
 }
@@ -225,15 +224,16 @@ static void PumpPressure_LowerPourFlow(PumpPressureAlarmState_t *state, uint16_t
 }
 
 /*
- * 函数功能：压力稳定低于恢复线后只增加一档，并重新等待1秒，防止直接跳回大流量。
+ * 函数功能：压力稳定低于恢复线后只增加一档，并重新等待500ms，防止直接跳回大流量。
  * 输入参数：state为单路状态；target_speed为当前用户设定上限；now_ms为当前时刻。
  * 返回参数：无；更新下发目标，完成原设定后的稳定观察由调用者继续执行。
  */
 static void PumpPressure_RaisePourFlow(PumpPressureAlarmState_t *state, uint16_t target_speed, uint32_t now_ms)
 {
     uint16_t remaining = (uint16_t)(target_speed - state->last_output_speed); /* 调用前已限幅，剩余上升空间非负。 */
-    state->last_output_speed = (remaining <= PUMP_PRESSURE_POUR_RECOVER_STEP_ML_MIN) ? target_speed : (uint16_t)(state->last_output_speed + PUMP_PRESSURE_POUR_RECOVER_STEP_ML_MIN); /* 每次最多增加20，为原步长的两倍，绝不超过用户设定。 */
-    state->pour_low_tick_ms = now_ms; /* 增流后重新等待完整1秒的稳定低压，再决定下一档。 */
+    uint16_t step = (state->last_output_speed >= PUMP_PRESSURE_POUR_LARGE_STEP_FROM_ML_MIN) ? PUMP_PRESSURE_POUR_LARGE_STEP_ML_MIN : PUMP_PRESSURE_POUR_SMALL_STEP_ML_MIN; /* 与降流共用100分界及20/10步长，恢复不跳过压力反馈。 */
+    state->last_output_speed = (remaining <= step) ? target_speed : (uint16_t)(state->last_output_speed + step); /* 每个稳定低压周期只升一档，且不超过用户设定。 */
+    state->pour_low_tick_ms = now_ms; /* 增流后重新等待完整500ms的稳定低压，再决定下一档。 */
     state->pour_low_timing_active = 1U; /* 当前低压样本作为新观察起点，不在同一周期连续增流。 */
     state->pour_adjust_tick_ms = now_ms; /* 增流后若再次超压，一级细调仍遵守500ms反馈间隔。 */
 }
@@ -374,10 +374,10 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
 }
 
 /*
- * 函数功能：灌注按逐档g阈值确认超压，20档观察500ms仍未恢复则进入5并提示；试升后持续高于恢复线即退回5等待再次恢复，检测失效保持输出；建压后持续失压4秒停泵，停止请求优先。
+ * 函数功能：灌注按逐档g阈值确认超压，20档观察500ms仍未恢复则进入5并提示；试升后持续高于恢复线则从当前流量重新逐档降低，降到底仍未恢复才进入5，检测失效保持输出，停止请求优先。
  * 输入参数：state为单路独立状态；target_speed为用户设定mL/min；weight_x10为压力板0.1g读数；threshold_g只检查0表示无效。
- *           sequence为压力帧序号；now_ms为当前毫秒时刻；alarm_event接收本周期超压、检测失效或无液体停机事件，指针不能为NULL。
- * 返回参数：本周期应下发的流量目标；不修改用户设定，0表示用户停止或已确认无液体输入。
+ *           sequence为压力帧序号；now_ms为当前毫秒时刻；alarm_event接收本周期超压或检测失效事件，指针不能为NULL。
+ * 返回参数：本周期应下发的流量目标；不修改用户设定，0表示用户停止。
  */
 uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
                                        uint16_t target_speed,
@@ -402,7 +402,7 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     uint32_t high_x10; /* 当前输出流量对应的启动线，单位0.1g，每次调档后重新查表。 */
     uint32_t recover_x10; /* 与当前输出配套的恢复线，保持区位于恢复线和启动线之间。 */
     uint8_t is_high; /* 当前新样本是否达到当前输出流量的启动线。 */
-    uint8_t low_confirmed = 0U; /* 只有连续低于恢复线满1秒才允许本周期增流或完成本轮恢复。 */
+    uint8_t low_confirmed = 0U; /* 只有连续低于恢复线满500ms才允许本周期增流或完成本轮恢复。 */
 
     if (target_speed == 0U) /* 人工停止立即生效，不等待压力或任何调档计时。 */
     {
@@ -416,10 +416,6 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
         state->target_speed = target_speed; /* 保存用户设定，保护过程只改变last_output_speed。 */
         state->last_output_speed = target_speed; /* 首次运行从用户设定建立输出，立即检查本周期压力有效性。 */
         state->pour_adjust_tick_ms = now_ms; /* 建立调档观察起点，后续慢调按实际时刻推进。 */
-    }
-    if (state->pour_no_liquid_latched != 0U) /* 无液体输入已确认时，后续压力回升或调速都不能恢复输出。 */
-    {
-        return 0U; /* 等待上层撤销运行请求及停止复位，不重复报警。 */
     }
     previous_output = state->last_output_speed; /* 后续判断用户是否实际改变了输出，而不因仅改设定清除本轮超压记录。 */
     if (state->target_speed != target_speed) /* 屏幕、脚踏和外控修改设定都保持同一压力过程。 */
@@ -440,7 +436,7 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     }
     if (previous_output != state->last_output_speed) /* 用户主动改变输出后，旧低压不能证明新流量已经稳定。 */
     {
-        state->pour_low_timing_active = 0U; /* 重新确认低压1秒，但保留本轮堵塞及提示锁存。 */
+        state->pour_low_timing_active = 0U; /* 重新确认低压500ms，但保留本轮堵塞及提示锁存。 */
         state->pour_adjust_tick_ms = now_ms; /* 细调观察从本次新命令开始，避免同周期再补降一档。 */
     }
     PumpPressure_GetPourThresholds(state->last_output_speed, &high_x10, &recover_x10); /* 按已下发目标查表；降流后不能继续使用原设定的高门槛。 */
@@ -468,26 +464,6 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     state->last_sequence = sequence; /* 保存本次新帧序号，255回到0也按新帧处理。 */
     state->sequence_valid = 1U; /* 首帧序号为0时也建立有效样本状态。 */
     state->last_sample_tick_ms = now_ms; /* 只有新有效帧刷新超时基准，旧值不能延长允许运行时间。 */
-    if (weight_x10 > PUMP_PRESSURE_POUR_NO_LIQUID_MAX_X10) /* 有效压力达到10mmHg才允许监测本次运行后续的失压。 */
-    {
-        state->pour_pressure_established = 1U; /* 所有非零流量共用建压记录，用户改流量或保护调流不清除。 */
-        state->pour_no_liquid_timing = 0U; /* 压力已回升，之前低于10mmHg的片段不能继续累计。 */
-    }
-    else if (state->pour_pressure_established != 0U) /* 启动后一直低压不属于从正常工作压力下降，不启动此项报警。 */
-    {
-        if (state->pour_no_liquid_timing == 0U) /* 从本段首个有效低压新帧开始计时。 */
-        {
-            state->pour_no_liquid_tick_ms = now_ms; /* 不能把此前正常压力或断帧时间算入连续失压。 */
-            state->pour_no_liquid_timing = 1U; /* 本通道进入4秒失压确认，不影响另一泵的计时。 */
-        }
-        else if ((uint32_t)(now_ms - state->pour_no_liquid_tick_ms) >= PUMP_PRESSURE_POUR_NO_LIQUID_CONFIRM_MS) /* 只在新有效帧上确认满4秒，支持毫秒计数回绕。 */
-        {
-            state->pour_no_liquid_latched = 1U; /* 锁存本轮无液体输入，避免压力回升后自动恢复运行。 */
-            state->last_output_speed = 0U; /* 本周期立即输出零流量，不经过原超压降档和自动恢复分支。 */
-            *alarm_event = PUMP_PRESSURE_EVENT_NO_LIQUID; /* 上层撤销运行请求，并播放三声蜂鸣及76号图3秒。 */
-            return 0U; /* 无液体停机优先于超压调流，原设定保留供排查后重新启动。 */
-        }
-    }
     is_high = (weight_x10 >= high_x10) ? 1U : 0U; /* 使用当前流量的离线g启动线，不执行mmHg曲线换算。 */
     if ((is_high != 0U) ||
         ((state->pour_phase == PUMP_PRESSURE_POUR_RECOVER) && (weight_x10 > recover_x10))) /* 首次降流仍按原分档启动线；试升必须保持在本档恢复线以下，进入保持区也算恢复失败候选。 */
@@ -509,13 +485,13 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     state->pour_last_high = is_high; /* 记录本帧分类，用户改设定时据此禁止绕过正在进行的超压确认。 */
     if (weight_x10 <= recover_x10) /* 当前档的恢复线低于启动线，防止降流后沿用过高恢复门槛而立即加速。 */
     {
-        if (state->pour_low_timing_active == 0U) /* 重新进入低压区后必须等待完整1秒。 */
+        if (state->pour_low_timing_active == 0U) /* 重新进入低压区后必须等待完整500ms。 */
         {
             state->pour_low_tick_ms = now_ms; /* 记录低压片段起点，不沿用之前的短暂低谷。 */
             state->pour_low_timing_active = 1U; /* 标记本轮低压观察已开始。 */
         }
         low_confirmed = ((uint32_t)(now_ms - state->pour_low_tick_ms) >= PUMP_PRESSURE_POUR_RECOVER_CONFIRM_MS) ? 1U : 0U; /* 只在新帧上确认低压，旧帧不会触发增流。 */
-        if (low_confirmed != 0U) /* 稳定低压1秒才解除本轮堵塞记录，单个压力低谷不能中止持续降档。 */
+        if (low_confirmed != 0U) /* 稳定低压500ms才解除本轮堵塞记录，单个压力低谷不能中止持续降档。 */
         {
             state->pour_blocked_latched = 0U; /* 连续低压已证明本轮压力恢复，解除保持区继续降档，后续允许小步增流。 */
         }
@@ -527,24 +503,25 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     minimum_speed = (target_speed < PUMP_PRESSURE_POUR_WORK_MIN_ML_MIN) ? target_speed : PUMP_PRESSURE_POUR_WORK_MIN_ML_MIN; /* 一级下限不能高于用户设定。 */
     if (state->pour_phase == PUMP_PRESSURE_POUR_LOW) /* 压力未稳定恢复时维持非零低流量，继续等待新压力决定是否升速。 */
     {
-        if (low_confirmed != 0U) /* 每次压力重新稳定低于恢复线1秒都允许升速，不限制本轮恢复次数。 */
+        if (low_confirmed != 0U) /* 每次压力重新稳定低于恢复线500ms都允许升速，不限制本轮恢复次数。 */
         {
-            state->pour_phase = PUMP_PRESSURE_POUR_RECOVER; /* 开始逐档恢复；若压力再次升高则退回5等待，下一段稳定低压仍可恢复。 */
+            state->pour_phase = PUMP_PRESSURE_POUR_RECOVER; /* 开始逐档恢复；再次异常时从当前流量逐档降低，下一段稳定低压仍可恢复。 */
             if (state->last_output_speed < target_speed) /* 原设定已低于等于5时不抬高流量，继续原设定的稳定观察。 */
             {
-                PumpPressure_RaisePourFlow(state, target_speed, now_ms); /* 首次只加20，后续每一档仍独立确认1秒，恢复斜率为原来的两倍。 */
+                PumpPressure_RaisePourFlow(state, target_speed, now_ms); /* 首次按当前档加10或20，后续每一档仍独立确认500ms，升降使用相同分档步长。 */
             }
         }
         return state->last_output_speed; /* 低流量等待阶段保持当前非零目标，用户停止仍由函数入口立即处理。 */
     }
-    if (state->pour_phase == PUMP_PRESSURE_POUR_RECOVER) /* 二级恢复单独观察压力，持续超过恢复线即退回5并重新确认低压。 */
+    if (state->pour_phase == PUMP_PRESSURE_POUR_RECOVER) /* 二级恢复单独确认压力；失败后复用下方逐档降流，不能从中间流量直接回到5。 */
     {
-        if ((weight_x10 > recover_x10) && ((uint32_t)(now_ms - state->condition_tick_ms) >= PUMP_PRESSURE_POUR_RECOVER_HIGH_CONFIRM_MS)) /* 试升后持续500ms超过本档恢复线即判失败；25档使用50mmHg，不能在50至100mmHg之间长期保持。 */
+        if ((weight_x10 > recover_x10) && ((uint32_t)(now_ms - state->condition_tick_ms) >= PUMP_PRESSURE_POUR_RECOVER_HIGH_CONFIRM_MS)) /* 试升后持续500ms超过本档恢复线才重新降流；25档仍使用50mmHg，不扩大原压力许可范围。 */
         {
-            return PumpPressure_EnterPourLow(state, target_speed, now_ms, alarm_event); /* 回到不高于5重新等待稳定低压，允许后续再次恢复，提示仍受同一轮一次限制。 */
+            state->pour_phase = PUMP_PRESSURE_POUR_ADJUST; /* 从当前输出接回既有降档分支，保留500ms反馈间隔及20/10步长，不直接跳到5。 */
+            state->pour_blocked_latched = 1U; /* 试升超过恢复线已确认失败，即使尚未达到启动线也继续逐档降流，稳定低压后才解除。 */
         }
     }
-    else if (state->pour_phase == PUMP_PRESSURE_POUR_NORMAL) /* 正常运行只在连续超压达到500ms后启动一级，过滤更短的压力波动。 */
+    if (state->pour_phase == PUMP_PRESSURE_POUR_NORMAL) /* 正常运行仍独立确认500ms；恢复失败转入ADJUST后，本周期允许继续走下方逐档分支。 */
     {
         if ((is_high != 0U) && ((uint32_t)(now_ms - state->condition_tick_ms) >= PUMP_PRESSURE_POUR_HIGH_CONFIRM_MS)) /* 瞬时压力升高不改变正常灌注。 */
         {
@@ -574,15 +551,15 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
         }
         return state->last_output_speed; /* 高压时只降流或保持，不进入自动增流。 */
     }
-    if (low_confirmed != 0U) /* 一级或二级恢复只有稳定低压1秒后才能增加一档。 */
+    if (low_confirmed != 0U) /* 一级或二级恢复只有稳定低压500ms后才能增加一档。 */
     {
         if (state->last_output_speed < target_speed) /* 仍低于用户设定时继续小步恢复，保持区不触发该动作。 */
         {
-            PumpPressure_RaisePourFlow(state, target_speed, now_ms); /* 每次最多加20，并重新等待完整1秒，不能跳回用户高流量。 */
+            PumpPressure_RaisePourFlow(state, target_speed, now_ms); /* 每次按当前档增加10或20，并重新等待完整500ms，不能跳回用户高流量。 */
         }
         else
         {
-            state->pour_phase = PUMP_PRESSURE_POUR_NORMAL; /* 原设定恢复后又稳定低压1秒，才结束整轮调流过程。 */
+            state->pour_phase = PUMP_PRESSURE_POUR_NORMAL; /* 原设定恢复后又稳定低压500ms，才结束整轮调流过程。 */
             state->alarm_active = 0U; /* 重新允许下一轮独立超压提示，短暂回落或中途试升不会清此锁存。 */
             state->pour_low_timing_active = 0U; /* 正常运行重新观察，不能把已完成的低压确认用于下一轮恢复。 */
         }

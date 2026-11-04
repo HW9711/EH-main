@@ -10,6 +10,7 @@
 typedef struct
 {
 	uint32_t feedback_tick_ms; /* HAL毫秒时钟：最近一次有效驱动回包形成快照的时刻。 */
+	uint32_t rx_window_start_ms; /* 该帧所属DMA接收窗口的起点，用于排除停机前缓存的反馈。 */
 	uint32_t speed_rpm;        /* 驱动 byte4~5 的“转速/10”字段换算成实际 rpm。 */
 	uint16_t sequence;         /* 每份CRC正确回包递增一次，自然回绕。 */
 	uint16_t current_x100;     /* 驱动 byte8~9 实时工作电流，单位0.01A。 */

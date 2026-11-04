@@ -4,6 +4,7 @@
 #include "queue.h"
 #include <string.h>
 #include "sscUIDP.h"
+#include "control_arbitration.h" /* 88号提示仅在外控仍持有控制权时有效。 */
 #include "diagnostic.h" /* 只观测相关UI消息，不改显示参数。 */
 #include "lcd.h"
 #include "Pubinterface.h"
@@ -854,17 +855,34 @@ void UISPEEDDP(bool enable_flag,uint32_t speed_value,bool update_value,bool run_
 			LCD_Disappear_Number(UIDP_LCD_SP_SPEED_VALUE);
 	}
 }
+static uint8_t s_external_hint_pending; /* 仅记录88号提示请求，不写入持续故障状态。 */
+static uint32_t s_external_hint_tick; /* 最近一次被拒绝的本地启动时刻，用于提示自动关闭。 */
+
 /*
- * 函数功能：跟随实际校验报警显示或关闭90号图，队列丢消息及串口发送失败后仍能收尾。
+ * 函数功能：记录外控占用期间的本地启动尝试，由显示任务统一写屏。
+ * 输入参数：无；调用方须已确认发生本地启动操作，并持有业务互斥锁。
+ * 返回参数：无。
+ */
+void UIDP_RequestExternalControlHint(void)
+{
+    if (!ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) || WorkMessage.alarm_flag)
+    {
+        return; /* 非外控或已有持续故障时不生成提示，不能抢占故障窗口。 */
+    }
+    s_external_hint_tick = HAL_GetTick(); /* 持续踩踏或触控保活时续期，结束操作后保留ALARM_MODE_MS。 */
+    s_external_hint_pending = 1U; /* 只置显示请求，不影响外控电机、泵和控制权。 */
+}
+
+/*
+ * 函数功能：跟随实际通信/校验报警显示或关闭75/90号图，队列丢消息及串口发送失败后仍能收尾。
  * 输入参数：无。
  * 返回参数：无；只有整帧发送成功才更新显示归属，不能代替屏幕回读确认。
  */
 static void UIDP_ServiceHandleVerifyAlarm(void)
 {
     uint8_t alarm = Handlescan_GetVerifyAlarmForDisplay(); /* 持续报警和运行中临时提示统一读取当前状态，不采用队列中的旧报警码。 */
-    uint8_t displayed_verify = (uint8_t)((s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
-                                       (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
-                                       (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)); /* 只收尾本功能的90号图，不关闭压力、缺泵或驱动提示。 */
+    uint8_t displayed_verify = (uint8_t)WorkAlarm_IsHandleEepromError(s_uidp_alarm_value); /* 只维护75/90号归属，不关闭其它报警。 */
+    uint16_t picture = WorkAlarm_IsHandleIicError(alarm) ? 75U : 90U; /* 通信失败选75，数据校验失败选90，关闭时下方另选隐藏值。 */
     if (Handlescan_HasUnsupportedHandle() || ((WorkMessage.alarm_flag != false) && (alarm == WORK_ALARM_NONE)))
     {
         return; /* 不支持手柄及其它持续故障优先，旧校验提示不能覆盖或关闭它们。 */
@@ -890,13 +908,13 @@ static void UIDP_ServiceHandleVerifyAlarm(void)
     }
     s_uidp_verify_alarm_retry_tick = HAL_GetTick(); /* 记录本次实际尝试时间，毫秒回绕按无符号差处理。 */
     s_uidp_verify_alarm_retry_pending = 1U; /* 先保留待处理标志，发送失败不能提前丢掉旧窗口归属。 */
-    if (LCD_Show_2byte_Number(UIDP_LCD_VP_ALARM_TIP, (alarm != WORK_ALARM_NONE) ? 90U : 0xFFFFU) == 0U)
+    if (LCD_Show_2byte_Number(UIDP_LCD_VP_ALARM_TIP, (alarm != WORK_ALARM_NONE) ? picture : 0xFFFFU) == 0U)
     {
         return; /* 复用已有返回发送结果的DWIN单字写接口，下次显示周期继续尝试显示或关闭。 */
     }
     s_uidp_alarm_value = alarm; /* 整帧已发送完成才更新归属；关闭失败期间仍记住需要清理的90号图。 */
     s_uidp_verify_alarm_retry_pending = 0U; /* 本次发送成功，后续只在报警来源改变时刷新。 */
-    ExternalComm_ReportScreenAlarm(alarm, (alarm != WORK_ALARM_NONE) ? 90U : MOTOR_ALARM_PICTURE_NONE); /* 外控显示与成功发出的屏幕命令同步，关闭时报告无报警。 */
+    ExternalComm_ReportScreenAlarm(alarm, (alarm != WORK_ALARM_NONE) ? picture : MOTOR_ALARM_PICTURE_NONE); /* 外控显示与成功发出的屏幕命令同步，关闭时报告无报警。 */
 }
 
 /*
@@ -920,25 +938,21 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		return; /* 已拔出的旧消息不能重新弹窗；驱动等系统故障已接管时也不能被迟到的71号消息覆盖。 */
 	}
 	if (!enable_flag && !WorkMessage.alarm_flag &&
-		(Pubinterface_GetInjectionPumpStartAlarm() != WORK_ALARM_NONE))
+		(Pubinterface_GetMotorStartAlarm() != WORK_ALARM_NONE))
 	{
 		enable_flag = true; /* 普通关窗请求不能代替控制源松开，首次缺泵期间必须保留提示。 */
-		arm_value = Pubinterface_GetInjectionPumpStartAlarm(); /* 其它临时提示退出后恢复当前仍有效的缺泵窗口。 */
+		arm_value = Pubinterface_GetMotorStartAlarm(); /* 其它临时提示退出后恢复当前仍有效的缺泵窗口。 */
 		picture_value = 0U; /* 按本次单向/往复逻辑码选72/73号图，不能继承旧故障覆盖图。 */
 	}
-	if ((arm_value == WORK_ALARM_INJECTION_MISSING_SINGLE) || (arm_value == WORK_ALARM_INJECTION_MISSING_OSC))
+	if ((arm_value == WORK_ALARM_TOOL_CRC_START_ERROR) || (arm_value == WORK_ALARM_INJECTION_MISSING_SINGLE) || (arm_value == WORK_ALARM_INJECTION_MISSING_OSC))
 	{
-		if (WorkMessage.alarm_flag || (arm_value != Pubinterface_GetInjectionPumpStartAlarm()))
+		if (WorkMessage.alarm_flag || (arm_value != Pubinterface_GetMotorStartAlarm()))
 		{
 			return; /* 更高优先级故障不能被缺泵覆盖；释放后积压的缺泵消息也不能重新弹窗。 */
 		}
 	}
-	if (((arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
-         (arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
-         (arm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)) ||
-        (!enable_flag && ((s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||
-                          (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||
-                          (s_uidp_alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB))))
+	if (WorkAlarm_IsHandleEepromError(arm_value) ||
+        (!enable_flag && WorkAlarm_IsHandleEepromError(s_uidp_alarm_value))) /* 75/90均走实际状态驱动的写屏重试路径，禁止旧消息重开已恢复报警。 */
     {
         UIDP_ServiceHandleVerifyAlarm(); /* 校验显示及关窗只按当前来源执行，另一侧仍失败时不会被旧关闭消息清掉。 */
         return; /* 该路径已按发送结果维护归属，不能再落入下方不带重试的普通显示。 */
@@ -1003,6 +1017,14 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,71U); /* 屏幕71号资源明确提示“不支持该手柄”。 */
 		ExternalComm_ReportScreenAlarm(arm_value, 71U); /* 外控同步16号逻辑报警及实际显示图片。 */
 		break;
+        case WORK_ALARM_EXTERNAL_SELECTED:
+        LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,88U); /* 提示当前为外部控制模式，请使用外部控制启动。 */
+        ExternalComm_ReportScreenAlarm(arm_value,88U); /* 外控同步实际显示的临时提示，不设置系统故障。 */
+        break;
+        case WORK_ALARM_TOOL_CRC_START_ERROR:
+        LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,77U); /* 仅真实启动动作保持且CRC三次失败时显示：无法识别刀具，请联系售后！ */
+        ExternalComm_ReportScreenAlarm(arm_value,77U); /* 外控收到22号逻辑码及77号实际图，松开按原关闭路径同步清除。 */
+        break;
 		case WORK_ALARM_INJECTION_MISSING_SINGLE:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,72U); /* 单向缺泵：刀具未按规定连接注水，可能会损坏。 */
 		ExternalComm_ReportScreenAlarm(arm_value,72U); /* 同步17号逻辑码及实际72号图片，外控也能识别首次启动失败原因。 */
@@ -1022,16 +1044,52 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	}
 }
 /*
- * 函数功能：周期跟随首次缺泵状态显示或关闭72/73号图，不覆盖其它报警。
+ * 函数功能：维护88号提示；故障优先，到期或退出外控后只关闭本提示。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void UIDP_ServiceExternalControlHint(void)
+{
+    if (WorkMessage.alarm_flag || Handlescan_HasUnsupportedHandle() ||
+        !ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) ||
+        ((uint32_t)(HAL_GetTick() - s_external_hint_tick) >= ALARM_MODE_MS))
+    {
+        s_external_hint_pending = 0U; /* 故障、外控退出或计时到期均取消旧请求，不能随后补弹过期提示。 */
+    }
+    if (s_uidp_alarm_value == WORK_ALARM_EXTERNAL_SELECTED)
+    {
+        if (s_external_hint_pending == 0U && !WorkMessage.alarm_flag)
+        {
+            if (LCD_Show_2byte_Number(UIDP_LCD_VP_ALARM_TIP,0xFFFFU) != 0U)
+            {
+                s_uidp_alarm_value = WORK_ALARM_NONE; /* 关闭发送成功才释放归属；失败则下周期重试。 */
+                ExternalComm_ReportScreenAlarm(WORK_ALARM_NONE,MOTOR_ALARM_PICTURE_NONE); /* 同步关闭外控端提示。 */
+            }
+        }
+        return; /* 已显示时不重复写屏，也不能关闭后来接管的其它报警。 */
+    }
+    if ((s_external_hint_pending != 0U) && (s_uidp_alarm_value == WORK_ALARM_NONE))
+    {
+        if (LCD_Show_2byte_Number(UIDP_LCD_VP_ALARM_TIP,88U) != 0U)
+        {
+            s_uidp_alarm_value = WORK_ALARM_EXTERNAL_SELECTED; /* 发送成功才记录显示归属，失败保留请求重试。 */
+            ExternalComm_ReportScreenAlarm(WORK_ALARM_EXTERNAL_SELECTED,88U); /* 上位机与本次屏幕提示同步。 */
+        }
+    }
+}
+
+/*
+ * 函数功能：周期跟随启动动作显示或关闭77及72/73号图，不覆盖其它报警。
  * 输入参数：无。
  * 返回参数：无。
  */
 static void UIDP_ServiceInjectionStartAlarm(void)
 {
-	uint8_t alarm = Pubinterface_GetInjectionPumpStartAlarm(); /* 直接读取待释放状态，显示队列复位不能提前结束首次提示。 */
+	uint8_t alarm = Pubinterface_GetMotorStartAlarm(); /* 直接读取待释放状态，显示队列复位不能提前结束首次提示。 */
 	if (WorkMessage.alarm_flag || ((s_uidp_alarm_value != WORK_ALARM_NONE) &&
 		(s_uidp_alarm_value != WORK_ALARM_INJECTION_MISSING_SINGLE) &&
-		(s_uidp_alarm_value != WORK_ALARM_INJECTION_MISSING_OSC)))
+		(s_uidp_alarm_value != WORK_ALARM_INJECTION_MISSING_OSC) &&
+        (s_uidp_alarm_value != WORK_ALARM_TOOL_CRC_START_ERROR))) /* 77同属按住提示，松开后只关闭自己的窗口。 */
 	{
 		return; /* 真故障和其它临时提示已占用报警区时，缺泵释放不能将它们关掉。 */
 	}
@@ -1338,6 +1396,7 @@ void UIDISPLAYBehavior()
 		unsupported_displayed = 0U; /* 其它故障接管时不强制关窗，后续恢复可重新显示71号。 */
 		unsupported_refresh_ticks = 0U; /* 下次进入拒绝状态立即补刷，不继承旧间隔。 */
 	}
+	UIDP_ServiceExternalControlHint(); /* 88号独立计时与关窗，不改变持续报警和外控输出。 */
 	UIDP_ServiceHandleVerifyAlarm(); /* 即使关窗消息未入队或被清队列，校验恢复后也按实际状态直接关闭旧90号图。 */
 	UIDP_ServiceInjectionStartAlarm(); /* 每个显示周期维护首次缺泵提示，不能因普通清屏或丢队列消息提前关窗。 */
 	if ((s_uidp_tool_spec_retry_pending != 0U) &&

@@ -16,6 +16,8 @@
 #include "handlescan.h"
 #include "handlekey.h" /* GZYT 临时测试开启时，屏幕允许选中手柄按钮控制。 */
 #include "motoruartdata.h"
+#include "sscFOOT.h" /* 换通道时统一隔离旧脚踏行程，不能只在脚踏发起切换时才要求松脚。 */
+#include "screenkey.h" /* 切换手柄时撤销旧通道触控保活，不能把旧按住动作用于新通道。 */
 #include "external_comm_task.h"
 
 ChannelrecognizeMessage_t ChannelrecognizeMessageA;
@@ -31,8 +33,6 @@ pumpMessage_t pumpMessageB;
 uint32_t paoxueSpeciValue_A[4] = {0U}; /* 保存 A 通道识别到的刀具规格，屏幕刷新时读取。 */
 uint32_t paoxueSpeciValue_B[4] = {0U}; /* 保存 B 通道识别到的刀具规格，与 A 通道分开保存。 */
 uint8_t paoxueSpeciValue_F[16] = {0U}; /* 保留的分体刀具扩展数据，不随屏幕页面关闭而清除。 */
-/* 1 表示用户已在屏幕选择非脚控模式；脚踏重新插入或用户选回脚控前，不自动改回脚控。 */
-static volatile uint8_t s_foot_priority_manual_lock = 0U;
 /* 记录是否达到 Page4 速度/频率阈值；不设置全局报警，当前超限蜂鸣发送已停用。 */
 static uint8_t s_speed_threshold_beep_active = 0U;
 /* 阈值持续达到时累计检查次数；原定每 10 次重发蜂鸣，当前重发语句已停用。 */
@@ -69,6 +69,7 @@ typedef struct
 	uint32_t identity; /* 本通道真实插拔代数；同型号重新插入也必须重新进行首次检查。 */
 	bool first_start_done; /* 本次插入已正常首次启动或已松开确认缺泵，后续启动不再报警。 */
 } InjectionStartChannel_t;
+static uint8_t s_rfid_start_sources[2]; /* 每侧按控制来源保存被CRC拒绝的启动动作；松开不清故障，恢复不清动作。 */
 static InjectionStartChannel_t s_injection_start_channel[2]; /* A/B分别记录首次，不能在A确认后直接放行B的首次。 */
 static uint8_t s_injection_start_source = CONTROL_OWNER_NONE; /* 正在等待真实释放的控制来源，连续启动命令仍属本次动作。 */
 static uint8_t s_injection_start_channel_id = CHANNEL_NONE; /* 本次报警对应的手柄通道，另一只手柄松键不能代为确认。 */
@@ -887,26 +888,69 @@ bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model)
 			(hand_model == LGZ_II_ONLINES));   /* EX8 表格确认 LGZII 双按键手柄保留手控入口，其它预留型号不再误亮手控。 */
 }
 
+
+
+
+
 /*
- * 函数功能：判断当前手柄型号是否为公共接头预留型号。
- * 输入参数：hand_model 为 EEPROM 识别出的系统内部手柄型号。
- * 返回参数：true 表示该型号没有手柄实体键，不自动切入手控。
+ * 函数功能：对当前通道执行CRC启动门禁，拒绝时记录按住来源供77提示及先松后启使用。
+ * 输入参数：source为脚踏、手控、屏幕或外控的CONTROL_OWNER编号。
+ * 返回参数：true表示无CRC限制，false表示保持停止；不修改其它报警和缺泵首次记录。
  */
-static bool IsCommonSocketReserved(uint8_t hand_model)
+bool Pubinterface_CheckRfidForRun(uint8_t source)
 {
-	return (hand_model == COMMON_SOCKET_ONLINES); /* 公共接头仅用于连接/显示，不占用手柄实体键控制逻辑。 */
+    uint8_t channel = WorkMessage.channel_work; /* 启动只能作用于当前选中通道。 */
+    if ((channel < CHANNEL_A) || (channel > CHANNEL_B) ||
+        (source < CONTROL_OWNER_EXTERNAL) || (source > CONTROL_OWNER_HANDLE))
+    {
+        return false; /* 无效通道或来源不能写位图，也不能取得启动许可。 */
+    }
+    if (Rfid_IsToolCrcBlocked(channel))
+    {
+        s_rfid_start_sources[channel - CHANNEL_A] |= (uint8_t)(1U << source); /* 记录真实启动动作；即使尚未满三次，也要等待松手后才准再次启动。 */
+        return false; /* 只阻止启动，77是否显示由三次失败及兼容结论独立决定。 */
+    }
+    return (s_rfid_start_sources[channel - CHANNEL_A] == 0U); /* 故障恢复但动作仍保持时继续拒绝，不能自动起机。 */
 }
 
-
-
+/*
+ * 函数功能：清除指定来源的启动动作记录，松开只撤销提示，不清RFID CRC故障。
+ * 输入参数：source或channel为NONE时匹配全部来源或全部通道。
+ * 返回参数：无。
+ */
+static void RfidStart_Release(uint8_t source, uint8_t channel)
+{
+    uint8_t index; /* A/B分别处理，另一侧手控松开不能清本侧提示。 */
+    if (source > CONTROL_OWNER_HANDLE) return; /* 无效来源不能用于移位。 */
+    for (index = 0U; index < 2U; ++index)
+    {
+        if ((channel == CHANNEL_NONE) || (channel == index + CHANNEL_A))
+        {
+            s_rfid_start_sources[index] &= (source == CONTROL_OWNER_NONE) ? 0U : (uint8_t)~(1U << source); /* 真实松开或来源取消只释放匹配的动作。 */
+        }
+    }
+}
 
 /*
- * 函数功能：撤销指定来源/通道的缺泵报警，通信异常不能代替操作者完成首次确认。
+ * 函数功能：在最终驱动出口再次检查CRC故障和松手等待，避免旧启动消息绕过前端。
+ * 输入参数：channel为输出目标通道。
+ * 返回参数：true要求保持停止，false表示无此项限制。
+ */
+bool Pubinterface_IsRfidRunBlocked(uint8_t channel)
+{
+    return Rfid_IsToolCrcBlocked(channel) || /* CRC错误仍在时，与屏幕是否显示77无关。 */
+           (((channel == CHANNEL_A) || (channel == CHANNEL_B)) &&
+            (s_rfid_start_sources[channel - CHANNEL_A] != 0U)); /* 恢复后尚未松手也禁止输出RUN。 */
+}
+
+/*
+ * 函数功能：撤销指定来源/通道的CRC启动提示和缺泵报警，通信异常不能代替操作者完成首次确认。
  * 输入参数：source为CONTROL_OWNER_*，channel为CHANNEL_*；各自为NONE时匹配任意来源或通道。
  * 返回参数：无；保留本次插柄的首次检查记录。
  */
 void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel)
 {
+    RfidStart_Release(source, channel); /* 统一接收断链、拔出和控制源取消，关闭77动作提示但保留CRC故障。 */
 	if (((source != CONTROL_OWNER_NONE) && (source != s_injection_start_source)) ||
 		((channel != CHANNEL_NONE) && (channel != s_injection_start_channel_id)))
 	{
@@ -962,6 +1006,10 @@ bool Pubinterface_CheckInjectionPumpForRun(uint8_t source)
 	{
 		return false; /* 尚未识别或已经拔出的手柄不建立缺泵首次记录，仍由原在线检查处理。 */
 	}
+    if (!Pubinterface_CheckRfidForRun(source))
+    {
+        return false; /* CRC禁止启动优先于缺泵检查，不能弹72/73掩盖77，也不算一次缺泵确认。 */
+    }
 	if (s_injection_start_source != CONTROL_OWNER_NONE)
 	{
 		return false; /* 首次动作未释放时，重复按住、接上泵或切换来源都不能自动起机。 */
@@ -991,6 +1039,7 @@ bool Pubinterface_CheckInjectionPumpForRun(uint8_t source)
  */
 void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel)
 {
+    RfidStart_Release(source, channel); /* 共用真实松脚、松键、触控超时及外控停止入口，关闭77且不解锁CRC故障。 */
 	InjectionStart_Service(); /* 先废弃旧插拔上下文，拔出后的延迟松键不能确认新手柄。 */
 	if ((s_injection_start_source == CONTROL_OWNER_NONE) || (source != s_injection_start_source) ||
 		((channel != CHANNEL_NONE) && (channel != s_injection_start_channel_id)))
@@ -1002,12 +1051,18 @@ void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel)
 }
 
 /*
- * 函数功能：提供等待释放期间的缺泵提示码，显示和蜂鸣独立读取，避免队列丢消息后提前解除。
+ * 函数功能：提供等待释放期间的77或缺泵提示码，显示和蜂鸣独立读取，避免队列丢消息后提前解除。
  * 输入参数：无。
- * 返回参数：17/18为单向/往复缺泵；NONE表示当前不提示。
+ * 返回参数：22为刀具CRC，17/18为单向/往复缺泵；NONE表示当前不提示。
  */
-uint8_t Pubinterface_GetInjectionPumpStartAlarm(void)
+uint8_t Pubinterface_GetMotorStartAlarm(void)
 {
+    uint8_t channel = WorkMessage.channel_work; /* 只显示当前选择且存在真实启动动作的通道提示。 */
+    if (((channel == CHANNEL_A) || (channel == CHANNEL_B)) &&
+        (s_rfid_start_sources[channel - CHANNEL_A] != 0U) && Rfid_IsToolCrcConfirmed(channel))
+    {
+        return WORK_ALARM_TOOL_CRC_START_ERROR; /* 第三次CRC失败且兼容读取失败才显示77，第一二次只禁启动。 */
+    }
 	return s_injection_start_alarm; /* 只有真实释放、手柄拔出或来源异常撤销才能结束本次报警。 */
 }
 
@@ -1069,26 +1124,40 @@ static void ApplyEx8ModeFallback(void)
 }
 
 /*
- * 函数功能：记录用户在脚踏在线期间通过屏幕手动切到非脚控模式。
- * 输入参数：无，直接读取当前脚踏在线标志。
+ * 函数功能：只按目标通道自己的模式、锁存和手柄能力计算可用控制方式，不借用当前另一通道状态。
+ * 输入参数：memory为目标通道记忆，脚踏在线状态是两通道共用的输入设备状态。
+ * 返回参数：JTWORK/HANDLEWORK/TOUCHWORK/NOWORK；无实体键型号绝不恢复手控。
+ */
+static uint8_t Pubinterface_GetChannelDriveType(const ChannelMemoryMessage_t *memory)
+{
+    if ((ControlSignalMessage.jt_enable_flag == true) && (memory->foot_manual_lock == 0U)) return JTWORK; /* 只有本通道未主动锁住非脚控时才执行脚踏优先。 */
+    if (memory->drive_type == TOUCHWORK) return TOUCHWORK; /* 保留本通道明确选择的触控模式，另一通道的触控状态不能写入这里。 */
+    if ((memory->drive_type == HANDLEWORK) && Pubinterface_IsHandleControlReservedModel(memory->hand_model)) return HANDLEWORK; /* 只为确有实体键的本通道恢复手控。 */
+    if (ControlSignalMessage.jt_enable_flag == true) return JTWORK; /* PXBB等型号的无效手控记忆在脚踏在线时回落脚控。 */
+    return Pubinterface_IsHandleControlReservedModel(memory->hand_model) ? HANDLEWORK : NOWORK; /* 脚踏离线时只开放本型号确实支持的手控入口。 */
+}
+
+/*
+ * 函数功能：记录当前通道在脚踏在线期间主动选择非脚控，不能影响另一通道的默认脚控。
+ * 输入参数：无，读取当前通道和脚踏在线标志。
  * 返回参数：无。
  */
 static void MarkFootManualLock(void)
 {
-	if (ControlSignalMessage.jt_enable_flag == true)
-	{
-		s_foot_priority_manual_lock = 1U; /* 只在脚踏在线周期内锁住自动脚控优先，脚踏重新插入后会重新允许脚控抢占。 */
-	}
+    if (ControlSignalMessage.jt_enable_flag != true) return; /* 未接脚踏时不建立在线周期锁存，后续接入脚踏仍按原优先级处理。 */
+    if (WorkMessage.channel_work == CHANNEL_A) MemoryMsgA.foot_manual_lock = 1U; /* A的手控或触控选择只约束A。 */
+    else if (WorkMessage.channel_work == CHANNEL_B) MemoryMsgB.foot_manual_lock = 1U; /* B独立记住自己的非脚控选择。 */
 }
 
 /*
- * 函数功能：清除脚踏在线周期内的屏幕手动选择锁存。
- * 输入参数：无。
+ * 函数功能：清除指定通道的非脚控锁存；共用脚踏掉线时才同时清除A/B。
+ * 输入参数：channel为A/B；CHANNEL_NONE表示脚踏设备已离线，结束两通道的本次在线周期。
  * 返回参数：无。
  */
-void Pubinterface_ClearFootControlManualLock(void)
+void Pubinterface_ClearFootControlManualLock(uint8_t channel)
 {
-	s_foot_priority_manual_lock = 0U; /* 脚踏离线或用户重新选择脚控后，下一次脚踏上线可继续按脚控优先处理。 */
+    if ((channel == CHANNEL_A) || (channel == CHANNEL_NONE)) MemoryMsgA.foot_manual_lock = 0U; /* 选择A脚控不能取消B自己的手控选择。 */
+    if ((channel == CHANNEL_B) || (channel == CHANNEL_NONE)) MemoryMsgB.foot_manual_lock = 0U; /* 只有B自身重选脚控或脚踏掉线才清B。 */
 }
 
 /*
@@ -1110,9 +1179,10 @@ bool Pubinterface_ApplyFootControlPriorityOnConnect(void)
 		return false; /* 最近的驱动反馈仍显示电机在转时，不切换控制方式；过期反馈不参与此判断。 */
 	}
 
-	if (s_foot_priority_manual_lock != 0U)
+	if (((WorkMessage.channel_work == CHANNEL_A) && (MemoryMsgA.foot_manual_lock != 0U)) ||
+		((WorkMessage.channel_work == CHANNEL_B) && (MemoryMsgB.foot_manual_lock != 0U)))
 	{
-		return false; /* 本次脚踏在线期间用户已经从屏幕手动切到手控/触控，保持用户选择直到脚踏重新插入。 */
+		return false; /* 只尊重当前通道自己的非脚控选择，另一通道的锁存不能挡住脚踏优先。 */
 	}
 
 	if (WorkMessage.hmiactive_work != 0U)
@@ -1590,22 +1660,6 @@ static void HandlePumpDriverFaultStop(uint8_t pump_channel)
 }
 
 /*
- * 函数功能：灌注建压后持续失压4秒时停止本泵，清除旧请求并播放三声蜂鸣、显示76号图3秒。
- * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不修改任何状态。
- * 返回参数：无；不停止手柄和另一台泵，重新启动须由新的控制操作发起。
- */
-void Pubinterface_HandlePumpNoLiquid(uint8_t pump_channel)
-{
-    if ((pump_channel != CHANNEL_A) && (pump_channel != CHANNEL_B)) /* 只处理明确的泵通道，防止错误调用影响其它设备。 */
-    {
-        return; /* 非法通道不停止设备、不播放报警。 */
-    }
-    HandlePumpDriverFaultStop(pump_channel); /* 复用单泵停机入口清运行、排空、联动和外控请求；不建立驱动故障码。 */
-    SendAlarmMessageTimed(PUMP_PRESSURE_BLOCKED_BEEP_ALARM, PUMP_PRESSURE_BEEP_MS); /* 复用六个100ms响停步骤，准确播放三声蜂鸣。 */
-    RaisePumpAlarm(76U, ALARM_PRESSURE_MS); /* 显示“灌注泵无液体流入，请检查！”3秒，沿用其它报警优先规则。 */
-}
-
-/*
  * 函数功能：A/B泵压力检测失效时仅蜂鸣三声并显示74号图窗2秒，保持本泵运行请求。
  * 输入参数：pump_channel为CHANNEL_A或CHANNEL_B；非法通道不产生提示。
  * 返回参数：无；不修改泵速、本机、联动或外控运行请求。
@@ -2034,6 +2088,32 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 }
 
 /*
+ * 函数功能：限制本通道PX电气往复目标速度，统一拦住旧记忆、外控直接设置和最终驱动出口的越界请求。
+ * 输入参数：channel为A/B通道；direction为运行方向；speed为刀具端目标rpm，0仍表示停止。
+ * 返回参数：范围内目标速度；往复配置无效时返回0；其它手柄、单向和MXYTP机械往复保留原值。
+ */
+uint32_t Pubinterface_ClampMotorSpeed(uint8_t channel, uint8_t direction, uint32_t speed)
+{
+    const ChannelrecognizeMessage_t *recognize; /* 仅使用本通道已经装载并校验的上下限，不增加运行时EEPROM访问。 */
+    if (direction != OSCDIR || speed == 0U) return speed; /* 单向保持原行为；零速不能被最小速度抬升为运行。 */
+    if (channel == CHANNEL_A) recognize = &ChannelrecognizeMessageA; /* A只按A的EEPROM与RFID交集限速。 */
+    else if (channel == CHANNEL_B) recognize = &ChannelrecognizeMessageB; /* B独立读取B的速度范围，避免跨通道套用。 */
+    else return 0U; /* 无有效通道时不能为电气往复生成非零输出。 */
+    if (((recognize->handle_type != PXBA_ONLINES) && (recognize->handle_type != PXBB_ONLINES)) ||
+        (recognize->raw_tool_type == RFID_TOOL_MODEL_MXYTP))
+    {
+        return speed; /* 仅收紧PX电气往复，机械往复仍按标签和原有倍率运行。 */
+    }
+    if ((recognize->speed_oscmin == 0U) || (recognize->speed_oscmax < recognize->speed_oscmin))
+    {
+        return 0U; /* 专用字段无效或RFID范围没有交集时保持停止，不回退Page4上限。 */
+    }
+    if (speed < recognize->speed_oscmin) return recognize->speed_oscmin; /* 低于本次有效下限时抬至下限。 */
+    if (speed > recognize->speed_oscmax) return recognize->speed_oscmax; /* 旧记忆或外控超过上限时钳回合法值。 */
+    return speed; /* 已在有效范围内，不改变正常调速和脚踏比例值。 */
+}
+
+/*
  * 函数功能：读取当前通道为当前方向保存的转速，供未设置启动速度时使用。
  * 输入参数：无，函数内部读取 WorkMessage.channel_work 和 WorkMessage.dir_work。
  * 返回参数：当前方向保存的转速，单位 rpm；初值来自识别参数，用户调速后随之更新；无有效通道时返回 0。
@@ -2105,11 +2185,12 @@ void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
 /*
  * 函数功能：判断报警码是否属于手柄识别失败或功能模式不支持，允许另一侧继续识别。
  * 输入参数：alarm_value 当前报警码，来自 WorkMessage.alarm_value 或临时提示报警。
- * 返回参数：true 表示手柄校验失败或型号不受支持；false 表示其它系统报警。
+ * 返回参数：true 表示手柄通信、校验失败或型号不受支持；false 表示其它系统报警。
  */
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value)
 {
-	return ((alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||  /* A 通道 EEPROM 校验失败时，不阻塞 B 通道继续识别。 */
+	return (WorkAlarm_IsHandleIicError(alarm_value) || /* IIC通信故障同样允许重试及另一侧识别，避免75号把扫描流程阻塞。 */
+            (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) ||  /* A 通道 EEPROM 校验失败时，不阻塞 B 通道继续识别。 */
 			(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) ||  /* B 通道 EEPROM 校验失败时，不阻塞 A 通道继续识别。 */
 			(alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB) ||  /* A/B 均失败时仍属于手柄校验系列，拔出任一坏手柄后再降级报警。 */
 			(alarm_value == WORK_ALARM_HANDLE_UNSUPPORTED)); /* 功能不匹配同样允许另一侧识别，但本通道必须拔出才能解除。 */
@@ -2137,6 +2218,19 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 		return; /* 无效通道不改 WorkMessage，避免把当前有效工作态清成不可预期状态。 */
 	}
 
+    if (WorkMessage.channel_work != channel) /* 只有实际换通道才结束旧触控动作；同通道RFID刷新不能打断当前选择。 */
+    {
+        Foot_OnHandleChannelChanged(channel); /* 屏幕切换、脚踏切换和新插入都需重新松脚，不能继承原通道的踩踏许可。 */
+        ScreenKey_OnHandleChannelChanged(); /* 立即撤销旧保活，原按住信号不能在新通道继续启动。 */
+        if ((ControlArbitration_IsExternalActive() == false) && (WorkMessage.touchactive_work == TOUCHWORK))
+        {
+            WorkMessage.touchactive_work = 0U; /* 当前触控窗口属于离开的通道，不能继续阻塞新通道脚控。 */
+            SendUIDSMessage(UI_TOUCH_ID, false, NULL); /* 先关闭旧窗口，后面按目标通道自己的选择决定是否恢复触控。 */
+            Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_SCREEN, CHANNEL_NONE); /* 换通道只撤销旧触控动作，不代替真实松手确认。 */
+            ControlArbitration_ExitLocalControlIfIdle(CONTROL_OWNER_SCREEN); /* 保留原有停稳互斥，反馈仍在转动时不能提前释放。 */
+        }
+    }
+
 	WorkMessage.current_work = memory->current_work;			  /* 同步当前通道保护电流，单位 0.01A，后续启动时按该手柄限流。 */
 	WorkMessage.eeprom_profile = memory->eeprom_profile; /* 本体方向和三档电流随所选通道恢复，A/B不得串用。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 同步刀具减速比，保证速度换算跟随通道。 */
@@ -2145,13 +2239,11 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 	{
 		WorkMessage.drivetype_work = TOUCHWORK; /* 外控切换 A/B 时只装载目标通道参数，运行控制方式继续归属外控，避免脚踏在线导致图标短暂变黄。 */
 	}
-	else if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
-	{
-		WorkMessage.drivetype_work = memory->drive_type = JTWORK;		  /* 脚踏在线且未被屏幕手动锁住时，切通道仍按脚控优先装载。 */
-	}
 	else
 	{
-		WorkMessage.drivetype_work = memory->drive_type;				  /* 脚踏离线或本在线周期用户已手动切换时，保留通道原控制方式记忆。 */
+        memory->drive_type = Pubinterface_GetChannelDriveType(memory); /* 目标通道只恢复自己的选择，并排除PXBB等型号的无效手控。 */
+        if (memory->drive_type == JTWORK) memory->foot_manual_lock = 0U; /* 本通道已恢复脚控时撤销本通道的旧锁存，不改另一通道。 */
+        WorkMessage.drivetype_work = memory->drive_type; /* 当前工作态只是目标通道记忆的镜像，不继承离开通道的模式。 */
 	}
 	WorkMessage.freq_work = memory->freq;						  /* 同步往复频率，避免 A/B 频率串用。 */
 	WorkMessage.tool_type = memory->tool_type;					  /* 同步刨/磨刀具类型，界面和限速逻辑都读取这里。 */
@@ -2176,7 +2268,18 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
 		WorkMessage.speed_set_work = memory->osc_speed;		  /* 往复或异常方向按往复速度装载，保持旧逻辑兼容。 */
 	}
 
+	WorkMessage.speed_set_work = Pubinterface_ClampMotorSpeed(channel, (uint8_t)WorkMessage.dir_work, WorkMessage.speed_set_work); /* 切回通道时再次限制旧往复记忆，禁止恢复超出当前配置的速度。 */
 	WorkMessage.speed_work = WorkMessage.speed_set_work;		  /* 切换通道后把运行目标改为该通道设定转速；这里只写目标，不是读取电机反馈。 */
+    if ((ControlArbitration_IsExternalActive() == false) && (WorkMessage.drivetype_work == TOUCHWORK) && (WorkMessage.touchactive_work != TOUCHWORK))
+    {
+        WorkMessage.touchactive_work = TOUCHWORK; /* 仅恢复目标通道自己保存的触控选择，绝不自动建立运行请求。 */
+        WorkMessage.speed_work = 0U; /* 恢复触控窗口先保持零速，必须有本通道的新按压才运行。 */
+        SendUIDSMessage(UI_TOUCH_ID, true, NULL); /* 新窗口以待运行状态显示，旧通道窗口已在上方关闭。 */
+    }
+    if ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) || (WorkMessage.auto_identify != 0U))
+    {
+        Rfid_ConfirmToolLoaded(channel, WorkMessage.rfid_result_sequence); /* 本次有效RFID参数已进入工作态才解除CRC锁定，旧缓存或手动参数不能解锁。 */
+    }
 }
 
 /*
@@ -2216,6 +2319,8 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层刚刚完成认证的临时识别缓存。 */
 	ChannelMemoryMessage_t *memory = NULL;		  /* 指向要更新的 A/B 通道记忆结构。 */
 	uint8_t keep_auto_identify = 0U;				  /* RFID 二次刷新前保留通道自动识别状态，避免新刀具参数覆盖该模式记忆。 */
+    uint8_t keep_drive_type = NOWORK; /* 仅保存本通道原控制模式，未选中通道刷新不能读取WorkMessage中的另一通道模式。 */
+    uint8_t keep_foot_manual_lock = 0U; /* 本通道锁存随RFID刷新保留，真实拔柄由MemoryMsg清零结束。 */
 	uint32_t keep_zz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的正转速度，避免标签默认值覆盖屏幕调节结果。 */
 	uint32_t keep_fz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的反转速度，保证异常掉线恢复后仍按用户设置运行。 */
 	uint32_t keep_osc_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的往复速度，避免自动识别重刷回标签默认速度。 */
@@ -2239,6 +2344,11 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	}
 
 	keep_auto_identify = memory->auto_identify;	  /* 识别缓存只包含刀具/手柄参数，自动识别模式属于通道 UI 记忆，需要单独保留。 */
+    if (memory->hand_model == recognize->handle_type) /* 同一手柄的刀具刷新保留选择；新型号不能沿用旧型号的控制模式。 */
+    {
+        keep_drive_type = memory->drive_type; /* 只读取本通道记忆，不受另一通道当前选中模式影响。 */
+        keep_foot_manual_lock = memory->foot_manual_lock; /* A/B各自保存自己的手动选择锁存。 */
+    }
 	keep_rfid_user_runtime = (bool)((recognize->rfid_cache_hit != 0U) && /* 仅本通道完整RFID数据再次命中时保留设置，换标签仍装载新默认值。 */
 									(memory->hand_model == recognize->handle_type) && /* 基座型号必须一致，防止上一只手柄的参数进入新手柄。 */
 									(recognize->tool_type != 0U) && /* 新标签必须已经解析出有效刀具，等待识别时不能恢复运行参数。 */
@@ -2309,40 +2419,20 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 			memory->dir = keep_dir;								  /* 方向仍被当前手柄和刀具支持时才恢复，避免异常方向写回运行状态。 */
 		}
 	}
+	memory->osc_speed = Pubinterface_ClampMotorSpeed(channel, OSCDIR, memory->osc_speed); /* 同标签重识别也要检查保留速度，不能把旧70000记忆写回新往复范围。 */
 	if (memory->tool_type != 0U)
 	{
 		Pubinterface_SetLastRfidToolType(channel, memory->tool_type); /* 保存本次刀具是刨刀还是磨头，掉线时据此选图，不直接用原始标签编号。 */
 	}
 
-	if (Pubinterface_IsHandleControlReservedModel(memory->hand_model))
-	{
-		ControlSignalMessage.HMI_enable_flag = true;			  /* 带手控入口手柄上线后打开手控可用显示，实体键是否能启动由 handlekey 按型号再判断。 */
-		if ((WorkMessage.drivetype_work == TOUCHWORK) ||
-			(WorkMessage.drivetype_work == JTWORK) ||
-			(WorkMessage.drivetype_work == HANDLEWORK))
-		{
-			memory->drive_type = WorkMessage.drivetype_work;	  /* RFID 只刷新刀具和运行参数，当前已明确选中的触控/脚控/手控必须原样保留，避免 PXBA 手控被脚踏在线状态覆盖。 */
-		}
-		else
-		{
-			if ((ControlSignalMessage.jt_enable_flag == true) && (s_foot_priority_manual_lock == 0U))
-			{
-				memory->drive_type = JTWORK;					  /* 脚控使能且本在线周期没有用户手动锁定时，才按脚踏优先级写入脚控记忆。 */
-			}
-			else
-			{
-				memory->drive_type = HANDLEWORK;				  /* 没有其它控制方式占用，或用户已手动锁住非脚控时，带按键手柄保持手控记忆。 */
-			}
-		}
-	}
-	else if (IsCommonSocketReserved(memory->hand_model))
-	{
-		memory->drive_type = WorkMessage.drivetype_work;		  /* 公共接头没有实体键，识别上线只继承当前控制方式，不能自动切入手控。 */
-	}
-	else
-	{
-		memory->drive_type = WorkMessage.drivetype_work;		  /* 非按键手柄保留当前控制方式记忆，切换通道时不额外改变控制来源。 */
-	}
+    memory->drive_type = keep_drive_type; /* 通道识别结果与本通道用户模式分开保存，不能复制WorkMessage的另一通道状态。 */
+    memory->foot_manual_lock = keep_foot_manual_lock; /* memset之后恢复本通道锁存，不重建全局锁。 */
+    memory->drive_type = Pubinterface_GetChannelDriveType(memory); /* 新接入按本型号和脚踏状态选默认模式，刷新则尊重本通道选择。 */
+    if (memory->drive_type == JTWORK) memory->foot_manual_lock = 0U; /* 无效模式回落脚控后清掉本通道无效锁存。 */
+    if (Pubinterface_IsHandleControlReservedModel(memory->hand_model))
+    {
+        ControlSignalMessage.HMI_enable_flag = true; /* 保留带实体键手柄上线时的既有使能通知，不改其它通道模式。 */
+    }
 }
 
 /*
@@ -2354,7 +2444,7 @@ void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 {
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层通道识别缓存，用于清掉心跳有效性判断会读取的刀具字段。 */
 	ChannelMemoryMessage_t *memory = NULL;		  /* 指向通道记忆；RFID 刀具头离线时保留速度等历史参数，但当前可运行刀具必须清零。 */
-	uint8_t keep_drive_type = WorkMessage.drivetype_work; /* 保留原控制方式记忆，刀具头移开不应把脚控/触控/外控显示重置。 */
+	uint8_t keep_drive_type = NOWORK; /* 只保留本通道自己的模式；空模式也不能借用另一通道当前的手控或触控。 */
 	uint8_t keep_auto_identify = WorkMessage.auto_identify; /* 保留用户选择的自动/手动识别模式，刀具掉线不应改模式或清通道记忆。 */
 	uint8_t keep_raw_tool_type = 0U; /* 保留最近一次原始刀具型号，避免扫描层清零后通道记忆丢失驱动兼容字段。 */
 	uint8_t keep_display_tool_type = 0U; /* 保留上次是刨刀还是磨头，掉线后据此选择 62 或 61 号图。 */
@@ -2381,10 +2471,7 @@ void Pubinterface_ClearRfidToolMemory(uint8_t channel)
 		return; /* 防御空指针，虽然上面分支已覆盖，仍避免后续维护误改造成异常访问。 */
 	}
 
-	if (memory->drive_type != 0U)
-	{
-		keep_drive_type = memory->drive_type; /* 优先保留该通道原本的控制方式记忆，防止清刀具头时改变控制模式显示。 */
-	}
+	keep_drive_type = memory->drive_type; /* 无条件保存本通道模式，NOWORK也有独立含义，不能回退到WorkMessage。 */
 	keep_auto_identify = memory->auto_identify; /* 清通道记忆前先保存识别模式，避免 memset 后丢失用户选择。 */
 	keep_raw_tool_type = (memory->raw_tool_type != 0U) ? memory->raw_tool_type : memory->tool_type; /* 优先保留原始标签码，没有原始码时回退当前能力值。 */
 	keep_display_tool_type = memory->tool_type; /* 记录刨刀/磨头分类，掉线图片不直接使用原始标签编号。 */
@@ -2679,7 +2766,7 @@ void ControlTypeActive(uint8_t key_value)
 			MemoryMsgA.drive_type = JTWORK; /* A 通道记住脚控方式，下次切回 A 时使用。 */
 		else if (WorkMessage.channel_work == CHANNEL_B) /* 当前选中 B 时保持 A 记忆不变。 */
 			MemoryMsgB.drive_type = JTWORK; /* B 通道单独保存脚控方式。 */
-		Pubinterface_ClearFootControlManualLock(); /* 用户明确切回脚控后，取消本在线周期的手动锁存，脚控继续保持最高优先级。 */
+		Pubinterface_ClearFootControlManualLock(WorkMessage.channel_work); /* 只取消当前通道锁存，另一通道的手控或触控选择继续保留。 */
 		Pubinterface_RefreshControlModeDisplay(); /* 屏幕切到脚控后立刻刷新高亮，状态仍只写主工程 WorkMessage/MemoryMsg。 */
 		// 注意界面更新
 	}
@@ -2703,7 +2790,7 @@ void ControlTypeActive(uint8_t key_value)
 			MemoryMsgA.drive_type = HANDLEWORK; /* A 通道记住手控方式，下次切回 A 时恢复。 */
 		else if (WorkMessage.channel_work == CHANNEL_B) /* 当前选中 B 时只更新 B 通道记忆。 */
 			MemoryMsgB.drive_type = HANDLEWORK; /* B 通道单独保存手控方式。 */
-		MarkFootManualLock(); /* 脚踏在线时用户手动选手控，本次在线周期内不再被脚踏自动切回脚控。 */
+		MarkFootManualLock(); /* 只锁住当前通道的手控选择，另一通道仍按自己的模式和脚踏状态装载。 */
 		Pubinterface_RefreshControlModeDisplay(); /* 立即更新控制方式按钮，让用户看到手控已选中。 */
 		// 界面调整更新
 	}
@@ -2728,7 +2815,7 @@ void ControlTypeActive(uint8_t key_value)
 			MemoryMsgA.drive_type = TOUCHWORK; /* A 通道记忆当前触控来源，后续切回 A 时保持显示一致。 */
 		else if (WorkMessage.channel_work == CHANNEL_B) /* B 通道进入触控时只更新 B 记忆，防止 A/B 串状态。 */
 			MemoryMsgB.drive_type = TOUCHWORK; /* B 通道记忆当前触控来源，避免切通道后又显示为手控。 */
-		MarkFootManualLock(); /* 脚踏在线时用户手动进入触控，本次在线周期保持触控选择直到脚踏重新插入。 */
+		MarkFootManualLock(); /* 当前通道独立保存触控选择，不能把另一通道一并锁成非脚控。 */
 		data[0] = 0U; /* 点击触控图标只进入触控模式，不直接启动电机；运行由 0x5520 保活帧维持。 */
 		SendUIDSMessage(UI_TOUCH_ID, true, data); /* 通知屏幕触控入口进入待运行状态，保持触控界面可见。 */
 		WorkMessage.runflag_work = false; /* 未收到保活前保持停机，避免进入触控模式瞬间误启动手柄。 */
@@ -2966,6 +3053,7 @@ void SpeedActive(uint8_t key_value)
 		return; /* 理论保护分支，防止未知键值落入后写速度。 */
 	}
 
+	speed_value = Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, speed_value); /* 增减键同样遵守有效往复范围，0上限不能在减速分支留下非零旧值。 */
 	WorkMessage.speed_set_work = speed_value; /* 写回当前控制目标速度，驱动任务后续按该值输出。 */
 	/* 当前为 A 通道时只保存 A 的方向速度记忆，切换到 B 后仍可恢复 B 原有设定。 */
 	if (WorkMessage.channel_work == CHANNEL_A)

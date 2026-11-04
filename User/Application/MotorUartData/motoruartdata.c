@@ -405,10 +405,10 @@ void MotorUart_NotifyStopTransmitFailure(void)
 
 /*
  * 函数功能：保存一包 CRC 正确的驱动反馈；更新前后改变版本号，让读取方避开写入中的数据。
- * 输入参数：frame指向已经复制并通过CRC校验的驱动回包。
+ * 输入参数：frame指向已经复制并通过CRC校验的驱动回包；rx_window_start_ms为该批字节的DMA接收起点。
  * 返回参数：无。
  */
-static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
+static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame, uint32_t rx_window_start_ms)
 {
 	uint16_t speed_field; /* 驱动回包byte4~5保存“实际rpm/10”字段。 */
 
@@ -422,6 +422,7 @@ static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame)
 	__DMB(); /* 先写入奇数版本，再修改反馈字段，让其它任务知道数据正在更新。 */
 	s_motor_uart_feedback_snapshot.sequence = (uint16_t)(s_motor_uart_feedback_snapshot.sequence + 1U); /* 每份CRC正确回包递增，16位自然回绕。 */
 	s_motor_uart_feedback_snapshot.feedback_tick_ms = HAL_GetTick(); /* 记录本帧CRC确认完成时的主控单调毫秒时钟。 */
+	s_motor_uart_feedback_snapshot.rx_window_start_ms = rx_window_start_ms; /* 与本帧速度一起发布，启动检查可排除在STOP前打开的接收窗口。 */
 	s_motor_uart_feedback_snapshot.speed_rpm = (uint32_t)speed_field * 10U; /* 把驱动私有“rpm/10”换算成上位机统一使用的rpm。 */
 	s_motor_uart_feedback_snapshot.current_x100 = (uint16_t)(((uint16_t)frame[8] << 8U) | frame[9]); /* 电流保留0.01A单位，避免浮点参与固件组包。 */
 	s_motor_uart_feedback_snapshot.raw_error = frame[7]; /* 保留驱动原始Err，不能用主控报警码替代诊断依据。 */
@@ -683,11 +684,12 @@ void BrushlessMotorUartData_ReceiveData(void)
 {
 	static uint8_t clean_huic=0; /* 记录此前是否收到驱动故障，用于恢复首帧再次清除手柄运行请求。 */
   uint8_t rlen = 0, i = 0;
+  uint32_t rx_window_start_ms; /* 记录本批字节开始接收的下界，与解析完成时刻分开。 */
   uint8_t dat[UART1_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
   uint16_t CRC_Check_Vaule=0;
 	
   //读取串口数据
-  rlen = Uart1_DMARecvDataPeek(dat);
+  rlen = Uart1_DMARecvDataPeek(dat, &rx_window_start_ms); /* 取同一批原始字节及其DMA起点，只有成功取到完整帧才使用起点。 */
 	/* 参数读写期间优先处理参数响应，不按普通电机反馈解析。 */
 	if (s_driver_parameter_state == MOTOR_UART_DRIVER_PARAMETER_STATE_WAITING)
 	{
@@ -711,7 +713,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
 			{
 				Common_CopyData(&dat[i], dat1, 12);    //复制完整 12 字节反馈，包含末尾两字节 CRC。
-				MotorUart_RecordFeedbackSnapshot(dat1); /* CRC通过后，将本帧的速度、电流和Err一起保存，供50ms上报任务读取，避免混用不同回包。 */
+				MotorUart_RecordFeedbackSnapshot(dat1, rx_window_start_ms); /* CRC通过后，将本帧的速度、电流和Err一起保存，供50ms上报任务读取，避免混用不同回包。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是当前模式ADC滤波实际电流 * 100：无刷为AllCur、有刷为CurLPF，单位0.01A，只上传给上位机显示。 */
 					/* byte7 为驱动故障码，0 表示本帧确认驱动已经恢复正常。 */

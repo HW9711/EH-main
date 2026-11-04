@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 /* 主控内部报警编号，不是屏幕图片号，也不是可调整的门限；改号必须同步屏幕、蜂鸣和外控处理。 */
+#define WORK_ALARM_EXTERNAL_SELECTED 23U /* 外控占用时拒绝本地启动的临时提示，屏幕使用88号图，不置系统故障。 */
 #define WORK_ALARM_NONE                  0U /* 无报警，也用于停止报警蜂鸣。 */
 #define WORK_ALARM_HANDLE_NOT_CONNECTED  1U /* 手柄未连接或运行中拔出，屏幕使用 80 号图。 */
 #define WORK_ALARM_MANUAL_SELECTED       2U /* 当前选中手控却尝试脚控启动，提示使用手柄按键。 */
@@ -26,6 +27,13 @@
 #define WORK_ALARM_INJECTION_MISSING_SINGLE 17U /* 首次单向启动缺注水泵，72号图，报警保持到控制源松开。 */
 #define WORK_ALARM_INJECTION_MISSING_OSC    18U /* 首次往复启动缺注水泵，73号图，报警保持到控制源松开。 */
 
+#define WORK_ALARM_TOOL_CRC_START_ERROR 22U /* EPC CRC连续失败且兼容读取未成功；仅启动动作保持时显示77，松开不解除故障。 */
+#define WORK_ALARM_HANDLE_IIC_ERROR_A    19U /* A通道短接已接通但IIC通信失败，显示75号图。 */
+#define WORK_ALARM_HANDLE_IIC_ERROR_B    20U /* B通道短接已接通但IIC通信失败，显示75号图。 */
+#define WORK_ALARM_HANDLE_IIC_ERROR_AB   21U /* A/B两通道均IIC通信失败，显示75号图。 */
+
+bool WorkAlarm_IsHandleIicError(uint8_t alarm_value); /* 判断75号通信故障系列，保留A/B来源。 */
+bool WorkAlarm_IsHandleEepromError(uint8_t alarm_value); /* 判断75/90号系列，不包含71号不支持手柄。 */
 
 void WorkAlarm_Set(uint8_t alarm_value); /* 写入报警码并同步报警有效标志。 */
 void WorkAlarm_Clear(void); /* 清除当前工作报警。 */

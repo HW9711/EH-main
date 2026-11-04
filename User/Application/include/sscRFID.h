@@ -63,6 +63,8 @@ typedef struct
     RfidReadSource_t source;                         /* 成功读取的数据区为EPC或USER；清空结果时为NONE。 */
     uint8_t payload_length;                          /* EPC为12字节，老USER为16字节，比较缓存前必须检查来源和长度。 */
     uint8_t payload[RFID_PAYLOAD_MAX_LENGTH];        /* 按协议提取出的完整原始标签数据，用于缓存比较。 */
+    bool epc_crc_checked; /* 完整EPC及外层校验已通过，已执行CRC8；无回包和坏外层帧不置位。 */
+    bool epc_crc_failed; /* 仅CRC8错误置位，型号、方向及速度等字段失败不计入77。 */
     bool tag_epc_valid; /* 本帧已通过模块校验且含12字节标签标识；用于核对EPC和USER属于同一标签。 */
     uint8_t tag_epc[RFID_PAYLOAD_EPC_LENGTH]; /* USER回包附带的EPC，或库存回包中的EPC原文。 */
     uint16_t sequence;                               /* 刀具数据需要重新处理时才增加；普通轮询读到相同标签时不变，手柄扫描程序用它判断是否需要刷新。 */
@@ -97,6 +99,10 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                              RfidReadSource_t expected_source,
                              RfidToolResult_t *result);
 void Rfid_ClearChannelResult(uint8_t channel);
+bool Rfid_IsToolCrcBlocked(uint8_t channel); /* 首次CRC错误后禁止启动，参数装载成功或确认拔柄才解除。 */
+bool Rfid_IsToolCrcConfirmed(uint8_t channel); /* 三次CRC错误且允许的USER兼容仍未成功，供启动时显示77。 */
+void Rfid_ConfirmToolLoaded(uint8_t channel, uint16_t sequence); /* 只确认本次有效结果已装载，旧缓存不能解锁。 */
+void Rfid_ResetToolCrcFault(uint8_t channel); /* 仅确认拔出手柄时清除该侧故障，不用于切手动或普通清缓存。 */
 
 void SendKeyRFIDMessageAup(uint8_t rfid_data);
 void SendKeyRFIDMessageAdown(void);

@@ -53,3 +53,28 @@ bool WorkAlarm_Is(uint8_t alarm_value)
 {
 	return ((WorkMessage.alarm_flag == true) && (WorkMessage.alarm_value == alarm_value));
 }
+
+/*
+ * 函数功能：识别手柄IIC通信报警，供屏幕选75号图及双通道报警合并使用。
+ * 输入参数：alarm_value为主控内部报警码。
+ * 返回参数：true表示A/B/双路IIC通信失败，false表示其它报警。
+ */
+bool WorkAlarm_IsHandleIicError(uint8_t alarm_value)
+{
+    return ((alarm_value == WORK_ALARM_HANDLE_IIC_ERROR_A) || /* A通道通信失败。 */
+            (alarm_value == WORK_ALARM_HANDLE_IIC_ERROR_B) || /* B通道通信失败。 */
+            (alarm_value == WORK_ALARM_HANDLE_IIC_ERROR_AB)); /* 双路通信失败仍只显示75号图。 */
+}
+
+/*
+ * 函数功能：识别EEPROM通信或数据校验报警，使75/90共用恢复及写屏重试流程。
+ * 输入参数：alarm_value为主控内部报警码。
+ * 返回参数：true表示75/90号报警，false表示其它报警，尤其不包含71号。
+ */
+bool WorkAlarm_IsHandleEepromError(uint8_t alarm_value)
+{
+    return (WorkAlarm_IsHandleIicError(alarm_value) || /* 通信失败进入相同恢复流程，但图片仍为75。 */
+            (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) || /* A通道数据校验失败显示90。 */
+            (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) || /* B通道数据校验失败显示90。 */
+            (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)); /* 双路数据校验失败显示90。 */
+}

@@ -333,6 +333,10 @@ void PlanerGridH(uint8_t key_value)
 	uint8_t current_channel = WorkMessage.channel_work; /* 记录当前工作通道，后续关闭 RFID 和刷新界面都使用它。 */
 	bool auto_identify_was_enabled = (WorkMessage.auto_identify != 0U); /* 记录进入函数前是否处于自动识别，自动转手动时即使刀具类型相同也要刷新。 */
 	bool tool_changed = false; /* 标记本次是否重新装载了手动刀具参数，后面据此刷新界面。 */
+    if (Rfid_IsToolCrcBlocked(current_channel))
+    {
+        return; /* CRC故障时不能用手动磨/刨选择绕过禁止启动；保持RFID读取以等待恢复。 */
+    }
 
 	if (WorkMessage.runflag_work == true || WorkMessage.alarm_flag == true) /* 运行中或报警中不能切换刀具模式，避免重载方向和速度参数。 */
 	{
@@ -419,6 +423,10 @@ void AutoIdentifyActive(uint8_t key_value)
 	ChannelMemoryMessage_t *memory = NULL; /* 指向当前 A/B 通道记忆，自动/手动模式要和切通道后的恢复状态保持一致。 */
 	uint8_t current_channel = WorkMessage.channel_work; /* 记录当前工作通道，后续刷新界面和触发 RFID 都按这个通道执行。 */
 
+    if (Rfid_IsToolCrcBlocked(current_channel))
+    {
+        return; /* CRC故障期间保留自动识别，切手动不能取消重试或解除启动限制。 */
+    }
 	if (key_value != SCREENKey_AutoIdentify) /* 该入口只处理新屏自动识别按钮。 */
 	{
 		return; /* 只接收新屏自动识别键，避免其它旧键误进入 RFID 流程。 */
@@ -630,7 +638,7 @@ void Handle_SelectRemainingOnlineAfterUnplug(void)
 }
 
 /*
- * 函数功能：最后一个手柄拔出后清空当前选中通道和参数显示。
+ * 函数功能：最后一个手柄拔出后清空当前通道、参数和本地手控残留，保留触控故障确认及外控退出流程。
  * 输入参数：无，直接清除 WorkMessage 中当前选中通道的参数。
  * 返回参数：无。
  */
@@ -649,6 +657,10 @@ static void Handle_ClearSelection(void)
 	WorkMessage.speed_work = 0U;				   /* 无手柄时实际目标速度必须为 0，保持显示和驱动停止状态一致。 */
 	WorkMessage.channel_work = CHANNEL_NONE;		   /* 最后一个手柄离线后没有选中通道，后续屏幕触控和方向按键都不能落到 A/B。 */
 	s_running_unplug_recovery_channel = CHANNEL_NONE; /* A/B 都离线后不存在可恢复目标，取消运行掉线自动切换请求。 */
+    if ((ControlArbitration_IsExternalActive() == false) && (WorkMessage.touchactive_work != TOUCHWORK))
+    {
+        WorkMessage.drivetype_work = ControlSignalMessage.jt_enable_flag ? JTWORK : NOWORK; /* 最后手柄离线时清当前手控残留；两通道自己的记忆已分别清零，触控掉线确认和外控仍走原退出流程。 */
+    }
 	UIDP_ForceNoHandleDisplay();				   /* 先清 UIDP 旧队列并直写无手柄控件，防止旧方向和自动识别消息晚到覆盖拔出状态。 */
 	Pubinterface_ClearSelectedChannelDisplay();	   /* 立即关闭方向、刀具识别、刀具规格、速度和频率区，清除屏幕旧控件残留。 */
 	Pubinterface_ApplyInjectionPumpDefaultFlow(0U); /* 无选中手柄时注水泵默认值回到程序默认 30，显示值和下一次运行目标保持一致。 */

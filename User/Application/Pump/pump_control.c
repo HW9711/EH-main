@@ -133,10 +133,14 @@ uint8_t Pump_CycleFlow(uint8_t screen_key)
 /*
  * 函数功能：按当前注水流量和本次调节方向取得分段步进值。
  * 输入参数：current_flow 为当前 speed_work 流量，单位 mL/min；increase 为 true 表示增加，false 表示减少。
- * 返回参数：每次调整 2、5、10 或 20 mL/min；在 30/100/200 分界值，加键用上一区间的步长，减键用下一区间的步长。
+ * 返回参数：每次调整 1、2、5、10 或 20 mL/min；在 10/30/100/200 分界值，加键用上一区间的步长，减键用下一区间的步长。
  */
 static uint16_t Pump_GetWaterFlowStep(uint16_t current_flow, bool increase)
 {
+	if ((current_flow < 10U) || ((increase == false) && (current_flow == 10U))) /* 10以下细调；恰好10向下时用低区步进，避免一步跳到8。 */
+	{
+		return 1U; /* 注水低流量每次调整1mL/min，调用方仍按原上下限限幅。 */
+	}
 	if ((current_flow < 30U) || ((increase == false) && (current_flow == 30U)))
 	{
 		return 2U; /* 低于 30 始终用 2；恰好为 30 时只有减流量继续使用低区间步进。 */
@@ -154,25 +158,25 @@ static uint16_t Pump_GetWaterFlowStep(uint16_t current_flow, bool increase)
 
 
 /*
- * 函数功能：按灌注流量和调节方向选择屏幕/HMI加减步进，跨越140时只调整到分界值。
+ * 函数功能：按灌注流量和调节方向选择屏幕/HMI加减步进，跨越160时只调整到分界值。
  * 输入参数：current_flow为当前流量，单位mL/min；increase为true表示增加，false表示减少。
- * 返回参数：本次调整量，通常为10或20mL/min；距140不足一步时返回到140的差值。
+ * 返回参数：本次调整量，通常为10或20mL/min；距160不足一步时返回到160的差值。
  */
 static uint16_t Pump_GetPourWaterFlowStep(uint16_t current_flow, bool increase)
 {
 	if (increase != false)
 	{
-		if (current_flow < 140U) /* 低流量区每次加10，不能从135等非整档值跳过140。 */
+		if (current_flow < 160U) /* 低流量区每次加10，不能从155等非整档值跳过160。 */
 		{
-			return (current_flow > 130U) ? (uint16_t)(140U - current_flow) : 10U; /* 剩余不足10时先到140，下一次再进入高区间。 */
+			return (current_flow > 150U) ? (uint16_t)(160U - current_flow) : 10U; /* 剩余不足10时先到160，下一次再进入高区间。 */
 		}
-		return 20U; /* 从140继续向上进入高流量区，每次加20，调用方限制最高300。 */
+		return 20U; /* 从160继续向上进入高流量区，每次加20，调用方限制最高300。 */
 	}
-	if (current_flow > 140U) /* 高流量区每次减20，接近分界时先减到140。 */
+	if (current_flow > 160U) /* 高流量区每次减20，接近分界时先减到160。 */
 	{
-		return (current_flow < 160U) ? (uint16_t)(current_flow - 140U) : 20U; /* 剩余不足20时先到140，避免一次减入低区间。 */
+		return (current_flow < 180U) ? (uint16_t)(current_flow - 160U) : 20U; /* 剩余不足20时先到160，避免一次减入低区间。 */
 	}
-	return 10U; /* 从140向下使用低流量区步进，调用方限制最低0。 */
+	return 10U; /* 从160向下使用低流量区步进，调用方限制最低0。 */
 }
 
 /*
@@ -441,10 +445,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			/* A 泵处于屏幕定时排空时拒绝调速，确保固定排空速度不被覆盖。 */
 			if (pumpMessageA.timingDrainage_flag == true)
 				return;
-			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
+			pumpMessageA.speed_step_value = Pump_GetWaterFlowStep(pumpMessageA.speed_work, increase); /* A 注水泵按当前流量区间和加减方向选择 1/2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageA.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageA.speed_work, increase); /* 灌注泵在140以下加减10，140以上加减20，跨区时先到140。 */
+			pumpMessageA.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageA.speed_work, increase); /* 灌注泵在160以下加减10，160以上加减20，跨区时先到160。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpADisplay(); /* A 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */
@@ -507,10 +511,10 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 			if (pumpMessageB.timingDrainage_flag == true)
 
 				return;
-			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 注水泵按当前流量区间和加减方向选择 2/5/10/20 步进。 */
+			pumpMessageB.speed_step_value = Pump_GetWaterFlowStep(pumpMessageB.speed_work, increase); /* B 注水泵按当前流量区间和加减方向选择 1/2/5/10/20 步进。 */
 			break;
 		case POURWATER: // 灌
-			pumpMessageB.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageB.speed_work, increase); /* 灌注泵在140以下加减10，140以上加减20，跨区时先到140。 */
+			pumpMessageB.speed_step_value = Pump_GetPourWaterFlowStep(pumpMessageB.speed_work, increase); /* 灌注泵在160以下加减10，160以上加减20，跨区时先到160。 */
 			break;
 		default:
 			Pubinterface_RefreshPumpBDisplay(); /* B 泵类型无效时只刷新为不可用状态，不沿用上一次步进值误改速度。 */

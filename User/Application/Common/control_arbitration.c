@@ -1,4 +1,5 @@
 #include "control_arbitration.h"
+#include "diagnostic.h" /* 仅记录控制权变化，不改变取得、释放和运行互斥条件。 */
 
 #include "motoruartdata.h"
 #include "Pubinterface.h"
@@ -80,6 +81,10 @@ uint8_t ControlArbitration_GetLocalDriveTypeAfterExit(void)
 		MemoryMsgB.drive_type = drive_type; /* 把退出后选择的本机控制方式记到 B 通道，切回此通道时仍显示同一方式。 */
 	}
 
+    if ((drive_type == JTWORK) && ((WorkMessage.channel_work == CHANNEL_A) || (WorkMessage.channel_work == CHANNEL_B)))
+    {
+        Pubinterface_ClearFootControlManualLock(WorkMessage.channel_work); /* 退出触控或外控只解开当前通道的旧非脚控锁存，不能影响另一通道。 */
+    }
 	return drive_type;
 }
 
@@ -133,6 +138,7 @@ static void ControlArbitration_ReleaseLocalIfIdle(void)
 	/* 无运行请求，且反馈为零或超时后，脚踏、屏幕和手柄按键可以重新申请控制。 */
 	if (ControlArbitration_IsMotorBusy() == false)
 	{
+		DIAG_EVENT(DIAG_EVENT_OWNER, WorkMessage.channel_work, s_control_owner, CONTROL_OWNER_NONE, 1U); /* 先记录空闲释放，才能追溯反馈非零前为何已无人持有。 */
 		s_control_owner = CONTROL_OWNER_NONE;
 	}
 }
@@ -421,6 +427,7 @@ bool ControlArbitration_TryEnter(uint8_t owner)
 	}
 
 	/* 允许切换后记下新控制来源；本地单独操作泵不会调用这里。 */
+	DIAG_EVENT(DIAG_EVENT_OWNER, WorkMessage.channel_work, s_control_owner, owner, 2U); /* 记录旧来源与新来源，时间与脚踏首拒对齐。 */
 	s_control_owner = owner;
 	return true;
 }
@@ -435,6 +442,7 @@ void ControlArbitration_Exit(uint8_t owner)
 	/* 只有当前持有者本人才能释放，避免其它来源误清正在运行的控制权。 */
 	if (s_control_owner == owner)
 	{
+		DIAG_EVENT(DIAG_EVENT_OWNER, WorkMessage.channel_work, s_control_owner, CONTROL_OWNER_NONE, 3U); /* 主动释放与自动空闲释放分开记录。 */
 		s_control_owner = CONTROL_OWNER_NONE;
 	}
 }
@@ -482,6 +490,8 @@ void ControlArbitration_RefreshMotorOwner(void)
 void ControlArbitration_ForceRelease(void)
 {
 	/* 急停或系统级清状态使用强制释放，让任何来源都不能继续占用控制权。 */
+	if (s_control_owner != CONTROL_OWNER_NONE) /* 无来源时不重复记录无效变化。 */
+		DIAG_EVENT(DIAG_EVENT_OWNER, WorkMessage.channel_work, s_control_owner, CONTROL_OWNER_NONE, 4U); /* 保留强制释放入口，便于区别拔柄、急停与普通松脚。 */
 	s_control_owner = CONTROL_OWNER_NONE;
 }
 
@@ -582,7 +592,17 @@ void ControlArbitration_ReleaseExternalControl(void)
  */
 bool ControlArbitration_ShouldBlockLocalKey(uint8_t control_type, uint8_t control_key)
 {
-	uint8_t key_owner = ControlArbitration_OwnerFromKey(control_type);
+    uint8_t key_owner = ControlArbitration_OwnerFromKey(control_type); /* 识别来源，外控自身请求不产生本地操作提示。 */
+    if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) &&
+        (((control_type == SCREENKey) && ((control_key == SCREENKey_TouchActi) ||
+          (control_key == SCREENKey_TouchKeepAlive) || (control_key == SCREENKey_APUMP_control) ||
+          (control_key == SCREENKey_BPUMP_control))) ||
+         ((control_type == HANDLEKey) && (control_key == HANDLEKey_motor_start)) ||
+         ((control_type == JTKey) && ControlArbitration_IsPumpKey(control_type,control_key) &&
+          (control_key != JTKey_Gently_left_stop) && (control_key != JTKey_Gently_rigth_stop))))
+    {
+        UIDP_RequestExternalControlHint(); /* 被拒绝的本地启动显示88，停止键和调参不触发。 */
+    }
 
 	/* 手柄插拔事件只维护在线状态和通道记忆，不属于运行控制，互斥期间仍要接收。 */
 	if (control_type == PLUGunPLUG)

@@ -15,11 +15,18 @@
 static uint8_t Uart1_Flag_Last = 0;
 static uint16_t Uart1_RecvWaitTimeCnt = 0;
 static uint8_t Uart1_DMABuf[UART1_MAX_PACKET_SIZE] = { 0 };
+static uint32_t s_uart1_rx_window_start_ms; /* 本轮DMA启动前的HAL时钟，供上层排除STOP前已进入缓存的反馈。 */
 
+/*
+ * 函数功能：启动首轮UART1 DMA接收，并为本轮反馈保存最早可能的接收时刻。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void Uart1_DmaInit(void)
 {
 //	Delay_ms(300);
 
+  s_uart1_rx_window_start_ms = HAL_GetTick(); /* 先取时刻再开DMA，确保这是本批字节可能到达的最早时刻。 */
   Bsp_UartReceiveDma(BSP_UART_PORT_1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
 }
 
@@ -37,11 +44,17 @@ void Uart1_Configuration(uint16_t baud)
   }
 }
 
+/*
+ * 函数功能：取走上一批UART1数据后重开DMA接收，分开保存新旧批次时刻。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
 static void Uart1_DMAReset(void)
 {
 
   Bsp_UartDmaStop(BSP_UART_PORT_1);
   memset(Uart1_DMABuf, 0, UART1_MAX_PACKET_SIZE);
+  s_uart1_rx_window_start_ms = HAL_GetTick(); /* 先取时刻再开DMA，确保这是本批字节可能到达的最早时刻。 */
   Bsp_UartReceiveDma(BSP_UART_PORT_1, Uart1_DMABuf, UART1_MAX_PACKET_SIZE);
   Uart1_RecvWaitTimeCnt = 0;
   Uart1_Flag_Last = UART1_MAX_PACKET_SIZE;
@@ -66,10 +79,10 @@ HAL_StatusTypeDef Uart1_SendPacket(uint8_t *pData, uint16_t Length)
 
 /*
  * 函数功能：连续多次未收到新字节后，取出 UART1 DMA 数据并重新开始接收。
- * 输入参数：data 指向至少 UART1_MAX_PACKET_SIZE 字节的输出缓存。
+ * 输入参数：data 指向至少 UART1_MAX_PACKET_SIZE 字节的输出缓存；rx_window_start_ms 指向必须提供的本批DMA接收起点输出变量。
  * 返回参数：复制的字节数；仍在接收或缓存为空时返回 0。
  */
-uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
+uint16_t Uart1_DMARecvDataPeek(uint8_t *data, uint32_t *rx_window_start_ms)
 {
   uint32_t RemainLen = 0;  // DMA剩余未传输的数据长度
   uint16_t rlen = 0;       // 实际接收到的数据长度
@@ -97,6 +110,7 @@ uint16_t Uart1_DMARecvDataPeek(uint8_t *data)
       {
         // 计算实际接收到的数据长度
         rlen = (UART1_MAX_PACKET_SIZE - RemainLen);
+        *rx_window_start_ms = s_uart1_rx_window_start_ms; /* 在DMA复位前返回旧批次起点，避免用下一批时刻证明旧包在STOP之后收到。 */
 
         // 将DMA缓冲区中的数据复制到输出缓冲区
 		    Common_CopyData(Uart1_DMABuf, data, rlen);

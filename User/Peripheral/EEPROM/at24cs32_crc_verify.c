@@ -86,9 +86,11 @@ AT24CS32_CRC_Status AT24CS32_VerifyCrcStep(uint8_t use_i2c3, AT24CS32_CRC_StepCo
         length = AT24CS32_SN_SIZE; /* 仅处理真实16字节SN。 */
     } else {
         block = &context->pages[(context->step - 2U) * AT24CS32_PAGE_SIZE]; /* step为2时把Page2存到数组开头，后续每页顺延32字节。 */
-        if ((use_i2c3 ? AT24CS32_ReadPage_I2C3(context->step - 1U, block) :
-                       AT24CS32_ReadPage_I2C2(context->step - 1U, block)) == 0U) {
-            return AT24CS32_CRC_STATUS_DATA_READ_FAILED; /* 任一页读取或校验和检查失败，本轮认证立即结束，不允许使用已读参数。 */
+        if (At24_ReadRawPage(use_i2c3, context->step - 1U, block) == 0U) { /* 先独立检查传输返回值，防止页和错误被当成针脚通信故障。 */
+            return AT24CS32_CRC_STATUS_DATA_READ_FAILED; /* 明确的IIC读取失败交给75号报警，停止使用本轮数据。 */
+        }
+        if (AT24CS32_VerifyPageChecksum(block) == 0U) { /* 只有完整读成功才判断页和，避免校验未更新的缓存。 */
+            return AT24CS32_CRC_STATUS_DATA_CHECKSUM_FAILED; /* 数据校验失败交给90号报警，不归为通信失败。 */
         }
         length = AT24CS32_PAGE_SIZE; /* 页尾两字节也参与CRC，与旧认证输入完全一致。 */
     }
@@ -110,8 +112,12 @@ AT24CS32_CRC_Status AT24CS32_VerifyCrcStep(uint8_t use_i2c3, AT24CS32_CRC_StepCo
     return AT24CS32_CRC_STATUS_OK; /* 返回认证成功；调用方将在后续扫描周期读取已保存的参数。 */
 }
 
-/* 按总线读取 Page2~Page8（共7页，224字节），每页读取时都会做页和校验 */
-static uint8_t At24_ReadAuthPages(uint8_t use_i2c3, uint8_t *out_buf)
+/*
+ * 函数功能：读取Page2~8并逐页校验，分别保留通信失败和页和失败原因。
+ * 输入参数：use_i2c3选择总线；out_buf接收全部认证页数据。
+ * 返回参数：OK表示全部成功，BAD_PARAM表示参数异常，其它状态区分读失败和页和失败。
+ */
+static AT24CS32_CRC_Status At24_ReadAuthPages(uint8_t use_i2c3, uint8_t *out_buf)
 {
     uint8_t page_buf[AT24CS32_PAGE_SIZE];
     uint16_t page_idx;
@@ -119,35 +125,38 @@ static uint8_t At24_ReadAuthPages(uint8_t use_i2c3, uint8_t *out_buf)
 
     /* 调用方未提供认证数据缓存时拒绝读取，避免连续七页数据写入空地址。 */
     if (out_buf == NULL) {
-        return 0U;
+        return AT24CS32_CRC_STATUS_BAD_PARAM; /* 空缓存属于调用错误，不伪装为通信故障。 */
     }
 
     for (page_idx = AT24CS32_AUTH_PAGE_START_INDEX;
          page_idx < (AT24CS32_AUTH_PAGE_START_INDEX + AT24CS32_AUTH_PAGE_COUNT);
          page_idx++) {
-        uint8_t ok = use_i2c3 ?
-            AT24CS32_ReadPage_I2C3(page_idx, page_buf) :
-            AT24CS32_ReadPage_I2C2(page_idx, page_buf);
-
-        /* 任一认证页读取或页和校验失败都立即终止，避免用不完整数据计算认证 CRC。 */
-        if (ok == 0U) {
-            return 0U;
+        if (At24_ReadRawPage(use_i2c3, page_idx, page_buf) == 0U) { /* 与分步认证一致，先检查实际传输结果。 */
+            return AT24CS32_CRC_STATUS_DATA_READ_FAILED; /* 传输未完成，不能计算页和或继续认证。 */
+        }
+        if (AT24CS32_VerifyPageChecksum(page_buf) == 0U) { /* 读取成功后单独校验本页数据。 */
+            return AT24CS32_CRC_STATUS_DATA_CHECKSUM_FAILED; /* 页和错误保留90号数据校验语义。 */
         }
 
         memcpy(&out_buf[offset], page_buf, AT24CS32_PAGE_SIZE);
         offset = (uint16_t)(offset + AT24CS32_PAGE_SIZE);
     }
 
-    return 1U;
+    return AT24CS32_CRC_STATUS_OK; /* 全部页面读取及页和通过，才允许后续最终CRC认证。 */
 }
 
-/* 按总线执行认证校验：use_i2c3=0 使用 I2C2，use_i2c3=1 使用 I2C3 */
+/*
+ * 函数功能：执行完整EEPROM认证，分别返回通信、页和及最终CRC错误。
+ * 输入参数：use_i2c3为0选I2C2、1选I2C3；result保存认证结果。
+ * 返回参数：OK表示通过，其它状态指明失败阶段和类型。
+ */
 static AT24CS32_CRC_Status At24_VerifyBus(uint8_t use_i2c3, AT24CS32_CRC_Result *result)
 {
     uint16_t crc1;
     uint16_t crc2;
     uint16_t crc3;
     uint16_t crc4;
+    AT24CS32_CRC_Status page_status; /* 保存业务页读取结果，不能把页和错误压成读失败。 */
 
     /* 结果结构为空时不能保存序列号和认证值，直接返回参数错误。 */
     if (result == NULL) {
@@ -189,8 +198,9 @@ static AT24CS32_CRC_Status At24_VerifyBus(uint8_t use_i2c3, AT24CS32_CRC_Result 
 
     /* 读取 Page2~Page8（0x0020~0x00FF）并按页校验 */
     /* Page2~8 任一页失败会造成认证输入不完整，因此不能继续计算 CRC。 */
-    if (At24_ReadAuthPages(use_i2c3, s_auth_data) == 0U) {
-        return AT24CS32_CRC_STATUS_DATA_READ_FAILED;
+    page_status = At24_ReadAuthPages(use_i2c3, s_auth_data); /* 同步认证与分步认证使用相同的故障分类。 */
+    if (page_status != AT24CS32_CRC_STATUS_OK) {
+        return page_status; /* 原样返回读失败或页和失败，保持75/90分类一致。 */
     }
 
     /* 认证输入为 SN + Page2~8(含每页末尾2字节页和) */

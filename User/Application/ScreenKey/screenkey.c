@@ -8,6 +8,8 @@
 #include "Pubinterface.h"
 #include "sscKEYBH.h"
 #include "sscBEEP.h"
+#include "sscUIDP.h" /* 本地触控被外控拦截时请求88号提示。 */
+#include "control_arbitration.h" /* 按实际控制权判断外控占用。 */
 
 #include "kernel_scheduler.h"
 #include "iwdg.h" /* 异常重启后先等待旧触控长按信号结束。 */
@@ -69,6 +71,22 @@ static void ScreenKey_InvalidateTouchKeepAlive(void)
 {
   s_touch_keepalive_accepted_valid = 0U; /* 先撤销有效标志，退出触控、外控或报警后旧保活不得再次启动。 */
   __DMB(); /* 保证上面的清零先完成，其他任务不能误用旧的有效标志。 */
+}
+
+/*
+ * 函数功能：手柄切换后作废旧触控按住动作，防止旧通道保活在目标通道起机。
+ * 输入参数：无，读取最近原始按住时刻和HAL毫秒时钟。
+ * 返回参数：无。
+ */
+void ScreenKey_OnHandleChannelChanged(void)
+{
+  ScreenKey_InvalidateTouchKeepAlive(); /* 队列中的旧保活立即失效，切换后不能复用旧通道的按住许可。 */
+  if ((s_touch_raw_keepalive_valid != 0U) &&
+      ((uint32_t)(HAL_GetTick() - s_touch_raw_keepalive_tick) < SCREENKEY_TOUCH_KEEPALIVE_TIMEOUT_MS))
+  {
+    s_touch_restart_release_required = 1U; /* 切换前仍有触控长按时，复用原有先松手保护，不接受持续旧按压。 */
+    s_touch_restart_keepalive_tick = s_touch_raw_keepalive_tick; /* 从最近真实按住信号开始确认420ms空闲，新到旧信号仍会延长等待。 */
+  }
 }
 
 /*
@@ -375,6 +393,13 @@ static void ScreenKey_PostLegacyAction(uint8_t legacy_key)
       }
     }
 
+    if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) &&
+        ((screen_key == SCREENKey_TouchActi) || (screen_key == SCREENKey_TouchKeepAlive) ||
+         (screen_key == SCREENKey_APUMP_control) || (screen_key == SCREENKey_BPUMP_control)))
+    {
+      UIDP_RequestExternalControlHint(); /* 外控期间可用性检查会提前拒绝；这里提示真实启动触摸，不接受运行请求。 */
+      return; /* 不入队、不修改控制权或输出；调参和退出键继续走原路径。 */
+    }
     if (ScreenKey_CanUse(screen_key) == false) /* 当前图标必须处于可操作状态，黑色或隐藏图片不接受触摸。 */
     {
       return; /* 黑色、隐藏或当前业务状态不可用的坐标静默丢弃，既不蜂鸣也不进入业务队列。 */

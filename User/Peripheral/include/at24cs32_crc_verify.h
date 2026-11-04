@@ -63,7 +63,8 @@ typedef enum
     AT24CS32_CRC_STATUS_SN_READ_FAILED,
     AT24CS32_CRC_STATUS_DATA_READ_FAILED,
     AT24CS32_CRC_STATUS_CRC_MISMATCH,
-    AT24CS32_CRC_STATUS_PENDING /* 分步认证尚未完成，不计失败、不发布手柄上线。 */
+    AT24CS32_CRC_STATUS_PENDING, /* 分步认证尚未完成，不计失败、不发布手柄上线。 */
+    AT24CS32_CRC_STATUS_DATA_CHECKSUM_FAILED /* Page2~8已读成功但页和错误；追加枚举保持原诊断状态编号。 */
 } AT24CS32_CRC_Status;
 
 typedef struct

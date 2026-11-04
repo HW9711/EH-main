@@ -137,6 +137,7 @@ void Foot_ClearKeyStatus(void);
  * 返回参数：1 表示必须停止；0 表示本次踩踏已允许运行。
  */
 uint8_t Foot_IsMotorStopLatched(void);
+void Foot_OnHandleChannelChanged(uint8_t channel); /* 实际切换或新插入后隔离旧脚踏行程，目标通道必须松脚重踩。 */
 
 /**
  * @brief 脚踏板任务初始化

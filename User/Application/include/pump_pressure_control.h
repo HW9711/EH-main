@@ -25,7 +25,7 @@ extern "C" {
 #define PUMP_PRESSURE_POUR_100_RECOVER_X10 326U
 /* 正常运行首次超压须持续500ms；短于此时长的波动不启动一级降流。 */
 #define PUMP_PRESSURE_POUR_HIGH_CONFIRM_MS 500U
-/* 二级试升后压力持续高于本档恢复线500ms即失败；25档用50mmHg，不能等待达到100mmHg才退回5。 */
+/* 二级试升后压力持续高于本档恢复线500ms即重新逐档降流；25档仍用50mmHg，不等待达到100mmHg。 */
 #define PUMP_PRESSURE_POUR_RECOVER_HIGH_CONFIRM_MS 500U
 /* 每次降档后至少等待500ms，并收到新压力后才决定下一档；不按旧帧补调多档。 */
 #define PUMP_PRESSURE_POUR_ADJUST_MS 500U
@@ -43,10 +43,8 @@ extern "C" {
 #define PUMP_PRESSURE_POUR_WORK_MIN_ML_MIN 20U
 /* 二级低流量为5mL/min；此档所有真实超压都只报警，不能因压力数值触发零速。 */
 #define PUMP_PRESSURE_POUR_LOW_FLOW_ML_MIN 5U
-/* 压力低于恢复线连续1000ms后才增加一档；每次增流都重新确认1000ms。 */
-#define PUMP_PRESSURE_POUR_RECOVER_CONFIRM_MS 1000U
-/* 每次稳定低压确认后恢复20mL/min，为原10mL/min步长的两倍；保留1秒确认并限幅至用户设定。 */
-#define PUMP_PRESSURE_POUR_RECOVER_STEP_ML_MIN 20U
+/* 压力低于恢复线连续500ms后才增加一档；每次增流都重新确认500ms。 */
+#define PUMP_PRESSURE_POUR_RECOVER_CONFIRM_MS PUMP_PRESSURE_POUR_ADJUST_MS /* 恢复与降流统一使用500ms反馈周期。 */
 /* 三类泵运行中500ms没有有效新压力即提示；压力板明确无效或未就绪立即提示，均保持当前输出。 */
 #define PUMP_PRESSURE_SAMPLE_TIMEOUT_MS 500U
 
@@ -61,22 +59,15 @@ extern "C" {
 #define PUMP_PRESSURE_POUR_NORMAL 0U
 /* 阶段1：一级逐档降流至20并观察，再按本轮超压未解除记录进入5；稳定低压可小步恢复。 */
 #define PUMP_PRESSURE_POUR_ADJUST 1U
-/* 阶段2：进入不高于5mL/min时提示本轮堵塞，每次稳定低压1秒后均允许逐步自动恢复。 */
+/* 阶段2：进入不高于5mL/min时提示本轮堵塞，每次稳定低压500ms后均允许逐步自动恢复。 */
 #define PUMP_PRESSURE_POUR_LOW 2U
-/* 阶段3：每秒按20mL/min逐步恢复；持续超过本档恢复线500ms即退回5等待，压力重新稳定后可再次恢复。 */
+/* 阶段3：每500ms按当前档10/20mL/min逐步恢复；持续超过本档恢复线500ms转回一级，从当前流量逐档降低，降到底仍未恢复才进入5。 */
 #define PUMP_PRESSURE_POUR_RECOVER 3U
 
 /* 返回事件位0：请求现有蜂鸣和压力弹窗，不修改运行请求。 */
 #define PUMP_PRESSURE_EVENT_ALARM 0x01U
 /* 返回事件位1：压力检测失效，仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
 #define PUMP_PRESSURE_EVENT_SENSOR_FAULT 0x02U
-/* 返回事件位2：灌注正常建压后持续失压，要求本周期零速、撤销运行请求并提示76号图3秒。 */
-#define PUMP_PRESSURE_EVENT_NO_LIQUID 0x04U
-/* P90-MEDIAN-PIECEWISE-20261021-V1中10mmHg约为0.809934g；0.1g整数读数不超过8即严格低于10mmHg。 */
-#define PUMP_PRESSURE_POUR_NO_LIQUID_MAX_X10 8U
-/* 建压后连续低于10mmHg满4000ms才判无液体输入，任何有效回升或检测中断重新计时。 */
-#define PUMP_PRESSURE_POUR_NO_LIQUID_CONFIRM_MS 4000U
-
 /*
  * 旧版 UART10 压力调试开关，保留 0=关闭、1=开启的历史定义。
  * 当前代码没有读取该宏，改成 1 不会产生调试日志；正式配置保持 0。
@@ -162,20 +153,16 @@ typedef struct
     uint16_t last_output_speed; /* 上次实际下发的流量目标；短时重复压力帧时保持，不能回跳原设定。 */
     uint8_t last_sequence; /* 最近有效压力帧序号；相同序号不能重复参与确认和调档。 */
     uint8_t sequence_valid; /* 已接收有效样本时置1，使首次序号为0仍能正常处理。 */
-    uint8_t alarm_active; /* 本轮已提示时置1；灌注须恢复原设定后再稳定低压1秒才清零，该标志不代表停泵。 */
+    uint8_t alarm_active; /* 本轮已提示时置1；灌注须恢复原设定后再稳定低压500ms才清零，该标志不代表停泵。 */
     uint8_t timing_active; /* 正在确认超压或试升后持续超过恢复线时置1；注水/抽吸沿用原提示确认规则。 */
     uint8_t mode; /* 0未使用、1抽吸、2注水、3灌注；用途切换时清除上一用途的状态。 */
     uint8_t pour_phase; /* 灌注阶段：正常、一级调节、二级低流量等待、逐步恢复；检测失效不改变本阶段。 */
     uint32_t pour_adjust_tick_ms; /* 最近一次调档时刻；至少等待500ms及新压力后才继续降档。 */
-    uint32_t pour_low_tick_ms; /* 首个连续低压样本时刻；每次增流后重新确认1秒。 */
-    uint8_t pour_blocked_latched; /* 已连续确认本轮超压时置1；保持区仍继续降档，稳定低于本档恢复线1秒才解除。 */
+    uint32_t pour_low_tick_ms; /* 首个连续低压样本时刻；每次增流后重新确认500ms。 */
+    uint8_t pour_blocked_latched; /* 本轮超压或二级试升失败确认后置1；保持区仍逐档降低，稳定低于本档恢复线500ms才解除。 */
     uint8_t pour_last_high; /* 上一新样本是否达到当时输出流量的启动线；用户改设定时据此避免跳回高流量。 */
     uint8_t pour_low_timing_active; /* 连续低于或等于当前输出流量的恢复线时置1，回升或调档后重新确认。 */
     uint8_t sensor_fault_active; /* 本通道检测失效已提示标志；持续失效不重报，有效新帧恢复后清零。 */
-    uint32_t pour_no_liquid_tick_ms; /* 建压后首个连续失压新样本时刻，单位ms；按无符号差支持时钟回绕。 */
-    uint8_t pour_pressure_established; /* 本次非零流量运行曾有有效压力达到10mmHg，防止启动未建压被判脱管。 */
-    uint8_t pour_no_liquid_timing; /* 有效新压力连续低于10mmHg时置1，回升或传感器故障立即清零。 */
-    uint8_t pour_no_liquid_latched; /* 无液体输入确认后保持零输出，直到停止复位；恢复压力本身不能重新启动。 */
 } PumpPressureAlarmState_t;
 
 /* 停止或泵类型切换时清除单路压力记录，不修改开泵请求。 */

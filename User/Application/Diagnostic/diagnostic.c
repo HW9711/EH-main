@@ -7,6 +7,7 @@
 #include "Pubinterface.h"
 #include "sscDRIVE.h"
 #include "motoruartdata.h"
+#include "sscRFID.h" /* 只读各通道的刀具 CRC 限制，诊断不触发读卡或清故障。 */
 #include "pump_behavior_core.h"
 #include "pump.h"
 #include "soft_uart.h"
@@ -21,6 +22,8 @@
 #define DIAG_TX_DEPTH 8U /* 普通 UART2 应答最多排队 8 帧；队列满后丢弃新帧并计数。调大会增加 RAM 占用。 */
 #define DIAG_TX_TIMEOUT_MS 40U /* UART2 发送超过 40ms 仍未完成就中止本帧。160 字节在 115200 波特率下约需 14ms；调小会更早中止。 */
 #define DIAG_LINK_TIMEOUT_MS 2500U /* 上位机每秒查询诊断状态；连续 2500ms 无诊断请求后恢复普通通信。调大会延后恢复，调小容易受 USB 延迟影响。 */
+#define DIAG_PRE_CAPACITY 1536U /* 首次拦截前只使用这些记录位置，至少留出 512 条事后空间。 */
+#define DIAG_POST_MS 2000U /* 首次拦截后继续记录 2000ms；容量先耗尽时提前锁存，不能覆盖事前证据。 */
 #define DIAG_WIRE_CHUNK 28U /* 每条串口日志最多放 28 个原始字节，较长报文拆成多条；修改此值必须同步上位机解码。 */
 
 /* 一条日志固定占 48 字节，直接按此格式发送给上位机；记录时须持有公共业务互斥锁，不能从中断调用。 */
@@ -60,12 +63,12 @@ typedef struct
     uint32_t count; /* 本次采集内业务函数正常返回的次数；重新开始采集时清零。 */
 } DiagnosticTaskStats_t;
 
-static DiagnosticRecord_t s_records[DIAG_RECORD_CAPACITY]; /* 循环保存最近 1024 条日志，共占 48KiB RAM；写满后从最旧记录的位置继续写。 */
+static DiagnosticRecord_t s_records[DIAG_RECORD_CAPACITY]; /* 96KiB 环形记录；触发前滚动，触发后只追加到剩余空间，不覆盖事前证据。 */
 static DiagnosticCache_t s_cache[DIAG_CACHE_COUNT]; /* 保存各组数据的上次值；本轮相同且不足 1 秒时，不重复写入日志。 */
 static DiagnosticTaskStats_t s_task_stats[15]; /* 下标 1～14 与看门狗任务编号相同；下标 0 保存未列入该编号表的任务计时。 */
 static uint32_t s_wire_stats[2][13][4]; /* 依次按接收/发送、串口号索引；每项为包数、最近毫秒时刻、发送失败数、最大包长，均由任务更新。 */
 static uint32_t s_next_sequence = 1U; /* 下一条日志序号，从 1 递增；达到 32 位上限时停止记录，重新开始采集后回到 1。 */
-static uint32_t s_count; /* 当前还能读取的日志条数，上限为 1024；重新开始采集时清零。 */
+static uint32_t s_count; /* 当前还能读取的日志条数，上限为 2048；重新开始采集时清零。 */
 static uint32_t s_overwritten; /* 本次采集中已有多少条旧日志被覆盖；重新开始采集时清零。 */
 static uint32_t s_cache_misses; /* 找不到空余数据比较项的次数；这种情况下仍然写日志，不代表丢了记录。 */
 static uint32_t s_session = 1U; /* 本次开机中的采集批次号；每次重新开始加 1，读取旧批次的命令会被拒绝。 */
@@ -86,6 +89,19 @@ static uint8_t s_reply_pending; /* 生成应答或收到相同请求重试时置
 static uint8_t s_request_key[12]; /* 保存上一条诊断请求的操作码、长度和参数；全部相同才复用应答，避免重试时再次清空日志。 */
 static uint32_t s_link_tick; /* 最近收到格式正确诊断请求的主控毫秒数，每次请求及重试都更新。 */
 static uint8_t s_link_seen; /* 上电为 0；首次诊断请求置 1，是否仍在诊断模式由请求间隔判断。 */
+static uint8_t s_capture_phase; /* 0普通记录、1已布防、2保留事后过程、3已锁存；只有重新开始采集才重新布防。 */
+static uint32_t s_trigger_tick; /* 首次拦截的主控时刻；后续拒绝不能移动这个时刻。 */
+static uint32_t s_trigger_sequence; /* 首次拦截标记的记录序号，便于对齐事前与事后。 */
+static uint32_t s_trigger_reason; /* 保存最早的拒绝原因，不被后续“尚未松脚”覆盖。 */
+static uint32_t s_pre_count; /* 触发瞬间仍保留的事前条数，用于证明事前窗口没有被事后刷掉。 */
+static uint8_t s_trigger_pedal; /* 首次拦截涉及的踏板侧，0未指定、1左、2右。 */
+static uint8_t s_force_snapshot; /* 仅在起始或首次拦截时强制输出完整上下文，不改变业务状态。 */
+static uint32_t s_foot_config[9]; /* 控制任务实际采用的连接、类型、左右低中高点及踩下余量。 */
+static void Diagnostic_CaptureContext(void); /* 首次拦截时读取已有状态，不发硬件查询。 */
+static void Diagnostic_CaptureMark(uint32_t stage, uint32_t cause); /* 输出锁存标记，字段含义见 DIAG_EVENT_CAPTURE。 */
+static void Diagnostic_Freeze(uint32_t cause); /* 只关闭日志追加，绝不停止手柄或泵。 */
+static uint8_t Diagnostic_AutoFreeze(void); /* 到期或事后空间用尽时锁存，返回是否已经执行。 */
+static void Diagnostic_TryTrigger(uint8_t pedal, uint32_t reason); /* 只有已布防且真实深踩时接受第一次拒绝。 */
 static uint8_t s_request_valid; /* 上电为 0；成功生成过诊断应答后置 1，此后才能比较上一条请求。 */
 
 /*
@@ -96,13 +112,15 @@ static uint8_t s_request_valid; /* 上电为 0；成功生成过诊断应答后�
 static void Diagnostic_Append(uint16_t kind, uint8_t channel, const uint32_t *values, uint8_t words)
 {
     DiagnosticRecord_t *record; /* 指向本次要写的日志位置；中断不会读取或写入该数组。 */
+    uint32_t limit = (s_capture_phase == 1U) ? DIAG_PRE_CAPACITY : DIAG_RECORD_CAPACITY; /* 布防时给事后记录预留空间。 */
+    if (Diagnostic_AutoFreeze() != 0U) return; /* 时间或容量到界时先写锁存标记，不能再覆盖首个拦截现场。 */
     if ((s_recording == 0U) || (values == NULL) || (words > DIAG_RECORD_WORDS)) return; /* 记录已冻结、数值指针为空或字段过多时直接返回，本条日志不写入。 */
     if (s_next_sequence == 0xFFFFFFFFUL)
     {
         s_recording = 0U; /* 日志序号即将用完，停止记录；须重新开始采集才继续，避免序号回到 0 后无法区分先后。 */
         return; /* 序号已用完，本次不再写入；现有日志仍可读取。 */
     }
-    record = &s_records[(s_next_sequence - 1U) % DIAG_RECORD_CAPACITY]; /* 按日志序号计算数组位置；超过 1024 条后回到开头覆盖最旧记录。 */
+    record = &s_records[(s_next_sequence - 1U) % DIAG_RECORD_CAPACITY]; /* 按日志序号计算数组位置；普通记录或布防期间超过保留条数后淘汰最旧记录。 */
     record->sequence = s_next_sequence++; /* 先保存本条序号，再把下一条序号加 1，保证记录有明确先后。 */
     record->tick_ms = HAL_GetTick(); /* 保存本条日志产生时的主控时间，方便与其它设备记录对齐。 */
     record->kind = kind; /* 保存数据类别，上位机据此解释每个数值及其单位。 */
@@ -110,8 +128,85 @@ static void Diagnostic_Append(uint16_t kind, uint8_t channel, const uint32_t *va
     record->words = (uint8_t)(words | (s_active_task << 4U)); /* 把正在执行的任务号放在高 4 位，便于查看哪轮任务之后数据发生变化。 */
     memset(record->value, 0, sizeof(record->value)); /* 清掉本位置上一条日志的数值，防止未使用字段带出旧数据。 */
     memcpy(record->value, values, (uint32_t)words * sizeof(uint32_t)); /* 把调用方已准备好的数值复制进日志，不在这里读硬件。 */
-    if (s_count < DIAG_RECORD_CAPACITY) ++s_count; /* 缓存尚未满时增加保留条数。 */
+    if (s_count < limit) ++s_count; /* 缓存尚未满时增加保留条数。 */
     else ++s_overwritten; /* 数组已满，本次写入覆盖了一条旧日志，累计覆盖次数加 1。 */
+}
+
+
+/*
+ * 函数功能：记录首次拦截及锁存边界，保留首次原因和事前条数。
+ * 输入参数：stage为1触发、2自动锁存、3人工冻结；cause为0计时结束、1容量耗尽、2人工操作。
+ * 返回参数：无。
+ */
+static void Diagnostic_CaptureMark(uint32_t stage, uint32_t cause)
+{
+    uint32_t value[9]; /* 固定九项只读元数据，记录头保存当前任务号。 */
+    value[0] = stage; value[1] = s_trigger_reason; /* 标记阶段和第一次拒绝原因。 */
+    value[2] = s_trigger_tick; value[3] = s_trigger_sequence; /* 首次触发时刻、序号保持不变。 */
+    value[4] = s_pre_count; value[5] = s_count - s_pre_count; /* 当前事后条数不包含本条标记。 */
+    value[6] = cause; /* 明确区分正常计时结束、提前耗尽空间和人工冻结。 */
+    value[7] = (s_trigger_sequence != 0U) ? (uint32_t)(HAL_GetTick() - s_trigger_tick) : 0U; /* 时钟回绕仍按无符号差值计算。 */
+    value[8] = DIAG_RECORD_CAPACITY; /* 把总容量写入导出，不能把条数误当秒数。 */
+    Diagnostic_Append(DIAG_EVENT_CAPTURE, s_trigger_pedal, value, 9U); /* 只追加元数据，不控制设备。 */
+}
+
+/*
+ * 函数功能：冻结诊断记录，给结束标记保留最后一个位置。
+ * 输入参数：cause为0计时结束、1容量耗尽、2人工冻结。
+ * 返回参数：无。
+ */
+static void Diagnostic_Freeze(uint32_t cause)
+{
+    if (s_recording == 0U) return; /* 已锁存窗口不得因重复下载再追加标记。 */
+    s_capture_phase = 3U; /* 先退出事后阶段，下面追加结束标记不会再次触发冻结。 */
+    Diagnostic_CaptureMark((cause == 2U) ? 3U : 2U, cause); /* 时间和容量锁存都保留第一次拒绝原因。 */
+    s_recording = 0U; /* 只停止日志追加，原启停、互斥和故障保护继续运行。 */
+}
+
+/*
+ * 函数功能：在任务入口或日志追加前检查事后记录是否结束。
+ * 输入参数：无，读取首次触发时刻和当前条数。
+ * 返回参数：1已执行自动锁存；0仍可继续记录。
+ */
+static uint8_t Diagnostic_AutoFreeze(void)
+{
+    if ((s_capture_phase != 2U) || (s_recording == 0U)) return 0U; /* 布防前、触发前和已冻结时不干预。 */
+    if (s_count >= DIAG_RECORD_CAPACITY - 1U) /* 留出结束标记位置，不能以覆盖事前数据换取事后空间。 */
+    {
+        Diagnostic_Freeze(1U); /* 明确记录事后窗口因容量提前结束。 */
+        return 1U; /* 当前待写日志不再追加，已锁存内容保持稳定。 */
+    }
+    if ((uint32_t)(HAL_GetTick() - s_trigger_tick) >= DIAG_POST_MS) /* 从首次拒绝起等待约2秒，不因反复拒绝延后。 */
+    {
+        Diagnostic_Freeze(0U); /* 即使后续状态完全不变，也会在任务入口自动锁存。 */
+        return 1U; /* 冻结完成，后续追加必须退出。 */
+    }
+    return 0U; /* 时间和容量都还有余量，继续记录事后过程。 */
+}
+
+/*
+ * 函数功能：真实深踩发生第一次拒绝时锁定事前窗口，并抓取拒绝处理清状态前的上下文。
+ * 输入参数：pedal为1左、2右、0任意侧；reason沿用脚踏拒绝原因，12表示许可被直接撤销。
+ * 返回参数：无。
+ */
+static void Diagnostic_TryTrigger(uint8_t pedal, uint32_t reason)
+{
+    DiagnosticFootState_t foot = {0}; /* 只读解析层当前AD，不从串口取走字节。 */
+    uint8_t deep = 0U; /* 没有可信的控制配置或深踩动作时，不因空闲检查触发锁存。 */
+    if ((s_capture_phase != 1U) || (s_recording == 0U) || (s_foot_config[0] == 0U)) return; /* 每次ARM只允许首个有效拒绝触发。 */
+    Foot_CopyDiagnosticState(&foot); /* 保留帧失效标志；超时情形的AD可能是最后一次有效值。 */
+    if (s_foot_config[1] == 1U) deep = (foot.ad_single > s_foot_config[2] + s_foot_config[8]); /* 单踏板超过控制任务实际低点和余量才算启动动作。 */
+    else if (s_foot_config[1] == 2U) deep = (foot.ad_two_stage > s_foot_config[3] + s_foot_config[8]); /* 双段踏板必须进入电机段，轻踩泵不触发。 */
+    else if (s_foot_config[1] == 3U) /* 双脚踏按请求侧的实际中点判断，不能用另一侧代替。 */
+        deep = (((pedal != 2U) && (foot.ad_left > s_foot_config[3] + s_foot_config[8])) || ((pedal != 1U) && (foot.ad_right > s_foot_config[6] + s_foot_config[8])));
+    if (deep == 0U) return; /* 空闲、松脚和仅轻踩泵时继续保留事前历史，不提前冻结。 */
+    s_capture_phase = 2U; /* 先锁定事前边界，下面的快照不会回到滚动覆盖状态。 */
+    s_trigger_tick = HAL_GetTick(); /* 记录第一次拒绝时间，后续拒绝不能刷新它。 */
+    s_trigger_sequence = s_next_sequence; /* 下一条即首个触发标记，作为CSV的分界。 */
+    s_trigger_reason = reason; s_trigger_pedal = pedal; /* 保存最早的原因和踏板侧。 */
+    s_pre_count = s_count; /* 从这一刻起保留全部现存事前记录。 */
+    Diagnostic_CaptureMark(1U, 0U); /* 在业务清许可前留下第一触发位置。 */
+    Diagnostic_CaptureContext(); /* 强制补齐当前控制权、配置、许可、请求和反馈，避免首行只能看到未知。 */
 }
 
 /*
@@ -138,7 +233,7 @@ static void Diagnostic_State(uint16_t kind, uint8_t channel, const uint32_t *val
         Diagnostic_Append(kind, channel, values, words); /* 没有位置保存上次值，本轮直接写日志，保证新数据仍被记录。 */
         return; /* 本条已经写入，结束处理，不再进行数据比较。 */
     }
-    changed = ((cache->kind == 0U) || (cache->words != words)) ? 1U : 0U; /* 此前未保存过本组，或字段个数不同，都需要马上写一条完整记录。 */
+    changed = ((s_force_snapshot != 0U) || (cache->kind == 0U) || (cache->words != words)) ? 1U : 0U; /* 此前未保存过本组，或字段个数不同，都需要马上写一条完整记录。 */
     for (i = 0U; i < words; ++i)
         if (((ignore_mask & (1U << i)) == 0U) && (cache->value[i] != values[i])) changed = 1U; /* 仅检查 ignore_mask 中对应位为 0 的数值；其中任一项改变就立即记日志。 */
     cache->kind = kind; cache->channel = channel; cache->words = words; /* 保存本项对应的组号、通道和字段个数，供下次查找。 */
@@ -165,7 +260,8 @@ void Diagnostic_StateObject(uint16_t kind, uint8_t channel, const void *data, ui
         uint16_t bytes = (uint16_t)(length - offset); /* 计算还剩多少字节未处理。 */
         if (bytes > sizeof(words)) bytes = sizeof(words); /* 一条日志最多保存 9 个整数，即 36 字节，多余数据留给下一条。 */
         memcpy(words, (const uint8_t *)data + offset, bytes); /* 从调用方传入的数据复制本条所需字节，不修改调用方的数组。 */
-        Diagnostic_State(kind++, channel, words, (uint8_t)(bytes / 4U), 0U); /* 每条用下一个连续组号保存，方便上位机按声明顺序还原整组字段。 */
+        uint16_t ignore = (kind == 20U) ? 128U : ((kind == 70U) ? 49U : 0U); /* 脚踏静默计数、压力收帧时刻/缓存字节/序号只随每秒快照保存，真实状态变化仍立即记录。 */
+        Diagnostic_State(kind++, channel, words, (uint8_t)(bytes / 4U), ignore); /* 降低纯计数变化的刷屏量，不改业务数据。 */
         offset = (uint16_t)(offset + bytes); /* 跳过本次已复制的字节，继续处理剩余字段。 */
     }
 }
@@ -178,6 +274,10 @@ void Diagnostic_StateObject(uint16_t kind, uint8_t channel, const void *data, ui
 void Diagnostic_Event(uint16_t event, uint8_t channel, uint32_t a, uint32_t b, uint32_t c)
 {
     uint32_t value[4]; /* 前三项保存事件参数，第四项保存事件发生时正在执行的任务号。 */
+    if ((event == DIAG_EVENT_FOOT_GATE) && ((a == 3U) || ((a >= 5U) && (a <= 11U)) || ((a == 2U) && (c == 0U))))
+        Diagnostic_TryTrigger(channel, a); /* 只以真实深踩的首次拒绝触发，不以批准或同侧持续运行触发。 */
+    if ((event == DIAG_EVENT_FOOT_PERMIT) && (a == 0U) && ((b & 2U) != 0U))
+        Diagnostic_TryTrigger(channel, 12U); /* 未经过已标号拒绝分支而撤销有效松脚许可时，也要保留清除前现场。 */
     value[0] = a; value[1] = b; value[2] = c; value[3] = s_active_task; /* 按固定顺序复制参数和任务号，供上位机解释同一次操作。 */
     Diagnostic_State(event, channel, value, 4U, 0U); /* 同组同通道的事件参数变化就立即记录；完全相同时每秒补记，避免重复拒绝占满日志。 */
 }
@@ -432,6 +532,36 @@ static void Diagnostic_CaptureMotorCommand(void)
     Diagnostic_State(80U, 0U, value, 9U, 19U); /* 组 80 保存电机命令；掩码 19 忽略两项时刻和命令序号变化，速度、方向等变化立即记录。 */
 }
 
+
+/*
+ * 函数功能：强制输出采集起点或首次拦截时的完整业务上下文，不额外读取EEPROM或发送驱动命令。
+ * 输入参数：无，读取业务已经保存的请求、配置及反馈。
+ * 返回参数：无。
+ */
+static void Diagnostic_CaptureContext(void)
+{
+    uint8_t channel; /* A/B分别抓取，不能只保留当前选中通道。 */
+    DiagnosticFootState_t foot = {0}; /* 保存许可、AD和切换保护的同次副本。 */
+    s_force_snapshot = 1U; /* 即使数据刚输出过也补齐快照，确保首个拒绝记录可独立阅读。 */
+    Diagnostic_CaptureWork(); Diagnostic_CaptureSignals(); /* 保存控制权、手柄请求和各输入来源。 */
+    Foot_CopyDiagnosticState(&foot); /* 只读现有脚踏状态，不重新判断或确认松脚。 */
+    Diagnostic_StateObject(20U, 0U, &foot, sizeof(foot)); /* 同时输出脚踏AD和许可，避免被后续清理后的值替代。 */
+    Diagnostic_StateObject(24U, 0U, s_foot_config, sizeof(s_foot_config)); /* 实际控制定标和启动余量是判断深踩的依据。 */
+    for (channel = 1U; channel <= 2U; ++channel)
+    {
+        uint32_t gate[4]; /* 保存每侧CRC限制和手控锁定，不改变故障状态。 */
+        const ChannelMemoryMessage_t *memory = (channel == 1U) ? &MemoryMsgA : &MemoryMsgB; /* 分别读取本侧保存参数。 */
+        Diagnostic_CaptureMemory(channel, memory); /* 输出本侧模式和参数，不触发重新识别。 */
+        Diagnostic_CaptureTool(channel, (channel == 1U) ? &ChannelrecognizeMessageA : &ChannelrecognizeMessageB); /* 保留刀具方向和速度范围。 */
+        gate[0] = Rfid_IsToolCrcBlocked(channel); gate[1] = Rfid_IsToolCrcConfirmed(channel); /* 分开记录禁止启动和已确认故障。 */
+        gate[2] = Pubinterface_IsRfidRunBlocked(channel); gate[3] = memory->foot_manual_lock; /* 保留故障恢复后的松手等待和本侧模式锁。 */
+        Diagnostic_State(32U, channel, gate, 4U, 0U); /* 仅写入诊断记录，不申请控制。 */
+        Diagnostic_CapturePump(channel, (channel == 1U) ? &pumpMessageA : &pumpMessageB); /* 保存拒绝清理前的实际泵请求。 */
+    }
+    Diagnostic_CaptureMotorCommand(); Diagnostic_CaptureMotorFeedback(); /* 区分主控请求、已生成命令和真实回包。 */
+    s_force_snapshot = 0U; /* 恢复正常去重，不让后续每个任务都重复输出整组快照。 */
+}
+
 /*
  * 函数功能：在业务函数执行前记下开始时间，并计算距上一轮开始已过多久。
  * 输入参数：task 指向当前任务，不能为空；调用前该任务已取得公共业务互斥锁。
@@ -442,6 +572,7 @@ void Diagnostic_TaskBegin(const struct task_s *task)
     DiagnosticTaskStats_t *stats; /* 指向当前任务的诊断计时数据；不写看门狗的完成记录。 */
     uint32_t now = HAL_GetTick(); /* 此时任务已取得公共业务互斥锁；之前等锁的时间不计入本轮业务耗时。 */
     s_active_task = (task->watchdog_id <= 14U) ? task->watchdog_id : 0U; /* 沿用现有看门狗任务号 1～14；未列入的任务用 0，供本轮日志标记采集任务。 */
+    (void)Diagnostic_AutoFreeze(); /* 不依赖状态是否变化，到首次拦截后约2秒也会锁存日志。 */
     stats = &s_task_stats[s_active_task]; /* 选择本任务的计时项，未列入编号表的任务合用下标 0。 */
     stats->begin = now; /* 保存本轮开始时刻，业务函数返回后用它计算耗时。 */
     stats->gap = (stats->count != 0U) ? (uint32_t)(now - stats->previous_begin) : 0U; /* 已经完成过一轮才计算相邻开始间隔；首轮间隔记为 0。 */
@@ -450,7 +581,7 @@ void Diagnostic_TaskBegin(const struct task_s *task)
 }
 
 /*
- * 函数功能：业务函数返回后统计耗时，并集中记录脚踏、手柄和泵的数据；不启动新任务或额外硬件通信。
+ * 函数功能：业务函数返回后统计耗时，并记录脚踏、手柄、泵和各通道启动限制；不启动新任务或额外硬件通信。
  * 输入参数：task 指向刚执行完业务函数的任务，不能为空；此时仍持有公共业务互斥锁。
  * 返回参数：无。
  */
@@ -475,6 +606,15 @@ void Diagnostic_TaskEnd(const struct task_s *task)
     }
     for (channel = 1U; channel <= 2U; ++channel)
     {
+        if ((s_active_task == 2U) || (s_active_task == 3U)) /* 脚踏启动判断或手柄识别结束后，分别保存 A/B 的限制和恢复状态。 */
+        {
+            uint32_t gate[4]; /* 组 32 固定保存四项只读状态，不能把限制已解除理解为本次踩踏已经放行。 */
+            gate[0] = Rfid_IsToolCrcBlocked(channel); /* 首次 CRC 失败即可禁止启动，此时屏幕可能尚未提示 77。 */
+            gate[1] = Rfid_IsToolCrcConfirmed(channel); /* 三次失败且兼容读取仍失败才确认，和单次禁止启动分别记录。 */
+            gate[2] = Pubinterface_IsRfidRunBlocked(channel); /* 同时覆盖 CRC 故障和故障恢复后仍未释放的启动动作。 */
+            gate[3] = (channel == CHANNEL_A) ? MemoryMsgA.foot_manual_lock : MemoryMsgB.foot_manual_lock; /* 记录本通道手控锁定，避免只看当前选中通道。 */
+            Diagnostic_State(32U, channel, gate, 4U, 0U); /* 状态变化立即入环形记录，稳定值每秒补记，不更改原启动许可。 */
+        }
         if (s_active_task == 3U) /* 手柄扫描任务 3 结束后，复制 A/B 各自的识别进度。 */
         {
             DiagnosticHandlescanState_t state = {0}; /* 本次循环只保存指定通道的手柄扫描数据。 */
@@ -714,13 +854,15 @@ uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, ui
             memset(s_task_stats, 0, sizeof(s_task_stats)); /* 清掉上一批的任务次数、最大间隔和最大耗时。 */
             s_task_stats[s_active_task].begin = active_begin; /* 恢复本轮真实开始时间，避免用 0 算出异常长的耗时。 */
             s_task_stats[s_active_task].previous_begin = active_begin; /* 保存本轮起点，下一轮还能计算两个开始时刻的间隔。 */
-            s_recording = 1U; /* 允许后续业务任务继续写日志；已有电机和泵运行请求保持原值。 */
+            s_capture_phase = 1U; s_trigger_tick = 0U; s_trigger_sequence = 0U; /* 新批次重新布防，不继承上一批触发边界。 */
+            s_trigger_reason = 0U; s_pre_count = 0U; s_trigger_pedal = 0U; /* 清空第一次拒绝元数据，重复请求会走缓存而不会重复清空。 */
+            s_recording = 1U; /* 仅开放诊断追加，已有电机和泵请求保持原值。 */
             Diagnostic_Event(DIAG_EVENT_MARK, 0U, 1U, s_session, HAL_GetTick()); /* 写一条“开始采集”记录，保存批次号和主控时间。 */
+            Diagnostic_CaptureContext(); /* 新批次从完整上下文开始，能追溯首次拒绝之前的模式、配置和许可。 */
         }
         else if (area == 2U) /* 操作 2：停止追加日志，保留已有记录供上位机分次读取。 */
         {
-            Diagnostic_Event(DIAG_EVENT_MARK, 0U, 2U, s_session, HAL_GetTick()); /* 先记下冻结操作发生的时刻，再关闭日志写入。 */
-            s_recording = 0U; /* 只冻结日志；脚踏、手柄和泵继续按原有请求运行。 */
+            Diagnostic_Freeze(2U); /* 人工冻结已锁存窗口时不再追加，重复下载保持序号和边界稳定。 */
         }
         else if (area == 3U) /* 操作 3：按上位机给定的序号，最多取两条日志放入应答。 */
         {
@@ -742,7 +884,7 @@ uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, ui
         else if (area == 4U) Diagnostic_Event(DIAG_EVENT_MARK, 0U, 4U, Diagnostic_Read32(&data[6]), HAL_GetTick()); /* 操作 4：记录上位机给定的标记值和主控时刻，不修改电机或泵请求。 */
         else if (area == 5U) /* 操作 5：返回诊断固件编译信息、接口映射和已保存的复位原因。 */
         {
-            static const char build[] = "R1 c7e8e4e + diag-v1 " __DATE__ " " __TIME__; /* 记录这版诊断代码的源码基线和编译时刻；它不是板上 EEPROM 保存的产品版本。 */
+            static const char build[] = "PXBA first-reject v2 " __DATE__ " " __TIME__; /* 标记本次脚踏诊断固件和编译时刻；它不是板上 EEPROM 保存的产品版本。 */
             memcpy(&payload[16], build, sizeof(build)); /* 把编译说明写入 64 字节文本区，保留末尾 0，未使用字节已清零。 */
             Diagnostic_Write32(&payload[80], HANDLE_PHYSICAL_AB_SWAP_ENABLE); /* 返回手柄 A/B 逻辑通道是否交换到另一物理接口，便于解释插拔数据。 */
             Diagnostic_Write32(&payload[84], PUMP_LOGICAL_AB_PHYSICAL_SWAP_ENABLE); /* 返回 A/B 泵驱动是否交换 UART5/7；压力板 A/PE4、B/PE6 不随此配置交换。 */
@@ -765,7 +907,10 @@ uint8_t Diagnostic_Command(uint8_t direction, uint8_t function, uint8_t area, ui
         Diagnostic_Write32(&payload[36], (s_count != 0U) ? s_records[(s_next_sequence - 2U) % DIAG_RECORD_CAPACITY].tick_ms : 0U); /* 有日志时返回最新一条的主控时刻；两端时间用于显示实际保留的时间范围。 */
         Diagnostic_Write32(&payload[40], s_tx_dropped); Diagnostic_Write32(&payload[44], s_tx_failed); /* 返回本次开机累计的普通帧入队失败数和 UART2 发送失败数。 */
         Diagnostic_Write32(&payload[48], s_cache_misses); Diagnostic_Write32(&payload[52], s_diag_busy_requests); /* 返回比较数组不足次数和诊断应答未取出时收到新请求的次数。 */
-        Diagnostic_Write32(&payload[56], HAL_GetTick()); payload_length = 60U; /* 最后返回当前主控毫秒数，本类应答数据共 60 字节。 */
+        Diagnostic_Write32(&payload[56], HAL_GetTick()); /* 保留V1的前60字节字段顺序。 */
+        Diagnostic_Write32(&payload[60], DIAG_RECORD_CAPACITY); Diagnostic_Write32(&payload[64], s_capture_phase); /* V2增加总容量和布防/事后/锁存阶段。 */
+        Diagnostic_Write32(&payload[68], s_trigger_tick); Diagnostic_Write32(&payload[72], s_trigger_reason); /* 返回第一次拒绝，后续重复拒绝不能覆盖。 */
+        Diagnostic_Write32(&payload[76], s_trigger_sequence); payload_length = 80U; /* V2状态为80字节；记录和版本应答长度不变。 */
     }
     payload[0] = DIAG_PROTOCOL_VERSION; payload[1] = status; /* 写入协议版本和处理结果；状态非 0 时，上位机不能当作操作成功。 */
     payload[2] = data[0]; payload[3] = data[1]; /* 原样返回请求号，方便上位机区分本次应答与迟到的旧应答。 */
@@ -792,16 +937,18 @@ void Diagnostic_Checkpoint(void)
 
 /*
  * 函数功能：记录脚踏控制任务从队列取出的连接和定标配置，便于核对它是否已经采用解析函数收到的新配置。
- * 输入参数：connected 为 0 离线、1 在线；type 为 1 单踏板、2 双段、3 双脚踏；ll/lm/lh、rl/rm/rh 分别为左、右侧低中高定标 AD 值。
+ * 输入参数：connected为连接标志，type为踏板类型；ll/lm/lh、rl/rm/rh为左右低中高定标AD；threshold为业务实际启动余量。
  * 返回参数：无。
  */
-void Diagnostic_FootConfig(uint8_t connected, uint8_t type, uint16_t ll, uint16_t lm, uint16_t lh, uint16_t rl, uint16_t rm, uint16_t rh)
+void Diagnostic_FootConfig(uint8_t connected, uint8_t type, uint16_t ll, uint16_t lm, uint16_t lh, uint16_t rl, uint16_t rm, uint16_t rh, uint16_t threshold)
 {
-    uint32_t value[8]; /* 按固定顺序保存控制任务实际取出的 8 项配置，不用新收到但尚未处理的配置替代。 */
+    uint32_t value[9]; /* 按固定顺序保存控制任务实际采用的 9 项配置，不用新收到但尚未处理的配置替代。 */
     value[0] = connected; value[1] = type; /* 保存这条脚踏消息中的连接标志和脚踏类型。 */
     value[2] = ll; value[3] = lm; value[4] = lh; /* 保存左侧松开、中点、踩到底的三个 AD 定标值。 */
     value[5] = rl; value[6] = rm; value[7] = rh; /* 保存右侧松开、中点、踩到底的三个 AD 定标值。 */
-    Diagnostic_State(24U, 0U, value, 8U, 0U); /* 组 24 专门表示控制任务已取出的配置，便于和组 20～23 的解析结果比较。 */
+    value[8] = threshold; /* 保存业务实际使用的余量，不在诊断模块另写一个可能漂移的阈值。 */
+    memcpy(s_foot_config, value, sizeof(value)); /* 首次拦截判断只使用控制任务已采用的配置。 */
+    Diagnostic_State(24U, 0U, value, 9U, 0U); /* 稳定时每秒补记，配置变化立即记录，起始与首拒快照强制保留。 */
 }
 
 /*

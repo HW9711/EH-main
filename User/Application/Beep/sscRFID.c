@@ -60,6 +60,9 @@
 #define RFID_FAST_ATTEMPTS              6U    /* 快速阶段EPC和USER各最多发送6次；任一来源成功即结束快速读取。 */
 #define RFID_NORMAL_ATTEMPTS            3U    /* 普通阶段EPC和USER各最多发送3次，连续失败耗尽本阶段预算后才切换。 */
 #define RFID_EPC_VERIFY_ATTEMPTS        2U    /* USER成功后按普通模式补读EPC两次；全部失败才发布暂存USER。 */
+#define RFID_EPC_CRC_RETRY_MS           100U /* 完整EPC回包CRC8错误后等待100ms再发命令，用户确认的快速重试间隔。 */
+#define RFID_EPC_CRC_FAIL_MAX           3U /* 首次及两次重试共三次CRC错误，参数错误与超时不计数。 */
+#define RFID_EPC_CRC_RECOVER_MS         1000U /* 一轮失败结束后约1秒再识别，故障与禁止启动持续保持。 */
 #define RFID_RESPONSE_WAIT_TICKS        1U    /* 每条命令至少等待一个100ms周期，收包检查完成后才决定是否重试。 */
 #define RFID_RESPONSE_MAX_WAIT_TICKS    2U    /* 分片或无效数据最多延长到200ms；持续噪声不能无限延长单条命令。 */
 #define RFID_PARTIAL_GRACE_TICKS        1U    /* 收到数据但未拼出有效完整回包时，暂停重发 1 个任务周期（100 ms），等剩余字节到齐；单条命令仍受200ms等待上限限制。 */
@@ -152,6 +155,17 @@ static uint16_t s_request_ticket = 0U;               /* 正在读取的请求编
 static uint8_t s_partial_grace_ticks = 0U;           /* 收到不完整数据后暂停补发命令的剩余周期。 */
 static uint8_t s_rx_accumulator[RFID_RX_ACCUM_SIZE]; /* 保存跨任务周期到达的 RFID 分片，直到组成合法完整帧。 */
 static uint16_t s_rx_accum_length = 0U;              /* 累计接收缓存中已存的有效字节数。 */
+typedef struct
+{
+    uint8_t failures; /* 本通道累计CRC8失败次数，达到三次后饱和，成功CRC可重置计数。 */
+    bool blocked; /* 第一次明确CRC错误即置位，不因松开脚踏、清缓存或切模式而解除。 */
+    bool confirmed; /* 本轮兼容流程耗尽仍无有效结果且已满三次时置位，决定能否提示77。 */
+    bool retry_wait; /* 失败事务结束后需要慢速等待，不让故障请求持续抢占RFID。 */
+    uint32_t retry_tick; /* 慢速恢复等待起点，按无符号差处理毫秒回绕。 */
+} RfidToolCrcFault_t;
+static RfidToolCrcFault_t s_tool_crc_fault[2]; /* A/B故障独立，另一侧成功不能解除本侧。 */
+static bool s_crc_retry_wait = false; /* 当前请求已结算坏CRC帧，等待100ms后才能重发。 */
+static uint32_t s_crc_retry_tick = 0U; /* 最近一次坏CRC命令结算时刻。 */
 static bool s_request_saw_rx_data = false;           /* true表示当前命令收到过字节；等待结束时区分无回包与无效数据。 */
 #if (RFID_LINK_STATS_ENABLE == 1U)
 static RfidLinkStatistics_t s_link_statistics[2];   /* A/B 通道请求应答、在线监测和确认掉线累计值。 */
@@ -268,6 +282,7 @@ static void Rfid_CompleteTicket(uint8_t channel, uint16_t ticket, RfidRequestRes
  */
 static void Rfid_ResetActiveRequest(void)
 {
+    s_crc_retry_wait = false; /* 请求完成或取消后不继承上一事务的100ms等待。 */
     s_request_active = false; /* 本次读取已结束，下一次任务执行时才能取下一条请求。 */
     s_request_channel = CHANNEL_NONE; /* 清除当前读取通道，空闲时不再把回包存入该通道结果。 */
     s_fallback_epc_valid = false; /* 结束本次请求后清掉标签标识，下次读取不能继承。 */
@@ -292,6 +307,16 @@ static void Rfid_CompleteActiveRequest(RfidRequestResult_t result)
     uint8_t channel = s_request_channel; /* 清状态前先记住通道，稍后把结果记到正确通道。 */
     uint16_t ticket = s_request_ticket; /* 清状态前先记住请求编号，稍后供调用方查询结果。 */
 
+    uint8_t index; /* 清活动状态前记录本侧故障及恢复等待。 */
+    if ((result == RFID_REQUEST_RESULT_TIMEOUT) && Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].blocked)
+    {
+        if (s_tool_crc_fault[index].failures >= RFID_EPC_CRC_FAIL_MAX)
+        {
+            s_tool_crc_fault[index].confirmed = true; /* 公共接头或PX兼容流程全部失败，才允许启动动作提示77。 */
+        }
+        s_tool_crc_fault[index].retry_wait = true; /* 无有效结果时保持禁止启动，下一事务改为慢速重试。 */
+        s_tool_crc_fault[index].retry_tick = HAL_GetTick(); /* 从本轮结束时开始计算1秒，不改变普通无标签轮询。 */
+    }
     Rfid_ResetActiveRequest(); /* 先结束当前读取状态，下一周期才能处理排队中的下一请求。 */
     Rfid_CompleteTicket(channel, ticket, result); /* 再保存这个请求编号的结果，供手柄扫描程序查询。 */
 }
@@ -749,6 +774,7 @@ static bool Rfid_UpdateParsedCache(RfidToolResult_t *result)
  */
 static void Rfid_BeginReadStage(RfidReadStage_t stage)
 {
+    s_crc_retry_wait = false; /* EPC转USER或复核是新阶段，不能被旧阶段剩余等待误卡住。 */
     s_request_stage = stage; /* 阶段单向推进，避免USER与EPC之间无限重试。 */
     s_request_source = (stage == RFID_STAGE_USER) ? RFID_READ_SOURCE_USER : RFID_READ_SOURCE_EPC; /* 首读和复核均发送EPC命令。 */
     s_request_attempts_left = (stage == RFID_STAGE_VERIFY_EPC) ? RFID_EPC_VERIFY_ATTEMPTS :
@@ -862,6 +888,14 @@ static void SplitType_AutoModeGetData_Task(void)
         return; /* 当前状态不允许继续识别。 */
     }
 
+    if (s_crc_retry_wait)
+    {
+        if ((uint32_t)(HAL_GetTick() - s_crc_retry_tick) < RFID_EPC_CRC_RETRY_MS)
+        {
+            return; /* 完整坏CRC帧已经结算，不重复解析或提前重发，保持100ms等待。 */
+        }
+        s_crc_retry_wait = false; /* 到期后继续下面的发送流程，仍先检查运行取消与通道有效性。 */
+    }
     if (s_read_pending && (s_read_wait_ticks < RFID_RESPONSE_MAX_WAIT_TICKS))
     {
         ++s_read_wait_ticks; /* 只累计已发出命令的等待周期，不把队列等待和阶段切换算成失败。 */
@@ -906,6 +940,38 @@ static void SplitType_AutoModeGetData_Task(void)
     {
         parsed_ok = false; /* USER属于另一标签时不作为候选，继续在剩余预算内等待。 */
         Rfid_ResetReceiveAccumulator(); /* 不让身份不符的完整帧挡住后续正确帧。 */
+    }
+    if (s_read_pending && parsed_result.epc_crc_checked && Rfid_ChannelToIndex(s_request_channel, &result_index))
+    {
+        if (!parsed_result.epc_crc_failed)
+        {
+            s_tool_crc_fault[result_index].failures = 0U; /* CRC正确时结束连续错误计数；字段检查失败仍不计77，旧故障待装载成功才解除。 */
+        }
+        else if (!parsed_ok)
+        {
+            s_tool_crc_fault[result_index].blocked = true; /* 首次CRC错误立即禁止本侧启动，但不主动弹窗。 */
+            s_last_result[result_index].valid = false; /* 作废旧有效结果，不能在重试期间沿用上一次标签放行。 */
+            if (s_tool_crc_fault[result_index].failures < RFID_EPC_CRC_FAIL_MAX)
+            {
+                ++s_tool_crc_fault[result_index].failures; /* 一条已发送命令只计一次，随后立即清接收缓存。 */
+            }
+            if ((s_request_stage == RFID_STAGE_INITIAL_EPC) &&
+                (s_tool_crc_fault[result_index].failures >= RFID_EPC_CRC_FAIL_MAX))
+            {
+                s_request_attempts_left = 0U; /* 三次CRC失败结束首读预算，PX转USER，公共接头结束请求。 */
+            }
+            Rfid_LinkStatsRecordLostResponse(s_request_channel); /* 当前命令无有效业务结果，沿用通信统计结算方式。 */
+            Rfid_LinkStatsRecordInvalidFrame(s_request_channel); /* 额外记录收到坏数据的命令批次。 */
+            s_read_pending = false; /* 立即结算完整坏帧，不再等待分片宽限或重复累计。 */
+            Rfid_ClearChannelUartData(s_request_channel); /* 下一次读取不得拼接已结算命令的残留字节。 */
+            Rfid_ResetReceiveAccumulator(); /* 同一个CRC坏回包不能在多个周期累计多次失败。 */
+            if (s_request_attempts_left != 0U)
+            {
+                s_crc_retry_tick = HAL_GetTick(); /* 按失败结算时刻计100ms，不用收包等待时间抵扣。 */
+                s_crc_retry_wait = true; /* 保持当前阶段，下一任务周期到期后再发送。 */
+                return; /* 本周期不重发，也不提前转USER。 */
+            }
+        }
     }
     if (parsed_ok)
     {
@@ -1106,6 +1172,12 @@ bool Rfid_RequestToolReadTracked(uint8_t channel,
         return true; /* 同通道排队或正在执行的请求不可被普通启动请求替换。 */
     }
 
+    if (s_tool_crc_fault[index].retry_wait &&
+        ((uint32_t)(HAL_GetTick() - s_tool_crc_fault[index].retry_tick) < RFID_EPC_CRC_RECOVER_MS))
+    {
+        return false; /* 已完成的故障事务等待约1秒再读取，原请求合并不受此限制。 */
+    }
+    s_tool_crc_fault[index].retry_wait = false; /* 已到恢复时间，下面正常分配新的读取票据。 */
     new_ticket = (uint16_t)(s_next_ticket[index] + 1U); /* 为该通道生成下一个请求编号。 */
     if (new_ticket == 0U)
     {
@@ -1283,6 +1355,79 @@ void Rfid_RecordConfirmedDropout(uint8_t channel)
 }
 
 /*
+ * 函数功能：查询本通道是否因EPC CRC错误禁止启动，与弹窗是否显示无关。
+ * 输入参数：channel为A/B通道。
+ * 返回参数：true表示仍需成功识别并装载参数，false表示无此故障。
+ */
+bool Rfid_IsToolCrcBlocked(uint8_t channel)
+{
+    uint8_t index; /* 通过统一映射避免无效通道访问数组。 */
+    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].blocked; /* 首次失败即拦截，不等待三次或用户踩踏。 */
+}
+
+/*
+ * 函数功能：查询是否已满足77号提示条件，读取过程中不主动弹窗或蜂鸣。
+ * 输入参数：channel为A/B通道。
+ * 返回参数：true表示三次失败且兼容识别未成功，false表示尚未确诊或已经恢复。
+ */
+bool Rfid_IsToolCrcConfirmed(uint8_t channel)
+{
+    uint8_t index; /* 每侧独立保存最终失败状态。 */
+    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].confirmed; /* USER暂存和复核阶段不能提前报77。 */
+}
+
+/*
+ * 函数功能：当前有效刀具结果已装载后解除CRC故障；旧参数和单纯收到回包均不能解除。
+ * 输入参数：channel为目标通道；sequence为已装载的RFID结果编号。
+ * 返回参数：无；不清启动动作的松手等待，由控制入口独立维护。
+ */
+void Rfid_ConfirmToolLoaded(uint8_t channel, uint16_t sequence)
+{
+    uint8_t index; /* 只核对该通道的新鲜结果。 */
+    if (Rfid_ChannelToIndex(channel, &index) && s_last_result[index].valid &&
+        (s_last_result[index].sequence == sequence)) /* CRC失败会使旧结果无效，不能借相同缓存编号恢复。 */
+    {
+        memset(&s_tool_crc_fault[index], 0, sizeof(s_tool_crc_fault[index])); /* 完整结果装载成功后清计数、故障及慢速等待。 */
+    }
+}
+
+/*
+ * 函数功能：确认物理拔柄后清理本侧CRC故障，普通清缓存或切模式不得调用。
+ * 输入参数：channel为已确认拔出的通道。
+ * 返回参数：无。
+ */
+void Rfid_ResetToolCrcFault(uint8_t channel)
+{
+    uint8_t index; /* 拔A不能清B的故障。 */
+    if (Rfid_ChannelToIndex(channel, &index))
+    {
+        memset(&s_tool_crc_fault[index], 0, sizeof(s_tool_crc_fault[index])); /* 新手柄不继承上一只的故障与计时。 */
+    }
+}
+
+/*
+ * 函数功能：只检查新版12字节EPC的CRC8，不混入型号、方向、倍率或速度检查。
+ * 输入参数：payload为完整的12字节EPC数据。
+ * 返回参数：true表示CRC8一致，false表示CRC8错误。
+ */
+static bool Rfid_EpcCrcMatches(const uint8_t *payload)
+{
+    uint8_t crc = 0xFFU; /* 沿用CRC-8/SAE-J1850初值，不改变标签协议。 */
+    uint8_t i; /* EPC业务字节位置。 */
+    uint8_t bit; /* 当前字节的移位次数。 */
+    for (i = 0U; i < RFID_PAYLOAD_EPC_LENGTH; ++i)
+    {
+        if (i == 10U) continue; /* B10存放CRC，必须跳过，不按零字节参与计算。 */
+        crc ^= payload[i]; /* 累加当前业务字节，输入不反射。 */
+        for (bit = 0U; bit < 8U; ++bit)
+        {
+            crc = (uint8_t)((crc << 1U) ^ ((crc & 0x80U) ? 0x1DU : 0U)); /* 保持原多项式与高位移出顺序。 */
+        }
+    }
+    return ((uint8_t)(crc ^ 0xFFU) == payload[10]); /* 最终异或后与原始B10比较。 */
+}
+
+/*
  * 函数功能：校验EPC或USER的业务CRC、型号和方向并转换参数；速度检查仅用于EPC，PXY老USER直接取标签速度。
  * 输入参数：source为EPC或USER；payload分别至少包含12或16字节；length为实际长度；parameters为输出。
  * 返回参数：true表示全部校验通过；false表示不能用于运行，输出保持全零。
@@ -1291,7 +1436,6 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
 {
     RfidToolParameters_t decoded = {0}; /* 先在本地解析，全部通过后才交给运行参数装载程序。 */
     uint16_t crc16 = 0xFFFFU; /* 老USER使用MODBUS CRC16初值，末尾按高字节在前存储。 */
-    uint8_t crc8 = 0xFFU; /* 新EPC使用CRC-8/SAE-J1850初值。 */
     uint8_t i; /* 当前参与校验的字节下标。 */
     uint8_t bit; /* 每个字节执行8次CRC移位。 */
     uint8_t count; /* 新EPC可选方向数量1~3。 */
@@ -1309,19 +1453,7 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
     }
     if ((source == RFID_READ_SOURCE_EPC) && (length == RFID_PAYLOAD_EPC_LENGTH))
     {
-        for (i = 0U; i < RFID_PAYLOAD_EPC_LENGTH; ++i) /* 按B0至B11顺序计算，但跳过保存CRC的B10。 */
-        {
-            if (i == 10U)
-            {
-                continue; /* B10不参与计算，不能先清零再计入。 */
-            }
-            crc8 ^= payload[i]; /* 当前业务字节加入CRC，不反射输入。 */
-            for (bit = 0U; bit < 8U; ++bit)
-            {
-                crc8 = (uint8_t)((crc8 << 1U) ^ ((crc8 & 0x80U) ? 0x1DU : 0U)); /* 使用多项式0x1D向高位移出。 */
-            }
-        }
-        if ((uint8_t)(crc8 ^ 0xFFU) != payload[10])
+        if (!Rfid_EpcCrcMatches(payload)) /* 单独检查CRC，77只针对这个失败原因，下面原有字段检查保持不变。 */
         {
             return false; /* 新EPC业务CRC错误，本次请求应继续读取老USER。 */
         }
@@ -1484,6 +1616,8 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
             {
                 continue; /* 库存帧必须包含RSSI、PC、12字节EPC和标签CRC，PC长度为6个字。 */
             }
+            result->epc_crc_checked = true; /* 外层帧完整且可信，才有资格判断EPC的CRC。 */
+            result->epc_crc_failed = !Rfid_EpcCrcMatches(&frame[8]); /* CRC错误与无响应及业务字段非法分开返回。 */
             offset = 8U; /* EPC位于RSSI和PC之后。 */
             payload_length = RFID_PAYLOAD_EPC_LENGTH; /* 新EPC业务长度固定12字节。 */
             memcpy(result->tag_epc, &frame[8], RFID_PAYLOAD_EPC_LENGTH); /* 即使业务CRC失败，也记录模块校验通过的标签标识。 */

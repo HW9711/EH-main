@@ -14,6 +14,8 @@ typedef struct
     uint16_t manual_grind_current_low; /* PXBA/PXBB手动磨头设定转速<30000rpm的保护电流，单位0.01A。 */
     uint16_t manual_grind_current_high; /* PXBA/PXBB手动磨头设定转速>=30000rpm的保护电流，单位0.01A。 */
     uint16_t manual_planer_current; /* PXBA/PXBB手动刨刀保护电流，单位0.01A，不随速度和方向分档。 */
+    uint32_t px_osc_speed_min; /* PXBA/PXBB本体Page3 PX01往复下限，单位rpm；RFID换刀必须保留，0表示配置无效。 */
+    uint32_t px_osc_speed_max; /* PXBA/PXBB本体Page3 PX01往复上限，单位rpm；标签只能缩小此范围，不能扩大。 */
     uint8_t direction_mask; /* Page4的01/10/11档位转换后的运行态许可位，非EEPROM原字节；0旧版，0x80异常禁止运行。 */
 } HandleEepromProfile_t; /* 参数属于手柄本体，RFID刷新只改刀具参数，不能清除此配置。 */
 
@@ -307,7 +309,8 @@ typedef struct {
     volatile HandleEepromProfile_t eeprom_profile; /* 本通道手柄EEPROM的方向和手动电流配置，随通道装载且不受RFID清理影响。 */
     volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
     volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
-  volatile uint8_t   drive_type;//驱动方式：脚控、手控、外控或触控
+  volatile uint8_t   drive_type;//本通道选择的脚控、手控或触控，不能从另一通道复制
+  volatile uint8_t   foot_manual_lock; /* 本通道在脚踏在线时主动选择非脚控的锁存；拔本通道清零，A/B互不影响。 */
   volatile uint8_t   freq_alarm_osc;//Page4往复转频率报警值，单位沿用频率工作值
   volatile uint8_t   auto_identify;//本通道是否采用 RFID 自动识别，切回本通道时恢复
 }
@@ -438,7 +441,7 @@ void HmiExitActive(uint8_t key_value); /* 处理退出外部控制的按键事�
 void Pubinterface_RefreshControlModeDisplay(void); /* 一起刷新脚控、手控、触控图标，防止旧控制方式仍亮着。 */
 void Pubinterface_RefreshRuntimeDisplaySnapshot(void); /* 开机后按当前保存的状态刷新 A/B 手柄图标和当前通道参数。 */
 bool Pubinterface_ApplyFootControlPriorityOnConnect(void); /* 脚踏上线且手柄未运行时，按脚踏优先规则尝试切到脚控。 */
-void Pubinterface_ClearFootControlManualLock(void); /* 脚踏掉线或用户重新选脚控后，清除“用户已手动选其他方式”的记录。 */
+void Pubinterface_ClearFootControlManualLock(uint8_t channel); /* 清本通道非脚控锁存；CHANNEL_NONE仅供脚踏掉线时清两通道。 */
 void Pubinterface_RefreshExternalCommDisplay(bool connected_flag, bool active_flag); /* 刷新外部通信小电脑图标：在线白色、外控黄色、离线熄灭。 */
 bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value); /* 判断报警码是否属于手柄校验失败。 */
 bool Pubinterface_IsHandleControlReservedModel(uint8_t hand_model); /* 判断此型号是否允许用手柄实体按键控制。 */
@@ -475,15 +478,17 @@ void Pubinterface_RefreshPumpAButtonDisplay(void); /* A 泵刚启动时先刷新
 void Pubinterface_RefreshPumpBButtonDisplay(void); /* B 泵刚启动时先刷新按钮，等输出设置值更新后再刷新档位环，避免闪出零档图。 */
 void Pubinterface_RefreshPumpADisplay(void); /* 刷新 A 泵数值和启停按钮，屏幕操作和上位机操作共用。 */
 void Pubinterface_RefreshPumpBDisplay(void); /* 刷新 B 泵数值和启停按钮，屏幕操作和上位机操作共用。 */
+uint32_t Pubinterface_ClampMotorSpeed(uint8_t channel, uint8_t direction, uint32_t speed); /* 按本通道有效往复范围限制PX电气往复，零速保持停止。 */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void); /* 读取当前通道、当前方向在MemoryMsg中保存的速度，单位rpm；调速后保存值会更新，不一定仍是出厂默认值。 */
 void Pubinterface_SetHandleInjectionPumpRun(bool enable); /* 随手柄启动或停止注水冷却泵，只释放本次联动接管的泵。 */
 bool Pubinterface_CheckInjectionPumpForRun(uint8_t source); /* 本次插柄首次启动检查缺泵；首次拒绝后须真实松开，后续启动不再提示。 */
 void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel); /* 真实松开/明确停止完成首次确认；channel为NONE时匹配该来源当前报警。 */
 void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel); /* 异常撤销报警而不完成确认；source或channel为NONE时匹配任意来源或通道。 */
-uint8_t Pubinterface_GetInjectionPumpStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
+bool Pubinterface_CheckRfidForRun(uint8_t source); /* CRC启动检查；第一次失败即禁启动，真实松开前恢复也不自动起机。 */
+bool Pubinterface_IsRfidRunBlocked(uint8_t channel); /* 最终驱动检查故障及未松开的旧启动动作。 */
+uint8_t Pubinterface_GetMotorStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B泵压力提示只蜂鸣三声并显示89号弹窗3秒；灌注同一轮一次，不撤销运行请求。 */
-void Pubinterface_HandlePumpNoLiquid(uint8_t pump_channel); /* 灌注无液体输入时撤销本泵请求、蜂鸣三声并显示76号图3秒，另一泵和手柄不受影响。 */
 void Pubinterface_HandlePumpPressureSensorFault(uint8_t pump_channel); /* A/B泵压力检测失效仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
 /*
  * 函数功能：上电定位重试失败时显示79号报警图，3秒后自动关闭。

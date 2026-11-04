@@ -166,7 +166,7 @@ static uint8_t double_beep_phase = 0U; //双响剩余步骤：4=响、3=停、2=
 static uint8_t alignment_beep_phase = 0U; /* 定位结果响停步骤：成功2到0响一声，重试失败4到0响两声，每步100ms；普通按键不能打断。 */
 uint8_t alignment_busy = PumpBehavior_IsAlignmentBusy(); /* 本周期已装配泵是否仍在定位；仅限制普通故障双响，不再屏蔽按键反馈。 */
 uint8_t alignment_result; /* 本周期读取的定位结果：0不响、1成功单响、2重试失败双响；结果不经过普通蜂鸣队列。 */
-uint8_t injection_alarm = Pubinterface_GetInjectionPumpStartAlarm(); /* 每周期读取首次待释放状态，队列满或普通清错都不能丢掉持续报警。 */
+uint8_t injection_alarm = Pubinterface_GetMotorStartAlarm(); /* 每周期读取首次待释放状态，队列满或普通清错都不能丢掉持续报警。 */
 
 // 从消息队列获取消息
 /* 队列初始化成功后才允许读取消息，避免任务启动早于队列创建时访问空句柄。 */
@@ -254,7 +254,7 @@ if(BeepMsgQueue != NULL)
 		alarm_limited_ticks = 0U; /* 清旧倒计时，后续按新的真实报警消息运行。 */
 	}
 
-	if (((alarm_flag == WORK_ALARM_INJECTION_MISSING_SINGLE) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC)) &&
+	if (((alarm_flag == WORK_ALARM_TOOL_CRC_START_ERROR) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_SINGLE) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC)) &&
 		((injection_alarm == WORK_ALARM_NONE) || WorkMessage.alarm_flag))
 	{
 		alarm_flag = WorkMessage.alarm_flag ? WorkMessage.alarm_value : WORK_ALARM_NONE; /* 缺泵释放只清自己的蜂鸣；真实故障接管时继续保留故障报警。 */
@@ -263,7 +263,8 @@ if(BeepMsgQueue != NULL)
 	}
 	if ((injection_alarm != WORK_ALARM_NONE) && !WorkMessage.alarm_flag &&
 		((alarm_flag == WORK_ALARM_NONE) || (alarm_flag == WORK_ALARM_INJECTION_MISSING_SINGLE) ||
-		 (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC)))
+		 (alarm_flag == WORK_ALARM_INJECTION_MISSING_OSC) ||
+         (alarm_flag == WORK_ALARM_TOOL_CRC_START_ERROR))) /* 77随真实启动动作发声，松开后停止，不解除CRC禁止启动。 */
 	{
 		alarm_flag = injection_alarm; /* 首次未松开时恢复持续报警，普通按键和NONE消息都不能关闭。 */
 		alarm_limited_ticks = 0U; /* 不设超时，保持100ms响/100ms停直到对应控制源真实释放。 */

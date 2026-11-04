@@ -570,6 +570,10 @@ static void HandleRunKey_Process(uint8_t channel, bool press_event, bool release
 		return; /* 已运行、普通报警或其它控制来源占用时不启动实体键控制。 */
 	}
 
+    if ((channel == WorkMessage.channel_work) && !Pubinterface_CheckRfidForRun(CONTROL_OWNER_HANDLE))
+    {
+        return; /* CRC拒绝在准备速度之前记录按下，即使旧速度为0也能在按住时提示77，松键沿原入口关闭。 */
+    }
 	if (HandleRunKey_PrepareRunChannel(channel) == false)
 	{
 		return; /* 本次按下不能启动，不占用控制；条件恢复后仍需重新按键。 */
@@ -601,6 +605,14 @@ static void HandleKey_ScanRunKeys(void)
 		key_b_press_event = HandleRunKey_DebouncePressEvent(&s_handle_run_key_b_filter, HANDLE_RUN_KEY_B_STATUS()); /* 普通B手柄读取PE0，连续低电平约120ms后产生按下沿。 */
 	}
 
+    if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL))
+    {
+        if (key_a_press_event || key_b_press_event)
+        {
+            UIDP_RequestExternalControlHint(); /* 外控时仍做GPIO去抖，确认新按下才提示，长按不生成重复启动。 */
+        }
+        return; /* 只消费按键边沿，不能进入实体键启停业务或修改外控输出。 */
+    }
 	HandleRunKey_Process(CHANNEL_A, key_a_press_event, s_handle_run_key_a_filter.release_event); /* 先处理 A，根据型号判断按下启动、再次按下停止或松手停止。 */
 	HandleRunKey_Process(CHANNEL_B, key_b_press_event, s_handle_run_key_b_filter.release_event); /* 再处理 B；如果 A 已经由实体键启动，B 的按键不会影响 A。 */
 }
@@ -790,6 +802,10 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
         return; /* 正常按住时保留原请求，不反复写方向、转速和启动消息。 */
     }
     if ((state->trigger == 0U) || (state->release_count < GZYT_TEST_RELEASE_FRAMES)) return; /* 两键松开或还未确认三帧松手时不启动。 */
+    if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL))
+    {
+        UIDP_RequestExternalControlHint(); /* 数字帧已通过校验并确认新按下，外控占用时只提示88。 */
+    }
     if ((WorkMessage.drivetype_work != HANDLEWORK) || (WorkMessage.runflag_work == true) ||
         (WorkMessage.alarm_flag == true) || (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE) == true) ||
         (MotorUart_IsRecentFeedbackMoving() == true) || (s_handle_run_key_owner_channel != CHANNEL_NONE))
@@ -838,6 +854,11 @@ void HANDLEKEYTaskFunc(uint32_t event)
     s_handle_gpio_scan_tick = HAL_GetTick(); /* 记录本次 GPIO 扫描时刻，下一次至少再等待 30ms。 */
 #endif
 	HandleRunKey_ServiceFootAlarm(); /* 维护 82 号限时弹窗，到 ALARM_MODE_MS 后关闭。 */
+    if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL))
+    {
+        HandleKey_ScanRunKeys(); /* 外控时只扫描并消费本地按下边沿，内部专用分支阻止启停。 */
+        return; /* 保留外控独占，退出后也不能复用外控期间已经消费的按下沿。 */
+    }
 	if (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE))
 	{
 		return; /* 脚踏、屏幕或外控正在控制时不处理手柄键；上面的引脚更新和提示到期检查仍会执行。 */

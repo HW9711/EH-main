@@ -774,11 +774,6 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                                        (pump_type == INJECTWATER) ? 1U : 0U,
                                                        weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
     }
-    if ((alarm_event & PUMP_PRESSURE_EVENT_NO_LIQUID) != 0U) /* 无液体输入必须优先撤销本泵请求，不能只将本周期流量暂时降为零。 */
-    {
-        Pubinterface_HandlePumpNoLiquid(binding->public_channel); /* 清除运行、排空及旧外控请求，并提示76号图3秒和三声蜂鸣。 */
-        return 0U; /* 本周期直接发送零速，避免等待下一25ms任务才停泵。 */
-    }
     if ((alarm_event & PUMP_PRESSURE_EVENT_SENSOR_FAULT) != 0U) /* 检测失效使用独立74号图窗，不将保持输出改为零速。 */
     {
         Pubinterface_HandlePumpPressureSensorFault(binding->public_channel); /* A/B泵共用三声蜂鸣和2秒74号提示，不撤销任何运行请求。 */
