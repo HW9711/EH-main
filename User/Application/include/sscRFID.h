@@ -99,8 +99,8 @@ bool Rfid_ParseReceivedFrame(const uint8_t *uartx_rf_buff,
                              RfidReadSource_t expected_source,
                              RfidToolResult_t *result);
 void Rfid_ClearChannelResult(uint8_t channel);
-bool Rfid_IsToolCrcBlocked(uint8_t channel); /* 首次CRC错误后禁止启动，参数装载成功或确认拔柄才解除。 */
-bool Rfid_IsToolCrcConfirmed(uint8_t channel); /* 三次CRC错误且允许的USER兼容仍未成功，供启动时显示77。 */
+bool Rfid_IsToolCrcBlocked(uint8_t channel); /* PXBA/PXBB校验失败沿用保留参数且不禁启动；其它基座仍在首次CRC错误后禁止启动，成功装载或确认拔柄才解除。 */
+bool Rfid_IsToolCrcConfirmed(uint8_t channel); /* PXBA/PXBB校验失败不提示；其它基座三次CRC错误且兼容未成功时，供启动动作显示77。 */
 void Rfid_ConfirmToolLoaded(uint8_t channel, uint16_t sequence); /* 只确认本次有效结果已装载，旧缓存不能解锁。 */
 void Rfid_ResetToolCrcFault(uint8_t channel); /* 仅确认拔出手柄时清除该侧故障，不用于切手动或普通清缓存。 */
 

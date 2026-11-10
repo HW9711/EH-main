@@ -31,6 +31,12 @@ bool Handlescan_RestoreSplitHandleEepromRuntime(uint8_t channel, uint8_t manual_
 void Handlescan_PrepareSplitAutoIdentify(uint8_t channel); /* 重新启用自动识别前清掉旧 RFID 结果编号和计数，保留当前刀具参数。 */
 bool Handlescan_TakeVerifyAlarmCloseRequest(uint8_t channel); /* 取出并清掉关窗请求；插拔任务清空屏幕队列后须重新发送关闭 90 号报警窗的消息。 */
 bool Handlescan_IsChannelPhysicallyInserted(uint8_t channel); /* 读取该通道插拔检测脚，低电平返回 true；这里只看本次电平，不保证识别已通过。 */
+/*
+ * 函数功能：提供扫描层已经短去抖确认的断开状态，提前STOP和最终RUN出口不得直接用瞬时电平替代。
+ * 输入参数：channel为逻辑A/B通道；调用方须在公共业务锁内查询，不改变本通道扫描计数。
+ * 返回参数：连续断开达到现有门槛、已处空闲离线态或通道非法时返回true，其它情况返回false。
+ */
+bool Handlescan_IsChannelDisconnectConfirmed(uint8_t channel);
 bool Handlescan_IsNavigationReady(uint8_t channel); /* 该通道完成识别并处于在线阶段才返回 true，供外部导航检查是否允许读写。 */
 uint32_t Handlescan_GetNavigationGeneration(uint8_t channel); /* 返回拔出检查的变化计数；读取导航数据前后计数不同，就应放弃旧请求。 */
 

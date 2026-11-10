@@ -90,6 +90,17 @@ void SimUart_HandleExti(uint16_t GPIO_Pin);
  * channel 指定本次读取 PE4 还是 PE6 的电平；两路各用自己的定时器。 */
 void SimUart_TimerIrqHandler(sim_uart_channel_t channel);
 
+/* 实时状态页只读零点快照；独立于综合诊断开关，不参与压力计算和泵保活。 */
+typedef struct {
+    uint32_t meta; /* 位0为缓存有效，位2~5为查询状态，位8~15状态、16~23故障、24~31板端标志。 */
+    uint32_t received_tick; /* 主控收到合法零点应答的毫秒时刻，不能代替压力帧接收时刻。 */
+    int32_t factory_raw; /* 压力板Flash中保存的出厂零点ADC。 */
+    int32_t boot_raw; /* 压力板本次上电使用的零点ADC。 */
+    int32_t session_raw; /* 原27字节协议兼容字段；双零点版与boot_raw相同，不建立第三零点。 */
+} SimUartZeroSnapshot;
+void SimUart_RequestZeroInfo(void); /* 用户点击后为A/B各排队一次固定0x13只读命令，不归零、不写Flash。 */
+void SimUart_CopyZeroSnapshot(uint8_t channel, SimUartZeroSnapshot *out); /* 1=A/PE4、2=B/PE6，仅复制对应物理板缓存。 */
+
 /* 以下为单通道历史兼容接口，默认映射到通道 1。 */
 SoftUART_Status Soft_UART_Init(void);
 SoftUART_Status Soft_UART_SendByte(uint8_t data);

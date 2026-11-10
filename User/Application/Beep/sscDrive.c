@@ -16,6 +16,7 @@
 #include "sscUIDP.h"
 #include "sscRFID.h"
 #include "sscFOOT.h"
+#include "handlescan.h" /* 电机最终输出共用A/B扫描层的短去抖断开结果，不再用瞬时电平锁停。 */
 #include "delay.h"
 
 #include <string.h>
@@ -64,6 +65,44 @@ static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示数
 static volatile uint8_t s_tool_position_guard_active = 0U; /* 1 表示已发出定位命令，暂不重发空闲停止帧，给驱动留出完成定位的时间。 */
 static volatile uint32_t s_tool_position_guard_until_ms = 0U; /* 保存定位保护截止时刻，配合有符号差值兼容HAL毫秒计数回绕。 */
 static volatile uint32_t s_tool_position_last_command = 0U; /* 最近定位指令：bit0～7逻辑通道、bit8～15方向4/5、bit16～23步长；上电为0，普通启停不清除最近指令。 */
+static uint8_t s_handle_disconnect_stop_mask = 0U; /* bit0/bit1分别锁住A/B拔出后的手柄输出；原启动请求撤销且本通道重新识别稳定后才解除，不记录泵状态。 */
+
+/*
+ * 函数功能：检查当前手柄输出资格，只锁存扫描层已确认的断开，兼顾短毛刺过滤和禁止沿用旧运行请求。
+ * 输入参数：无，读取当前WorkMessage的A/B在线状态和本通道扫描层的短去抖确认结果。
+ * 返回参数：当前通道在线、扫描层尚未确认断开且拔出锁停已解除时返回true；其它情况返回false。
+ */
+static bool MotorDrive_IsHandleOutputAllowed(void)
+{
+    uint8_t channel_mask; /* 当前逻辑通道对应的锁停位；只读写本通道，不用另一侧的插拔状态。 */
+    if ((WorkMessage.channel_work != CHANNEL_A) && (WorkMessage.channel_work != CHANNEL_B))
+    {
+        return false; /* 没有合法当前通道时禁止沿用旧电机运行请求。 */
+    }
+    if ((WorkMessage.channel_work == CHANNEL_A) && (WorkMessage.Channel_Aonline == false))
+    {
+        return false; /* A 已被扫描层确认离线时只撤销 A 的最终输出资格。 */
+    }
+    if ((WorkMessage.channel_work == CHANNEL_B) && (WorkMessage.Channel_Bonline == false))
+    {
+        return false; /* B 已被扫描层确认离线时不影响 A 通道状态。 */
+    }
+    channel_mask = (WorkMessage.channel_work == CHANNEL_A) ? 0x01U : 0x02U; /* 合法A/B分别使用独立的一位，切换通道不能串用锁停记录。 */
+    if (Handlescan_IsChannelDisconnectConfirmed(WorkMessage.channel_work) != false)
+    {
+        s_handle_disconnect_stop_mask |= channel_mask; /* 只锁住扫描层已短去抖确认的断开，最终出口单独碰到原始电平毛刺不能误停。 */
+        return false; /* 短去抖已确认就转STOP，仍不等待500ms界面离线收尾。 */
+    }
+    if ((s_handle_disconnect_stop_mask & channel_mask) != 0U)
+    {
+        if ((WorkMessage.runflag_work != false) || !Handlescan_IsNavigationReady(WorkMessage.channel_work))
+        {
+            return false; /* 原启动动作未撤销或重新认证未完成时保持停止，避免拔出抖动引起反复启动。 */
+        }
+        s_handle_disconnect_stop_mask &= (uint8_t)~channel_mask; /* 本通道连接稳定且已退出旧RUN，才允许后续新的启动请求。 */
+    }
+    return true; /* 当前通道连接有效且没有残留拔出锁停，其余RFID、方向和驱动保护仍由原流程检查。 */
+}
 
 /*
  * 函数功能：把往复频率限制在驱动允许的 0~100 范围内。
@@ -380,7 +419,7 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 
 
 /*
- * 函数功能：记录本次50ms输出判定，并在周期电机命令内容变化时同步记录真实UART1命令序号和时刻。
+ * 函数功能：记录周期输出或拔出STOP的判定，并在电机命令内容变化时同步记录真实UART1命令序号和时刻。
  * 输入参数：command为11字节驱动帧；logical_channel、run_state和command_speed_rpm描述实际帧；其余参数描述原始运行请求。
  * 返回参数：无；重复帧仍更新请求诊断字段，但不增加命令序号和sent_tick_ms。
  */
@@ -414,7 +453,7 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
     s_motor_drive_command_snapshot.source_speed_rpm = source_speed_rpm; /* 保存倍率和补偿前的原始速度，直接定位零速RUN来源。 */
     s_motor_drive_command_snapshot.requested_run_state = requested_run_state; /* 保存业务层提出的RUN/STOP，不用反推实际UART帧。 */
     s_motor_drive_command_snapshot.drive_type = drive_type; /* 保存脚踏、手控、触控或外控来源，定位是哪条控制路径留下请求。 */
-    s_motor_drive_command_snapshot.zero_speed_blocked = zero_speed_blocked; /* 要求启动但速度为 0、实际改发停止帧时记为 1。 */
+    s_motor_drive_command_snapshot.zero_speed_blocked = zero_speed_blocked; /* 要求启动但速度无效或本通道断开、实际改发STOP时记为1，结合插拔记录区分原因。 */
     if (command_changed != 0U)
     {
         memcpy(s_motor_drive_last_command, command, motor_frem_length); /* 保存完整实际帧，方向、电机类型或电流变化也会触发新序号。 */
@@ -507,6 +546,41 @@ static void MotorStops(uint8_t requested_run_state,
 }
 
 /*
+ * 函数功能：当前手柄连续断开达到短去抖门槛后提前发出一次STOP，过滤单次毛刺并缩短拔柄后的旧RUN窗口。
+ * 输入参数：channel为10ms扫描任务本轮更新计数的逻辑A/B通道；由调用方在公共业务锁内执行。
+ * 返回参数：无；保留业务运行标志供原拔出报警判断，不修改任何泵请求或泵故障保护。
+ */
+void MotorDrive_StopDisconnectedHandle(uint8_t channel)
+{
+    uint8_t channel_mask; /* 为发生断开的通道选择独立锁停位，另一侧手柄仍按自己的连接状态输出。 */
+    if (((channel != CHANNEL_A) && (channel != CHANNEL_B)) || (WorkMessage.channel_work != channel))
+    {
+        return; /* 非当前通道拔出不能向共用UART1发送STOP，避免误停正在运行的另一手柄。 */
+    }
+    if (Handlescan_IsChannelDisconnectConfirmed(channel) == false)
+    {
+        return; /* 扫描层尚未短去抖确认时既不发STOP也不设置锁停位，电平恢复后保持原正常运行。 */
+    }
+    channel_mask = (channel == CHANNEL_A) ? 0x01U : 0x02U; /* A/B使用与最终输出检查一致的锁停位。 */
+    if ((s_handle_disconnect_stop_mask & channel_mask) != 0U)
+    {
+        return; /* 同一次断开只插入一次立即STOP；后续50ms输出任务负责保持零速和发送失败后的补发。 */
+    }
+    s_handle_disconnect_stop_mask |= channel_mask; /* 先禁止旧RUN恢复，短接触点抖回低电平也不能自行重启。 */
+    if ((s_motor_drive_command_snapshot.valid != 0U) && (s_motor_drive_command_snapshot.run_state != 0U) &&
+        (s_motor_drive_command_snapshot.channel == channel))
+    {
+        if (MotorUart_IsDriverParameterTransactionActive() != 0U)
+        {
+            MotorUart_AbortDriverParameterTransaction(); /* 实际RUN尚未被STOP替换时，拔出停机优先于维护等待。 */
+        }
+        Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 沿用现有5ms静默间隔，避免紧邻上一RUN的STOP被驱动拼成非11字节包；每次断开只等待一次。 */
+        MotorStops((WorkMessage.runflag_work != false) ? 1U : 0U, WorkMessage.drivetype_work,
+                   s_motor_drive_command_snapshot.source_speed_rpm, 1U); /* 复用同通道同配置的零速模板和真实发送结果检查，只停止手柄电机。 */
+    }
+}
+
+/*
  * 函数功能：把 msg 组装成启动帧发送，并记录控制来源、原始速度和实际命令速度。
  * 输入参数：command_speed_rpm 为命令速度，单位 rpm；drive_type 为控制方式；source_speed_rpm 为换算前的非零目标速度。
  * 返回参数：无。
@@ -544,6 +618,7 @@ static void MotorStart(uint32_t command_speed_rpm,
         Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 保留完整串口静默间隔，避免零速帧与后续启动帧被驱动拼成一包。 */
     }
     if (Pubinterface_IsRfidRunBlocked(WorkMessage.channel_work) || /* UART发帧前再拦截CRC锁定，避免前面检查后状态发生变化。 */
+        (MotorDrive_IsHandleOutputAllowed() == false) || /* 拔出检测已生效时，最终RUN出口也必须改发STOP。 */
         (WorkMessage.runflag_work == false) || (WorkMessage.alarm_flag != false) ||
         ((drive_type == JTWORK) && (Foot_IsMotorStopLatched() != 0U)))
     {
@@ -603,6 +678,7 @@ void MOTORRUN(void)
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
     uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
+    uint8_t handle_output_allowed = MotorDrive_IsHandleOutputAllowed() ? 1U : 0U; /* A/B共用各自扫描层的短去抖结果，单次候选电平不再阻断本周期RUN。 */
     if (Pubinterface_IsRfidRunBlocked(WorkMessage.channel_work))
     {
         WorkMessage.runflag_work = false; /* CRC故障或尚未松开的旧启动动作在最终输出处必须转STOP，77隐藏不能绕过。 */
@@ -627,10 +703,10 @@ void MOTORRUN(void)
     }
     if(MotorUart_IsDriverParameterTransactionActive()!=0U)
     {
-        if((WorkMessage.runflag_work==false) &&
+        if(((WorkMessage.runflag_work==false) || (handle_output_allowed==0U)) &&
            ((s_motor_drive_command_snapshot.valid==0U) || (s_motor_drive_command_snapshot.run_state!=0U)))
         {
-            MotorUart_AbortDriverParameterTransaction(); /* 只有上一份真实UART1命令仍是RUN时，新的停机请求才抢占维护等待。 */
+            MotorUart_AbortDriverParameterTransaction(); /* 上一份真实UART1命令仍是RUN时，正常停机或拔出锁停都必须抢占维护等待。 */
         }
         else
         {
@@ -639,10 +715,10 @@ void MOTORRUN(void)
     }
     if(s_tool_position_guard_active!=0U)
     {
-        if((WorkMessage.runflag_work!=false)||(WorkMessage.alarm_flag!=false)||
+        if((WorkMessage.runflag_work!=false)||(WorkMessage.alarm_flag!=false)||(handle_output_allowed==0U)||
            ((int32_t)(s_tool_position_guard_until_ms-HAL_GetTick())<=0))
         {
-            s_tool_position_guard_active=0U; /* 收到运行请求、存在报警或等待到期时，结束定位等待，继续处理本周期命令。 */
+            s_tool_position_guard_active=0U; /* 收到运行请求、报警、拔出锁停或等待到期时结束定位等待，断开不能继续跳过STOP。 */
         }
         else
         {
@@ -658,11 +734,12 @@ void MOTORRUN(void)
     motor_source_speed=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, motor_source_speed); /* 最终出口按本通道电气往复范围限速；配置无效会得到0并沿下方STOP路径处理。 */
     display_speed_value=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, display_speed_value); /* 显示使用同一限幅结果，不把已截断的超限请求显示成实际运行速度。 */
     requested_run_state=(WorkMessage.runflag_work!=false)?1U:0U; /* 在任何倍率和低速补偿前冻结本周期原始启停请求。 */
-    if((requested_run_state!=0U) && (motor_source_speed==0U))
+    if((requested_run_state!=0U) &&
+       ((motor_source_speed==0U) || (handle_output_allowed == 0U)))
     {
-        zero_speed_blocked=1U; /* 虽然要求启动，但目标为 0，必须发停止帧，不能被后面的最低 500rpm 补偿改成运行。 */
+        zero_speed_blocked=1U; /* 要求启动但目标为0或手柄已拔出时，必须发停止帧，不能被后面的最低500rpm补偿改成运行。 */
     }
-    if((requested_run_state!=0U) && (motor_source_speed!=0U))
+    if((requested_run_state!=0U) && (motor_source_speed!=0U) && (handle_output_allowed != 0U))
     {
         motor_output_run_state=1U; /* 只有RUN和非零原始速度同时成立，才允许进行机械倍率与启动补偿。 */
         ssc_speed_value=motor_source_speed; /* 单独保存实际输出目标，不改屏幕设定、脚踏显示和原始速度记录。 */

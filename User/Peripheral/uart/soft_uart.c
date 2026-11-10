@@ -10,6 +10,9 @@
 #include "Pubinterface.h"
 #include "pump.h" /* 首次识别流量与启动补速共用定义，右侧灌注默认120mL/min，模块重连保留原设定。 */
 #include "sscBEEP.h"
+#include "pump_behavior_core.h" /* 74冻结检测只使用已有真实转动反馈。 */
+#include "pump_pressure_control.h" /* 共用原6000压力无效标记，不改变串口协议。 */
+#include <string.h> /* 独立清理本路压力健康记录。 */
 
 #include <stdbool.h>
 
@@ -53,6 +56,35 @@ typedef enum {
     SOFT_UART_RX_STAGE_STOP
 } SoftUartRxStage;
 
+#define CS1237_SENSOR_FAULT_CONFIRM_MS 10000U /* 无有效新数据或ADC冻结都须连续10秒，才确认74。 */
+#define CS1237_SENSOR_RECOVER_MS       1000U /* 连续正常数据1秒后才解除本段报警锁存。 */
+#define CS1237_SENSOR_FRAME_GAP_MS     300U /* 恢复和冻结观察不跨超过三个报告周期的数据间断。 */
+#define CS1237_SENSOR_MIN_RAW_FRAMES   5U /* 同值ADC须由多帧确认，丢帧不能把10秒冻结判定无限推迟。 */
+#define CS1237_SENSOR_MIN_RECOVER_FRAMES 5U /* 单帧恢复不能重新使能74提示。 */
+
+/* 接收层独立维护每路压力健康，3秒掉线停泵不能清掉10秒故障计时。 */
+typedef struct {
+    uint32_t last_valid_tick; /* 最近有效且序号更新的压力帧时刻。 */
+    uint32_t raw_change_tick; /* 连续运行观察中最后一次原始ADC变化时刻。 */
+    uint32_t valid_frames; /* 有效新帧累计数，恢复确认按无符号差支持回绕。 */
+    uint32_t recovery_tick; /* 本段连续健康恢复起点。 */
+    uint32_t recovery_frames; /* 恢复起点的累计帧数。 */
+    int32_t last_raw; /* 最近有效新帧的原始ADC，不使用量化后的重量判断冻结。 */
+    int32_t fault_raw; /* 冻结报警当时的ADC，恢复须确认它真正变化。 */
+    uint8_t watching; /* 已识别过本路泵，明确无设备帧才取消监测。 */
+    uint8_t sequence; /* 最近完整帧序号，用于排除重复旧包。 */
+    uint8_t sequence_valid; /* 区分首个序号0与尚无序号。 */
+    uint8_t latest_usable; /* 最近完整帧的压力字段是否可信且非6000。 */
+    uint8_t motion_active; /* 只有驱动真实转动且命令非零时观察ADC冻结。 */
+    uint8_t raw_seen; /* 运行冻结观察已建立原始值基线。 */
+    uint8_t raw_frames; /* 同值有效新帧数，饱和计数避免回绕。 */
+    uint8_t fault_active; /* 本段故障已提示一次，单个好帧不解除。 */
+    uint8_t fault_reason; /* 位0无有效新数据，位1运行ADC冻结，可同时存在。 */
+    uint8_t recovery_active; /* 正在观察连续正常恢复。 */
+} Cs1237PressureHealth;
+
+static Cs1237PressureHealth s_cs1237_health[SIM_UART_COUNT]; /* A/B完全独立，不借另一侧压力恢复本侧报警。 */
+
 /* 每路串口各自的引脚、定时器、接收进度和缓存。
  * A/B 同时上报时各收各的数据，不共用接收进度。 */
 typedef struct {
@@ -91,7 +123,7 @@ typedef struct {
 /* 每路协议帧解析状态。
  * 任务层按字节寻找 AA55 帧头，拼满固定长度后再校验字段和 CRC。 */
 typedef struct {
-    uint8_t frame[CS1237_FRAME_LENGTH];
+    uint8_t frame[27U]; /* 同一物理串口分别组装21字节压力帧和27字节只读零点回包。 */
     uint8_t length;
 } Cs1237FrameParser;
 
@@ -127,6 +159,33 @@ static uint8_t s_dwt_ready = 0U;
 static uint8_t s_tim7_ready = 0U;
 static uint8_t s_rx_timers_initialized = 0U;
 static Cs1237FrameParser s_cs1237_parsers[SIM_UART_COUNT];
+static SimUartZeroSnapshot s_zero_snapshots[SIM_UART_COUNT]; /* A/B分别保存原固件手动查询结果，不参与泵保活。 */
+/* 零点查询只允许固定0x13命令；其它标定命令不进入该发送器。 */
+#define ZERO_QUERY_IDLE        0U /* 尚未请求，不代表零点为0。 */
+#define ZERO_QUERY_QUEUED      1U /* 等待独立定时器发送，不阻塞泵任务。 */
+#define ZERO_QUERY_WAITING     2U /* 已启动发送，等待本通道同序号应答。 */
+#define ZERO_QUERY_OK          3U /* 当前查询成功，可结合缓存接收年龄判断时效。 */
+#define ZERO_QUERY_TIMEOUT     4U /* 500ms内无合法回包，保留历史缓存但不伪造新零点。 */
+#define ZERO_QUERY_UNSUPPORTED 5U /* 压力板明确返回不支持0x13，仍保留正常压力日志。 */
+#define ZERO_QUERY_ERROR       6U /* 压力板返回其它错误，或成功载荷不符合协议。 */
+typedef struct
+{
+    uint32_t attempt_tick; /* 本轮发送起点ms；排队时暂存请求时刻，真正发送时重置。 */
+    uint8_t status; /* 上述查询阶段；只在公共业务任务域修改。 */
+    uint8_t sequence; /* 各通道独立8位请求号，防止A/B或迟到回包串用。 */
+} ZeroQueryState;
+typedef struct
+{
+    uint8_t frame[10]; /* 固定A55A/01/13/00/seq/CRC/5AA5，共10字节只读命令。 */
+    uint8_t channel; /* 当前发送的物理串口下标，0=A/PE5、1=B/PE11。 */
+    uint8_t byte_index; /* 正在发送的字节下标，范围0~9。 */
+    uint8_t bit_index; /* 下次中断发bit0~7，8发停止位，9结束该字节。 */
+    volatile uint8_t active; /* ISR与任务共享忙标志；结束停止位后才清零。 */
+} ZeroQueryTx;
+static ZeroQueryState s_zero_queries[SIM_UART_COUNT]; /* 每块压力板分别等待和超时，查询失败不更改泵在线状态。 */
+static ZeroQueryTx s_zero_tx; /* 两路分时共用TIM9发送，每帧约10.4ms，RX仍由TIM11/TIM13独立采样。 */
+static uint8_t s_zero_timer_ready; /* 第一次查询才配置TIM9，未点击读取时不占用它。 */
+
 static uint32_t s_cs1237_last_valid_tick[SIM_UART_COUNT]; /* 每路最近一次格式、CRC及设备码有效的帧时间；压力值可失效，用于独立判断泵掉线。 */
 static uint32_t s_cs1237_loss_suspect_tick[SIM_UART_COUNT]; /* 每路开始怀疑掉线的时间，单位：ms；0 表示当前没有等待确认。 */
 static bool s_cs1237_flow_initialized[SIM_UART_COUNT]; /* A/B本次开机是否已设置首次识别流量；模块掉线不清零，重连保留speed_work，包含用户设为0的情况。 */
@@ -916,6 +975,129 @@ static uint16_t Cs1237_DecodePumpType(sim_uart_channel_t channel, uint8_t device
 }
 
 /*
+ * 函数功能：记录本路完整压力帧的健康证据，不操作泵输出、不由重复旧包保活。
+ * 输入参数：channel为物理压力口，frame为CRC正确的21字节帧，trusted为原数值检查结果，pump_type为原设备码映射结果。
+ * 返回参数：无。
+ */
+static void Cs1237_RecordPressureHealth(sim_uart_channel_t channel, const uint8_t *frame,
+                                        bool trusted, uint16_t pump_type)
+{
+    Cs1237PressureHealth *health = &s_cs1237_health[(uint32_t)channel]; /* 只更新当前解析通道。 */
+    uint32_t now = HAL_GetTick(); /* 以真实收包时刻确认新数据，不用25ms控制任务的轮询次数。 */
+    int32_t raw = (int32_t)Cs1237_ReadU32Le(&frame[6]); /* 原ADC即使重量因限零不变，也能提供健康变化证据。 */
+    uint8_t usable = ((trusted != false) && (Cs1237_ReadU16Le(&frame[14]) != 0U) &&
+        (Cs1237_ReadU32Le(&frame[10]) != PUMP_PRESSURE_CONTROL_NOT_READY_X10)) ? 1U : 0U; /* 明确未就绪不刷新有效数据时间。 */
+    uint8_t fresh; /* 只由完整帧序号变化判新包。 */
+    if (pump_type == 0U) {
+        memset(health, 0, sizeof(*health)); /* 明确拆管或禁用侧是无泵，不误报压力板损坏。 */
+        return; /* 不把未安装设备纳入74监测。 */
+    }
+    if (health->watching == 0U) {
+        health->watching = 1U; /* 第一帧已识别到泵后启动本路监测。 */
+        health->last_valid_tick = now; /* 即使首帧未就绪，也给完整10秒确认期。 */
+    }
+    fresh = ((health->sequence_valid == 0U) || (health->sequence != frame[5])) ? 1U : 0U; /* 255回0仍是新包。 */
+    health->sequence = frame[5]; /* 保存本次完整帧序号；无效数值也不能把同包当新包。 */
+    health->sequence_valid = 1U; /* 首个合法序号0也已观察过。 */
+    health->latest_usable = usable; /* 如实记录最近帧是否处于未就绪/越界恢复阶段。 */
+    if (usable == 0U) {
+        health->raw_seen = 0U; /* 无效ADC不参与运行冻结观察。 */
+        health->raw_frames = 0U; /* 不拼接无效前后的同值计数。 */
+        health->recovery_active = 0U; /* 任一无效帧打断恢复连续性。 */
+        return; /* 不刷新最近有效数据时刻。 */
+    }
+    if (fresh == 0U) {
+        return; /* 重复旧包不保活、不增加恢复帧数，也不增加冻结样本数。 */
+    }
+    if ((uint32_t)(now - health->last_valid_tick) > CS1237_SENSOR_FRAME_GAP_MS) {
+        health->recovery_active = 0U; /* 恢复不含缺帧空白。 */
+    }
+    health->last_valid_tick = now; /* 只有可信且序号更新的压力帧才能延长有效期。 */
+    ++health->valid_frames; /* 自然回绕，后续仅比较无符号差。 */
+    if (health->motion_active != 0U) {
+        if ((health->raw_seen == 0U) || (health->last_raw != raw)) {
+            health->raw_change_tick = now; /* 原ADC任何真实变化都重开冻结观察。 */
+            health->raw_frames = 1U; /* 本帧是新同值区间的第一个样本。 */
+            health->raw_seen = 1U; /* 已取得转动期间的ADC基线。 */
+        } else if (health->raw_frames < 255U) {
+            ++health->raw_frames; /* 仅完整有效新包计数，旧任务轮询不计。 */
+        }
+    } else {
+        health->raw_seen = 0U; /* 静止时压力完全稳定可以正常，不能判ADC冻结。 */
+        health->raw_frames = 0U; /* 下一次真实转动重新观察。 */
+    }
+    health->last_raw = raw; /* 保存有效新ADC，也用于确认冻结故障后的真实恢复。 */
+}
+
+/*
+ * 函数功能：每100ms确认74故障与恢复；只提示一次，不改变原3秒掉线停泵和真实超压处理。
+ * 输入参数：无。
+ * 返回参数：无。
+ */
+static void Cs1237_ServicePressureHealth(void)
+{
+#if (PUMP_PRESSURE_CONTROL_ENABLE == 0U)
+    return; /* 保留原压力总开关语义，关闭时不产生74。 */
+#else
+    uint32_t now = HAL_GetTick(); /* 两路采用同一个任务时刻，计数回绕用无符号差处理。 */
+    for (uint32_t i = 0U; i < SIM_UART_COUNT; ++i) {
+        Cs1237PressureHealth *health = &s_cs1237_health[i]; /* 每路有自己的10秒计时与报警锁存。 */
+        PumpDriverFeedbackSnapshot_t feedback; /* 只用已有驱动反馈，不新增串口查询。 */
+        pumpMessage_t *message = Cs1237_GetPump((sim_uart_channel_t)i); /* 使用原A/B压力归属。 */
+        uint8_t reason = 0U; /* 本周期确认到的故障原因位。 */
+        uint8_t moving; /* 驱动反馈真实转动时才启用ADC冻结判断。 */
+        if (health->watching == 0U) continue; /* 尚未装泵或已明确拆管，不报传感器故障。 */
+        moving = ((message != NULL) && (message->online_flag != false) && (message->speed_output != 0U) &&
+            (PumpBehavior_CopyDriverFeedbackSnapshot((PumpBehaviorChannel_t)i, &feedback) != 0U) &&
+            (feedback.valid != 0U) && (feedback.raw_error == 0U) && (feedback.alignment_state == PUMP_DRIVER_READY) &&
+            ((uint32_t)(now - feedback.feedback_tick_ms) <= 100U) && (feedback.actual_speed != 0U)) ? 1U : 0U; /* 定位、停泵和驱动失联不伪装成传感器冻结。 */
+        health->motion_active = moving; /* 下一轮新压力帧按真实转动状态采集冻结证据。 */
+        if (moving == 0U) {
+            health->raw_seen = 0U; /* 停止观察不保留上一段运行的同值时间。 */
+            health->raw_frames = 0U; /* 再次转动须从新样本重新累计10秒。 */
+        }
+        if ((uint32_t)(now - health->last_valid_tick) >= CS1237_SENSOR_FAULT_CONFIRM_MS) {
+            reason |= 1U; /* 持续10秒无可信新序号，覆盖无输出、旧包重复和持续未就绪。 */
+        }
+        if ((moving != 0U) && (health->raw_seen != 0U) &&
+            (health->raw_frames >= CS1237_SENSOR_MIN_RAW_FRAMES) &&
+            ((uint32_t)(now - health->raw_change_tick) >= CS1237_SENSOR_FAULT_CONFIRM_MS)) {
+            reason |= 2U; /* 多帧原ADC连续10秒完全相同才判疑似冻结，不看显示值是否变化。 */
+        }
+        if (reason != 0U) {
+            health->recovery_active = 0U; /* 故障仍成立，单帧或间歇好数据不解除锁存。 */
+            if (health->fault_active == 0U) {
+                health->fault_active = 1U; /* 每段故障只产生一次74，避免反复弹窗。 */
+                health->fault_raw = health->last_raw; /* 冻结恢复必须看到ADC真的改变。 */
+                health->fault_reason = reason; /* 保存本次原因，后续坏好交替仍属于同一段。 */
+                Pubinterface_HandlePumpPressureSensorFault((i == (uint32_t)SIM_UART_1) ? CHANNEL_A : CHANNEL_B); /* 沿用三声蜂鸣和2秒74图窗，不清运行请求。 */
+            } else {
+                health->fault_reason |= reason; /* 已报警后合并原因，不重复提示。 */
+            }
+            continue; /* 本周期不能同时报告故障并解除它。 */
+        }
+        if (health->fault_active != 0U) {
+            uint8_t healthy = ((health->latest_usable != 0U) &&
+                ((uint32_t)(now - health->last_valid_tick) <= CS1237_SENSOR_FRAME_GAP_MS) &&
+                (((health->fault_reason & 2U) == 0U) || (health->last_raw != health->fault_raw))) ? 1U : 0U; /* 冻结故障不能靠停泵后继续同值来假恢复。 */
+            if (healthy == 0U) {
+                health->recovery_active = 0U; /* 无连续有效数据就重开恢复窗口。 */
+            } else if (health->recovery_active == 0U) {
+                health->recovery_active = 1U; /* 第一段合理新数据只开始观察。 */
+                health->recovery_tick = now; /* 连续正常至少保持1秒。 */
+                health->recovery_frames = health->valid_frames; /* 至少还需五个真实新包，时间流逝本身不能凑恢复。 */
+            } else if (((uint32_t)(now - health->recovery_tick) >= CS1237_SENSOR_RECOVER_MS) &&
+                       ((uint32_t)(health->valid_frames - health->recovery_frames) >= CS1237_SENSOR_MIN_RECOVER_FRAMES)) {
+                health->fault_active = 0U; /* 连续正常后才允许未来独立故障再次提示。 */
+                health->fault_reason = 0U; /* 本段故障结束，不影响零点或泵控制状态。 */
+                health->recovery_active = 0U; /* 清恢复观察，准备下一段异常。 */
+            }
+        }
+    }
+#endif
+}
+
+/*
  * 函数功能：独立更新设备在线状态与压力有效性；压力故障不清泵在线，A/B仅首次识别写默认流量。
  * 输入参数：channel为模拟串口；frame为格式、CRC及设备码高位已校验的21字节帧；pressure_trusted表示压力字段已通过范围与恢复检查。
  * 返回参数：无。
@@ -978,6 +1160,7 @@ static void Cs1237_UpdatePumpMessage(sim_uart_channel_t channel, const uint8_t *
     pump_display_changed = ((old_pump_type != pump_type) ||
                             pump_online_changed); /* 泵类型或在线状态改变才刷新该泵区域，A 在左、B 在右。 */
     taskEXIT_CRITICAL();
+    Cs1237_RecordPressureHealth(channel, frame, pressure_trusted, pump_type); /* CRC完整帧单独维护10秒74时序，不依赖泵控制状态复位。 */
 
     /* 状态变化时刷新界面和脚踏档位；默认流量只在本次开机首次有效识别时写入。 */
     if (pump_display_changed)
@@ -1072,7 +1255,155 @@ static void Cs1237_CheckPumpTimeout(void)
 }
 
 /*
- * 函数功能：压力候选帧校验失败后，在现有缓存内寻找下一处 AA55 帧头并恢复解析位置。
+ * 函数功能：只为零点只读命令准备独立TIM9位发送时基；不改TIM7、RX定时器及泵调度。
+ * 输入参数：无。
+ * 返回参数：无；当前工程TIM9未用于其它业务，使用内部定时不配置GPIO复用。
+ */
+static void Cs1237_InitZeroTxTimer(void)
+{
+    uint32_t divider; /* APB2定时器时钟到1MHz的分频值，沿用RX时钟计算规则。 */
+    if (s_zero_timer_ready != 0U) return; /* 不重置已经配置的发送器。 */
+    divider = SoftUart_GetTimerClockHz(&s_channels[0]) / 1000000U; /* TIM9与A路TIM11同属APB2。 */
+    if (divider == 0U) divider = 1U; /* 防止异常时钟导致PSC无符号下溢。 */
+    __HAL_RCC_TIM9_CLK_ENABLE(); /* 仅开启未使用的内部定时器，不改变接收时钟。 */
+    TIM9->CR1 = 0U; TIM9->DIER = 0U; /* 准备期间关闭计数和更新中断。 */
+    TIM9->PSC = divider - 1U; TIM9->ARR = 103U; /* 每104us推进一位，9600bps误差约0.16%。 */
+    TIM9->CNT = 0U; TIM9->EGR = TIM_EGR_UG; TIM9->SR = 0U; /* 装载分频并清掉UG产生的更新标志。 */
+    HAL_NVIC_SetPriority(TIM1_BRK_TIM9_IRQn, SOFT_UART_IRQ_PRIORITY, 0U); /* 与短RX采样ISR同优先级，避免FreeRTOS临界区拉长位时间。 */
+    HAL_NVIC_ClearPendingIRQ(TIM1_BRK_TIM9_IRQn); HAL_NVIC_EnableIRQ(TIM1_BRK_TIM9_IRQn); /* 接收功能保持原中断配置。 */
+    s_zero_timer_ready = 1U; /* 后续请求只启动一次10字节发送。 */
+}
+
+/*
+ * 函数功能：每次TIM9更新只写一个发送位，不关全局中断、不在任务中等待串口发送。
+ * 输入参数：无；由启动向量的TIM1_BRK_TIM9中断进入，当前工程没有启用TIM1。
+ * 返回参数：无；10字节的最后停止位完整保持104us后停表并释放发送器。
+ */
+void TIM1_BRK_TIM9_IRQHandler(void)
+{
+    SoftUartChannelContext *ctx; /* 只访问正在发送的物理TX，不操作业务压力和零点缓存。 */
+    if (((TIM9->SR & TIM_SR_UIF) == 0U) || ((TIM9->DIER & TIM_DIER_UIE) == 0U)) return; /* 非TIM9更新不推进位序号。 */
+    TIM9->SR = 0U; /* 立即清本定时器更新标志，后续只做短GPIO写操作。 */
+    if (s_zero_tx.active == 0U) { TIM9->DIER = 0U; TIM9->CR1 = 0U; return; } /* 无活动命令时停表，不留下空转中断。 */
+    ctx = &s_channels[s_zero_tx.channel]; /* 通道只由已校验的任务入口写入，ISR不改A/B归属。 */
+    if (s_zero_tx.bit_index < 8U) {
+        SoftUart_WriteTx(ctx, ((s_zero_tx.frame[s_zero_tx.byte_index] >> s_zero_tx.bit_index) & 1U) ? GPIO_PIN_SET : GPIO_PIN_RESET); /* 8N1低位先发，RX中断可继续处理另一引脚。 */
+        ++s_zero_tx.bit_index; /* 下一位在硬件定时器的下一个104us边界输出。 */
+    } else if (s_zero_tx.bit_index == 8U) {
+        SoftUart_WriteTx(ctx, GPIO_PIN_SET); s_zero_tx.bit_index = 9U; /* 停止位必须维持整个位周期，不能立刻发下一字节。 */
+    } else if (++s_zero_tx.byte_index < sizeof(s_zero_tx.frame)) {
+        SoftUart_WriteTx(ctx, GPIO_PIN_RESET); s_zero_tx.bit_index = 0U; /* 上一停止位已结束，开始下一字节起始位。 */
+    } else {
+        TIM9->DIER = 0U; TIM9->CR1 = 0U; /* 保持TX高电平并停止定时器，正常压力接收仍运行。 */
+        __DMB(); s_zero_tx.active = 0U; /* 先停表再释放共享缓冲，任务下轮才能排另一通道。 */
+    }
+}
+
+/*
+ * 函数功能：实时状态页点击读取时，为两路压力板各排队一次只读0x13查询。
+ * 输入参数：无；调用时持有公共业务互斥锁，不在中断内调用。
+ * 返回参数：无；排队不写零点、阈值或Flash，不改变泵运行请求。
+ */
+void SimUart_RequestZeroInfo(void)
+{
+    uint32_t now = HAL_GetTick(); /* 排队和应答均使用主控ms计时，兼容计数回绕。 */
+    for (uint8_t i = 0U; i < SIM_UART_COUNT; ++i) {
+        ZeroQueryState *query = &s_zero_queries[i]; /* A/B分别限制频率和匹配序号。 */
+        if ((query->status == ZERO_QUERY_QUEUED) || (query->status == ZERO_QUERY_WAITING)) continue; /* 重复上位机轮询不能改写正在等待的请求。 */
+        ++query->sequence; query->attempt_tick = now; query->status = ZERO_QUERY_QUEUED; /* 只排本轮读取，由100ms任务启动非阻塞发送。 */
+    }
+}
+
+/*
+ * 函数功能：处理查询超时，并启动至多一路固定只读命令；不阻塞原压力接收和25ms泵任务。
+ * 输入参数：无；在两路RX缓存全部解析后调用，避免先超时后才处理已经收到的回包。
+ * 返回参数：无。
+ */
+static void Cs1237_ServiceZeroQuery(void)
+{
+    uint32_t now = HAL_GetTick(); /* 查询500ms超时独立于压力板在线和压力500ms有效性判断。 */
+    for (uint8_t i = 0U; i < SIM_UART_COUNT; ++i) {
+        if ((s_zero_queries[i].status == ZERO_QUERY_WAITING) && ((uint32_t)(now - s_zero_queries[i].attempt_tick) >= 500U))
+            s_zero_queries[i].status = ZERO_QUERY_TIMEOUT; /* 仅标记读取失败，既不清运行请求也不为旧压力保活。 */
+    }
+    if (s_zero_tx.active != 0U) return; /* 上一10字节命令尚未发完，保持其静态缓冲不变。 */
+    for (uint8_t i = 0U; i < SIM_UART_COUNT; ++i) {
+        ZeroQueryState *query = &s_zero_queries[i]; /* 当前只为已排队通道构造合法帧。 */
+        uint16_t crc; /* 标定家族使用CRC16/MODBUS低字节先发。 */
+        if (query->status != ZERO_QUERY_QUEUED) continue; /* 无请求的通道不增加通信和CPU负载。 */
+        Cs1237_InitZeroTxTimer(); /* 一次性配置独立TIM9，保留原TIM11/TIM13接收。 */
+        s_zero_tx.frame[0] = 0xA5U; s_zero_tx.frame[1] = 0x5AU; /* 与AA55普通上报分开，压力板只交给标定协议解析。 */
+        s_zero_tx.frame[2] = 1U; s_zero_tx.frame[3] = 0x13U; /* 版本1的GET_ZERO_INFO只读命令，不能由外部传入任意命令码。 */
+        s_zero_tx.frame[4] = 0U; s_zero_tx.frame[5] = query->sequence; /* 空载荷，不含任何标定、阈值和归零参数。 */
+        crc = Cs1237_CalcCrc16Modbus(&s_zero_tx.frame[2], 4U); /* 校验版本、命令、长度和请求号。 */
+        s_zero_tx.frame[6] = (uint8_t)crc; s_zero_tx.frame[7] = (uint8_t)(crc >> 8U); /* 保持压力板原小端CRC格式。 */
+        s_zero_tx.frame[8] = 0x5AU; s_zero_tx.frame[9] = 0xA5U; /* 固定帧尾，总长10字节。 */
+        s_zero_tx.channel = i; s_zero_tx.byte_index = 0U; s_zero_tx.bit_index = 0U; /* 首字节将从bit0开始。 */
+        query->attempt_tick = now; query->status = ZERO_QUERY_WAITING; /* 实际发送时起算500ms应答期限。 */
+        s_zero_tx.active = 1U; __DMB(); /* 静态帧和通道先写完，之后才允许ISR读取。 */
+        SoftUart_WriteTx(&s_channels[i], GPIO_PIN_RESET); /* 立即输出首个起始位，其后所有位由定时器完成。 */
+        TIM9->CNT = 0U; TIM9->SR = 0U; TIM9->DIER = TIM_DIER_UIE; TIM9->CR1 = TIM_CR1_CEN; /* 任务立即返回，串口在约10.4ms后台发完。 */
+        DIAG_WIRE((uint8_t)(11U + i), 1U, 0x113U, s_zero_tx.frame, sizeof(s_zero_tx.frame)); /* 记录只读请求原文，便于与应答、超时逐一核对。 */
+        return; /* 另一通道下轮启动，避免共用发送缓冲被覆盖。 */
+    }
+}
+
+/*
+ * 函数功能：接收原压力固件0x13查询应答，按物理通道、请求号和期限更新零点或错误状态。
+ * 输入参数：channel为当前物理压力串口；frame为14字节错误应答或27字节零点应答。
+ * 返回参数：true为已消费合法协议帧（含迟到或错误应答），false为格式/CRC错误需要重新同步。
+ */
+static bool Cs1237_AcceptZeroReply(sim_uart_channel_t channel, const uint8_t *frame)
+{
+    ZeroQueryState *query = &s_zero_queries[(uint32_t)channel]; /* 只能完成本通道的待应答请求。 */
+    uint8_t length = (uint8_t)(10U + frame[4]); /* 上层已限定payload为4或17字节，不接收任意长度。 */
+    SimUartZeroSnapshot value = {0}; /* 原命令未提供同轮ADC、板端时间和滤波前值，保持未提供状态。 */
+    if ((frame[length - 2U] != 0x5AU) || (frame[length - 1U] != 0xA5U) ||
+        (Cs1237_ReadU16Le(&frame[6U + frame[4]]) != Cs1237_CalcCrc16Modbus(&frame[2], (uint16_t)(4U + frame[4])))) return false; /* 坏回包不能更新任何业务和查询结果。 */
+    if ((query->status != ZERO_QUERY_WAITING) || (query->sequence != frame[5])) return true; /* 迟到或另一轮序号只消费，不替换已有零点。 */
+    if ((uint32_t)(HAL_GetTick() - query->attempt_tick) >= 500U) { query->status = ZERO_QUERY_TIMEOUT; return true; } /* 过期应答不冒充新鲜读取。 */
+    if (frame[6] != 0U) { query->status = (frame[6] == 5U) ? ZERO_QUERY_UNSUPPORTED : ZERO_QUERY_ERROR; return true; } /* 区分明确不支持和其它板端错误，不伪填零点。 */
+    if ((frame[4] != 17U) || (frame[7] > 6U) || (frame[8] > 10U) || ((frame[9] & 0xFCU) != 0U)) {
+        query->status = ZERO_QUERY_ERROR; return true; /* 成功应答必须含完整三个零点、状态和故障。 */
+    }
+    value.factory_raw = (int32_t)Cs1237_ReadU32Le(&frame[10]); value.boot_raw = (int32_t)Cs1237_ReadU32Le(&frame[14]); /* 有符号24位ADC用32位承载。 */
+    value.session_raw = (int32_t)Cs1237_ReadU32Le(&frame[18]); /* 原协议兼容字段来自压力板RAM，不用主控压力值反推。 */
+    if ((value.factory_raw < CS1237_RAW_MIN_VALUE) || (value.factory_raw > CS1237_RAW_MAX_VALUE) ||
+        (value.boot_raw < CS1237_RAW_MIN_VALUE) || (value.boot_raw > CS1237_RAW_MAX_VALUE) ||
+        (value.session_raw < CS1237_RAW_MIN_VALUE) || (value.session_raw > CS1237_RAW_MAX_VALUE)) {
+        query->status = ZERO_QUERY_ERROR; return true; /* 越界零点只标查询异常，不能污染泵压力和在线状态。 */
+    }
+    value.meta = 3U | ((uint32_t)frame[7] << 8U) | ((uint32_t)frame[8] << 16U) | ((uint32_t)frame[9] << 24U); /* 位0有效、位1原固件查询；此来源没有同轮ADC或滤波前重量。 */
+    value.received_tick = HAL_GetTick(); s_zero_snapshots[(uint32_t)channel] = value; /* 只保存主控收包时刻，不伪造压力板采样时刻。 */
+    query->status = ZERO_QUERY_OK; /* 成功读取不代表标定无故障，状态/故障原值仍完整上传。 */
+    return true; /* 全过程不调用泵接入更新、压力换算或Flash操作。 */
+}
+
+/*
+ * 函数功能：复制指定物理压力板最近零点通知，不发串口命令、不改变零点。
+ * 输入参数：channel为1=A/PE4、2=B/PE6；out为快照输出，调用方持有公共业务互斥锁。
+ * 返回参数：无；非法参数保持输出不变，未收到快照时meta为0。
+ */
+void SimUart_CopyZeroSnapshot(uint8_t channel, SimUartZeroSnapshot *out)
+{
+    if ((out == NULL) || (channel < 1U) || (channel > 2U)) return; /* 参数不合法时不读取数组。 */
+    *out = s_zero_snapshots[channel - 1U]; /* 拷贝含接收时刻的缓存，失败后仍可查看历史零点。 */
+    out->meta = (out->meta & ~0x3CU) | ((uint32_t)s_zero_queries[channel - 1U].status << 2U); /* 位2~5独立上传查询状态；有效位不被超时或未支持伪造。 */
+}
+
+/*
+ * 函数功能：识别正常AA55和诊断A55A帧头，供坏包后重新同步；两类帧分别校验且不互相保活。
+ * 输入参数：first、second为相邻候选帧头字节。
+ * 返回参数：true表示支持的帧头，false表示继续丢弃候选字节。
+ */
+static bool Cs1237_HeaderMatches(uint8_t first, uint8_t second)
+{
+    if ((first == 0xA5U) && (second == 0x5AU)) return true; /* 实时只读查询也接收原压力板零点应答。 */
+    return (first == CS1237_HEADER_0) && (second == CS1237_HEADER_1); /* 保留原压力帧识别规则。 */
+}
+
+/*
+ * 函数功能：候选帧校验失败后，在缓存内寻找下一处支持的AA55/A55A帧头并恢复解析位置。
  * 输入参数：parser 保存当前通道已收到的压力字节和长度。
  * 返回参数：无；函数直接更新缓存内容和有效长度。
  */
@@ -1082,8 +1413,7 @@ static void Cs1237_ParserResync(Cs1237FrameParser *parser)
 
     for (uint8_t start = 1U; (start + 1U) < parser->length; start++)
     {
-        if ((parser->frame[start] == CS1237_HEADER_0) &&
-            (parser->frame[start + 1U] == CS1237_HEADER_1))
+        if (Cs1237_HeaderMatches(parser->frame[start], parser->frame[start + 1U])) /* 坏包重同步也识别独立零点通知，不能把两个协议拼成一帧。 */
         {
             new_length = (uint8_t)(parser->length - start); /* 缓存内部已有下一帧头时，只保留该帧头之后的数据，避免粘包错位后整段丢弃。 */
             for (uint8_t i = 0U; i < new_length; i++)
@@ -1095,9 +1425,11 @@ static void Cs1237_ParserResync(Cs1237FrameParser *parser)
         }
     }
 
-    if (parser->frame[parser->length - 1U] == CS1237_HEADER_0)
+    if ((parser->frame[parser->length - 1U] == CS1237_HEADER_0)
+        || (parser->frame[parser->length - 1U] == 0xA5U) /* 保留可能跨任务到达的零点帧首字节。 */
+       )
     {
-        parser->frame[0] = CS1237_HEADER_0; /* 末字节可能是下一帧的第一个 AA，保留它等待后续 55。 */
+        parser->frame[0] = parser->frame[parser->length - 1U]; /* 保留实际候选首字节，区分下一帧AA55与A55A。 */
         parser->length = 1U; /* 解析器回到“已收到第一个帧头字节”状态。 */
         return;
     }
@@ -1106,65 +1438,58 @@ static void Cs1237_ParserResync(Cs1237FrameParser *parser)
 }
 
 /*
- * 函数功能：逐字节收齐21字节帧；设备码与压力可信度分开处理，格式或CRC错误时重新寻找帧头。
+ * 函数功能：分别组装21字节正常压力帧和原固件零点查询应答；坏包恢复同步，零点不参与业务保活。
  * 输入参数：channel 为字节所属模拟串口通道；data 为本次收到的原始字节。
  * 返回参数：无。
  */
 static void Cs1237_ParseByte(sim_uart_channel_t channel, uint8_t data)
 {
-    Cs1237FrameParser *parser; /* 每路独立保存接收进度，不能串用A/B设备码。 */
-    bool pressure_trusted; /* 仅决定是否更新压力值，不决定设备码是否保活。 */
-
-    if (!SoftUart_ChannelValid(channel))
-    {
-        return; /* 非法通道没有独立解析缓存，直接拒绝以防数组越界。 */
+    Cs1237FrameParser *parser; /* 只访问本物理压力串口的接收缓存。 */
+    uint8_t frame_length; /* 正常压力21字节、零点应答27字节或错误应答14字节，分别校验和消费。 */
+    bool accepted; /* 当前候选帧是否已被正确校验并提交。 */
+    if (!SoftUart_ChannelValid(channel)) return; /* 非法通道不访问A/B数组。 */
+    parser = &s_cs1237_parsers[(uint32_t)channel]; /* 两路独立保存跨任务半帧。 */
+    if ((parser->length == 0U) || ((parser->length == 1U) && !Cs1237_HeaderMatches(parser->frame[0], data))) {
+        parser->length = ((data == CS1237_HEADER_0)
+                          || (data == 0xA5U) /* 独立接收A5帧头，零点回包不能触发压力业务更新。 */
+                         ) ? 1U : 0U; /* 噪声丢弃，重复帧头从最新字节重新开始。 */
+        parser->frame[0] = data; /* 保存实际首字节，不能把A5强改成AA。 */
+        return; /* 未收齐两个帧头字节，不判断业务状态。 */
     }
-
-    parser = &s_cs1237_parsers[(uint32_t)channel];
-
-    /* 当前没有候选帧时只查找第一个 AA 帧头，普通噪声不能进入解析缓存。 */
-    if (parser->length == 0U)
-    {
-        if (data == CS1237_HEADER_0)
-        {
-            parser->frame[0] = data; /* 空闲状态只接受 AA 作为候选帧起点，普通噪声字节直接忽略。 */
-            parser->length = 1U; /* 记录已收到第一帧头字节，下一字节必须为 55。 */
+    parser->frame[parser->length++] = data; /* 已确认帧头，按顺序追加本通道字节。 */
+    while (parser->length >= 2U) { /* 坏零点应答内可能含21字节压力帧，立即处理保留内容，不丢下一帧。 */
+        frame_length = CS1237_FRAME_LENGTH; /* 默认保持原压力上报长度。 */
+        if (parser->frame[0] == 0xA5U) {
+            if (parser->length < 5U) return; /* 未收齐固定头时继续等待版本、命令和长度。 */
+            if ((parser->frame[2] == 1U) && (parser->frame[3] == 0x93U) && ((parser->frame[4] == 17U) || (parser->frame[4] == 4U))) {
+                frame_length = (uint8_t)(10U + parser->frame[4]); /* 原固件查询成功27字节，错误应答14字节。 */
+            } else {
+                Cs1237_ParserResync(parser); continue; /* 不支持的标定包只恢复同步，不交给正常压力业务。 */
+            }
         }
-        return;
-    }
-
-    if ((parser->length == 1U) && (data != CS1237_HEADER_1))
-    {
-        parser->length = (data == CS1237_HEADER_0) ? 1U : 0U; /* 第二字节不是 55 时，重复 AA 可继续作为新帧头，其它值则回到空闲。 */
-        parser->frame[0] = CS1237_HEADER_0; /* 统一保留候选 AA，避免连续 AA55 的有效帧被漏掉。 */
-        return;
-    }
-
-    parser->frame[parser->length++] = data; /* 帧头已确认后按接收顺序保存协议字节。 */
-    if (parser->length < CS1237_FRAME_LENGTH)
-    {
-        return; /* 21 字节尚未收齐时继续等待，不能提前刷新泵在线和压力状态。 */
-    }
-
-    DIAG_WIRE((uint8_t)(11U + channel), 0U, 0x100U, parser->frame, CS1237_FRAME_LENGTH); /* 11为PE4/A、12为PE6/B；候选帧尚未校验。 */
-    if (Cs1237_FrameValid(parser->frame))
-    {
-        pressure_trusted = Cs1237_BusinessDataTrusted(channel, parser->frame); /* 压力越界仍执行原连续3帧恢复检查，但不再丢弃合法设备码。 */
-        if ((parser->frame[16] & 0xF0U) == 0U) /* 设备码只允许低4位；高位异常的帧不能刷新在线状态。 */
+        if (parser->length < frame_length) return; /* 半帧只保留缓存，不刷新压力或在线。 */
+        accepted = false; /* 每个候选独立校验，不能沿用上一帧成功结果。 */
+        if (parser->frame[0] == 0xA5U) {
+            DIAG_WIRE((uint8_t)(11U + channel), 0U, (uint16_t)(0x100U | parser->frame[3]), parser->frame, frame_length); /* 保存原固件应答或周期通知原文，失败同样可查。 */
+            accepted = Cs1237_AcceptZeroReply(channel, parser->frame); /* 只接受原固件查询回包，不调用业务压力更新。 */
+        } else
         {
-            Cs1237_UpdatePumpMessage(channel, parser->frame, pressure_trusted); /* CRC及设备码格式有效即更新接入，压力失效单独标记且不停泵。 */
+            DIAG_WIRE((uint8_t)(11U + channel), 0U, 0x100U, parser->frame, CS1237_FRAME_LENGTH); /* 保留原21字节压力诊断入口。 */
+            if (Cs1237_FrameValid(parser->frame)) {
+                bool pressure_trusted = Cs1237_BusinessDataTrusted(channel, parser->frame); /* 压力越界继续原连续3帧恢复逻辑。 */
+                if ((parser->frame[16] & 0xF0U) == 0U) {
+                    Cs1237_UpdatePumpMessage(channel, parser->frame, pressure_trusted); /* 设备码和压力有效性仍按原规则分别更新。 */
+                }
+                accepted = true; /* 格式和CRC已通过，本完整帧可以消费。 */
+            }
         }
-        parser->length = 0U; /* 本帧已处理完，清长度并等待下一帧。 */
-    }
-    else
-    {
-        /* 当前 21 字节候选帧无效时，从缓冲内部继续寻找下一处 AA55，避免粘包错位后长期丢帧。 */
-        Cs1237_ParserResync(parser);
+        if (!accepted) { Cs1237_ParserResync(parser); continue; } /* 坏包只重同步，不覆盖已保存的业务或零点。 */
+        parser->length = (uint8_t)(parser->length - frame_length); /* 消费当前帧，保留重同步时已接收的后续字节。 */
+        for (uint8_t i = 0U; i < parser->length; ++i) parser->frame[i] = parser->frame[frame_length + i]; /* 仅移动尾部有效字节，不丢下一帧。 */
     }
 }
-
 /*
- * 函数功能：每 100ms 取出两路接收字节、解析压力帧、复制到旧接口队列，并检查泵是否掉线。
+ * 函数功能：每100ms接收两路压力、保留原掉线保护，并独立确认连续10秒的74故障。
  * 输入参数：event 为任务事件，本函数不使用。
  * 返回参数：无；串口每一位的电平采样由定时器中断完成，不在本任务里等待。
  */
@@ -1209,7 +1534,9 @@ static void SimUartTaskFunc(uint32_t event)
         }
     }
 
-    Cs1237_CheckPumpTimeout(); /* 处理完两路数据后，检查是否太久没收到有效压力帧，并处理刚发生的掉线。 */
+    Cs1237_CheckPumpTimeout(); /* 保留原3秒掉线停泵，不能借延后74而延迟离线保护。 */
+    Cs1237_ServicePressureHealth(); /* 74独立累计连续10秒，3秒掉线清运行请求不会清掉此计时。 */
+    Cs1237_ServiceZeroQuery(); /* 先处理RX和原保护，再推进用户触发的500ms查询；空闲时不发送。 */
 }
 
 /*

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #ifndef MAINCTRL_DIAG_ENABLE
-#define MAINCTRL_DIAG_ENABLE 0U /* 正常固件默认关闭UART2综合诊断；需要采集脚踏、手柄和泵日志时改为1后重新编译。 */
+#define MAINCTRL_DIAG_ENABLE 0U /* 正式交付关闭UART2综合诊断；需要采集脚踏、手柄和泵日志时改为1并重新编译。 */
 #endif
 #if (MAINCTRL_DIAG_ENABLE != 0U) && (MAINCTRL_DIAG_ENABLE != 1U)
 #error "MAINCTRL_DIAG_ENABLE must be 0 or 1"

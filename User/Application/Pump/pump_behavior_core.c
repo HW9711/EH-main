@@ -50,7 +50,7 @@ typedef struct
 /* PumpBehaviorRuntime_t 保存每路任务自己的跨周期状态，A/B 不能互相覆盖。 */
 typedef struct
 {
-    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护压力确认；灌注据此分级调流且检测失效保持当前输出，注水和抽吸只产生超压或检测失效提示事件。 */
+    PumpPressureAlarmState_t pressure_alarm; /* 本通道独立维护原压力调流和超压提示；74计时单独保存在压力接收层。 */
     uint16_t output_color;       /* 记住最近发送的RGB565颜色；定位过程保持停止白色，正常开泵仍显示黄色。 */
     uint8_t business_direction;  /* 保存本泵按类型选定的方向，发送普通零速命令时也使用该方向。 */
     volatile uint8_t driver_fault_hold; /* 1表示暂不允许启动；驱动已就绪、没有故障且旧运行/排空请求都清零后改为0。 */
@@ -157,6 +157,10 @@ static const PumpBehaviorBinding_t s_pump_binding[PUMP_BEHAVIOR_CHANNEL_COUNT] =
         PumpBehavior_ReceivePacketB              /* B 回包从同一逻辑出口对应的物理串口取回。 */
     }
 };
+
+/* 离线硬门禁在启动检查和25ms输出任务中共用，定义位于本文件后段。 */
+static uint8_t PumpBehavior_IsChannelOnline(const PumpBehaviorBinding_t *binding);
+static void PumpBehavior_ClearOfflineRequest(const PumpBehaviorBinding_t *binding);
 
 /*
  * 函数功能：保存指定泵的一帧有效驱动反馈，并用版本号标明何时正在写入、何时已经写完。
@@ -389,6 +393,10 @@ uint8_t PumpBehavior_DriverCanRun(PumpBehaviorChannel_t channel)
     if (PumpBehavior_ChannelEnabled(channel) == 0U)
     {
         return 0U; /* 未装配或通道无效时禁止启动；已装配通道仍检查新鲜反馈、就绪状态和故障。 */
+    }
+    if (PumpBehavior_IsChannelOnline(&s_pump_binding[channel]) == 0U)
+    {
+        return 0U; /* 本通道压力板已拔出或类型无效时禁止任何新启动，另一通道仍按自己的在线状态判断。 */
     }
     return ((PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U) &&
             (snapshot.alignment_state == PUMP_DRIVER_READY) && (snapshot.raw_error == PUMP_DRIVER_ERROR_NONE) &&
@@ -730,9 +738,9 @@ static void PumpBehavior_ReceiveSpeed(const PumpBehaviorBinding_t *binding, Queu
 }
 
 /*
- * 函数功能：按泵用途处理压力；灌注按固定g阈值分级降流、保压和单次提示；注水与抽吸保留原提示逻辑。
+ * 函数功能：按原阈值处理泵压力；本层无效数据只暂停调节，74由接收层统一确认连续10秒。
  * 输入参数：binding 为本通道固定配置；runtime 保存独立压力状态；pump_type 为本泵用途；pump_speed 为类型限幅后的业务速度。
- * 返回参数：本周期应下发的业务速度；灌注超压和压力检测失效均不清运行请求，失效时保持当前输出并独立提示；无液体输入立即返回零并撤销本泵请求。
+ * 返回参数：本周期应下发的业务速度；无效数据保持输出且不清运行请求，74由接收层按10秒统一确认。
  */
 static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                            PumpBehaviorRuntime_t *runtime,
@@ -742,7 +750,7 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
     uint32_t weight_x10; /* 本次读取的压力值，单位 0.1g，须与阈值字段、序号来自同一帧。 */
     uint16_t threshold_g; /* 压力帧中0表示无效；灌注使用固定0.1g整数阈值，注水/抽吸保留原配置。 */
     uint8_t sequence; /* 压力帧序号用于排除泵任务重复读取的旧样本。 */
-    uint8_t alarm_event; /* 事件位区分89号超压、74号检测失效及76号无液体输入；仅无液体输入撤销本泵运行请求。 */
+    uint8_t alarm_event; /* 本层只接收原压力超限事件；74由压力接收任务按连续10秒统一产生。 */
     uint16_t output_speed; /* 灌注真实超压按策略调流，检测失效保持当前输出；注水和抽吸保持原设定速度。 */
     uint32_t now_ms; /* 本周期统一使用同一个主控时间判断持续超限和恢复。 */
 
@@ -774,11 +782,7 @@ static uint16_t PumpBehavior_ApplyPressure(const PumpBehaviorBinding_t *binding,
                                                        (pump_type == INJECTWATER) ? 1U : 0U,
                                                        weight_x10, threshold_g, sequence, now_ms); /* 注水统一 800g，抽吸保留原最低标定点。 */
     }
-    if ((alarm_event & PUMP_PRESSURE_EVENT_SENSOR_FAULT) != 0U) /* 检测失效使用独立74号图窗，不将保持输出改为零速。 */
-    {
-        Pubinterface_HandlePumpPressureSensorFault(binding->public_channel); /* A/B泵共用三声蜂鸣和2秒74号提示，不撤销任何运行请求。 */
-    }
-    else if ((alarm_event & PUMP_PRESSURE_EVENT_ALARM) != 0U) /* 正常压力超限仍沿用独立的本轮一次提示。 */
+    if ((alarm_event & PUMP_PRESSURE_EVENT_ALARM) != 0U) /* 正常压力超限仍沿用独立的本轮一次提示。 */
     {
         Pubinterface_HandlePumpPressureBlocked(binding->public_channel); /* A/B泵超压蜂鸣三声并显示89号图窗3秒。 */
     }
@@ -1057,6 +1061,40 @@ static void PumpBehavior_UpdateColor(PumpBehaviorChannel_t channel,
 }
 
 /*
+ * 函数功能：判断指定泵通道是否仍具备输出资格；压力板离线或业务类型被清零时禁止本通道输出。
+ * 输入参数：binding 为本通道固定绑定，包含独立的 A/B 泵状态。
+ * 返回参数：1 表示本通道在线且已识别，0 表示本通道不可输出；不读取另一通道状态。
+ */
+static uint8_t PumpBehavior_IsChannelOnline(const PumpBehaviorBinding_t *binding)
+{
+    if ((binding == NULL) || (binding->message == NULL))
+    {
+        return 0U; /* 绑定缺失时按不可输出处理，避免异常指针继续写驱动。 */
+    }
+
+    return ((binding->message->online_flag != false) &&
+            (binding->message->type != 0U)) ? 1U : 0U; /* 只有本路压力板在线且类型有效时才允许计算非零速度。 */
+}
+
+/*
+ * 函数功能：清除已经确认离线泵的本路输出请求和排空状态，避免旧控制源在离线期间继续生成速度。
+ * 输入参数：binding 为待清理的 A 或 B 通道绑定。
+ * 返回参数：无；只修改本通道的请求，不触碰另一通道及驱动故障保护记录。
+ */
+static void PumpBehavior_ClearOfflineRequest(const PumpBehaviorBinding_t *binding)
+{
+    if ((binding == NULL) || (binding->message == NULL))
+    {
+        return; /* 绑定无效时不访问任何泵状态。 */
+    }
+
+    binding->message->run_flag = false; /* 泵板拔出后撤销普通运行请求，防止下一周期沿用旧速度。 */
+    binding->message->timingDrainage_flag = false; /* 同步结束本路屏幕定时排空，避免排空逻辑重新生成非零输出。 */
+    binding->message->pedalDrainage_flag = false; /* 清除本路脚踏轻排来源，另一泵的脚踏状态保持独立。 */
+    binding->message->timingDrainage_times = 0U; /* 离线后不保留排空计时，下次上线必须重新开始完整周期。 */
+}
+
+/*
  * 函数功能：每 25ms 处理指定泵的速度请求、驱动故障、压力提示和排空计时，再发送命令并刷新显示。
  * 输入参数：channel 为逻辑 A/B 通道；message_queue 为该通道原有的独立 FreeRTOS 消息队列。
  * 返回参数：无。
@@ -1097,7 +1135,13 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
         return; /* 未装配侧不参与定位等待、自动重试或运行换算。 */
     }
 
-    request_active = (binding->message->run_flag || binding->message->timingDrainage_flag) ? 1U : 0U; /* 先记住是否还有运行或排空请求，故障处理清标志后仍用此值判断是否允许重启。 */
+    if (PumpBehavior_IsChannelOnline(binding) == 0U)
+    {
+        PumpBehavior_ClearOfflineRequest(binding); /* 压力板已确认拔出时先清本通道全部输出来源，避免外控或脚踏旧请求继续参与后续计算。 */
+    }
+    request_active = (PumpBehavior_IsChannelOnline(binding) != 0U) &&
+                     (binding->message->run_flag || binding->message->timingDrainage_flag) ?
+                     1U : 0U; /* 只记录本通道在线时的运行/排空请求，离线侧不进入原保护重启判断。 */
     PumpBehavior_ParseDriverFeedback(channel, binding, runtime); /* 发送下一命令前先解析上一条命令的驱动回包。 */
     if (WorkMessage.alarm_flag != false && (runtime->startup_alignment_active != 0U || runtime->realign_phase != 0U ||
         (PumpBehavior_GetFreshFeedback(channel, &snapshot) != 0U && snapshot.alignment_state == PUMP_DRIVER_ALIGNING)))
@@ -1107,7 +1151,7 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     driver_fault_active = PumpBehavior_ServiceDriverFaultHold(channel, binding, runtime, request_active); /* 定位、失联和故障期间统一撤销旧请求并维持零速。 */
     PumpBehavior_ServiceStartupRetry(channel, runtime); /* 先处理旧请求和停机保护，再检查本泵失败等待是否已满2秒。 */
     control = PumpBehavior_TakeRealignCommand(channel, runtime); /* 先检查是否需要取消定位，再处理屏幕或上电失败的重试请求，确定本周期的特殊命令。 */
-    if (driver_fault_active == 0U)
+    if ((driver_fault_active == 0U) && (PumpBehavior_IsChannelOnline(binding) != 0U))
     {
         drainage_active = binding->message->timingDrainage_flag ? 1U : 0U; /* 驱动允许输出时，先记下本周期是否正在定时排空，再计算流量。 */
     }
@@ -1115,7 +1159,9 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
     {
         drainage_active = 0U; /* 驱动故障期禁止排空逻辑递增计时或生成固定非零速度。 */
     }
-    if ((driver_fault_active == 0U) && (binding->message->run_flag || binding->message->timingDrainage_flag))
+    if ((driver_fault_active == 0U) &&
+        (PumpBehavior_IsChannelOnline(binding) != 0U) &&
+        (binding->message->run_flag || binding->message->timingDrainage_flag))
     {
         pump_type = (uint8_t)binding->message->type; /* 运行时使用设备识别流程写入的真实泵类型。 */
         if ((pump_type == INJECTWATER) && (binding->message->speed_work > PUMP_INJECTWATER_SPEED_MAX))
@@ -1123,6 +1169,14 @@ void PumpBehaviorCore_Run(PumpBehaviorChannel_t channel, QueueHandle_t message_q
             binding->message->speed_work = PUMP_INJECTWATER_SPEED_MAX; /* 收回异常越界设定，确保排空结束后正常注水最多保持70。 */
         }
         pump_speed = (drainage_active != 0U) ? PUMP_TIMING_DRAINAGE_SPEED : binding->message->speed_work; /* 只有屏幕定时排空使用固定速度；脚踏轻踩和普通联动都读取屏幕设定速度。 */
+    }
+
+    if (PumpBehavior_IsChannelOnline(binding) == 0U)
+    {
+        PumpBehavior_ClearOfflineRequest(binding); /* 处理期间若本路刚被确认拔出，重新把本路计算结果锁到零速。 */
+        pump_type = 0U; /* 不让已缓存的旧类型进入压力换算或方向选择。 */
+        pump_speed = 0U; /* 本通道离线时最终输出设定必须为零，另一通道仍按自己的任务继续运行。 */
+        drainage_active = 0U; /* 离线侧不推进排空计时，也不生成固定排空速度。 */
     }
 
     uart_data = PumpBehavior_ConvertOutput(binding, runtime, pump_type, &pump_speed, drainage_active); /* 灌注按压力减速或归零，注水包含排空仅提示；驱动故障仍优先输出零速。 */

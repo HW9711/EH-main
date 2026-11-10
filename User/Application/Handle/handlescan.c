@@ -21,6 +21,7 @@
 #include "sscBEEP.h"
 #include "sscKEYBH.h"
 #include "sscRFID.h"
+#include "sscDrive.h" /* 短去抖确认断开后提前停当前手柄电机，缩短旧RUN窗口；不改独立灌注请求。 */
 #include "external_comm_task.h"
 #include "at24cs32.h"
 #include "at24cs32_crc_verify.h"
@@ -46,7 +47,7 @@ static uint8_t s_verify_channel = CHANNEL_A; /* 每轮只允许一侧执行认�
  */
 #define HANDLESCAN_TASK_PERIOD_MS             10U /* 按 10ms 换算等待次数；修改时须同步 HandlescanTaskInit 的任务周期，单改本宏不会改变扫描间隔。 */
 #define HANDLESCAN_INSERT_DEBOUNCE_MS         50U /* 插入信号需连续稳定的时间，单位 ms；加大后插入确认更慢。 */
-#define HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS 50U /* 已在线时，高电平需连续保持这么多 ms 才开始确认拔出，滤掉短暂干扰。 */
+#define HANDLESCAN_ONLINE_DISCONNECT_FILTER_MS 50U /* 在线高电平连续累计到本门槛后才提前停输出并开始确认离线，短毛刺保持原运行。 */
 #define HANDLESCAN_REMOVE_DEBOUNCE_MS         500U /* 拔出确认所需的累计时间，单位 ms；在线时前面的 50ms 已计入，加大后离线通知更晚。 */
 #define HANDLESCAN_VERIFY_START_DELAY_MS      200U /* 插入确认后再等这么多 ms 才校验 EEPROM，给接口留出稳定时间。 */
 #define HANDLESCAN_VERIFY_RETRY_DELAY_MS      200U /* 校验或读取失败后，下次快速重试前等待的 ms 数。 */
@@ -468,6 +469,22 @@ bool Handlescan_IsChannelPhysicallyInserted(uint8_t channel)
     }
 
     return (Bsp_GpioRead(binding->short_gpio, binding->short_pin) == GPIO_PIN_RESET); /* 与10ms扫描任务保持同一极性：低电平为插入，高电平为拔出候选。 */
+}
+
+/*
+ * 函数功能：读取本通道扫描层的断开确认结果，供提前STOP和最终RUN出口共用，避免单次GPIO毛刺锁停。
+ * 输入参数：channel为逻辑A/B通道；调用方与扫描任务使用同一公共业务锁，不在这里重新采样或累计次数。
+ * 返回参数：连续断开达到现有短去抖门槛、已处空闲离线态或通道非法时返回true，其它情况返回false。
+ */
+bool Handlescan_IsChannelDisconnectConfirmed(uint8_t channel)
+{
+    const HandlescanChannelBinding *binding = Handlescan_GetBinding(channel); /* 只读取指定通道自己的阶段和连续断开次数，A/B不能借用确认结果。 */
+    if (binding == NULL)
+    {
+        return true; /* 非法通道按断开处理，禁止最终输出使用不存在的连接资格。 */
+    }
+    return ((binding->context->stage == HANDLESCAN_STAGE_IDLE) || /* 正式离线收尾会清零计数，空闲态仍须保持断开判定，不能因计数归零重新放行旧RUN。 */
+            (binding->context->debounce.out_debounce_ticks >= HANDLESCAN_ONLINE_DISCONNECT_FILTER_TICKS)); /* 复用每10ms连续采样5次的现有门槛，未达门槛的单次或间断毛刺不构成断开。 */
 }
 /*
  * 函数功能：判断指定通道的手柄 EEPROM 是否已经完成本轮识别，可供外部通信读取导航页。
@@ -2850,7 +2867,7 @@ Handlescan_ReadEepromPage(const HandlescanChannelBinding *binding,
 }
 
 /*
- * 函数功能：连续检查拔出信号，确认后通知离线并清除本通道数据；短暂断开后恢复则重新识别。
+ * 函数功能：连续断开达到短去抖门槛后提前停止本通道手柄输出，再按原500ms确认离线；门槛前恢复则只清毛刺计数。
  * 输入参数：binding 指定通道；is_inserted 为本轮检测结果，0 表示高电平（可能拔出），非 0 表示低电平（插着）。
  * 返回参数：true 表示本轮已处理拔出或等待确认，调用方应结束本轮；false 表示可以继续检查插入和识别。
 
@@ -2883,6 +2900,7 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
         return true; /* 连续高电平未满配置门槛时保持原在线状态，本轮禁止进入 EEPROM 重新认证。 */
       }
 
+      MotorDrive_StopDisconnectedHandle(binding->channel); /* 本轮连续断开刚达到5次才锁停当前手柄；另一侧和独立灌注请求保持原状态。 */
       ++context->navigation_generation; /* 高电平持续达到要求后改变计数，让外部导航放弃未读完的旧手柄数据。 */
       context->stage =
           HANDLESCAN_STAGE_DEBOUNCE_OUT; /* 达到配置门槛后进入原拔出去抖，后续仍按总计 500ms 确认真实离线。 */
@@ -2907,7 +2925,8 @@ Handlescan_ProcessDisconnect(const HandlescanChannelBinding *binding,
       if (context->debounce.out_debounce_ticks <
           HANDLESCAN_REMOVE_DEBOUNCE_TICKS) {
         ++context->debounce
-              .out_debounce_ticks; /* 拔出去抖未满阈值时，仅累计次数后返回。 */
+              .out_debounce_ticks; /* 继续累计500ms离线确认次数，提前停输出仍只采用短去抖门槛。 */
+        MotorDrive_StopDisconnectedHandle(binding->channel); /* 重识别等阶段也共用短去抖结果；函数内部拒绝未确认断开，并对同一次锁停去重。 */
         return true;               /* 本轮不做其他动作，等待下一个扫描周期。 */
       }
 
@@ -3442,7 +3461,7 @@ static bool Handlescan_ProcessEepromHandle(
   Handlescan_UpdateToolRatioMessage(
       message, context->tool_info_buf); /* 本通道按 Page3[8]/[9]
                                            装入减速/增速比，供驱动统一换算。 */
-  WorkMessage.auto_identify = memory->auto_identify = 1;
+  memory->auto_identify = 1U; /* 只保存本通道原有识别模式；当前工作态由选中通道装载，避免插入另一手柄改变运行模式。 */
   Handlescan_UpdateInitialInfoMessage(
       message,
       context
@@ -3455,19 +3474,11 @@ static bool Handlescan_ProcessEepromHandle(
       Handlescan_MapToolType(
           mapped_tool_model)); /* 规格缓存保存业务刀具类型，PXM/PXP
                                   不再直接暴露旧码给 UI。 */
-  if (binding->channel == CHANNEL_A) {
-    WorkMessage.auto_identify =
-        0U; /* A 通道保留原顺序：先清工作态自动识别，再发送上线事件。 */
-  }
   context->offline_event_required = 1U; /* 普通 EEPROM 手柄准备发布上线事件，后续物理拔出必须与该在线状态配对。 */
   (void)SendKeyBehMessage(
       PLUGunPLUG,
       binding->plug_key); /* 沿用原插入事件链装载通道记忆和工作态。 */
-  if (binding->channel == CHANNEL_B) {
-    WorkMessage.auto_identify =
-        0U; /* B 通道保留原顺序：上线事件处理完成后再清工作态自动识别。 */
-  } /* 通知插拔事件链：本通道上线，实际 WorkMessage/MemoryMsg 装载在
-       PlugORunPLUGActive 中完成。 */
+  /* A/B 上线均只发布本通道事件；运行中保留另一通道工作参数，实际选中后再统一装载。 */
   Handlescan_ClearChannelAlarm(binding->channel, context->last_alarm); /* 如果之前已经进入最终失败报警，后续自恢复成功时清掉本通道报警。
                                                                         */
   Handlescan_ResetVerifyRetry(context); /* 上线成功后清空失败重试状态。 */

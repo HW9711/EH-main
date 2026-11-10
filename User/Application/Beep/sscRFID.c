@@ -62,7 +62,7 @@
 #define RFID_EPC_VERIFY_ATTEMPTS        2U    /* USER成功后按普通模式补读EPC两次；全部失败才发布暂存USER。 */
 #define RFID_EPC_CRC_RETRY_MS           100U /* 完整EPC回包CRC8错误后等待100ms再发命令，用户确认的快速重试间隔。 */
 #define RFID_EPC_CRC_FAIL_MAX           3U /* 首次及两次重试共三次CRC错误，参数错误与超时不计数。 */
-#define RFID_EPC_CRC_RECOVER_MS         1000U /* 一轮失败结束后约1秒再识别，故障与禁止启动持续保持。 */
+#define RFID_EPC_CRC_RECOVER_MS         1000U /* 一轮失败结束后约1秒再识别；分体保留参数，其它基座继续保持原CRC启动限制。 */
 #define RFID_RESPONSE_WAIT_TICKS        1U    /* 每条命令至少等待一个100ms周期，收包检查完成后才决定是否重试。 */
 #define RFID_RESPONSE_MAX_WAIT_TICKS    2U    /* 分片或无效数据最多延长到200ms；持续噪声不能无限延长单条命令。 */
 #define RFID_PARTIAL_GRACE_TICKS        1U    /* 收到数据但未拼出有效完整回包时，暂停重发 1 个任务周期（100 ms），等剩余字节到齐；单条命令仍受200ms等待上限限制。 */
@@ -158,8 +158,8 @@ static uint16_t s_rx_accum_length = 0U;              /* 累计接收缓存中已
 typedef struct
 {
     uint8_t failures; /* 本通道累计CRC8失败次数，达到三次后饱和，成功CRC可重置计数。 */
-    bool blocked; /* 第一次明确CRC错误即置位，不因松开脚踏、清缓存或切模式而解除。 */
-    bool confirmed; /* 本轮兼容流程耗尽仍无有效结果且已满三次时置位，决定能否提示77。 */
+    bool blocked; /* 第一次明确CRC错误即记录并保持；分体仅用于后台重试，其它基座还据此禁止启动。 */
+    bool confirmed; /* 三次CRC失败且兼容流程耗尽时记录；分体不提示77，其它基座仍按此结果提示。 */
     bool retry_wait; /* 失败事务结束后需要慢速等待，不让故障请求持续抢占RFID。 */
     uint32_t retry_tick; /* 慢速恢复等待起点，按无符号差处理毫秒回绕。 */
 } RfidToolCrcFault_t;
@@ -312,9 +312,9 @@ static void Rfid_CompleteActiveRequest(RfidRequestResult_t result)
     {
         if (s_tool_crc_fault[index].failures >= RFID_EPC_CRC_FAIL_MAX)
         {
-            s_tool_crc_fault[index].confirmed = true; /* 公共接头或PX兼容流程全部失败，才允许启动动作提示77。 */
+            s_tool_crc_fault[index].confirmed = true; /* 记录最终CRC失败；对外查询只允许非分体基座生成77提示。 */
         }
-        s_tool_crc_fault[index].retry_wait = true; /* 无有效结果时保持禁止启动，下一事务改为慢速重试。 */
+        s_tool_crc_fault[index].retry_wait = true; /* 无有效结果时保留后台慢速重试；分体沿用原参数，其它基座继续保持门禁。 */
         s_tool_crc_fault[index].retry_tick = HAL_GetTick(); /* 从本轮结束时开始计算1秒，不改变普通无标签轮询。 */
     }
     Rfid_ResetActiveRequest(); /* 先结束当前读取状态，下一周期才能处理排队中的下一请求。 */
@@ -605,28 +605,28 @@ static bool Rfid_IsRequestAllowed(uint8_t channel)
 
 
 /*
- * 函数功能：按当前通道基座决定EPC连续失败后能否兼容读取PXYTP/PXYTM的老USER标签。
+ * 函数功能：判断本通道是否为PXBA/PXBB分体基座，供老USER兼容读取和校验失败保留参数策略共用。
  * 输入参数：channel为CHANNEL_A或CHANNEL_B；基座型号来自该通道EEPROM识别缓存。
- * 返回参数：仅PXBA/PXBB返回true；公共接头上的MXYTP/MXYTM及其它基座只读EPC。
+ * 返回参数：仅PXBA/PXBB返回true；公共接头、其它型号或非法通道返回false。
  */
-static bool Rfid_IsUserFallbackAllowed(uint8_t channel)
+static bool Rfid_IsSplitHandleChannel(uint8_t channel)
 {
     uint8_t handle_type; /* 使用本通道的基座身份，避免屏幕选中另一通道时改变读取区域。 */
 
     if (channel == CHANNEL_A)
     {
-        handle_type = ChannelrecognizeMessageA.handle_type; /* A侧识别缓存先于刀具结果建立，公共接头未识别到刀具也能禁止USER。 */
+        handle_type = ChannelrecognizeMessageA.handle_type; /* A侧按本体识别缓存判定，即使首个RFID失败也能使用分体基座默认参数策略。 */
     }
     else if (channel == CHANNEL_B)
     {
-        handle_type = ChannelrecognizeMessageB.handle_type; /* B侧独立取基座身份，不沿用A侧的兼容读取权限。 */
+        handle_type = ChannelrecognizeMessageB.handle_type; /* B侧独立取基座身份，不借用A侧的兼容读取和参数保留策略。 */
     }
     else
     {
-        return false; /* 无效通道没有可确认的PXY兼容基座，禁止发送USER命令。 */
+        return false; /* 无效通道不能取得分体式兼容读取或校验失败保留参数资格。 */
     }
 
-    return ((handle_type == PXBA_ONLINES) || (handle_type == PXBB_ONLINES)); /* 只为PX基座保留老PXY标签回退；公共接头无响应或CRC失败时仍只读EPC。 */
+    return ((handle_type == PXBA_ONLINES) || (handle_type == PXBB_ONLINES)); /* 仅两款分体基座允许老USER兼容和CRC失败静默沿用参数；公共接头继续原保护。 */
 }
 
 /*
@@ -949,8 +949,8 @@ static void SplitType_AutoModeGetData_Task(void)
         }
         else if (!parsed_ok)
         {
-            s_tool_crc_fault[result_index].blocked = true; /* 首次CRC错误立即禁止本侧启动，但不主动弹窗。 */
-            s_last_result[result_index].valid = false; /* 作废旧有效结果，不能在重试期间沿用上一次标签放行。 */
+            s_tool_crc_fault[result_index].blocked = true; /* 首次CRC错误记录本侧失败；分体静默沿用参数，其它基座通过查询接口禁止启动。 */
+            s_last_result[result_index].valid = false; /* 本次RFID结果作废，不能把坏标签当成有效结果；分体运行参数仍由扫描层保留。 */
             if (s_tool_crc_fault[result_index].failures < RFID_EPC_CRC_FAIL_MAX)
             {
                 ++s_tool_crc_fault[result_index].failures; /* 一条已发送命令只计一次，随后立即清接收缓存。 */
@@ -1014,7 +1014,7 @@ static void SplitType_AutoModeGetData_Task(void)
     }
     if (s_request_attempts_left == 0U)
     {
-        if ((s_request_stage == RFID_STAGE_INITIAL_EPC) && Rfid_IsUserFallbackAllowed(s_request_channel))
+        if ((s_request_stage == RFID_STAGE_INITIAL_EPC) && Rfid_IsSplitHandleChannel(s_request_channel))
         {
             Rfid_BeginReadStage(RFID_STAGE_USER); /* 仅PXBA/PXBB兼容PXY老标签：EPC连续失败后读USER；公共接头直接进入下面的超时结束。 */
         }
@@ -1355,25 +1355,33 @@ void Rfid_RecordConfirmedDropout(uint8_t channel)
 }
 
 /*
- * 函数功能：查询本通道是否因EPC CRC错误禁止启动，与弹窗是否显示无关。
+ * 函数功能：查询本通道CRC启动限制；分体式校验失败沿用已保留参数，其它基座继续执行原CRC门禁。
  * 输入参数：channel为A/B通道。
- * 返回参数：true表示仍需成功识别并装载参数，false表示无此故障。
+ * 返回参数：PXBA/PXBB始终返回false；其它基座CRC故障未解除时返回true，否则返回false。
  */
 bool Rfid_IsToolCrcBlocked(uint8_t channel)
 {
     uint8_t index; /* 通过统一映射避免无效通道访问数组。 */
-    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].blocked; /* 首次失败即拦截，不等待三次或用户踩踏。 */
+    if (Rfid_IsSplitHandleChannel(channel))
+    {
+        return false; /* 分体坏标签仍被解析层拒绝，运行沿用上次有效参数或基座默认参数，不因CRC错误禁止启动。 */
+    }
+    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].blocked; /* 公共接头等原受保护型号仍在首次CRC失败后禁止启动，不受分体策略影响。 */
 }
 
 /*
- * 函数功能：查询是否已满足77号提示条件，读取过程中不主动弹窗或蜂鸣。
+ * 函数功能：查询是否需要77号提示；分体式校验失败静默保留参数，其它基座沿用原确认条件。
  * 输入参数：channel为A/B通道。
- * 返回参数：true表示三次失败且兼容识别未成功，false表示尚未确诊或已经恢复。
+ * 返回参数：PXBA/PXBB始终返回false；其它基座三次失败且兼容识别未成功时返回true，否则返回false。
  */
 bool Rfid_IsToolCrcConfirmed(uint8_t channel)
 {
     uint8_t index; /* 每侧独立保存最终失败状态。 */
-    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].confirmed; /* USER暂存和复核阶段不能提前报77。 */
+    if (Rfid_IsSplitHandleChannel(channel))
+    {
+        return false; /* 分体CRC错误只影响本次新标签是否装载，不产生77弹窗或对应蜂鸣，内部重试和校验继续保留。 */
+    }
+    return Rfid_ChannelToIndex(channel, &index) && s_tool_crc_fault[index].confirmed; /* 公共接头等原型号仍按最终失败结果提示，USER暂存和复核阶段不能提前报77。 */
 }
 
 /*

@@ -25,10 +25,10 @@
 #define PX_YIM_CURRENT_2 66 // PX_YIM 的 2 旧配置：0.66A，当前未使用。
 #define PX_YIP_CURRENT_45 40 // PX_YIP 的 45 旧配置：0.40A，当前未使用。
 
-/* 保存最近一次 50ms 任务的启停判断，以及最近一次内容变化的 UART1 命令，供状态查询和调试。 */
+/* 保存周期输出或拔出确认STOP的启停判断，以及最近一次内容变化的UART1命令，供状态查询和调试。 */
 typedef struct
 {
-    uint32_t evaluated_tick_ms; /* HAL毫秒时钟：最近一次50ms输出任务完成启停判定的时刻。 */
+    uint32_t evaluated_tick_ms; /* HAL毫秒时钟：最近一次周期输出或拔出STOP完成启停判定的时刻。 */
     uint32_t sent_tick_ms;      /* HAL 毫秒时钟：不同命令实际送入 UART1 的时刻。 */
     uint32_t source_speed_rpm;  /* 当前控制来源提供的原始目标速度，尚未做机械倍率和低速补偿。 */
     uint32_t command_speed_rpm; /* 驱动帧 byte4~5 换算后的电机指令速度，停机固定为 0rpm。 */
@@ -39,7 +39,7 @@ typedef struct
     uint8_t motor_type;         /* 实际 UART1 帧 byte3 驱动电机类型。 */
     uint8_t requested_run_state;/* WorkMessage在本次50ms判定时提出的原始运行请求。 */
     uint8_t drive_type;         /* 本次请求来源：脚踏、手控、触控或外控，数值沿用drivetype_work。 */
-    uint8_t zero_speed_blocked; /* 1 表示虽然要求启动，但原始速度或除以 10 后的协议速度为 0，实际改发停止帧。 */
+    uint8_t zero_speed_blocked; /* 1表示虽然要求启动，但速度无效或本通道已断开，实际改发停止帧。 */
     uint8_t valid;              /* 已形成至少一份周期电机命令时置1。 */
 } MotorDriveCommandSnapshot_t;
 
@@ -62,6 +62,13 @@ typedef struct
  * 返回参数：1表示已有定位指令记录；0表示没有记录或参数为空，没有记录时输出默认值。
  */
 uint8_t MotorDrive_CopyToolPositionStatus(MotorToolPositionStatus_t *status);
+
+/*
+ * 函数功能：扫描层短去抖确认当前手柄断开后锁住本通道输出，必要时提前发STOP，保留原离线报警时序。
+ * 输入参数：channel为逻辑A/B手柄通道；调用方须在公共业务锁内执行，函数内部再次核对扫描确认结果。
+ * 返回参数：无；不改变独立灌注泵的运行请求，泵保护仍由泵模块处理。
+ */
+void MotorDrive_StopDisconnectedHandle(uint8_t channel);
 
 void SscDriveMotorTask_Init(void);
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel);//通道，方向，角度

@@ -45,7 +45,7 @@ extern "C" {
 #define PUMP_PRESSURE_POUR_LOW_FLOW_ML_MIN 5U
 /* 压力低于恢复线连续500ms后才增加一档；每次增流都重新确认500ms。 */
 #define PUMP_PRESSURE_POUR_RECOVER_CONFIRM_MS PUMP_PRESSURE_POUR_ADJUST_MS /* 恢复与降流统一使用500ms反馈周期。 */
-/* 三类泵运行中500ms没有有效新压力即提示；压力板明确无效或未就绪立即提示，均保持当前输出。 */
+/* 500ms仅表示控制连续性中断；无效/旧数据保持输出，74由接收层连续10秒确认。 */
 #define PUMP_PRESSURE_SAMPLE_TIMEOUT_MS 500U
 
 #if (PUMP_PRESSURE_POUR_100_RECOVER_X10 >= PUMP_PRESSURE_POUR_100_HIGH_X10)
@@ -66,8 +66,6 @@ extern "C" {
 
 /* 返回事件位0：请求现有蜂鸣和压力弹窗，不修改运行请求。 */
 #define PUMP_PRESSURE_EVENT_ALARM 0x01U
-/* 返回事件位1：压力检测失效，仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */
-#define PUMP_PRESSURE_EVENT_SENSOR_FAULT 0x02U
 /*
  * 旧版 UART10 压力调试开关，保留 0=关闭、1=开启的历史定义。
  * 当前代码没有读取该宏，改成 1 不会产生调试日志；正式配置保持 0。
@@ -76,7 +74,7 @@ extern "C" {
 #define PUMP_PRESSURE_CONTROL_UART10_DEBUG_ENABLE 0U
 #endif
 
-/* 压力板未完成自标定时发送的特殊值，单位0.1g；灌注、注水和抽吸均按检测失效提示，不改变运行请求。 */
+/* 压力板明确无效时的原协议标记；控制保持当前输出，接收层累计10秒后统一确认74。 */
 #define PUMP_PRESSURE_CONTROL_NOT_READY_X10 6000U
 
 /* 第1个压力报警参考流量，单位mL/min；流量不超过50时使用ALARM_50_G，改大后更多低流量档使用同一报警阈值。 */
@@ -116,8 +114,6 @@ extern "C" {
 #define PUMP_PRESSURE_ALARM_RECOVER_MS 1000U
 /* 注水泵和抽吸泵恢复线比提示线低多少，单位g；灌注恢复阈值随当前输出流量选取。 */
 #define PUMP_PRESSURE_ALARM_HYSTERESIS_G 20U
-/* 新压力帧允许的最大间隔，单位 ms，当前 1000；间隔达到此值便重新计时，调大可容忍更长断帧但更易沿用旧计时。 */
-#define PUMP_PRESSURE_ALARM_MAX_SAMPLE_GAP_MS 1000U
 
 /* 旧版压力源编号 0：自动选择；当前任务不读取这些压力源宏，不能用本值切换接线。 */
 #define PUMP_PRESSURE_CONTROL_SOURCE_AUTO 0U
@@ -146,7 +142,7 @@ extern "C" {
 typedef struct
 {
     uint32_t condition_tick_ms; /* 首个超压或试升后超过恢复线的样本时刻；注水/抽吸仍用于其超限或恢复确认，单位ms。 */
-    uint32_t last_sample_tick_ms; /* 最近有效新压力样本时刻；三类泵超时500ms只提示，灌注同时暂停压力调流。 */
+    uint32_t last_sample_tick_ms; /* 最近有效新压力样本时刻；间断500ms暂停连续调节，74另按10秒确认。 */
     uint32_t last_alarm_tick_ms; /* 最近一次提示时刻；注水/抽吸每10秒重报，灌注只记录本轮首次提示。 */
     uint16_t target_speed; /* 当前用户设定流量；自动降流不覆盖该值，用户调速不清本轮超压记录。 */
     uint16_t alarm_threshold_g; /* 最近一次判定使用的整g启动线；灌注按当前输出选档后四舍五入显示，实际比较0.1g。 */
@@ -162,12 +158,12 @@ typedef struct
     uint8_t pour_blocked_latched; /* 本轮超压或二级试升失败确认后置1；保持区仍逐档降低，稳定低于本档恢复线500ms才解除。 */
     uint8_t pour_last_high; /* 上一新样本是否达到当时输出流量的启动线；用户改设定时据此避免跳回高流量。 */
     uint8_t pour_low_timing_active; /* 连续低于或等于当前输出流量的恢复线时置1，回升或调档后重新确认。 */
-    uint8_t sensor_fault_active; /* 本通道检测失效已提示标志；持续失效不重报，有效新帧恢复后清零。 */
+    uint8_t sensor_fault_active; /* 本通道控制输入暂不可用标志；不是74提示锁存，接收层独立处理报警。 */
 } PumpPressureAlarmState_t;
 
 /* 停止或泵类型切换时清除单路压力记录，不修改开泵请求。 */
 void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state);
-/* 注水固定按800g、抽吸沿用原曲线；无效或超时压力返回独立检测失效提示事件。 */
+/* 注水固定按800g、抽吸沿用原曲线；无效或旧压力只暂停确认，不直接产生74。 */
 uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t target_speed,
                                         uint8_t is_injection, /* 1 为注水泵，0 为抽吸泵。 */
@@ -175,7 +171,7 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t threshold_g,
                                         uint8_t sequence,
                                         uint32_t now_ms);
-/* 灌注保护开启时按当前输出选取逐档g阈值，执行分级降流、保压、恢复和提示；压力检测失效只产生独立提示事件并保持当前输出。 */
+/* 灌注按原逐档阈值降流和恢复；无效或旧压力保持输出，74由接收层连续10秒统一确认。 */
 uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
                                        uint16_t target_speed,
                                        uint32_t weight_x10,

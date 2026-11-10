@@ -23,6 +23,7 @@
 #include "sscUIDP.h"
 #include "sscRFID.h"
 #include "uart2.h"
+#include "soft_uart.h" /* 实时零点读取只调用固定只读查询和缓存复制，不进入泵控制。 */
 
 #include <string.h>
 
@@ -2236,8 +2237,16 @@ static void ExternalComm_RefreshUart5PumpRunState(void)
 	 */
     uint8_t manual_request = s_uart5_pump_manual_run_request; /* 保存上位机独立控制请求，避免后续表达式重复读全局变量。 */
     bool follow_request_a = ExternalComm_ShouldFollowPumpA(); /* 判断当前手柄冷却目标是否正好是 A 泵。 */
+	bool pump_a_online = ((pumpMessageA.online_flag != false) && (pumpMessageA.type != 0U)); /* A 压力板拔出或类型失效后，本路外控请求不能再次写回运行标志。 */
 
-	if ((manual_request != 0U) || follow_request_a)
+	if (pump_a_online == false)
+	{
+		s_uart5_pump_manual_run_request = 0U; /* 只撤销 A 泵独立外控请求；全局手柄跟随请求保留给仍在线的 B 泵。 */
+		pumpMessageA.run_flag = false; /* A 泵离线时本周期明确保持停止，避免外控刷新重新拉起旧输出。 */
+		pumpMessageA.timingDrainage_flag = false; /* 同步退出 A 排空，防止离线后固定速度再次生成。 */
+		pumpMessageA.pedalDrainage_flag = false; /* 清掉 A 轻排来源，不改 B 泵的脚踏状态。 */
+	}
+	else if ((manual_request != 0U) || follow_request_a)
 	{
 		if (pumpMessageA.speed_work == 0U)
 		{
@@ -5405,6 +5414,41 @@ static ExternalCommFormalFrameAction_t ExternalComm_ClassifyFormalFrame(const Ex
 }
 
 /*
+ * 函数功能：独立处理实时状态页零点读取，在诊断关闭时仍可只读访问压力板。
+ * 输入参数：frame为已经通过外部协议CRC检查的正式帧；0x0F/FF/FF携带版本1、操作0缓存或1读取、两字节请求号。
+ * 返回参数：1表示本帧已消费，0表示继续原命令分派；不申请控制权、不刷新外控看门狗、不改泵状态。
+ */
+static uint8_t ExternalComm_HandlePressureZero(const ExternalCommFrame_t *frame)
+{
+    uint8_t payload[48] = {0}; /* 固定8字节头与双路各20字节快照，整帧64字节。 */
+    uint32_t now; /* 统一按主控收包时钟计算快照年龄，不把读取当成新压力。 */
+    if ((frame->tran_code != EXTERNAL_COMM_TRAN_DOWNLOAD) ||
+        (frame->fun_code != EXTERNAL_COMM_FUNC_PRESSURE_ZERO)) return 0U; /* 其它帧保持原处理链。 */
+    payload[0] = 1U; /* 独立查询协议版本，不复用诊断会话。 */
+    if (frame->info_len >= 4U) { payload[2] = frame->info_area[2]; payload[3] = frame->info_area[3]; } /* 原样回显本次请求号，拒绝迟到应答串轮。 */
+    payload[1] = 1U; /* 默认拒绝错误长度、区域或操作，不能向下透传任意标定命令。 */
+    if ((frame->area_code == EXTERNAL_COMM_AREA_NONE) && (frame->info_code == EXTERNAL_COMM_INFO_NONE) &&
+        (frame->info_len == 4U) && (frame->info_area[0] == 1U) && (frame->info_area[1] <= 1U)) {
+        payload[1] = 0U; /* 本次固定只读请求格式正确。 */
+        if (frame->info_area[1] == 1U) SimUart_RequestZeroInfo(); /* 仅用户点击时A/B各查询一次，操作0只取缓存。 */
+        now = HAL_GetTick(); /* 两路年龄共用一次当前时刻，所有多字节字段按正式协议高字节在前。 */
+        ExternalComm_WriteBE32(&payload[4], now); /* 上传主控时刻便于核查本次查询时间。 */
+        for (uint8_t channel = 1U; channel <= 2U; ++channel) {
+            SimUartZeroSnapshot zero = {0}; /* 未收到零点时meta有效位为0，不以默认0冒充标定结果。 */
+            uint8_t offset = (uint8_t)(8U + (channel - 1U) * 20U); /* A/B分别占固定记录，绝不按当前工作通道换位。 */
+            SimUart_CopyZeroSnapshot(channel, &zero); /* 只复制该物理压力口已经校验的缓存。 */
+            ExternalComm_WriteBE32(&payload[offset], zero.meta); /* 同时保留板端状态、故障、有效标志和读取阶段。 */
+            ExternalComm_WriteBE32(&payload[offset + 4U], ((zero.meta & 1U) != 0U) ? (uint32_t)(now - zero.received_tick) : 0U); /* 只有真实缓存才有有效年龄。 */
+            ExternalComm_WriteBE32(&payload[offset + 8U], (uint32_t)zero.factory_raw); /* 有符号ADC按原32位比特上传。 */
+            ExternalComm_WriteBE32(&payload[offset + 12U], (uint32_t)zero.boot_raw); /* 本次上电零点直接来自压力板回包，禁止按压力反推。 */
+            ExternalComm_WriteBE32(&payload[offset + 16U], (uint32_t)zero.session_raw); /* 保留压力板旧协议第三字段，页面仅展示两个实际零点。 */
+        }
+    }
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_PRESSURE_ZERO, EXTERNAL_COMM_AREA_NONE, EXTERNAL_COMM_INFO_NONE, payload, sizeof(payload)); /* 普通发送通道只回此只读应答，不改变心跳和报警生成。 */
+    return 1U; /* 查询到此结束，禁止进入外控登录、保活或业务控制分支。 */
+}
+
+/*
  * 函数功能：从 UART2 接收缓存中找最早的正式或简易帧，处理一帧或跳过一段无效数据。
  * 输入参数：无，直接访问本任务私有 FIFO。
  * 返回参数：返回 1 表示本周期可以继续检查下一帧；返回 0 表示先暂停，可能在等待更多数据或下一周期 EEPROM 处理机会。
@@ -5547,6 +5591,10 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     parse_result = ExternalCommProtocol_Parse(s_frame_buf, frame_len, &frame);
     if (parse_result == EXTERNAL_COMM_PARSE_OK)
     {
+        if (ExternalComm_HandlePressureZero(&frame) != 0U) {
+            (void)ExternalComm_RxFifoSkip(frame_len); /* 零点帧独立消费，不触碰外控连接、运行保活或泵请求。 */
+            return 1U; /* 诊断关闭也能读取零点，其它命令继续原流程。 */
+        }
         if (DIAG_COMMAND(frame.tran_code, frame.fun_code, frame.area_code, frame.info_code, frame.info_area, frame.info_len) != 0U)
         {
             (void)ExternalComm_RxFifoSkip(frame_len); /* 诊断模块已处理整帧，跳过普通控制与保活分发。 */

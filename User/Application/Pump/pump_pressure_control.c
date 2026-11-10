@@ -95,22 +95,17 @@ static uint16_t PumpPressure_LegacyAlarmThreshold(uint16_t target_speed)
 }
 
 /*
- * 函数功能：三类泵压力检测失效时产生一次独立提示，保留超压记录；灌注暂停压力调流。
- * 输入参数：state为A/B任一路压力状态；now_ms为当前时刻，供灌注重新建立压力观察起点。
- * 返回参数：首次失效返回SENSOR_FAULT事件，持续失效返回0；不修改泵速及任何运行请求。
+ * 函数功能：压力无效或旧帧超时时暂停本通道连续确认；74改由接收层连续10秒统一判断。
+ * 输入参数：state为本路控制状态，now_ms为当前毫秒数。
+ * 返回参数：无；不产生报警事件，不改变任何运行请求或用户设定。
  */
-static uint8_t PumpPressure_ReportSensorFault(PumpPressureAlarmState_t *state, uint32_t now_ms)
+static void PumpPressure_PauseInvalidSample(PumpPressureAlarmState_t *state, uint32_t now_ms)
 {
-    if (state->sensor_fault_active == 0U) /* 每路泵每次连续失效只提示一次，不能每25ms重复弹窗。 */
-    {
-        state->sensor_fault_active = 1U; /* 独立于超压提示锁存，检测故障与本轮超压不会互相吞掉提示。 */
-        state->timing_active = 0U; /* 无效压力不能延续超压确认，恢复后必须重新取得连续样本。 */
-        state->pour_low_timing_active = 0U; /* 检测中断不能被误算为稳定低压，防止恢复后直接加速。 */
-        state->pour_last_high = 0U; /* 清除旧样本的高压分类，检测恢复后用新帧重新确认，保留本轮堵塞记录。 */
-        state->pour_adjust_tick_ms = now_ms; /* 灌注暂停压力调档；注水和抽吸不读取该调档字段。 */
-        return PUMP_PRESSURE_EVENT_SENSOR_FAULT; /* 三类泵统一请求三声蜂鸣和74号2秒提示，不产生停泵事件。 */
-    }
-    return 0U; /* 同一段失效不重复提示；有效新帧恢复后允许下一次独立提示。 */
+    state->sensor_fault_active = 1U; /* 仅表示控制输入暂不可用，不再表示74已提示。 */
+    state->timing_active = 0U; /* 无效区间不能延续超压确认。 */
+    state->pour_low_timing_active = 0U; /* 无效区间不能凑足低压恢复时间。 */
+    state->pour_last_high = 0U; /* 下个有效新样本重新分类，保留本轮堵塞锁存。 */
+    state->pour_adjust_tick_ms = now_ms; /* 恢复后观察完整调档周期，不追赶无效期间的升降档。 */
 }
 
 #if (PUMP_PRESSURE_POUR_PROTECTION_ENABLE != 0U)
@@ -251,10 +246,10 @@ void PumpPressureControl_ResetAlarm(PumpPressureAlarmState_t *state)
 }
 
 /*
- * 函数功能：注水固定按800g、抽吸按原最低档提示超压；两者检测失效独立提示，持续超压仍每10秒重报。
+ * 函数功能：注水固定按800g、抽吸按原最低档提示超压；无效数据暂停确认，74由接收层连续10秒统一判断。
  * 输入参数：state 为单路状态；target_speed 为业务设定；is_injection 为 1 表示注水、0 表示抽吸；weight_x10 单位 0.1g；threshold_g 为压力帧有效性字段；
  *           sequence 为压力帧序号；now_ms 为本周期 HAL 毫秒时刻。
- * 返回参数：超压返回ALARM事件，检测失效首次返回SENSOR_FAULT事件，其余返回0；不控制泵和手柄启停。
+ * 返回参数：超压返回ALARM事件，其余返回0；74不在控制任务中产生，不控制泵和手柄启停。
  */
 uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
                                         uint16_t target_speed,
@@ -294,19 +289,21 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
     }
     if ((threshold_g == 0U) || (weight_x10 == PUMP_PRESSURE_CONTROL_NOT_READY_X10)) /* 注水、抽吸也必须报告明确无效或未就绪的压力数据。 */
     {
-        return PumpPressure_ReportSensorFault(state, now_ms); /* 只报74号图窗，不改变调用方保留的泵速。 */
+        PumpPressure_PauseInvalidSample(state, now_ms); /* 未就绪只暂停压力确认，74由接收层连续10秒判断。 */
+        return 0U; /* 短时无效和单帧抖动不直接触发74。 */
     }
-    if ((state->sequence_valid != 0U) && (state->sensor_fault_active == 0U) &&
-        ((uint32_t)(now_ms - state->last_sample_tick_ms) >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS)) /* 三类泵统一按500ms无新帧识别检测失败。 */
+    if ((state->sequence_valid != 0U) && (state->last_sequence == sequence) &&
+        ((uint32_t)(now_ms - state->last_sample_tick_ms) >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS)) /* 500ms仅暂停旧样本控制，不能拿迟到的新包误报74。 */
     {
-        return PumpPressure_ReportSensorFault(state, now_ms); /* 持续失效不重报；迟到的新帧不能抹掉本次中断。 */
+        PumpPressure_PauseInvalidSample(state, now_ms); /* 旧帧不再用于累计超压或恢复时间。 */
+        return 0U; /* 检测失效提示只由接收层10秒观察产生。 */
     }
 
     alarm_threshold_g = (is_injection != 0U) ? PUMP_PRESSURE_INJECT_ALARM_G : PumpPressure_LegacyAlarmThreshold(target_speed); /* 注水不再按手柄型号或流量选阈值。 */
     if (((is_injection == 0U) && (state->target_speed != target_speed)) ||
         (state->alarm_threshold_g != alarm_threshold_g) ||
         ((state->sequence_valid != 0U) &&
-         ((uint32_t)(now_ms - state->last_sample_tick_ms) >= PUMP_PRESSURE_ALARM_MAX_SAMPLE_GAP_MS)))
+         ((uint32_t)(now_ms - state->last_sample_tick_ms) >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS)))
     {
         state->timing_active = 0U; /* 抽吸设定或阈值变化、压力断帧后重新确认；注水调流量不打断 800g 计时。 */
     }
@@ -317,7 +314,7 @@ uint8_t PumpPressureControl_UpdateAlarm(PumpPressureAlarmState_t *state,
     {
         return 0U; /* 25ms 泵任务重复读取同一压力帧时，不能靠重复旧值触发报警或恢复。 */
     }
-    state->sensor_fault_active = 0U; /* 通过有效性和新序号检查后解除检测失效锁存，下一次失效可再次提示。 */
+    state->sensor_fault_active = 0U; /* 有效新样本恢复控制；74报警锁存由接收层连续正常1秒后解除。 */
     state->last_sequence = sequence; /* 只在帧序号变化时接收新压力样本，支持 255 回绕到 0。 */
     state->sequence_valid = 1U; /* 记录已经读取过有效帧，首次序号为 0 也不会被丢弃。 */
     state->last_sample_tick_ms = now_ms; /* 保存本次新样本时刻，后续识别采样间断。 */
@@ -387,7 +384,7 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
                                        uint32_t now_ms,
                                        uint8_t *alarm_event)
 {
-    *alarm_event = 0U; /* 每周期重新建立事件，避免沿用上一周期超压或检测失效提示位。 */
+    *alarm_event = 0U; /* 每周期重新建立超压事件；74不再由控制函数产生。 */
 #if ((PUMP_PRESSURE_CONTROL_ENABLE == 0U) || (PUMP_PRESSURE_POUR_PROTECTION_ENABLE == 0U))
     (void)weight_x10; /* 显式关闭保护时不读取压力值。 */
     (void)threshold_g; /* 显式关闭保护时不检查压力板状态。 */
@@ -443,22 +440,24 @@ uint16_t PumpPressureControl_ApplyPour(PumpPressureAlarmState_t *state,
     state->alarm_threshold_g = (uint16_t)((high_x10 + 5U) / 10U); /* 诊断协议只显示整g；实际调流与恢复仍比较0.1g阈值。 */
     if ((threshold_g == 0U) || (weight_x10 == PUMP_PRESSURE_CONTROL_NOT_READY_X10)) /* 压力板明确无效或6000未就绪属于检测故障，不属于真实超压。 */
     {
-        *alarm_event = PumpPressure_ReportSensorFault(state, now_ms); /* 包括5档在内仅产生独立74号提示，不清运行请求。 */
+        PumpPressure_PauseInvalidSample(state, now_ms); /* 包括5档在内仅暂停无效压力控制，不直接提示74。 */
         return state->last_output_speed; /* 压力未知时保留当前输出，不把检测失败作为零速条件。 */
     }
     sample_gap_ms = (state->sequence_valid != 0U) ? (uint32_t)(now_ms - state->last_sample_tick_ms) : 0U; /* 无符号差支持毫秒计数回绕，首帧不补算历史时间。 */
-    if ((state->sequence_valid != 0U) && (sample_gap_ms >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS) && (state->sensor_fault_active == 0U)) /* 首次断帧达到500ms只提示一次，迟到的新帧也不能掩盖已经发生的中断。 */
+    if ((state->sequence_valid != 0U) && (state->last_sequence == sequence) && (sample_gap_ms >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS)) /* 仅对旧帧暂停控制，74另按连续10秒确认。 */
     {
-        *alarm_event = PumpPressure_ReportSensorFault(state, now_ms); /* 500ms断帧按检测失败提示一次。 */
+        PumpPressure_PauseInvalidSample(state, now_ms); /* 500ms断帧不能直接变成传感器损坏报警。 */
         return state->last_output_speed; /* 保留输出，后续收到有效新序号才恢复压力调节。 */
     }
     if ((state->sequence_valid != 0U) && (state->last_sequence == sequence)) /* 25ms任务重复读取同一压力帧时只保持输出。 */
     {
         return state->last_output_speed; /* 旧帧不能推进降流、恢复、提示或连续超压确认。 */
     }
-    if (state->sensor_fault_active != 0U) /* 已通过有效性和新序号检查，才确认本通道压力检测恢复。 */
+    if ((state->sensor_fault_active != 0U) || (sample_gap_ms >= PUMP_PRESSURE_SAMPLE_TIMEOUT_MS)) /* 有效新样本恢复控制，但不能跨缺帧拼接连续确认。 */
     {
-        state->sensor_fault_active = 0U; /* 恢复后允许下一次独立检测失效提示，不清本轮超压报警记录。 */
+        state->sensor_fault_active = 0U; /* 只恢复控制输入标志，不干预接收层74的恢复锁存。 */
+        state->timing_active = 0U; /* 跨500ms以上间断的新高压必须重新确认。 */
+        state->pour_low_timing_active = 0U; /* 跨间断的新低压不能立即触发升流。 */
         state->pour_adjust_tick_ms = now_ms; /* 新压力恢复后先观察完整调档间隔，不立即追赶失效期间的降档。 */
     }
     state->last_sequence = sequence; /* 保存本次新帧序号，255回到0也按新帧处理。 */
