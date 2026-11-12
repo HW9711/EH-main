@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #ifndef MAINCTRL_DIAG_ENABLE
-#define MAINCTRL_DIAG_ENABLE 0U /* 正式交付关闭UART2综合诊断；需要采集脚踏、手柄和泵日志时改为1并重新编译。 */
+#define MAINCTRL_DIAG_ENABLE 1U /* GZYT负载停机排查开启UART2综合诊断；完成实机定位后再关闭。 */
 #endif
 #if (MAINCTRL_DIAG_ENABLE != 0U) && (MAINCTRL_DIAG_ENABLE != 1U)
 #error "MAINCTRL_DIAG_ENABLE must be 0 or 1"
@@ -144,6 +144,10 @@ typedef struct
 
 #define DIAG_EVENT_CAPTURE 121U /* 首次拦截锁存：依次为阶段(1触发/2自动锁存/3人工冻结)、原因、触发ms、触发序号、事前条数、事后条数、结束原因(0计时/1容量/2人工)、触发后ms、总容量。 */
 #define DIAG_EVENT_FOOT_PERMIT 122U /* 脚踏许可变化：a=0撤销/1松脚/2批准；b/c为旧/新状态，位0要求停机、位1已松脚、位8～15为启动侧；只在变化时记。 */
+/* GZYT诊断只保存现场，不改变按钮、保护或启停规则。 */
+#define DIAG_EVENT_GZYT_REVOKE 124U /* a=撤销原因：1配置改变、2接收异常/半帧超时、3字节积压、4帧拒绝、5收帧超时/接收异常、6运行条件被撤销、7启动门禁、8方向/控制权拒绝；b=撤销前running；c=最近有效帧年龄ms。 */
+#define DIAG_STATE_GZYT 125U /* 九项：帧6..9小端打包、候选序号、上次有效序号、帧间隔ms、处理年龄ms、内部状态、UART错误、主控状态、手控许可；序号和时间只随状态变化或每秒补记。 */
+#define DIAG_EVENT_GZYT_REJECT 126U /* a=拒绝条件位图：bit0 CRC、1未就绪、2原始保留位、3触发保留位、4复位保留位、5帧积压、6序号跳变、7复位变化、8帧间隔、9双键、10运行键改变、11未松开换键；b=候选序号；c=上次有效序号。 */
 #define DIAG_EVENT_OWNER 123U /* 控制权变化：a为旧来源，b为新来源，c=1空闲释放/2取得/3主动释放/4强制释放；channel为当时手柄通道。 */
 
 /* 压力解析任务结束后复制的收帧时间和恢复计数；只读已保存数据，不取走串口接收字节。 */

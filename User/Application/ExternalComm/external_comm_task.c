@@ -5414,6 +5414,56 @@ static ExternalCommFormalFrameAction_t ExternalComm_ClassifyFormalFrame(const Ex
 }
 
 /*
+ * 函数功能：返回双通道当前采用的保护配置快照；不读写EEPROM、不启动设备、不刷新外控保活。
+ * 输入参数：frame为CRC已通过的正式帧；0x10/FF/FF数据为版本1、只读操作0、两字节请求号。
+ * 返回参数：1表示已应答并消费，0表示继续原分派；本函数由业务调度任务调用。
+ */
+static uint8_t ExternalComm_HandleProtectionQuery(const ExternalCommFrame_t *frame)
+{
+    uint8_t payload[28] = {0}; /* 8字节头加A/B各10字节，离线通道保留零值且online=0。 */
+    if ((frame->tran_code != EXTERNAL_COMM_TRAN_DOWNLOAD) ||
+        (frame->fun_code != EXTERNAL_COMM_FUNC_PROTECTION_QUERY)) return 0U; /* 非本查询交回原流程。 */
+    payload[0] = 1U; /* 应答版本，防止上位机按未知布局解释参数。 */
+    payload[1] = 1U; /* 默认拒绝，只有固定只读格式才提供参数。 */
+    if (frame->info_len >= 4U) { payload[2] = frame->info_area[2]; payload[3] = frame->info_area[3]; } /* 回显请求号，隔离迟到应答。 */
+    if ((frame->area_code == EXTERNAL_COMM_AREA_NONE) && (frame->info_code == EXTERNAL_COMM_INFO_NONE) &&
+        (frame->info_len == 4U) && (frame->info_area[0] == 1U) && (frame->info_area[1] == 0U)) {
+        payload[1] = 0U; /* 格式校验通过，查询不需要申请外控权限。 */
+        ExternalComm_WriteBE32(&payload[4], HAL_GetTick()); /* 同一应答携带主控快照时刻。 */
+        for (uint8_t channel = CHANNEL_A; channel <= CHANNEL_B; ++channel) {
+            const ChannelMemoryMessage_t *memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB; /* 先固定A/B来源，避免通道串用。 */
+            uint8_t offset = (uint8_t)(8U + (channel - CHANNEL_A) * 10U); /* 每路字段依次为在线、选中、电流、时间22、时间24、回退、阈值有效。 */
+            uint8_t selected = (WorkMessage.channel_work == channel) ? 1U : 0U; /* 当前通道读取工作配置，其它通道读取记忆配置。 */
+            const volatile HandleEepromProfile_t *profile = selected ? &WorkMessage.eeprom_profile : &memory->eeprom_profile; /* 两项时间始终取本手柄配置。 */
+            uint8_t model = selected ? WorkMessage.hand_model : memory->hand_model; /* 判定是否使用PX手动分档。 */
+            uint8_t tool = selected ? WorkMessage.tool_type : memory->tool_type; /* 手动未选刀具时不能显示旧阈值。 */
+            uint8_t automatic = selected ? WorkMessage.auto_identify : memory->auto_identify; /* 自动识别使用已装载RFID阈值。 */
+            uint16_t direction = memory->dir; /* 非当前通道按该通道记忆方向选择设定速度。 */
+            uint32_t speed = selected ? WorkMessage.speed_set_work : ((direction == OSCDIR) ? memory->osc_speed : ((direction == FZDIR) ? memory->fz_speed : memory->zz_speed)); /* 与驱动规则相同，用设定速度而非脚踏实时速度分档。 */
+            uint16_t current = selected ? WorkMessage.current_work : memory->current_work; /* 默认取已装载的手柄或刀具电流，单位0.01A，不做发送校准。 */
+            payload[offset] = ((channel == CHANNEL_A) ? WorkMessage.Channel_Aonline : WorkMessage.Channel_Bonline) ? 1U : 0U; /* 离线时不暴露上次手柄缓存。 */
+            if (payload[offset] == 0U) continue; /* 未接入返回空记录，上位机显示--。 */
+            payload[offset + 1U] = selected; /* 标明本次查询的当前工作通道。 */
+            payload[offset + 9U] = 1U; /* 普通配置允许0表示驱动默认值，不把0伪装成0A。 */
+            if ((profile->direction_mask != 0U) && ((model == PXBA_ONLINES) || (model == PXBB_ONLINES)) && (automatic == 0U)) {
+                if (tool == PLANER) current = profile->manual_planer_current; /* PX手动刨刀使用专属阈值。 */
+                else if (tool == GRINDH) current = (speed < 30000U) ? profile->manual_grind_current_low : profile->manual_grind_current_high; /* 30000rpm及以上取高速档，与MotorDrive_GetConfiguredCurrent一致。 */
+                else current = 0U; /* 无有效刀具时清掉旧RFID电流。 */
+                payload[offset + 9U] = (current != 0U) ? 1U : 0U; /* 新版PX手动0阈值被运行门禁拒绝，不解释为驱动默认。 */
+            }
+            ExternalComm_WriteBE16(&payload[offset + 2U], current); /* 返回配置阈值，不混入实测电流或B路有刷发送校准。 */
+            ExternalComm_WriteBE16(&payload[offset + 4U], Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time22_ms)); /* 往复时间逐项校验，越界用500ms。 */
+            ExternalComm_WriteBE16(&payload[offset + 6U], Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time24_ms)); /* 无霍尔时间独立校验，不沿用参数22。 */
+            payload[offset + 8U] = profile->overcurrent_time_fallback & 7U; /* 保留EEPROM缺失或非法项的回退原因。 */
+            if ((profile->overcurrent_time22_ms < HANDLE_OVERCURRENT_TIME_MIN_MS) || (profile->overcurrent_time22_ms > HANDLE_OVERCURRENT_TIME_MAX_MS)) payload[offset + 8U] |= 1U; /* 运行缓存非法也明确标记参数22回退。 */
+            if ((profile->overcurrent_time24_ms < HANDLE_OVERCURRENT_TIME_MIN_MS) || (profile->overcurrent_time24_ms > HANDLE_OVERCURRENT_TIME_MAX_MS)) payload[offset + 8U] |= 2U; /* 参数24独立记录回退。 */
+        }
+    }
+    ExternalComm_SendFrame(EXTERNAL_COMM_FUNC_PROTECTION_QUERY, EXTERNAL_COMM_AREA_NONE, EXTERNAL_COMM_INFO_NONE, payload, sizeof(payload)); /* 只发送快照，不改变控制状态。 */
+    return 1U; /* 已消费，不进入登录和运行保活分支。 */
+}
+
+/*
  * 函数功能：独立处理实时状态页零点读取，在诊断关闭时仍可只读访问压力板。
  * 输入参数：frame为已经通过外部协议CRC检查的正式帧；0x0F/FF/FF携带版本1、操作0缓存或1读取、两字节请求号。
  * 返回参数：1表示本帧已消费，0表示继续原命令分派；不申请控制权、不刷新外控看门狗、不改泵状态。
@@ -5591,6 +5641,10 @@ static uint8_t ExternalComm_ProcessRxFifoFrame(void)
     parse_result = ExternalCommProtocol_Parse(s_frame_buf, frame_len, &frame);
     if (parse_result == EXTERNAL_COMM_PARSE_OK)
     {
+        if (ExternalComm_HandleProtectionQuery(&frame) != 0U) {
+            (void)ExternalComm_RxFifoSkip(frame_len); /* 保护查询独立消费，不触碰外控权限和运行保活。 */
+            return 1U; /* 查询完成后允许继续处理后续完整帧。 */
+        }
         if (ExternalComm_HandlePressureZero(&frame) != 0U) {
             (void)ExternalComm_RxFifoSkip(frame_len); /* 零点帧独立消费，不触碰外控连接、运行保活或泵请求。 */
             return 1U; /* 诊断关闭也能读取零点，其它命令继续原流程。 */

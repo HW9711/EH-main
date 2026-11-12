@@ -1147,6 +1147,9 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
 
     memset(message, 0, sizeof(*message)); /* 先清空刀具字段，确保上位机只显示“等待 RFID”，不会看到全 0 假刀具。 */
     message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 未读到本手柄Page4前禁止运行，不能把未初始化值当旧版。 */
+    message->eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 基座重新识别先恢复默认往复保护。 */
+    message->eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间等待本次Page6独立装载。 */
+    message->eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取Page6，不能将旧原值当作新柄参数。 */
     message->handle_type = mapped_model; /* 保存基座型号，插拔事件链会把它搬到 MemoryMsgA/B。 */
     message->hand_type_raw_major = raw_type_major; /* 保存 EEPROM 第二页原始主类型，上位机手柄卡片按该值显示 PXBA/PXBB。 */
     message->hand_type_raw_minor = raw_type_minor; /* 保存 EEPROM 第二页原始子类型，便于区分 PXBA、PXBB 和公共接头。 */
@@ -2001,7 +2004,7 @@ static uint16_t Handlescan_ReadPage6SpeedStep(const uint8_t *speed_step_buf, uin
 }
 
 /*
- * 函数功能：把 Page6 速度调节区同步到识别缓存的小步进和大步进字段。
+ * 函数功能：把Page6速度调节区同步到识别缓存的小步进和大步进，不覆盖本体保护时间。
  * 输入参数：message 为目标通道识别缓存；speed_step_buf 为已读取并校验过页尾的 Page6 缓存，读取失败时可传 NULL。
  * 返回参数：无。
  */
@@ -2031,6 +2034,22 @@ static void Handlescan_UpdateSpeedStepMessage(ChannelrecognizeMessage_t *message
 }
 
 /*
+ * 函数功能：仅在实际读取Page6后更新本体保护时间；RFID重载步进不能覆盖时间或读取失败原因。
+ * 输入参数：message为本通道识别结果；speed_step_buf为校验后的Page6，读取失败传NULL。
+ * 返回参数：无；两项分别校验，默认500ms。
+ */
+static void Handlescan_UpdateProtectionTimes(ChannelrecognizeMessage_t *message, const uint8_t *speed_step_buf)
+{
+    message->eeprom_profile.overcurrent_time22_raw = (speed_step_buf != NULL) ? Handlescan_ReadUint16BE(speed_step_buf, 18U) : 0U; /* 无标记，大端读取Page6[18..19]；读失败不沿用旧柄。 */
+    message->eeprom_profile.overcurrent_time24_raw = (speed_step_buf != NULL) ? Handlescan_ReadUint16BE(speed_step_buf, 20U) : 0U; /* Page6[20..21]独立保存无霍尔时间。 */
+    message->eeprom_profile.overcurrent_time22_ms = Pubinterface_ValidateOvercurrentTime(message->eeprom_profile.overcurrent_time22_raw); /* CRC通过后仍须校验参数22范围。 */
+    message->eeprom_profile.overcurrent_time24_ms = Pubinterface_ValidateOvercurrentTime(message->eeprom_profile.overcurrent_time24_raw); /* 参数24独立回退，不能借用参数22。 */
+    message->eeprom_profile.overcurrent_time_fallback = (speed_step_buf == NULL) ? 7U :
+        (uint8_t)(((message->eeprom_profile.overcurrent_time22_raw != message->eeprom_profile.overcurrent_time22_ms) ? 1U : 0U) |
+                  ((message->eeprom_profile.overcurrent_time24_raw != message->eeprom_profile.overcurrent_time24_ms) ? 2U : 0U)); /* 记录回退原因，不改变原认证和启动门禁。 */
+}
+
+/*
  * 函数功能：读取指定通道 EEPROM Page6 多档位速度页，并写入通道识别缓存的三方向调速步进。
  * 输入参数：binding 指定 A/B 通道、该通道的 EEPROM 和识别缓存。
  * 返回参数：无。
@@ -2054,6 +2073,7 @@ static void Handlescan_LoadPage6SpeedStep(const HandlescanChannelBinding *bindin
     {
         memset(context->speed_step_buf, 0, sizeof(context->speed_step_buf)); /* 读取失败时清空本通道页数据，随后按默认的小步长1000、大步长2000设置调速参数。 */
     }
+    Handlescan_UpdateProtectionTimes(message, (read_status != 0U) ? context->speed_step_buf : NULL); /* 只有实际EEPROM读取才更新本体时间，RFID换刀保留这份结果。 */
     Handlescan_UpdateSpeedStepMessage(message, (read_status != 0U) ? context->speed_step_buf : NULL); /* 把本通道 Page6 转成三方向步进。 */
 }
 
@@ -2262,6 +2282,9 @@ static void Handlescan_ClearRecognizeMessage(ChannelrecognizeMessage_t *message)
     }
 
     memset((void *)&message->eeprom_profile, 0, sizeof(message->eeprom_profile)); /* 真实拔柄或无效插入清除本体配置，RFID掉线路径不得执行此清理。 */
+    message->eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 拔柄后撤销旧往复时间。 */
+    message->eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 换柄前无霍尔时间恢复500ms。 */
+    message->eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读到本次Page6，诊断标为缺失。 */
     message->handle_type = 0U;
     message->hand_type_raw_major = 0U;                       /* 清掉 Page2 原始主类型，避免下一次上线前外部通信读到旧手柄编码。 */
     message->hand_type_raw_minor = 0U;                       /* 清掉 Page2 原始子类型，保持识别缓存和当前插拔状态一致。 */

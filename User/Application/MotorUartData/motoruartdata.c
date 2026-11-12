@@ -426,9 +426,29 @@ static void MotorUart_RecordFeedbackSnapshot(const uint8_t *frame, uint32_t rx_w
 	s_motor_uart_feedback_snapshot.speed_rpm = (uint32_t)speed_field * 10U; /* 把驱动私有“rpm/10”换算成上位机统一使用的rpm。 */
 	s_motor_uart_feedback_snapshot.current_x100 = (uint16_t)(((uint16_t)frame[8] << 8U) | frame[9]); /* 电流保留0.01A单位，避免浮点参与固件组包。 */
 	s_motor_uart_feedback_snapshot.raw_error = frame[7]; /* 保留驱动原始Err，不能用主控报警码替代诊断依据。 */
+    s_motor_uart_feedback_snapshot.overcurrent_time22_ms = (frame[0] == MOTOR_PROTECTION_FRAME_ADDRESS) ? (uint16_t)(((uint16_t)frame[10] << 8U) | frame[11]) : 0U; /* 只在完整新帧中读取扩展值。 */
+    s_motor_uart_feedback_snapshot.overcurrent_time24_ms = (frame[0] == MOTOR_PROTECTION_FRAME_ADDRESS) ? (uint16_t)(((uint16_t)frame[12] << 8U) | frame[13]) : 0U; /* 参数24独立解码。 */
+    s_motor_uart_feedback_snapshot.motor_kind = frame[3]; /* 诊断保留真实物理通道，不能用当前选中通道代替。 */
+    s_motor_uart_feedback_snapshot.protection_protocol_valid = (uint8_t)((frame[0] == MOTOR_PROTECTION_FRAME_ADDRESS) &&
+        (frame[3] >= 1U) && (frame[3] <= 4U) && /* 能力确认必须来自定义内的实际电机通道。 */
+        (s_motor_uart_feedback_snapshot.overcurrent_time22_ms == Pubinterface_ValidateOvercurrentTime(s_motor_uart_feedback_snapshot.overcurrent_time22_ms)) &&
+        (s_motor_uart_feedback_snapshot.overcurrent_time24_ms == Pubinterface_ValidateOvercurrentTime(s_motor_uart_feedback_snapshot.overcurrent_time24_ms))); /* CRC正确仍须验证时间，非法反馈不确认新能力。 */
 	s_motor_uart_feedback_snapshot.valid = 1U; /* 所有字段写完后标记已有有效反馈。 */
 	__DMB(); /* 保证字段先于最终偶数版本发布。 */
 	++s_motor_uart_feedback_version; /* 写完后恢复偶数版本，其它任务才可复制这份反馈记录。 */
+}
+
+/*
+ * 函数功能：确认驱动近期已正确回复新协议，旧固件或失联时禁止运动命令。
+ * 输入参数：无。
+ * 返回参数：新能力有效返回1，否则返回0；停止命令不受此门禁限制。
+ */
+uint8_t MotorUart_IsProtectionProtocolReady(void)
+{
+    MotorUartFeedbackSnapshot_t feedback; /* 复制同一版本，避免能力位和时间戳跨帧。 */
+    return (uint8_t)((MotorUart_CopyFeedbackSnapshot(&feedback) != 0U) &&
+        (feedback.protection_protocol_valid != 0U) &&
+        ((uint32_t)(HAL_GetTick() - feedback.feedback_tick_ms) <= MOTOR_PROTECTION_FEEDBACK_TIMEOUT_MS)); /* 计时使用无符号差兼容回绕。 */
 }
 
 /*
@@ -676,7 +696,7 @@ uint8_t MotorUart_IsDriverParameterTransactionActive(void)
 }
 
 /*
- * 函数功能：读取 UART1 接收包，按当前状态处理参数响应或 12 字节电机反馈。
+ * 函数功能：读取UART1接收包，处理参数响应和12/16字节反馈，校验新协议保护时间。
  * 输入参数：无，直接读取 UART1 DMA 接收缓冲区。
  * 返回参数：无；更新速度、电流和报警。故障时停止手柄及其联动注水泵，保留独立泵；恢复首帧仍清电机请求。
  */
@@ -687,6 +707,7 @@ void BrushlessMotorUartData_ReceiveData(void)
   uint32_t rx_window_start_ms; /* 记录本批字节开始接收的下界，与解析完成时刻分开。 */
   uint8_t dat[UART1_MAX_PACKET_SIZE] = { 0 }, dat1[22] = { 0 };
   uint16_t CRC_Check_Vaule=0;
+  uint8_t frame_len; /* 根据明确帧头选择长度，禁止跨短包访问CRC或时间字段。 */
 	
   //读取串口数据
   rlen = Uart1_DMARecvDataPeek(dat, &rx_window_start_ms); /* 取同一批原始字节及其DMA起点，只有成功取到完整帧才使用起点。 */
@@ -706,13 +727,15 @@ void BrushlessMotorUartData_ReceiveData(void)
   //逐字节查找电机反馈帧头 0xAA。
   for (i = 0; i < (rlen - 11); i++)    //只检查从 i 开始至少还剩 12 字节的位置。
   {
-	  if (dat[i] == 0xAA)  
+	  if ((dat[i] == 0xAA) || (dat[i] == MOTOR_PROTECTION_FRAME_ADDRESS))
 	  {
-		  CRC_Check_Vaule = Common_Crc16(&dat[i],10);//ssc
+          frame_len = (dat[i] == MOTOR_PROTECTION_FRAME_ADDRESS) ? MOTOR_PROTECTION_FEEDBACK_LEN : 12U; /* 新旧反馈不可共用固定CRC位置。 */
+          if (((uint16_t)i + frame_len) > rlen) { continue; } /* 不完整新帧不能读取时间、续租或确认能力。 */
+          CRC_Check_Vaule = Common_Crc16(&dat[i], (uint16_t)(frame_len - 2U)); /* CRC覆盖全部反馈时间字段。 */
 			/* CRC 通过后才允许修改运行状态，避免串口噪声被误当成驱动故障或速度反馈。 */
-			if(CRC_Check_Vaule==dat[i+10]+(dat[i+11]<<8))
+			if(CRC_Check_Vaule == (uint16_t)(dat[i + frame_len - 2U] | ((uint16_t)dat[i + frame_len - 1U] << 8U)))
 			{
-				Common_CopyData(&dat[i], dat1, 12);    //复制完整 12 字节反馈，包含末尾两字节 CRC。
+				Common_CopyData(&dat[i], dat1, frame_len); /* 复制已完整校验的反馈，时间与速度来自同一包。 */
 				MotorUart_RecordFeedbackSnapshot(dat1, rx_window_start_ms); /* CRC通过后，将本帧的速度、电流和Err一起保存，供50ms上报任务读取，避免混用不同回包。 */
 				WorkMessage.driver_speed_feedback = (uint16_t)(((uint16_t)dat1[4] << 8U) | dat1[5]); /* 驱动 byte4~5 是实际转速反馈，单位沿用驱动私有协议的“转速/10”，只做监测不改目标速度。 */
 				WorkMessage.driver_current_x100 = (uint16_t)(((uint16_t)dat1[8] << 8U) | dat1[9]);    /* 驱动 byte8~9 是当前模式ADC滤波实际电流 * 100：无刷为AllCur、有刷为CurLPF，单位0.01A，只上传给上位机显示。 */
@@ -765,7 +788,7 @@ void BrushlessMotorUartData_ReceiveData(void)
 				}
 
 				memset(dat1, 0, 15);
-				i += 12;
+				i = (uint8_t)(i + frame_len - 1U); /* for还会加1，下一帧紧接时不能跳过其帧头。 */
 			}
 	  }
   }

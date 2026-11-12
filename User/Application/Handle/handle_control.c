@@ -646,6 +646,9 @@ static void Handle_ClearSelection(void)
 {
 	WorkMessage.hand_model = 0U;					   /* 没有任何手柄在线时清掉当前手柄型号，防止一体式手柄拔出后仍按旧型号刷新方向按钮。 */
 	memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
+	WorkMessage.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 当前手柄离线后先恢复500ms，选中新柄再装载其时间。 */
+	WorkMessage.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立复位，避免旧工作态残留。 */
+	WorkMessage.eeprom_profile.overcurrent_time_fallback = 7U; /* 当前无有效Page6，诊断不能视为已读取。 */
 	WorkMessage.tool_type = 0U;					   /* 没有任何手柄在线时清掉当前刀具能力，防止旧刨刀能力继续打开往复入口。 */
 	WorkMessage.raw_tool_type = 0U;				   /* 同步清掉原始刀具型号，避免后续驱动或上位机继续看到旧 EEPROM/RFID 代号。 */
 	WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
@@ -741,6 +744,9 @@ void PlugORunPLUGActive(uint8_t key_value)
 		}
 		WorkMessage.Channel_Aonline = false;					   /* A 拔出后立刻离线，心跳会报告 A 不可用。 */
 		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
+		MemoryMsgA.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 拔柄后本通道往复保护恢复500ms。 */
+		MemoryMsgA.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间不保留上一只手柄配置。 */
+		MemoryMsgA.eeprom_profile.overcurrent_time_fallback = 7U; /* 下次上线前按Page6尚未读取记录。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 A 才需要决定回落 B 或清空当前通道。 */
 		{
 			if ((current_channel_run_interrupted == 0U) && /* 确认不是运行掉线、无报警且 B 在线时才允许直接回落。 */
@@ -760,6 +766,9 @@ void PlugORunPLUGActive(uint8_t key_value)
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 B 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
+				WorkMessage.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 当前手柄离线后先恢复500ms，选中新柄再装载其时间。 */
+				WorkMessage.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立复位，避免旧工作态残留。 */
+				WorkMessage.eeprom_profile.overcurrent_time_fallback = 7U; /* 当前无有效Page6，诊断不能视为已读取。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 B 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
@@ -797,6 +806,9 @@ void PlugORunPLUGActive(uint8_t key_value)
 		}
 		WorkMessage.Channel_Bonline = false;					   /* B 拔出后立刻离线，心跳会报告 B 不可用。 */
 		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
+		MemoryMsgB.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 拔柄后本通道往复保护恢复500ms。 */
+		MemoryMsgB.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间不保留上一只手柄配置。 */
+		MemoryMsgB.eeprom_profile.overcurrent_time_fallback = 7U; /* 下次上线前按Page6尚未读取记录。 */
 		if (current_channel_unplugged != 0U) /* 只有拔掉当前 B 才需要决定回落 A 或清空当前通道。 */
 		{
 			if ((current_channel_run_interrupted == 0U) && /* 确认不是运行掉线、无报警且 A 在线时才允许直接回落。 */
@@ -816,6 +828,9 @@ void PlugORunPLUGActive(uint8_t key_value)
 				}
 				WorkMessage.hand_model = 0U;					   /* 运行中、报警中或无 A 在线时，清当前手柄型号，防止离线手柄继续被手柄键扫描。 */
 				memset((void *)&WorkMessage.eeprom_profile, 0, sizeof(WorkMessage.eeprom_profile)); /* 当前手柄真实离线后清本体配置，下次选中必须重新装载。 */
+				WorkMessage.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 当前手柄离线后先恢复500ms，选中新柄再装载其时间。 */
+				WorkMessage.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立复位，避免旧工作态残留。 */
+				WorkMessage.eeprom_profile.overcurrent_time_fallback = 7U; /* 当前无有效Page6，诊断不能视为已读取。 */
 				WorkMessage.tool_type = 0U;					   /* 运行中、报警中或无 A 在线时，清当前刀具类型，界面进入未选中状态。 */
 				WorkMessage.raw_tool_type = 0U;				   /* 同步清当前原始刀具型号，避免拔出后驱动侧读取旧 PXM/PXP/RFID 代号。 */
 				WorkMessage.rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */

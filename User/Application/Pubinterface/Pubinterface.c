@@ -25,6 +25,17 @@ ChannelrecognizeMessage_t ChannelrecognizeMessageB;
 ControlSigleMessage_t ControlSigleMssage;
 ControlSignalMessage_t ControlSignalMessage;
 
+/*
+ * 函数功能：校验手柄过流时间，越界直接回退500ms，不钳位到较长时间。
+ * 输入参数：value为未截断的毫秒值。
+ * 返回参数：500~1500ms范围内的原值，非法值返回500ms。
+ */
+uint16_t Pubinterface_ValidateOvercurrentTime(uint32_t value)
+{
+    return ((value >= HANDLE_OVERCURRENT_TIME_MIN_MS) && (value <= HANDLE_OVERCURRENT_TIME_MAX_MS))
+             ? (uint16_t)value : HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 两项分别调用，不能因一项非法覆盖另一项。 */
+}
+
 WorkMessage_t WorkMessage;		   // 工作信息
 ChannelMemoryMessage_t MemoryMsgA; // A 通道记忆，用于切换通道后恢复识别参数和用户设置
 ChannelMemoryMessage_t MemoryMsgB; // B 通道记忆，字段含义与 A 通道完全一致
@@ -1512,7 +1523,13 @@ void Pubinterface_RefreshRuntimeDisplaySnapshot(void)
 void ChannelrecognizeMessageInit(void)
 {
 	memset(&ChannelrecognizeMessageA, 0, sizeof(ChannelrecognizeMessageA)); /* 清除 A 通道型号、规格和默认参数。 */
+	ChannelrecognizeMessageA.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
+	ChannelrecognizeMessageA.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
+	ChannelrecognizeMessageA.eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取本次Page6，记录缺失回退。 */
 	memset(&ChannelrecognizeMessageB, 0, sizeof(ChannelrecognizeMessageB)); /* 清除 B 通道识别结果，不保留上次刀具数据。 */
+	ChannelrecognizeMessageB.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
+	ChannelrecognizeMessageB.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
+	ChannelrecognizeMessageB.eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取本次Page6，记录缺失回退。 */
 }
 /*
  * 函数功能：清空当前工作参数和运行、报警标志。
@@ -1522,6 +1539,9 @@ void ChannelrecognizeMessageInit(void)
 void WorkMessageInit(void)
 {
 	memset(&WorkMessage, 0, sizeof(WorkMessage)); /* 初始化为未选通道、未运行且无报警，之后由识别流程填入参数。 */
+	WorkMessage.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
+	WorkMessage.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
+	WorkMessage.eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取本次Page6，记录缺失回退。 */
 }
 /*
  * 函数功能：清空 A/B 通道各自保存的型号和用户运行设置。
@@ -1531,7 +1551,13 @@ void WorkMessageInit(void)
 void ChannelMemoryMessageInit(void)
 {
 	memset(&MemoryMsgA, 0, sizeof(MemoryMsgA)); /* 清空 A 通道保存的速度、方向和控制方式等参数。 */
+	MemoryMsgA.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
+	MemoryMsgA.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
+	MemoryMsgA.eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取本次Page6，记录缺失回退。 */
 	memset(&MemoryMsgB, 0, sizeof(MemoryMsgB)); /* 清空 B 通道参数，等待本通道识别完成后重新填写。 */
+	MemoryMsgB.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
+	MemoryMsgB.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
+	MemoryMsgB.eeprom_profile.overcurrent_time_fallback = 7U; /* 尚未读取本次Page6，记录缺失回退。 */
 }
 /*
  * 函数功能：初始化两路泵状态，清除运行和排空请求。

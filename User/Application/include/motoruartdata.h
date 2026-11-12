@@ -6,7 +6,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 只保存通过 CRC 检查的完整 12 字节回包，保证速度、电流和错误码来自同一包。 */
+#define MOTOR_PROTECTION_FRAME_ADDRESS 0xABU /* 新运行协议地址；旧0xAA驱动不会把扩展字段误解释为运动命令。 */
+#define MOTOR_PROTECTION_COMMAND_LEN 15U /* byte9~12为参数22/24大端毫秒，byte13~14为CRC。 */
+#define MOTOR_PROTECTION_FEEDBACK_LEN 16U /* byte10~13回报实际时间，byte14~15为CRC。 */
+#define MOTOR_PROTECTION_FEEDBACK_TIMEOUT_MS 200U /* 新协议能力证明只在最近200ms内有效，失联后必须重新确认。 */
+uint8_t MotorUart_IsProtectionProtocolReady(void); /* 仅有效新协议反馈允许主控发出运动命令。 */
+
+/* 只保存通过CRC检查的完整12/16字节回包，各字段必须来自同一包。 */
 typedef struct
 {
 	uint32_t feedback_tick_ms; /* HAL毫秒时钟：最近一次有效驱动回包形成快照的时刻。 */
@@ -14,6 +20,10 @@ typedef struct
 	uint32_t speed_rpm;        /* 驱动 byte4~5 的“转速/10”字段换算成实际 rpm。 */
 	uint16_t sequence;         /* 每份CRC正确回包递增一次，自然回绕。 */
 	uint16_t current_x100;     /* 驱动 byte8~9 实时工作电流，单位0.01A。 */
+	uint16_t overcurrent_time22_ms; /* 新反馈中的实际有霍尔往复时间；旧协议为0，不代表驱动采用值。 */
+	uint16_t overcurrent_time24_ms; /* 新反馈中的实际无霍尔时间，单位ms。 */
+	uint8_t protection_protocol_valid; /* 1表示新协议且两项时间均合法，旧回复不能授予启动权限。 */
+	uint8_t motor_kind; /* 实际反馈物理通道与电机类型，1/2无刷、3/4有刷。 */
 	uint8_t raw_error;         /* 驱动 byte7 原始错误码，不经过主控报警映射。 */
 	uint8_t valid;             /* 已收到至少一份CRC正确回包时置1。 */
 } MotorUartFeedbackSnapshot_t;

@@ -51,7 +51,7 @@
 /* 单踏板连续前 3 次低值先不停止泵，第 4 次才确认松脚；周期 25ms，即首个低值后再等约 75ms。调大可减少抖动停泵，但松脚停泵更慢；电机不等待此计数。 */
 #define FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS 3U
 #define FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS 10U /* 双脚踏深踩切通道需累计 10 次控制检查，每次 25ms，约 250ms；调大切换更慢，调小更容易误切。 */
-#define FOOT_PEDAL_SPEED_HIGH_MARGIN 30U /* 双脚踏控制对应通道时，从定标高点减去 30 个 AD 计数作为满速位置；调大将更早达到设定速度，不改变最高速度。 */
+#define FOOT_PEDAL_SPEED_HIGH_MARGIN 30U /* 单路三点和双脚踏均从定标高点减去 30 个 AD 计数作为满速位置；调大更早满速，必须保留有效的电机调速区间。 */
 #define FOOT_SINGLE_FRAME_LENGTH 10U /* 单踏板实时值、Flash读回和脚踏实体按键帧均为10字节，最后2字节为CRC。 */
 #define FOOT_TWO_STAGE_FRAME_LENGTH 18U /* 双段踏板周期帧为18字节，包含实时AD、三点定标值和CRC。 */
 #define FOOT_DOUBLE_FRAME_LENGTH 24U /* 双脚踏周期帧为24字节，包含左右实时AD、两组三点定标值和CRC。 */
@@ -333,7 +333,7 @@ static uint32_t Foot_GetCurrentDirectionMinSpeed(void)
  */
 static uint32_t Foot_BuildTravelMotorSpeed(uint16_t ad_value,uint16_t low_adc,uint16_t high_adc,uint16_t high_margin)
 {
-    uint16_t effective_high_adc=high_adc; /* 达到设定速度的 AD 位置，双脚踏部分分支会比定标高点提前 30 个计数。 */
+    uint16_t effective_high_adc=high_adc; /* 满速 AD 位置由调用方指定余量；单路三点、双脚踏的正常和备用通道均减去 30。 */
     uint16_t clamped_adc=ad_value; /* 将 AD 值限制在运行段内，防止踩到底时速度超过设定值。 */
     uint32_t min_speed=Foot_GetCurrentDirectionMinSpeed(); /* 当前方向 EEPROM/RFID 最小速度，脚踏比例不能再从 0 开始。 */
     uint32_t max_speed=WorkMessage.speed_set_work; /* 当前屏幕/EEPROM 设定速度在脚踏模式下作为最大速度。 */
@@ -643,7 +643,7 @@ static bool Foot_IsPedalTwoPointStorageValid(uint16_t low_adc, uint16_t high_adc
 }
 
 /*
- * 函数功能：判断双段脚踏保存的低点、中点和高点是否满足有效行程要求。
+ * 函数功能：判断单路三点或双脚踏每侧的定标行程，并确认提前满速位置高于电机启动位置。
  * 输入参数：low_adc 为低点；mid_adc 为中点；high_adc 为高点。
  * 返回参数：true 表示低/中/高值有效；false 表示脚踏存储值错误。
  */
@@ -659,7 +659,12 @@ static bool Foot_IsPedalThreePointStorageValid(uint16_t low_adc, uint16_t mid_ad
         return false; /* 电机段中点到高点无有效行程时，脚踏不能安全控制手柄。 */
     }
 
-    return true; /* 低/中/高三点递增且两段行程都有效，允许脚踏接入。 */
+    if((uint32_t)high_adc <= ((uint32_t)mid_adc + JT_threshold + FOOT_PEDAL_SPEED_HIGH_MARGIN))
+    {
+        return false; /* 高值减 30 后必须仍高于中值加启动余量，否则刚启动就可能满速，拒绝这组定标并由解析入口报警 83。 */
+    }
+
+    return true; /* 两段行程和提前满速位置均有效，允许本侧脚踏接入。 */
 }
 
 /*
@@ -1461,7 +1466,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
             return FOOT_CONTROL_FLOW_RETURN_TASK; /* 正常等待保持轻踩注水，故障拒绝仍由原失败入口清理泵请求。 */
         }
         ControlSignalMessage.jtL_control_flag=true; /* 本次通过停稳和启动检查后才提交深踩电机请求。 */
-        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,0U); /* 双段脚踏电机段从中值开始算比例，不再从 0rpm 起步。 */
+        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 单路三点脚踏在高值减 30 处达到设定速度，踩到底的小幅 AD 回落不再降低目标速度。 */
         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
         Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_LEFT); /* 深踩获准启动手柄后，记住该踏板启动了联动泵，完全松脚时据此停泵。 */
     }
@@ -1594,7 +1599,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                             }
                             ControlSignalMessage.jtL_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,0U); /* 双脚踏左侧跨通道运行同样按 EEPROM 最小速度起步。 */
+                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 左脚控制备用手柄时同样在高值减 30 处满速，避免更换目标通道后必须踩到原高值。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_LEFT); /* 左脚控制 B 通道时仍记为左脚启动，松左脚时据此停联动泵。 */
                         }
@@ -1752,7 +1757,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                             }
                             ControlSignalMessage.jtR_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,0U); /* 双脚踏右侧跨通道运行同样按 EEPROM 最小速度起步。 */
+                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 右脚控制备用手柄时同样在高值减 30 处满速，避免 AD 轻微回落后目标速度不足。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_RIGHT); /* 右脚控制 A 通道时仍记为右脚启动，松右脚时据此停联动泵。 */
                         }

@@ -21,7 +21,7 @@
 
 #include <string.h>
 
-#define motor_frem_length  11 /* 电机控制帧共 11 字节，含末尾 2 字节 CRC；修改长度必须同步驱动协议。 */
+#define motor_frem_length MOTOR_PROTECTION_COMMAND_LEN /* 新控制帧15字节，时间和原运行字段一起受CRC保护。 */
 #define MOTOR_DRIVE_CMD_FREQ_MAX 100U /* 往复频率字段允许 0~100，超过时按 100 发送；这是协议值，不直接表示 Hz。 */
 #define MOTOR_DRIVE_RATIO_X100_UNIT 100U /* 倍率放大 100 倍保存：100=1.00 倍、525=5.25 倍；须与 EEPROM/RFID 定义一致。 */
 /* 仅影响屏幕B通道的有刷手柄：下发保护电流=原阈值/(本宏/100)，不修改屏幕A、无刷手柄或原始设定。
@@ -39,7 +39,9 @@
 #define MOTOR_DRIVE_ZERO_REARM_GAP_MS 5U /* 从停止到启动时，先发同通道零速帧，再间隔 5ms 发运行帧；过短可能被驱动当成同一包，调大增加启动等待。 */
 
 kernel_task_t MOTORRUNTaskHandle;
-static const uint8_t s_motor_stop_fallback[motor_frem_length]={0xAA ,0x01 ,0x00 ,0x01 ,0x00 ,0x00 ,0x02 ,0x00 ,0x00  ,0x00 ,0x00}; /* 上电尚未形成运行模板时只发送历史兼容零速帧，此状态下主控从未授权本次电机运行。 */
+static const uint8_t s_motor_stop_fallback[motor_frem_length]={MOTOR_PROTECTION_FRAME_ADDRESS,1U,0U,1U,0U,0U,2U,0U,0U,1U,0xF4U,1U,0xF4U,0U,0U}; /* 上电使用新协议零速探测；能力未知时先补发旧STOP，不允许退回旧格式运行。 */
+static uint8_t s_motor_protection_waiting = 0U; /* 新启动尚未收到新协议回复时保持零速，不阻塞停止任务。 */
+static uint32_t s_motor_protection_wait_tick = 0U; /* 等待能力确认的起点，连续300ms无有效新回复则报通信故障。 */
 static uint8_t s_motor_stop_template[motor_frem_length]; /* 保存最近一份真实 RUN 帧除速度外的全部协议字段，STOP 必须沿用同一物理通道、方向和运行方式。 */
 static volatile uint8_t s_motor_stop_tx_pending = 1U; /* STOP未成功送入UART1前，任何新RUN都必须先补发零速。 */
 static uint8_t s_motor_stop_template_valid = 0U; /* 首次组装真实 RUN 帧后置 1，防止未初始化模板被周期停机任务使用。 */
@@ -59,7 +61,7 @@ typedef struct {
 RunInformMessage_t;
 static RunInformMessage_t msg;
 static MotorDriveCommandSnapshot_t s_motor_drive_command_snapshot; /* 保存最近一次实际改变并送入UART1的周期电机命令。 */
-static uint8_t s_motor_drive_last_command[motor_frem_length]; /* 保存上一份11字节周期命令，用于排除每50ms重复保活帧。 */
+static uint8_t s_motor_drive_last_command[motor_frem_length]; /* 保存上一份15字节周期命令，用于排除每50ms重复保活帧。 */
 static uint8_t s_motor_drive_last_command_valid = 0U; /* 0表示尚未保存命令；首次生成启动或停止帧时必须保存一份记录。 */
 static volatile uint32_t s_motor_drive_snapshot_version = 0U; /* 偶数表示数据可读，奇数表示正在更新；读取前后比较此值，避免混用两次命令。 */
 static volatile uint8_t s_tool_position_guard_active = 0U; /* 1 表示已发出定位命令，暂不重发空闲停止帧，给驱动留出完成定位的时间。 */
@@ -120,27 +122,43 @@ static uint8_t MotorDrive_BuildCommandFrequency(uint16_t freq_work)
 }
 
 /*
- * 函数功能：计算 11 字节电机控制帧的 CRC16，并写到最后两个字节。
- * 输入参数：command 指向待发送的完整控制帧，前 9 字节必须已经组装完成。
+ * 函数功能：计算15字节新控制帧CRC16，覆盖两项过流时间并写入帧尾。
+ * 输入参数：command 指向待发送的完整控制帧，前13字节必须已经组装完成。
  * 返回参数：无；command 为空时不处理。
  */
 static void MotorDrive_UpdateCommandCrc(uint8_t *command)
 {
-    uint16_t crc; /* 保存前 9 字节的 CRC16/MODBUS 结果，驱动端按低字节在前校验。 */
+    uint16_t crc; /* CRC16/MODBUS覆盖前13字节，驱动端按低字节在前校验。 */
 
     if (command == NULL)
     {
         return; /* 内部命令缓存无效时不得写 CRC 字段，调用方也不会发送该帧。 */
     }
 
+    command[0] = MOTOR_PROTECTION_FRAME_ADDRESS; /* 所有RUN、STOP和定位均使用同一明确的新帧地址。 */
     crc = Common_Crc16(command, (uint16_t)(motor_frem_length - 2U)); /* CRC 覆盖地址、模式、通道、速度和保护电流。 */
-    command[motor_frem_length - 2U] = (uint8_t)(crc & 0x00FFU); /* 协议第 10 字节发送 CRC 低字节。 */
-    command[motor_frem_length - 1U] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 协议第 11 字节发送 CRC 高字节。 */
+    command[motor_frem_length - 2U] = (uint8_t)(crc & 0x00FFU); /* 新帧byte13发送CRC低字节。 */
+    command[motor_frem_length - 1U] = (uint8_t)((crc >> 8U) & 0x00FFU); /* 协议第 15 字节发送 CRC 高字节。 */
+}
+
+/*
+ * 函数功能：把本通道两项合法过流时间写入新命令，EEPROM原值不直接上总线。
+ * 输入参数：command为15字节命令；profile为本通道手柄配置。
+ * 返回参数：无。
+ */
+static void MotorDrive_SetProtectionTimes(uint8_t *command, const volatile HandleEepromProfile_t *profile)
+{
+    uint16_t time22 = Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time22_ms); /* 发送前再次限制有霍尔往复时间。 */
+    uint16_t time24 = Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time24_ms); /* 无霍尔时间独立校验，不能串用。 */
+    command[9] = (uint8_t)(time22 >> 8U); /* 参数22高字节，大端毫秒。 */
+    command[10] = (uint8_t)time22; /* 参数22低字节，CRC稍后统一计算。 */
+    command[11] = (uint8_t)(time24 >> 8U); /* 参数24高字节。 */
+    command[12] = (uint8_t)time24; /* 参数24低字节，不增加扩展标记。 */
 }
 
 /*
  * 函数功能：从所有类型手柄的本次 RUN 帧生成后续 STOP 模板，只清零速度并重新计算 CRC。
- * 输入参数：run_command 指向已经完成方向、物理通道、运行方式、电流和 CRC 组装的 11 字节 RUN 帧。
+ * 输入参数：run_command 指向已经完成方向、物理通道、运行方式、电流和 CRC 组装的 15 字节 RUN 帧。
  * 返回参数：无；空指针时保留上一份可信模板。
  */
 static void MotorDrive_UpdateStopTemplate(const uint8_t *run_command)
@@ -154,7 +172,7 @@ static void MotorDrive_UpdateStopTemplate(const uint8_t *run_command)
     s_motor_stop_template[4] = 0U; /* 协议 byte4 为速度高字节，STOP 模板固定清零。 */
     s_motor_stop_template[5] = 0U; /* 协议 byte5 为速度低字节，与高字节共同形成零速命令。 */
     MotorDrive_UpdateCommandCrc(s_motor_stop_template); /* 速度改变后重新生成 CRC，驱动端才能接受该停止帧。 */
-    s_motor_stop_template_valid = 1U; /* 所有 11 字节完成后再开放模板，周期任务不会读取半更新数据。 */
+    s_motor_stop_template_valid = 1U; /* 所有 15 字节完成后再开放模板，周期任务不会读取半更新数据。 */
 }
 
 /*
@@ -400,10 +418,16 @@ uint8_t MotorDrive_CopyToolPositionStatus(MotorToolPositionStatus_t *status)
  */
 void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 {
- uint8_t cmd[11] ={0xAA ,0x04 ,0x00 ,0x01 ,0x00 ,0x01 ,0x02 ,0x00 ,0x00 ,0x00 ,0x00 }; /* 形成11字节定位帧，保留原有电机运行方式和CRC位置。 */
+ uint8_t cmd[motor_frem_length] ={MOTOR_PROTECTION_FRAME_ADDRESS,4U,0U,1U,0U,1U,2U,0U,0U,0U}; /* 定位也使用完整新帧，禁止旧格式绕过能力门禁。 */
  uint32_t saved_primask; /* 保存本次更新前的中断屏蔽状态，写完定位记录后按原状态恢复。 */
  uint8_t physical_channel = BoardProfile_MapHandlePhysicalChannel(channel_number); /* 定位命令只交换物理电机路，调用方仍传逻辑A/B。 */
 
+ if (MotorUart_IsProtectionProtocolReady() == 0U)
+ {
+     MotorUart_NotifyStopTransmitFailure(); /* 旧驱动或失联时明确报警并撤销运行，不允许定位绕过升级检查。 */
+     return; /* 周期STOP仍会继续发送以确认新驱动。 */
+ }
+ MotorDrive_SetProtectionTimes(cmd, (channel_number == CHANNEL_A) ? &MemoryMsgA.eeprom_profile : &MemoryMsgB.eeprom_profile); /* 定位使用指定通道参数，不借用另一通道。 */
  cmd[3]=(physical_channel==BOARD_PROFILE_HANDLE_CHANNEL_A)?BOARD_PROFILE_HANDLE_CHANNEL_A:BOARD_PROFILE_HANDLE_CHANNEL_B; /* 驱动帧第3字节选择原物理A或B电机通道。 */
  direction==true?(cmd[1]=4):(cmd[1]=5); /* 定位方向沿用原协议4/5，不受通道交换影响。 */
  cmd[5]=angel; /* 定位角度继续写入协议第5字节，保持原单位和范围。 */
@@ -420,7 +444,7 @@ void ToolPosMay(uint8_t channel_number,bool direction,uint8_t angel)
 
 /*
  * 函数功能：记录周期输出或拔出STOP的判定，并在电机命令内容变化时同步记录真实UART1命令序号和时刻。
- * 输入参数：command为11字节驱动帧；logical_channel、run_state和command_speed_rpm描述实际帧；其余参数描述原始运行请求。
+ * 输入参数：command为15字节驱动帧；logical_channel、run_state和command_speed_rpm描述实际帧；其余参数描述原始运行请求。
  * 返回参数：无；重复帧仍更新请求诊断字段，但不增加命令序号和sent_tick_ms。
  */
 static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
@@ -432,7 +456,7 @@ static void MotorDrive_RecordCommandSnapshot(const uint8_t *command,
                                              uint32_t source_speed_rpm,
                                              uint8_t zero_speed_blocked)
 {
-    uint8_t command_changed = 0U; /* 只有完整11字节帧变化才递增序号，50ms重复保活只刷新请求诊断。 */
+    uint8_t command_changed = 0U; /* 只有完整15字节帧变化才递增序号，50ms重复保活只刷新请求诊断。 */
     uint32_t evaluated_tick_ms; /* 一次读取HAL时钟同时供本次判定时刻和新命令发送时刻使用。 */
 
     if (command == NULL)
@@ -519,6 +543,7 @@ static void MotorStops(uint8_t requested_run_state,
                        uint32_t source_speed_rpm,
                        uint8_t zero_speed_blocked)
 {
+ HAL_StatusTypeDef legacy_status = HAL_OK; /* 能力未知时补发旧STOP也必须检查发送结果，不能用新帧成功掩盖旧帧失败。 */
  uint8_t motor_stopcode[motor_frem_length]; /* 本周期私有 STOP 帧，避免公共模板被后续 RUN 更新时影响当前发送。 */
 
  if (s_motor_stop_template_valid != 0U)
@@ -529,11 +554,24 @@ static void MotorStops(uint8_t requested_run_state,
  {
      memcpy(motor_stopcode, s_motor_stop_fallback, motor_frem_length); /* 上电尚无 RUN 时使用零速兼容帧，不读取未初始化模板。 */
  }
+ s_motor_protection_waiting = 0U; /* 普通停止取消旧启动等待，下一次请求重新计时。 */
+ if (MotorUart_IsProtectionProtocolReady() == 0U)
+ {
+     uint8_t legacy_stop[11]; /* 能力未知时补发旧格式零速，旧驱动也必须可以停止。 */
+     uint16_t legacy_crc; /* 旧帧独立校验，不能复用新帧尾部CRC。 */
+     memcpy(legacy_stop, motor_stopcode, 9U); /* 保留实际通道、模式和电流，只有格式不同。 */
+     legacy_stop[0] = 0xAAU; /* 旧地址只用于停止，绝不回退为旧格式RUN。 */
+     legacy_stop[4] = 0U; legacy_stop[5] = 0U; /* 明确清零速度，旧驱动不能误启动。 */
+     legacy_crc = Common_Crc16(legacy_stop, 9U); /* 旧协议覆盖前9字节。 */
+     legacy_stop[9] = (uint8_t)legacy_crc; legacy_stop[10] = (uint8_t)(legacy_crc >> 8U); /* 旧CRC低字节先发。 */
+     legacy_status = Uart1_SendPacket(legacy_stop, sizeof(legacy_stop)); /* 旧驱动只认此STOP，发送失败也必须触发通信报警。 */
+     Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 防止旧STOP与新探测帧在驱动IDLE接收中粘连。 */
+ }
  motor_stopcode[4] = 0U; /* 发送前再次强制速度高字节为 0，避免任何模板异常产生非零停止帧。 */
  motor_stopcode[5] = 0U; /* 发送前再次强制速度低字节为 0，与高字节共同形成零速命令。 */
  MotorDrive_UpdateCommandCrc(motor_stopcode); /* 最终零速字段确定后重新生成 CRC。 */
  s_motor_stop_tx_pending = 1U; /* 先保存待发送STOP约束，发送失败不能被下一次RUN跳过。 */
- if (Uart1_SendPacket(motor_stopcode, motor_frem_length) == HAL_OK)
+ if ((Uart1_SendPacket(motor_stopcode, motor_frem_length) == HAL_OK) && (legacy_status == HAL_OK))
  {
      s_motor_stop_tx_pending = 0U; /* 只有UART真实发送成功才允许解除补发要求。 */
      MotorDrive_RecordCommandSnapshot(motor_stopcode, WorkMessage.channel_work, 0U, 0U,
@@ -574,7 +612,7 @@ void MotorDrive_StopDisconnectedHandle(uint8_t channel)
         {
             MotorUart_AbortDriverParameterTransaction(); /* 实际RUN尚未被STOP替换时，拔出停机优先于维护等待。 */
         }
-        Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 沿用现有5ms静默间隔，避免紧邻上一RUN的STOP被驱动拼成非11字节包；每次断开只等待一次。 */
+        Delay_ms(MOTOR_DRIVE_ZERO_REARM_GAP_MS); /* 沿用现有5ms静默间隔，避免紧邻上一RUN的STOP被驱动拼成非15字节包；每次断开只等待一次。 */
         MotorStops((WorkMessage.runflag_work != false) ? 1U : 0U, WorkMessage.drivetype_work,
                    s_motor_drive_command_snapshot.source_speed_rpm, 1U); /* 复用同通道同配置的零速模板和真实发送结果检查，只停止手柄电机。 */
     }
@@ -590,13 +628,28 @@ static void MotorStart(uint32_t command_speed_rpm,
                        uint32_t source_speed_rpm)
 {
     /* msg.pro_current_h/l 已在 MOTORRUN() 中完成屏幕B有刷电流校准并拆分，此处直接组帧，避免重复校准。 */
-    uint8_t motor_startcode[motor_frem_length]={0xAA ,msg.control_mode ,msg.frequency ,msg.motor_type\
+    uint8_t motor_startcode[motor_frem_length]={MOTOR_PROTECTION_FRAME_ADDRESS ,msg.control_mode ,msg.frequency ,msg.motor_type\
       ,msg.speed_h ,msg.speed_l ,msg.run_type ,msg.pro_current_h ,msg.pro_current_l ,0x00 ,0x00};
     uint8_t motor_rearmcode[motor_frem_length]; /* 启动前先发同通道、同模式的零速帧，让驱动解除“必须先收到停止命令才能再启动”的限制。 */
     HAL_StatusTypeDef transmit_status; /* 保存安全零速帧和 RUN 帧的 UART1 实际发送结果。 */
     bool zero_rearm_required = ((s_motor_stop_tx_pending != 0U) || /* 前次STOP发送失败必须先补零速，不能沿用旧RUN记录。 */
                                 (s_motor_drive_command_snapshot.valid == 0U) ||
                                 (s_motor_drive_command_snapshot.run_state == 0U)); /* 仅从未发送或停止态进入运行时重装，运行中的速度更新不能插入零速。 */ 
+    MotorDrive_SetProtectionTimes(motor_startcode, &WorkMessage.eeprom_profile); /* 运行命令携带本手柄完整配置，不能依赖另一次配置命令成功。 */
+    if (MotorUart_IsProtectionProtocolReady() == 0U)
+    {
+        uint32_t wait_tick = s_motor_protection_wait_tick; /* MotorStops会撤销等待，先保留本轮连续请求起点。 */
+        uint8_t waiting = s_motor_protection_waiting; /* 周期重试不能重置300ms截止时间。 */
+        MotorStops(1U, drive_type, source_speed_rpm, 1U); /* 只发新旧零速探测，尚不允许发任何非零速度。 */
+        s_motor_protection_wait_tick = (waiting != 0U) ? wait_tick : HAL_GetTick(); /* 首次请求才建立等待起点。 */
+        s_motor_protection_waiting = 1U; /* 让下周期沿用同一次启动的时间预算。 */
+        if ((uint32_t)(HAL_GetTick() - s_motor_protection_wait_tick) >= 300U)
+        {
+            MotorUart_NotifyStopTransmitFailure(); /* 旧驱动或无有效回复时显示驱动通信故障并撤销请求，需升级或恢复连接。 */
+        }
+        return; /* 新协议未确认时绝不回退到旧帧启动。 */
+    }
+    s_motor_protection_waiting = 0U; /* 已确认能力，退出探测；后续RUN仍自带两项经过校验的时间。 */
     MotorDrive_UpdateCommandCrc(motor_startcode); /* 启动帧只在全部业务字段确定后计算 CRC，避免速度或电流更新使校验失效。 */
     MotorDrive_UpdateStopTemplate(motor_startcode); /* 所有手柄 RUN 字段确定后生成同配置 STOP 模板，松脚时只允许速度归零。 */
     if (zero_rearm_required)

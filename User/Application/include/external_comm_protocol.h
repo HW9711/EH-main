@@ -29,6 +29,8 @@ extern "C" {
 /* 下行 0x0D 控制电机状态定时上传：数据区 0 关闭、1 开启；上传周期 50ms，不改变 100ms 心跳和电机控制周期。 */
 #define EXTERNAL_COMM_FUNC_MOTOR_TELEMETRY_SUBSCRIBE 0x0DU
 
+#define EXTERNAL_COMM_FUNC_PROTECTION_QUERY 0x10U /* 双通道保护配置只读查询，不申请控制权、不刷新运行保活。 */
+
 #define EXTERNAL_COMM_FUNC_PRESSURE_ZERO    0x0FU /* 实时页独立只读零点查询；不申请外控、不刷新运行保活、不打开诊断。 */
 
 #define EXTERNAL_COMM_AREA_NONE            0xFFU  /* 无区域码时填充 0xFF。 */

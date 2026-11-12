@@ -7,10 +7,20 @@
 #include "handle_control.h"
 
 #define HANDLE_EEPROM_DIRECTION_BITS 0x07U /* 手柄方向许可bit0正转、bit1反转、bit2往复；0仅表示已确认的旧EEPROM。 */
+#define HANDLE_OVERCURRENT_TIME_DEFAULT_MS 500U /* 参数22/24缺失或非法时统一采用500ms。 */
+#define HANDLE_OVERCURRENT_TIME_MIN_MS 500U /* 参数22/24允许的最短过流判定时间，含边界。 */
+#define HANDLE_OVERCURRENT_TIME_MAX_MS 1500U /* 参数22/24允许的最长过流判定时间，超限回退默认值。 */
+uint16_t Pubinterface_ValidateOvercurrentTime(uint32_t value); /* 按毫秒校验完整数值，禁止先截断再校验。 */
+
 #define HANDLE_EEPROM_PROFILE_INVALID 0x80U /* 新版参数非法或Page4读取失败时锁住全部方向，不能退回旧规则。 */
 
 typedef struct
 {
+    uint16_t overcurrent_time22_ms; /* 本手柄有霍尔往复过流时间，500~1500ms，随A/B切换保留。 */
+    uint16_t overcurrent_time24_ms; /* 本手柄无霍尔过流时间，独立于参数22，RFID换刀不覆盖。 */
+    uint16_t overcurrent_time22_raw; /* Page6[18..19]原值，仅供诊断；不能直接用于运行。 */
+    uint16_t overcurrent_time24_raw; /* Page6[20..21]原值，仅供诊断；不能直接用于运行。 */
+    uint8_t overcurrent_time_fallback; /* bit0参数22越界、bit1参数24越界、bit2页读取失败；不放宽认证门禁。 */
     uint16_t manual_grind_current_low; /* PXBA/PXBB手动磨头设定转速<30000rpm的保护电流，单位0.01A。 */
     uint16_t manual_grind_current_high; /* PXBA/PXBB手动磨头设定转速>=30000rpm的保护电流，单位0.01A。 */
     uint16_t manual_planer_current; /* PXBA/PXBB手动刨刀保护电流，单位0.01A，不随速度和方向分档。 */

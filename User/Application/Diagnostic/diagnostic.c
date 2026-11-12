@@ -261,6 +261,7 @@ void Diagnostic_StateObject(uint16_t kind, uint8_t channel, const void *data, ui
         if (bytes > sizeof(words)) bytes = sizeof(words); /* 一条日志最多保存 9 个整数，即 36 字节，多余数据留给下一条。 */
         memcpy(words, (const uint8_t *)data + offset, bytes); /* 从调用方传入的数据复制本条所需字节，不修改调用方的数组。 */
         uint16_t ignore = (kind == 20U) ? 128U : ((kind == 70U) ? 49U : 0U); /* 脚踏静默计数、压力收帧时刻/缓存字节/序号只随每秒快照保存，真实状态变化仍立即记录。 */
+        if (kind == DIAG_STATE_GZYT) ignore = 30U; /* GZYT候选/旧序号和两项时间不单独刷日志，Hall、运行状态及错误变化立即记录。 */
         Diagnostic_State(kind++, channel, words, (uint8_t)(bytes / 4U), ignore); /* 降低纯计数变化的刷屏量，不改业务数据。 */
         offset = (uint16_t)(offset + bytes); /* 跳过本次已复制的字节，继续处理剩余字段。 */
     }
@@ -486,6 +487,23 @@ static void Diagnostic_CaptureMotorFeedback(void)
     value[5] = feedback.valid; /* 1 表示曾收到 CRC 正确的反馈；是否已超时还要看下一项。 */
     value[6] = feedback.valid && ((uint32_t)(HAL_GetTick() - feedback.feedback_tick_ms) <= MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS); /* 曾有有效反馈，且距该反馈不超过 MOTOR_UART_FEEDBACK_MOTION_TIMEOUT_MS 时记 1，否则记 0。 */
     Diagnostic_State(82U, 0U, value, 7U, 3U); /* 组 82 不指定 A/B，因为回包没有通道号；掩码 3 只忽略时间和序号变化，其它字段变化立即记录。 */
+    {
+        uint8_t channel; /* 分别记录逻辑A/B，不能把另一物理通道反馈当作本柄采用值。 */
+        for (channel = CHANNEL_A; channel <= CHANNEL_B; ++channel)
+        {
+            const volatile HandleEepromProfile_t *profile = (channel == CHANNEL_A) ? &MemoryMsgA.eeprom_profile : &MemoryMsgB.eeprom_profile; /* 本体配置已在换刀时保留。 */
+            uint8_t physical = BoardProfile_MapHandlePhysicalChannel(channel); /* 反馈通道按实际硬件交换配置匹配。 */
+            uint32_t times[9]; /* 组127依次保存原值、主控值、回退原因、驱动值与有效性。 */
+            times[0] = profile->overcurrent_time22_raw; times[1] = profile->overcurrent_time24_raw; /* EEPROM真实原值，读失败为0。 */
+            times[2] = Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time22_ms); times[3] = Pubinterface_ValidateOvercurrentTime(profile->overcurrent_time24_ms); /* 最终发送采用值。 */
+            times[4] = profile->overcurrent_time_fallback; /* bit0/1为越界，bit2为读取失败。 */
+            times[5] = feedback.overcurrent_time22_ms; times[6] = feedback.overcurrent_time24_ms; /* 驱动缓存的真实回复，必须结合有效性读取。 */
+            times[7] = (uint32_t)((feedback.protection_protocol_valid != 0U) && (value[6] != 0U) &&
+                ((feedback.motor_kind == physical) || (feedback.motor_kind == (physical + 2U)))); /* 只有新鲜且同通道的新反馈才代表本柄实际值。 */
+            times[8] = feedback.motor_kind; /* 保留实际物理通道，便于排查A/B交换。 */
+            Diagnostic_State(127U, channel, times, 9U, 0U); /* 时间或回退原因变化立即记录，其余按每秒刷新。 */
+        }
+    }
 }
 
 /*

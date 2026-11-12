@@ -83,6 +83,7 @@ typedef struct
     volatile uint16_t write_index;               /* 中断写入位置，写完字节和时刻后才推进；到缓存末尾回到 0。 */
     volatile uint16_t read_index;                /* 任务读取位置，取出字节和时刻后才推进；配置切换时与 write_index 一起清零。 */
     volatile bool enabled;                      /* 当前选中通道是在线 GZYT 时置 true，离线或切走时清零并关闭接收中断。 */
+    volatile uint32_t rx_fault_detail;          /* 中断保存首个SR错误位；bit16表示环形缓存满，任务清缓存时复位，不在中断写诊断日志。 */
     volatile bool rx_fault;                     /* 串口错误或缓存满时由中断置 true；任务停测试、丢旧字节后清零。 */
     uint8_t frame[GZYT_TEST_FRAME_SIZE];          /* 逐字节组装的候选帧，完整通过校验后才读取触发位。 */
     uint8_t frame_size;                          /* 已组装字节数，完整处理或接收异常后清零；帧头错位时保留后 11 字节继续查找。 */
@@ -126,6 +127,7 @@ bool HandleKey_UartIrqHandler(uint8_t channel)
     byte = (uint8_t)uart->Instance->DR; /* 读取 DR，清 RXNE 及已读 SR 对应的错误标志。 */
     if ((status & (USART_SR_ORE | USART_SR_NE | USART_SR_FE | USART_SR_PE)) != 0U)
     {
+        if (state->rx_fault == false) state->rx_fault_detail = status; /* 锁存首个UART错误，后续错误不覆盖起因。 */
         state->rx_fault = true; /* 丢字节、噪声或帧错误后停止使用旧按钮记录，任务下一轮清运行请求。 */
         return true; /* 错误字节不进入候选帧，防止被当成新的有效按下。 */
     }
@@ -133,6 +135,7 @@ bool HandleKey_UartIrqHandler(uint8_t channel)
     next = (uint16_t)((state->write_index + 1U) % GZYT_TEST_RX_SIZE); /* 缓存位置回绕，不覆盖尚未读取的字节。 */
     if (next == state->read_index)
     {
+        state->rx_fault_detail = 0x10000U; /* 单独标识缓存满，区别于UART硬件错误。 */
         state->rx_fault = true; /* 缓存满说明数据完整性已丢失，本次测试必须重新松手。 */
         return true; /* 不覆盖旧数据，避免拼出来源不完整的按钮帧。 */
     }
@@ -619,12 +622,39 @@ static void HandleKey_ScanRunKeys(void)
 
 #if (GZYT_DIGITAL_TEST_ENABLE == 1U)
 /*
+ * 函数功能：保存GZYT候选帧和撤销前现场，区分Hall变化、通信失效与其它模块撤销请求。
+ * 输入参数：state为本通道状态，channel为逻辑通道，tick为候选帧到达时刻，now为任务处理时刻。
+ * 返回参数：无；只读业务状态，诊断关闭后不生成日志。
+ */
+static void HandleGzytTest_Diagnostic(const GzytTestState_t *state, uint8_t channel, uint32_t tick, uint32_t now)
+{
+#if (MAINCTRL_DIAG_ENABLE == 1U)
+    uint32_t value[9]; /* 按诊断125组定义保存九项现场，禁止直接上传结构体填充字节。 */
+    value[0] = (uint32_t)state->frame[6] | ((uint32_t)state->frame[7] << 8U) | ((uint32_t)state->frame[8] << 16U) | ((uint32_t)state->frame[9] << 24U); /* 原始Hall、稳定触发、就绪与复位原因原样保存；CRC错误时这些值不可信。 */
+    value[1] = (uint32_t)state->frame[4] | ((uint32_t)state->frame[5] << 8U); /* 候选序号用于对照跳号和模块重启。 */
+    value[2] = state->sequence; /* 保存尚未被候选帧覆盖的有效序号。 */
+    value[3] = tick - state->last_frame_tick; /* 保留真实帧间隔；have_sequence为零时不能解释为有效间隔。 */
+    value[4] = now - tick; /* 区分线上断帧和任务延迟导致的积压。 */
+    value[5] = (uint32_t)state->running | ((uint32_t)state->have_sequence << 1U) | ((uint32_t)state->enabled << 2U) | ((uint32_t)state->trigger << 8U) | ((uint32_t)state->run_trigger << 16U) | ((uint32_t)state->release_count << 24U); /* 保存撤销前请求、按钮及松手确认进度。 */
+    value[6] = state->rx_fault_detail; /* 首个UART错误SR或缓存满标志，清缓存前记录。 */
+    value[7] = (uint32_t)WorkMessage.runflag_work | ((uint32_t)WorkMessage.alarm_flag << 1U) | ((uint32_t)WorkMessage.drivetype_work << 8U) | ((uint32_t)WorkMessage.channel_work << 16U); /* 记录主控是否已被其它路径停机或切换控制方式。 */
+    value[8] = (uint32_t)ControlSignalMessage.handle_control_flag | ((uint32_t)ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) << 1U); /* 区分手控请求撤销和控制权丢失。 */
+    DIAG_STATE(DIAG_STATE_GZYT, channel, value, sizeof(value)); /* 状态变化立即记录，单纯序号和时间变化每秒补记。 */
+#else
+    (void)state; (void)channel; (void)tick; (void)now; /* 关闭诊断时不读取业务状态、不影响原任务行为。 */
+#endif
+}
+
+/*
  * 函数功能：结束本通道数字按钮发起的测试请求，并清除旧帧和松手记录。
- * 输入参数：state 为通道测试记录；channel 为 CHANNEL_A 或 CHANNEL_B；由持有业务互斥锁的任务调用。
+ * 输入参数：state为通道测试记录；channel为A/B；reason为诊断124组撤销原因；由持有业务互斥锁的任务调用。
  * 返回参数：无；其它控制方式正在控制或当前已换通道时，不修改其电机和泵请求。
  */
-static void HandleGzytTest_Revoke(GzytTestState_t *state, uint8_t channel)
+static void HandleGzytTest_Revoke(GzytTestState_t *state, uint8_t channel, uint32_t reason)
 {
+    HandleGzytTest_Diagnostic(state, channel, state->last_frame_tick, HAL_GetTick()); /* 清运行和缓存前保存现场，结合126组判断具体坏帧条件。 */
+    DIAG_EVENT(DIAG_EVENT_GZYT_REVOKE, channel, reason, state->running, HAL_GetTick() - state->last_frame_tick); /* 记录撤销原因；running为零表示启动被拒，不能当作运行中停机。 */
+    (void)reason; /* 诊断关闭时原因参数不参与业务判断。 */
     Pubinterface_CancelInjectionPumpStart(CONTROL_OWNER_HANDLE, channel); /* 数字按键异常或超时只能撤销本通道提示，不能把坏帧当作首次确认。 */
     if ((state->running == true) && (WorkMessage.channel_work == channel) &&
         (ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) == true))
@@ -643,6 +673,7 @@ static void HandleGzytTest_Revoke(GzytTestState_t *state, uint8_t channel)
     state->frame_size = 0U; /* 丢弃正在组装的旧半帧，不能与后续字节拼接使用。 */
     taskENTER_CRITICAL(); /* 暂停接收中断修改位置，避免清缓存时只更新一半。 */
     state->read_index = state->write_index; /* 丢弃已积压字节，新的松手确认必须来自后续接收。 */
+    state->rx_fault_detail = 0U; /* 现场已保存，与接收故障一同清除，避免下次错误沿用旧原因。 */
     state->rx_fault = false; /* 本次异常已经处理，接收中断可以继续保存新字节。 */
     taskEXIT_CRITICAL(); /* 接收位置更新完成，允许串口中断继续执行。 */
 }
@@ -660,7 +691,7 @@ static void HandleGzytTest_Configure(GzytTestState_t *state, uint8_t channel,
     __HAL_UART_DISABLE_IT(uart, UART_IT_RXNE); /* 先暂停该串口字节接收中断，避免清记录途中又写入字节。 */
     __HAL_UART_DISABLE_IT(uart, UART_IT_ERR); /* 配置期间不让旧串口错误再次进入测试接收。 */
     state->enabled = false; /* 中断若已经排队，看到此值后不再读写测试缓存。 */
-    HandleGzytTest_Revoke(state, channel); /* 原测试停止并重新要求松手；不发异步启动/停止按键消息。 */
+    HandleGzytTest_Revoke(state, channel, 1U); /* 原测试停止并重新要求松手；不发异步启动/停止按键消息。 */
     state->read_index = 0U; /* 接收已关闭，可以把读取位置恢复到缓存开头。 */
     state->write_index = 0U; /* 写入位置与读取位置一起复位，缓存从空状态开始。 */
     state->identity_generation = generation; /* 记录本次使用的手柄，下一次插拔后重新配置。 */
@@ -683,26 +714,32 @@ static bool HandleGzytTest_AcceptFrame(GzytTestState_t *state, uint32_t received
     uint16_t crc = (uint16_t)state->frame[10] | ((uint16_t)state->frame[11] << 8U); /* CRC 低字节先发，与数字模块格式一致。 */
     uint16_t sequence = (uint16_t)state->frame[4] | ((uint16_t)state->frame[5] << 8U); /* 读取 16 位小端递增序号。 */
     uint8_t trigger = state->frame[7] & GZYT_TEST_BUTTON_MASK; /* 只解释 HAL4/HAL5，其它三个 Hall 不控制此次测试。 */
-    if ((Common_Crc16(&state->frame[2], 8U) != crc) || (state->frame[8] != 0x01U) ||
-        ((state->frame[6] & 0xE0U) != 0U) || ((state->frame[7] & 0xE0U) != 0U) ||
-        ((state->frame[9] & 0xC0U) != 0U) || ((uint32_t)(now - received_tick) >= GZYT_TEST_TIMEOUT_MS))
+    uint32_t reject = 0U; /* 位图同时保留本帧全部异常条件；零表示沿用原有效帧处理。 */
+    HandleGzytTest_Diagnostic(state, channel, received_tick, now); /* 在更新序号与触发位前保存候选帧，便于比较停机前后的Hall状态。 */
+    if ((Common_Crc16(&state->frame[2], 8U) != crc)) reject |= (1U << 0U); /* 保存CRC错误，异常帧仍按原规则拒绝。 */
+    if ((state->frame[8] != 0x01U)) reject |= (1U << 1U); /* 保存模块未就绪，异常帧仍按原规则拒绝。 */
+    if (((state->frame[6] & 0xE0U) != 0U)) reject |= (1U << 2U); /* 保存原始Hall保留位错误，异常帧仍按原规则拒绝。 */
+    if (((state->frame[7] & 0xE0U) != 0U)) reject |= (1U << 3U); /* 保存触发保留位错误，异常帧仍按原规则拒绝。 */
+    if (((state->frame[9] & 0xC0U) != 0U)) reject |= (1U << 4U); /* 保存复位保留位错误，异常帧仍按原规则拒绝。 */
+    if (((uint32_t)(now - received_tick) >= GZYT_TEST_TIMEOUT_MS)) reject |= (1U << 5U); /* 保存候选帧积压超时，异常帧仍按原规则拒绝。 */
+    if ((reject == 0U) && (state->have_sequence == true)) /* 只有基本校验通过才解释序号和复位原因，保持原检查顺序。 */
     {
-        return false; /* CRC、就绪状态、保留位或帧时效不合格，不能把异常时清零的触发位当成有效松手。 */
+        if (sequence == state->sequence) return true; /* 重复帧仍不续时、不更新按钮，由原超时分支停机。 */
+        if ((uint16_t)(sequence - state->sequence) != 1U) reject |= (1U << 6U); /* 标识丢帧、倒序或序号重启。 */
+        if (state->frame[9] != state->reset_flags) reject |= (1U << 7U); /* 标识模块复位原因改变。 */
+        if ((uint32_t)(received_tick - state->last_frame_tick) >= GZYT_TEST_TIMEOUT_MS) reject |= (1U << 8U); /* 标识有效帧到达间隔超限。 */
     }
-    if (state->have_sequence == true)
+    if (reject == 0U) /* 仅对通信校验合格的帧判断按钮，避免把坏帧误判成真实Hall变化。 */
     {
-        if (sequence == state->sequence) return true; /* 重复帧不改变按钮、不累计松手，也不刷新通信有效时间。 */
-        if (((uint16_t)(sequence - state->sequence) != 1U) || (state->frame[9] != state->reset_flags) ||
-            ((uint32_t)(received_tick - state->last_frame_tick) >= GZYT_TEST_TIMEOUT_MS))
-        {
-            return false; /* 跳号、倒序、复位原因改变或帧间断超过 50ms 后，先停测试再重新确认松手。 */
-        }
+        if (trigger == GZYT_TEST_BUTTON_MASK) reject |= (1U << 9U); /* 双键同时触发仍立即撤销请求。 */
+        if ((state->running == true) && (trigger != state->run_trigger)) reject |= (1U << 10U); /* 保存运行中松开或换键这一直接停机原因。 */
+        if ((state->trigger != 0U) && (trigger != 0U) && (trigger != state->trigger)) reject |= (1U << 11U); /* 标识未松开就换向，不允许直接反转。 */
     }
-    if ((trigger == GZYT_TEST_BUTTON_MASK) ||
-        ((state->running == true) && (trigger != state->run_trigger)) ||
-        ((state->trigger != 0U) && (trigger != 0U) && (trigger != state->trigger)))
+    if (reject != 0U) /* 任一原有拒绝条件成立，先保存证据再交给调用方撤销。 */
     {
-        return false; /* 双键、运行中松开或未松开就换键均清运行请求，不允许直接由正转切到反转。 */
+        DIAG_EVENT(DIAG_EVENT_GZYT_REJECT, channel, reject, sequence, state->sequence); /* 记录完整原因位图，区分通信故障与按钮变化。 */
+        DIAG_WIRE((channel == CHANNEL_A) ? 10U : 8U, 0U, (uint16_t)reject, state->frame, GZYT_TEST_FRAME_SIZE); /* 仅异常候选帧保存12字节原文，正常递增帧不刷满缓冲。 */
+        return false; /* 保持原停机与重新松手规则。 */
     }
     if (trigger == 0U)
     {
@@ -752,7 +789,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     if ((state->rx_fault == true) ||
         ((state->frame_size != 0U) && ((uint32_t)(now - state->frame_start_tick) >= GZYT_TEST_TIMEOUT_MS)))
     {
-        HandleGzytTest_Revoke(state, channel); /* 串口错误、缓存满或旧半帧超时后先清请求，不允许后面的积压字节立即重启。 */
+        HandleGzytTest_Revoke(state, channel, 2U); /* 串口错误、缓存满或旧半帧超时后先清请求，不允许后面的积压字节立即重启。 */
         return; /* 下一轮从新字节重新确认两键松开。 */
     }
     end = state->write_index; /* 固定本轮结束位置，本轮后到达的字节留给下一次任务。 */
@@ -764,7 +801,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
         state->read_index = (uint16_t)((state->read_index + 1U) % GZYT_TEST_RX_SIZE); /* 字节和时刻复制完成后推进读取位置。 */
         if ((uint32_t)(now - tick) >= GZYT_TEST_TIMEOUT_MS)
         {
-            HandleGzytTest_Revoke(state, channel); /* 即使随后还有新字节，也不能让积压旧帧维持运行或累计松手。 */
+            HandleGzytTest_Revoke(state, channel, 3U); /* 即使随后还有新字节，也不能让积压旧帧维持运行或累计松手。 */
             return; /* 丢掉本轮剩余积压数据，等待新的正常松手帧。 */
         }
         if (state->frame_size == 0U) state->frame_start_tick = tick; /* 新候选帧开始时记下时间，后续拆帧不得跨越超时限制。 */
@@ -780,14 +817,14 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
         state->frame_size = 0U; /* 已取得完整候选帧，校验成功后可继续处理同一缓存中的下一帧。 */
         if (HandleGzytTest_AcceptFrame(state, tick, now, channel) == false) /* 传入实际通道，数字按钮松手只确认自己的首次缺泵提示。 */
         {
-            HandleGzytTest_Revoke(state, channel); /* 坏帧、松开或换键均先清请求，后面的积压按下不能在本轮再次启动。 */
+            HandleGzytTest_Revoke(state, channel, 4U); /* 坏帧、松开或换键均先清请求，后面的积压按下不能在本轮再次启动。 */
             return; /* 等新的三帧松手及下一次按下，避免同轮停止后又发送非零请求。 */
         }
     }
     if ((state->rx_fault == true) ||
         ((state->have_sequence == true) && ((uint32_t)(now - state->last_frame_tick) >= GZYT_TEST_TIMEOUT_MS)))
     {
-        HandleGzytTest_Revoke(state, channel); /* 处理期间接收出错或最后新帧已超时，均清本次测试请求。 */
+        HandleGzytTest_Revoke(state, channel, 5U); /* 处理期间接收出错或最后新帧已超时，均清本次测试请求。 */
         return; /* 重复帧和坏版本帧不能延长运行许可。 */
     }
     if (state->have_sequence == false) return; /* 首帧尚未收全时保留半帧；没有正常帧不能累计松手或启动。 */
@@ -797,7 +834,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
             (WorkMessage.drivetype_work != HANDLEWORK) || (ControlSignalMessage.handle_control_flag == false) ||
             (ControlArbitration_IsOwner(CONTROL_OWNER_HANDLE) == false))
         {
-            HandleGzytTest_Revoke(state, channel); /* 报警或其它处理已经结束测试时清旧按住记录，条件恢复不能自动重启。 */
+            HandleGzytTest_Revoke(state, channel, 6U); /* 报警或其它处理已经结束测试时清旧按住记录，条件恢复不能自动重启。 */
         }
         return; /* 正常按住时保留原请求，不反复写方向、转速和启动消息。 */
     }
@@ -810,7 +847,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
         (WorkMessage.alarm_flag == true) || (ControlArbitration_IsBusyByOther(CONTROL_OWNER_HANDLE) == true) ||
         (MotorUart_IsRecentFeedbackMoving() == true) || (s_handle_run_key_owner_channel != CHANNEL_NONE))
     {
-        HandleGzytTest_Revoke(state, channel); /* 未选手控、已有请求、报警、其它来源占用、近期仍转动或旧 GPIO 按键尚未退出时拒绝本次按下；必须再松开后重试。 */
+        HandleGzytTest_Revoke(state, channel, 7U); /* 未选手控、已有请求、报警、其它来源占用、近期仍转动或旧 GPIO 按键尚未退出时拒绝本次按下；必须再松开后重试。 */
         return; /* 持续按住不能在条件后来恢复时自行启动。 */
     }
     direction = (state->trigger == GZYT_TEST_FORWARD_MASK) ? ZZDIR : FZDIR; /* HAL4 使用主控正转语义，HAL5 使用反转语义。 */
@@ -818,7 +855,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     if ((WorkMessage.dir_work != direction) || (WorkMessage.speed_set_work == 0U) ||
         (ControlArbitration_TryEnter(CONTROL_OWNER_HANDLE) == false))
     {
-        HandleGzytTest_Revoke(state, channel); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */
+        HandleGzytTest_Revoke(state, channel, 8U); /* 方向被限制、该方向参数缺失或不能取得控制时拒绝启动，不套用其它手柄的测试转速。 */
         return; /* 下次需重新确认两键松开并按下，不能反复尝试旧请求。 */
     }
     if (Pubinterface_CheckInjectionPumpForRun(CONTROL_OWNER_HANDLE) == false)
@@ -834,6 +871,7 @@ static void HandleGzytTest_PollChannel(uint8_t channel)
     Pubinterface_SetHandleInjectionPumpRun(true); /* 与正常手控相同，冷却泵继续执行原定位、压力和联动检查。 */
     state->run_trigger = state->trigger; /* 保存本次实际使用的按钮，随后换键必须先清请求并重新松手。 */
     state->running = true; /* 记录本模块已经写入运行请求；不代表驱动已回复或电机已实际转动。 */
+    HandleGzytTest_Diagnostic(state, channel, state->last_frame_tick, HAL_GetTick()); /* 启动后补一份请求现场，与后续撤销前记录形成闭环。 */
     /* 本测试直接更新请求，不再发送 HANDLEKey_motor_start 队列消息，避免超时停机后旧启动消息再次置位。 */
 }
 #endif
