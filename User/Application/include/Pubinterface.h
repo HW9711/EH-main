@@ -460,7 +460,7 @@ void Pubinterface_SendHandleDisplay(uint8_t channel, uint8_t handle_model, bool 
 void Pubinterface_RefreshOnlineHandleDisplay(void); /* 按当前在线状态刷新 A/B 手柄图标，已拔出的通道显示为未连接。 */
 bool Pubinterface_IsSplitToolSpecDisplayModel(uint8_t hand_model); /* 判断是否为 PXBA/PXBB 分体识别手柄。 */
 bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type); /* 判断此刀具是否按刨刀方式控制。 */
-bool Pubinterface_IsDirectionAllowed(uint8_t direction); /* 检查EEPROM与RFID共同允许的显示方向，0/1/2为正/反/往复；异常扩展全部禁止。 */
+bool Pubinterface_IsDirectionAllowed(uint8_t direction); /* 检查手动刀具限制、EEPROM与RFID共同允许的显示方向，0/1/2为正/反/往复；异常配置全部禁止。 */
 bool Pubinterface_IsDirLocked(uint8_t hand_model, uint8_t raw_tool_type, uint8_t eeprom_mask); /* 新EEPROM按许可位判断是否单向锁定；旧版保持型号规则，RFID机械刀具限制仍生效。 */
 void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_mask, uint8_t *set_direction); /* 读取A/B各自方向集合和设置值；集合bit0/1/2为正/反/往复，设置0/1/2，离线0/FF，不代表运行中允许换向。 */
 bool Pubinterface_IsOpenPositionEnabledTool(uint8_t hand_model, uint8_t tool_type); /* 判断当前组合是否允许开口定位。 */

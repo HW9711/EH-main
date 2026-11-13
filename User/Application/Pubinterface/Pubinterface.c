@@ -265,9 +265,31 @@ bool Pubinterface_IsPlanerCapabilityTool(uint8_t tool_type)
 }
 
 /*
- * 函数功能：检查当前手柄EEPROM与RFID刀具共同允许的方向，屏幕、换向及驱动发送共用。
+ * 函数功能：生成分体式手动选刀的方向限制，供当前方向门禁和A/B方向上报共用。
+ * 输入参数：hand_model为基座型号；tool_type为手动磨头或刨刀；auto_identify非0表示自动识别。
+ * 返回参数：bit0正转、bit1反转、bit2往复；非分体手动返回全部三位，不改变原自动及普通手柄规则。
+ */
+static uint8_t Pubinterface_GetManualDirectionMask(uint8_t hand_model, uint8_t tool_type, uint8_t auto_identify)
+{
+    if (((hand_model != PXBA_ONLINES) && (hand_model != PXBB_ONLINES)) || (auto_identify != 0U))
+    {
+        return HANDLE_EEPROM_DIRECTION_BITS; /* 只收紧分体手动模式，自动识别继续由EEPROM和RFID原规则决定。 */
+    }
+    if (tool_type == GRINDH)
+    {
+        return (uint8_t)((1U << ZZDIR) | (1U << FZDIR)); /* 手动磨头仅旋转，屏幕、按键、外控及驱动均不得进入往复。 */
+    }
+    if (tool_type == PLANER)
+    {
+        return (uint8_t)(1U << OSCDIR); /* 手动刨刀仅往复，不能通过正反转入口绕过刀具模式。 */
+    }
+    return 0U; /* 手动模式尚未选定有效刀具时不开放方向，避免默认三方向误放行。 */
+}
+
+/*
+ * 函数功能：检查手动刀具限制、EEPROM与RFID共同允许的方向，屏幕、换向及驱动发送共用。
  * 输入参数：direction为0正转、1反转、2往复。
- * 返回参数：true表示两层许可均通过；非法扩展或任一层禁止时返回false。
+ * 返回参数：true表示手动刀具、EEPROM及RFID许可均通过；任一层禁止时返回false。
  */
 bool Pubinterface_IsDirectionAllowed(uint8_t direction)
 {
@@ -282,6 +304,10 @@ bool Pubinterface_IsDirectionAllowed(uint8_t direction)
          ((eeprom_mask & (1U << direction)) == 0U)))
     {
         return false; /* 新EEPROM只开放明确允许的方向，异常标记禁止全部运行。 */
+    }
+    if ((Pubinterface_GetManualDirectionMask(WorkMessage.hand_model, WorkMessage.tool_type, WorkMessage.auto_identify) & (1U << direction)) == 0U)
+    {
+        return false; /* 分体手动磨头只放行正反转、刨刀只放行往复；与EEPROM取交集，配置冲突时禁止启动。 */
     }
     if (WorkMessage.rfid_direction_mask == 0U)
     {
@@ -383,6 +409,7 @@ void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_ma
     uint8_t raw_tool_type; /* 本通道原始刀具型号，机械往复和固定方向刀具须保留专用限制。 */
     uint8_t eeprom_mask; /* 本体方向许可，0表示旧版，异常标记必须禁止所有方向。 */
     uint8_t rfid_mask; /* 当前刀具方向许可，0表示没有独立RFID限制。 */
+    uint8_t auto_identify; /* 保存本通道自动/手动状态，未选中通道也要按自己的磨头或刨刀限制上报。 */
     uint16_t direction; /* 保留原16位设置值，先验证再转8位，避免异常值截断成合法方向。 */
 
     if ((direction_mask == NULL) || (set_direction == NULL))
@@ -411,6 +438,7 @@ void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_ma
         eeprom_mask = WorkMessage.eeprom_profile.direction_mask; /* 当前手柄EEPROM许可不能被RFID扩宽。 */
         rfid_mask = WorkMessage.rfid_direction_mask; /* 只使用当前已经装载的刀具许可。 */
         direction = WorkMessage.dir_work; /* 上报用户设置方向，驱动端物理方向补偿不影响此值。 */
+        auto_identify = WorkMessage.auto_identify; /* 当前通道使用实时模式，手动选择后立即收紧方向上报。 */
     }
     else
     {
@@ -420,6 +448,7 @@ void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_ma
         eeprom_mask = memory->eeprom_profile.direction_mask; /* 读取本通道本体许可，不能借用另一手柄配置。 */
         rfid_mask = memory->rfid_direction_mask; /* 读取本通道刀具许可，切换通道前即可显示。 */
         direction = memory->dir; /* 非当前通道上传切回后恢复的设置方向。 */
+        auto_identify = memory->auto_identify; /* 未选中通道从自身记忆恢复模式，防止A/B方向能力串用。 */
     }
     if (hand_model == 0U)
     {
@@ -438,6 +467,7 @@ void Pubinterface_GetChannelDirectionInfo(uint8_t channel, uint8_t *direction_ma
     {
         *direction_mask &= rfid_mask; /* 本体与标签取交集，标签不能增加手柄未允许的方向。 */
     }
+    *direction_mask &= Pubinterface_GetManualDirectionMask(hand_model, tool_type, auto_identify); /* 上报集合与运行门禁使用同一手动刀具限制，自动模式返回全位而不改变原结果。 */
     if (Pubinterface_IsDirLocked(hand_model, raw_tool_type, eeprom_mask))
     {
         *direction_mask &= (direction <= OSCDIR) ? (uint8_t)(1U << direction) : 0U; /* 固定方向只保留当前设置；机械往复保留显示语义，不当作电气往复。 */

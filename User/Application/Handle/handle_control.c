@@ -249,12 +249,13 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	recognize->raw_tool_type = 0U; /* 手动模式没有 RFID 原始刀具型号，清掉旧标签码。 */
 	recognize->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
 	recognize->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
-	if ((recognize->eeprom_profile.direction_mask != 0U) &&
-        ((recognize->eeprom_profile.direction_mask & (1U << direction)) == 0U))
+	if ((tool_type == GRINDH) && (recognize->eeprom_profile.direction_mask != 0U) &&
+        ((recognize->eeprom_profile.direction_mask & (1U << ZZDIR)) == 0U) &&
+        ((recognize->eeprom_profile.direction_mask & (1U << FZDIR)) != 0U))
     {
-        direction = recognize->run_direction; /* 手动默认方向被EEPROM禁止时改用同页合法默认方向；异常扩展仍由运行门禁阻止。 */
+        direction = FZDIR; /* 磨头默认正转被EEPROM禁止但反转允许时选择反转，绝不回退到往复。 */
     }
-	recognize->run_direction = direction; /* 保留磨头正转、刨刀往复习惯，但新版必须属于本手柄许可集合。 */
+	recognize->run_direction = direction; /* 刨刀保持往复；EEPROM不允许刀具所需方向时由统一门禁禁止运行，不改成另一刀具模式。 */
 	zz_speed = Handle_ClampSpeed(recognize,
 									 ZZDIR,
 									 Handle_GetDirectionDefaultSpeed(recognize, ZZDIR),
