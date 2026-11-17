@@ -658,7 +658,7 @@ void UITOOLDP(bool enable_flag,bool tool_type)
 }
 /*
  * 函数功能：刷新规格正文及显示长度；发送失败时保存最新请求，供显示任务稍后重试。
- * 输入参数：enable_flag 为规格区显隐；tool_length/tool_angle 为长度和角度显示值；tool_Diameter 为 16 位直径，raw_display_flag=0 时单位为 0.1mm，=1 时为 EPC 原始整数。
+ * 输入参数：enable_flag 为规格区显隐；tool_length/tool_angle 为长度和角度显示值；tool_Diameter 为 16 位直径，raw_display_flag=0 时单位为 0.1mm，=1 时为旧 USER 整数。
  * 返回参数：无；失败由本模块记录并重试，后到的规格或隐藏请求会替换旧请求。
  */
 void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint16_t tool_Diameter,uint8_t tool_angle,uint8_t raw_display_flag)
@@ -677,11 +677,11 @@ void UITOOLSPECDP(bool enable_flag,uint16_t tool_length,uint16_t tool_Diameter,u
 	{
 		if(raw_display_flag != 0U)
 		{
-			sent_ok = LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, (uint8_t)tool_Diameter, tool_angle); /* EPC 直径保持 0~255 的整数含义，同时写入 mm 和完整文本尾部。 */
+			sent_ok = LCD_IntegratedCutterRawData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, (uint8_t)tool_Diameter, tool_angle); /* 旧 USER 直径保持原 0~255 的整数显示，同时写入 mm 和完整文本尾部。 */
 		}
 		else
 		{
-			sent_ok = LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); /* EEPROM 直径保留完整 16 位并按 0.1mm 显示，例如 45 显示为 4.5mm。 */
+			sent_ok = LCD_IntegratedCutterData_Update(UIDP_LCD_VP_TOOL_SPEC_TEXT, tool_length, tool_Diameter, tool_angle); /* EPC 与 EEPROM 按 0.1mm 显示，41 显示为 4.1mm；EEPROM 继续保留完整16位。 */
 		}
 		if(sent_ok != 0U)
 		{

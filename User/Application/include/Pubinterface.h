@@ -27,6 +27,7 @@ typedef struct
     uint32_t px_osc_speed_min; /* PXBA/PXBB本体Page3 PX01往复下限，单位rpm；RFID换刀必须保留，0表示配置无效。 */
     uint32_t px_osc_speed_max; /* PXBA/PXBB本体Page3 PX01往复上限，单位rpm；标签只能缩小此范围，不能扩大。 */
     uint8_t direction_mask; /* Page4的01/10/11档位转换后的运行态许可位，非EEPROM原字节；0旧版，0x80异常禁止运行。 */
+    uint16_t default_injection_flow; /* 本体Page4默认注水量，单位mL/min；分体式RFID换刀保留备用，公共接头不装载此字段。 */
 } HandleEepromProfile_t; /* 参数属于手柄本体，RFID刷新只改刀具参数，不能清除此配置。 */
 
 /* 手柄型号固定编号：识别、控制和屏幕显示共用，不能当作可调参数修改。 */
@@ -48,6 +49,7 @@ typedef struct
 #define KSZ_II_ONLINES       16U//克氏针二型手柄编号
 #define KXZ_I_ONLINES        17U//空心钻一型手柄编号
 #define KXZ_II_ONLINES       18U//空心钻二型手柄编号
+#define HANDLE_RFID_BASE_DEFAULT_FLOW 20U /* RFID基座初始注水量，单位mL/min；公共接头无有效EPC流量时沿用此值，不读EEPROM流量。 */
 #define COMMON_SOCKET_ONLINES 19U//公共接头编号；接头没有实体按键，运行前还要识别 RFID 刀具
 #define EMBD_ONLINES         20U//EMBD 6 万增速手柄编号，用于 EEPROM 识别和屏幕显示
 #define EMBC_ONLINES         21U//EMBC 普通电动手柄编号，用于 EEPROM 识别和屏幕显示
@@ -327,6 +329,15 @@ typedef struct {
 ChannelMemoryMessage_t;
 extern ChannelMemoryMessage_t MemoryMsgA;//A 通道保存的识别结果和用户设置
 extern ChannelMemoryMessage_t MemoryMsgB;//B 通道保存的识别结果和用户设置
+
+typedef struct
+{
+    uint8_t source; /* 1为EPC、2为USER，两个来源不能按相同字节误匹配。 */
+    uint8_t length; /* 已校验的原始数据长度，EPC为12、USER为16。 */
+    uint8_t payload[16]; /* 完整业务内容，相同内容共用设置，不按型号或直径简化。 */
+    uint8_t tag_epc[12]; /* USER附带EPC参与比较；EPC来源置零以免重复保存同一内容。 */
+} RfidSettingsKey_t; /* 与识别参数一同发布的刀具身份，不用于放宽启动许可。 */
+
 typedef struct 
 {
   volatile bool      digital_enable;//历史预留的数字使能字段，当前业务未读取
@@ -377,6 +388,7 @@ typedef struct
     volatile HandleEepromProfile_t eeprom_profile; /* 本通道手柄EEPROM的方向和手动电流配置，随通道装载且不受RFID清理影响。 */
     volatile uint8_t rfid_direction_mask; /* RFID允许方向：bit0正转、bit1反转、bit2往复；非RFID或清刀具时为0。 */
     volatile uint16_t rfid_result_sequence; /* 已装载的RFID结果编号；清刀具时归0，用于拒绝换刀时尚未同步的旧参数。 */
+    RfidSettingsKey_t rfid_settings_key; /* 本次有效识别的完整内容，换刀设置不能绑定到后来的射频回包。 */
     volatile uint8_t   rfid_cache_hit;//是否再次识别到同一 RFID 刀具；是则保留用户已调好的速度和频率
 }
 ChannelrecognizeMessage_t;//本通道刚读出的手柄、刀具信息
@@ -415,8 +427,8 @@ typedef struct
 pumpMessage_t;
 extern pumpMessage_t pumpMessageA;//A 泵的设置、压力读数和运行请求
 extern pumpMessage_t pumpMessageB;//B 泵的设置、压力读数和运行请求
-extern uint32_t paoxueSpeciValue_A[4];//A 通道刀具规格，识别任务写入，屏幕任务读取显示
-extern uint32_t paoxueSpeciValue_B[4];//B 通道刀具规格，识别任务写入，屏幕任务读取显示
+extern uint32_t paoxueSpeciValue_A[5]; /* A 通道长度、直径、角度、刀具类型、整数直径标志；格式随规格缓存保留。 */
+extern uint32_t paoxueSpeciValue_B[5]; /* B 通道独立保存五项规格，末项为 1 时保留旧 USER 整数显示。 */
 extern uint8_t paoxueSpeciValue_F[16];//历史保留的分体刀具扩展数据区
 
 
@@ -439,6 +451,10 @@ extern ControlSigleMessage_t ControlSigleMssage;
 
 void ChannelMessageInit(void); /* 清空两组控制标志，不负责清除手柄识别结果。 */
 void WorkMessageInit(void); /* 清除当前手柄运行状态并设置初始值。 */
+void Pubinterface_UnbindToolSettings(uint8_t channel); /* 拔柄或切手动时解除绑定，保留RAM历史记录。 */
+void Pubinterface_SaveToolSettings(void); /* 成功调速、换向或调频后保存当前RFID刀具设置。 */
+void Pubinterface_SaveToolCoolingFlow(uint8_t pump_channel); /* 成功用户调节后保存当前刀具对应冷却流量。 */
+void Pubinterface_ServiceToolCoolingFlow(void); /* 处理泵上线或空闲后尚未应用的刀具流量，不建立运行请求。 */
 void ChannelMemoryMessageInit(void); /* 初始化 A/B 通道保存的参数。 */
 void HandleSwitchActive(uint8_t key_value); /* 按按键事件切换当前手柄通道。 */
 void Handle_RequestRemainingOnlineAfterUnplug(uint8_t channel); /* 记住运行中拔柄后要切换到的另一在线通道，等停止处理完成再切换。 */
@@ -471,7 +487,7 @@ bool Pubinterface_ClearHandleNotConnectedAlarm(void); /* 清除当前手柄未�
 void Pubinterface_RefreshHandleUnplugAlarmDisplay(void); /* 清屏后补发仍有效的拔手柄报警。 */
 void Pubinterface_StopRunningHandleOnUnplug(void); /* 运行中拔当前手柄时停止电机和联动泵。 */
 void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow); /* 为在线注水泵设置默认流量；输入无效时改用备用值，单位 mL/min。 */
-void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 把指定通道 Page4 的默认注水量设给在线注水泵。 */
+void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel); /* 把指定通道默认流量设给注水泵；无有效RFID时分体回退Page4，公共接头用20。 */
 bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel); /* 判断新插入通道是否允许自动选中。 */
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel); /* 把指定通道扫描结果保存到 MemoryMsgA/B。 */
 void Pubinterface_StopTouchKeepAliveRun(void); /* 结束屏幕按住运行按钮发起的电机运行。 */

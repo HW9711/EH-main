@@ -428,7 +428,7 @@ void LCD_Show_4byte_Number(uint16_t Addr, uint32_t data)
   Uart6_SendPacket(dat, 10);
 }
 
-static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 公共接头 EPC 本次下发的原始整数显示开关，只在 lcd.c 内部临时使用。 */
+static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 旧 USER 本次下发的原始整数显示开关，只在 lcd.c 内部临时使用。 */
 
 //============================================================================
 // 函数名称: LCD_IntegratedCutterData_Update()
@@ -439,7 +439,7 @@ static uint8_t s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 公共接头 EP
 //           Angle：角度
 // 输    出: 1=此前相同规格或本次发送完成，0=发送失败。
 // 函数说明: 刀具规格文字的中文样式如下；英文模式仅将前 4 字节改为 Spec。
-//  示例：规格: φ4.0mm、 110mm、 0°；EPC 整数直径示例：规格: φ16mm、 110mm、 0°。
+//  示例：规格: φ4.0mm、 110mm、 0°；旧 USER 整数直径示例：规格: φ16mm、 110mm、 0°。
 //============================================================================
 /*
  * 函数功能：按 LCD_TOOL_SPEC_LANGUAGE 选择“规格”或“Spec”前缀，拼出直径、长度和角度文字并发送到屏幕；三项都为 0 时清空文字。
@@ -502,27 +502,27 @@ uint8_t LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t
 	  dat[12] = 0xA6;
 	  dat[13] = 0xD5; //φ
 
-	  /* 公共接头 EPC 使用原始整数直径，不插入小数点；普通刀具走下方 0.1mm 格式。 */
+	  /* 旧 USER 使用原始整数直径，不插入小数点；普通刀具走下方 0.1mm 格式。 */
 	  if(raw_integer_mode != 0U)
 	  {
 		  if(DiameterTemp[2] > 0U)
 		  {
-			  dat[14] = DiameterTemp[2] + 0x30; //公共接头 EPC 直径百位不为 0 时占满三位整数显示。
-			  dat[15] = DiameterTemp[1] + 0x30; //公共接头 EPC 直径十位跟随百位显示，保留原始整数。
-			  dat[16] = DiameterTemp[0] + 0x30; //公共接头 EPC 直径个位跟随百位显示，支持 100~255 范围。
+			  dat[14] = DiameterTemp[2] + 0x30; //旧 USER 直径百位不为 0 时占满三位整数显示。
+			  dat[15] = DiameterTemp[1] + 0x30; //旧 USER 直径十位跟随百位显示，保留原始整数。
+			  dat[16] = DiameterTemp[0] + 0x30; //旧 USER 直径个位跟随百位显示，支持 100~255 范围。
 			  dat[17] = 0x6D; /* 三位整数直径后紧接第一个 m，明确直径单位。 */
 			  dat[18] = 0x6D; /* 第二个 m 与前一个组成 mm。 */
 		  }
 		  else if(DiameterTemp[1] > 0U)
 		  {
-			  dat[14] = DiameterTemp[1] + 0x30; //公共接头 EPC 直径十位，0x10 解析后的 16 显示为字符 '1'。
-			  dat[15] = DiameterTemp[0] + 0x30; //公共接头 EPC 直径个位，0x10 解析后的 16 显示为字符 '6'。
+			  dat[14] = DiameterTemp[1] + 0x30; //旧 USER 直径十位，0x10 解析后的 16 显示为字符 '1'。
+			  dat[15] = DiameterTemp[0] + 0x30; //旧 USER 直径个位，0x10 解析后的 16 显示为字符 '6'。
 			  dat[16] = 0x6D; /* 两位整数直径后直接写 m，不保留旧小数点。 */
 			  dat[17] = 0x6D; /* 补齐直径单位 mm；后面预填的空格保持长度字段位置不变。 */
 		  }
 		  else
 		  {
-			  dat[14] = DiameterTemp[0] + 0x30; //公共接头 EPC 一位直径直接显示原始整数。
+			  dat[14] = DiameterTemp[0] + 0x30; //旧 USER 一位直径直接显示原始整数。
 			  dat[15] = 0x6D; /* 一位整数直径后直接写第一个 m。 */
 			  dat[16] = 0x6D; /* 补齐直径单位 mm，其后未使用位置仍为空格。 */
 		  }
@@ -607,15 +607,15 @@ uint8_t LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t
 }
 
 /*
- * 函数功能：按现行 EPC 整数直径格式刷新主界面刀具规格，并返回发送结果。
- * 输入参数：Addr 为 DWIN 规格文本字地址；Length、Diameter、Angle 为 EPC 的长度、直径和角度原始整数。
+ * 函数功能：按旧 USER 整数直径格式刷新主界面刀具规格，并返回发送结果。
+ * 输入参数：Addr 为 DWIN 规格文本字地址；Length、Diameter、Angle 为旧 USER 的长度、直径和角度原始整数。
  * 返回参数：1 表示本次或此前相同规格已整帧发送，0 表示发送失败，需要重试。
  */
 uint8_t LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle)
 {
   uint8_t sent_ok; /* 保存发送结果，恢复普通直径格式后再交给显示任务判断是否重试。 */
 
-  s_lcd_integrated_cutter_raw_integer_mode = 1U; /* EPC 当前没有小数比例定义，本次按整数直径输出，例如 16 显示为 φ16mm。 */
+  s_lcd_integrated_cutter_raw_integer_mode = 1U; /* 旧 USER 保留原显示行为，本次按整数直径输出，例如 16 显示为 φ16mm。 */
   sent_ok = LCD_IntegratedCutterData_Update(Addr, Length, Diameter, Angle); /* 与 EEPROM 共用完整文本清理和发送结果检查。 */
   s_lcd_integrated_cutter_raw_integer_mode = 0U; /* 无论发送是否成功，都恢复 EEPROM 的 0.1mm 格式。 */
   return sent_ok; /* 失败交给显示任务稍后重发，不在当前调用中连续占用串口。 */

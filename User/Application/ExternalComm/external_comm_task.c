@@ -1721,8 +1721,14 @@ static void ExternalComm_SaveCurrentSpeed(uint16_t speed)
             MemoryMsgB.osc_speed = speed;
         }
     }
+    Pubinterface_SaveToolSettings(); /* 只在外控设定已生效后保存当前刀具，不改变协议应答或运行许可。 */
 }
 
+/*
+ * 函数功能：保存外控已校验的往复频率到通道及RFID刀具记忆。
+ * 输入参数：freq为现有协议频率设定值。
+ * 返回参数：无。
+ */
 static void ExternalComm_SaveCurrentFreq(uint16_t freq)
 {
     /* 当前工作频率立即更新。 */
@@ -1737,6 +1743,7 @@ static void ExternalComm_SaveCurrentFreq(uint16_t freq)
     {
         MemoryMsgB.freq = freq;
     }
+    Pubinterface_SaveToolSettings(); /* 只在外控设定已生效后保存当前刀具，不改变协议应答或运行许可。 */
 }
 
 /*
@@ -1836,6 +1843,7 @@ static uint8_t ExternalComm_SetDirection(uint8_t dir_value)
 
     /* 实际输出速度跟随方向切换后的设置速度。 */
     WorkMessage.speed_work = WorkMessage.speed_set_work;
+    Pubinterface_SaveToolSettings(); /* 记录外控实际生效的方向，拒绝分支不写刀具记忆。 */
     /* 方向切换成功。 */
     return 1U;
 }
@@ -1995,6 +2003,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             /* 设置 A 泵速度，不切换泵启停状态；PUMPAehaviors() 后续按该值换算 UART5 驱动数据。 */
             pumpMessageA.step_value = 0U; /* 外控直接设定流量后清脚踏循环记录，下次短按从20或100开始。 */
             pumpMessageA.speed_work = value;
+            Pubinterface_SaveToolCoolingFlow(CHANNEL_A); /* 外控用户流量只保存到当前刀具对应冷却泵，灌注和吸引自动忽略。 */
             /* 上位机改 A 泵速度后立即刷新屏幕，避免泵已按新速度输出但数值区仍显示旧值。 */
             Pubinterface_RefreshPumpADisplay();
             break;
@@ -2006,6 +2015,7 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
             /* 设置 B 泵速度，不切换泵启停状态。 */
             pumpMessageB.step_value = 0U; /* 外控直接设定流量后清脚踏循环记录，下次短按从20或100开始。 */
             pumpMessageB.speed_work = value;
+            Pubinterface_SaveToolCoolingFlow(CHANNEL_B); /* 外控用户流量只保存到当前刀具对应冷却泵，灌注和吸引自动忽略。 */
             /* 上位机改 B 泵速度后立即刷新屏幕，解决 B 泵已转但屏幕仍显示 0 的问题。 */
             Pubinterface_RefreshPumpBDisplay();
             break;

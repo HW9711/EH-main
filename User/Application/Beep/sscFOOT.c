@@ -47,11 +47,13 @@
 
 
 
-#define JT_threshold  15U /* 踩下判断需超过定标起点 20 个 AD 计数；调大需踩得更深，也会提高定标行程的最小要求。 */
+#define JT_threshold  15U /* 两点脚踏从低点增加超过 15 个 AD 计数才启动；三点定标也用此检查每段最小行程，调大将提高定标最小要求。 */
 /* 单踏板连续前 3 次低值先不停止泵，第 4 次才确认松脚；周期 25ms，即首个低值后再等约 75ms。调大可减少抖动停泵，但松脚停泵更慢；电机不等待此计数。 */
 #define FOOT_SINGLE_PEDAL_RELEASE_DEBOUNCE_TICKS 3U
 #define FOOT_DOUBLE_PEDAL_SWITCH_DEBOUNCE_TICKS 10U /* 双脚踏深踩切通道需累计 10 次控制检查，每次 25ms，约 250ms；调大切换更慢，调小更容易误切。 */
 #define FOOT_PEDAL_SPEED_HIGH_MARGIN 30U /* 单路三点和双脚踏均从定标高点减去 30 个 AD 计数作为满速位置；调大更早满速，必须保留有效的电机调速区间。 */
+#define FOOT_PUMP_START_PERCENT 60U /* 轻踩开泵阈值为 L+(M-L)×60%，单位为 AD 计数；调大需踩得更深，调小会减小松脚区。 */
+#define FOOT_MOTOR_START_PERCENT 10U /* 手柄启动阈值为 M+(H-M)×10%，单位为 AD 计数；调大需深踩更多，调小会缩短轻踩与起机的间隔。 */
 #define FOOT_SINGLE_FRAME_LENGTH 10U /* 单踏板实时值、Flash读回和脚踏实体按键帧均为10字节，最后2字节为CRC。 */
 #define FOOT_TWO_STAGE_FRAME_LENGTH 18U /* 双段踏板周期帧为18字节，包含实时AD、三点定标值和CRC。 */
 #define FOOT_DOUBLE_FRAME_LENGTH 24U /* 双脚踏周期帧为24字节，包含左右实时AD、两组三点定标值和CRC。 */
@@ -623,6 +625,34 @@ static void Foot_ReportHandleNotConnectedAlarm(void)
 }
 
 /*
+ * 函数功能：计算单路三点或双脚踏每侧轻踩开泵、松脚确认使用的同一个阈值。
+ * 输入参数：low_adc、mid_adc 为同一侧保存的低点和中点，单位为协议 AD 计数。
+ * 返回参数：返回 L+(M-L)×60% 的整数部分；AD 严格大于该值才开泵，回到该值及以下才退出开泵区。点位倒置返回 65535，禁止开泵。
+ */
+static uint16_t Foot_GetPumpStartThreshold(uint16_t low_adc, uint16_t mid_adc)
+{
+    if(mid_adc <= low_adc) /* 先检查点位顺序，避免无符号相减把错误定标变成可用行程。 */
+    {
+        return 65535U; /* 无有效轻踩行程时设置不可超过的 AD 阈值，本次不允许开泵。 */
+    }
+    return (uint16_t)((uint32_t)low_adc + (((uint32_t)mid_adc - low_adc) * FOOT_PUMP_START_PERCENT) / 100U); /* 用 32 位计算并向下取整，配合严格大于比较，首次开泵 AD 必须超过精确的 60% 位置。 */
+}
+
+/*
+ * 函数功能：计算单路三点或双脚踏每侧申请手柄运行、退出电机区使用的同一个阈值。
+ * 输入参数：mid_adc、high_adc 为同一侧保存的中点和高点，单位为协议 AD 计数。
+ * 返回参数：返回 M+(H-M)×10% 的整数部分；AD 严格大于该值才可申请起机，回到该值及以下撤销运行请求。点位倒置返回 65535。
+ */
+static uint16_t Foot_GetMotorStartThreshold(uint16_t mid_adc, uint16_t high_adc)
+{
+    if(high_adc <= mid_adc) /* 中高点倒置时不能计算电机行程，也不能沿用错误区间启动。 */
+    {
+        return 65535U; /* 返回不可超过的 AD 阈值，保持手柄停止。 */
+    }
+    return (uint16_t)((uint32_t)mid_adc + (((uint32_t)high_adc - mid_adc) * FOOT_MOTOR_START_PERCENT) / 100U); /* 用 32 位求 10% 启动位置，启动和停止分支统一比较此整数阈值。 */
+}
+
+/*
  * 函数功能：判断单踏板保存的低点和高点是否满足有效行程要求。
  * 输入参数：low_adc 为脚踏保存低点；high_adc 为脚踏保存高点。
  * 返回参数：true 表示低点到高点的行程有效；false 表示脚踏存储值错误。
@@ -659,9 +689,9 @@ static bool Foot_IsPedalThreePointStorageValid(uint16_t low_adc, uint16_t mid_ad
         return false; /* 电机段中点到高点无有效行程时，脚踏不能安全控制手柄。 */
     }
 
-    if((uint32_t)high_adc <= ((uint32_t)mid_adc + JT_threshold + FOOT_PEDAL_SPEED_HIGH_MARGIN))
+    if((uint32_t)high_adc <= ((uint32_t)Foot_GetMotorStartThreshold(mid_adc, high_adc) + FOOT_PEDAL_SPEED_HIGH_MARGIN)) /* 提前满速位置必须高于本次采用的 10% 手柄启动线。 */
     {
-        return false; /* 高值减 30 后必须仍高于中值加启动余量，否则刚启动就可能满速，拒绝这组定标并由解析入口报警 83。 */
+        return false; /* 高值减 30 后已没有有效电机调速区间，拒绝这组定标并由解析入口显示报警 83。 */
     }
 
     return true; /* 两段行程和提前满速位置均有效，允许本侧脚踏接入。 */
@@ -868,13 +898,13 @@ static void Foot_ClearPressureLatchOnRelease(void)
 }
 
 /*
- * 函数功能：判断某一路脚踏 AD 是否已经回到释放区间。
- * 输入参数：ad_value 为当前脚踏 AD 原始值，low_value 为该路脚踏低位基准值。
- * 返回参数：true 表示已经低于启动阈值，false 表示该路脚踏仍处于踩下状态。
+ * 函数功能：用对应的启动阈值判断某一路脚踏是否退出泵或电机运行区。
+ * 输入参数：ad_value 为当前协议 AD 值；release_threshold 为两点脚踏低值加 15，或三点脚踏已算好的 60%/10% 阈值，单位为 AD 计数。
+ * 返回参数：true 表示 AD 已回到阈值及以下；false 表示 AD 仍高于该启动阈值。
  */
-static bool Foot_IsPedalReleased(uint16_t ad_value, uint16_t low_value)
+static bool Foot_IsPedalReleased(uint16_t ad_value, uint32_t release_threshold)
 {
-    return ((uint32_t)ad_value <= ((uint32_t)low_value + (uint32_t)JT_threshold)); /* AD 不超过基准值加 20 才算已退出该区间，供松脚和退出电机区的检查共用。 */
+    return ((uint32_t)ad_value <= release_threshold); /* 与启动条件互补，避免同一 AD 在一处确认松脚、另一处仍请求运行。 */
 }
 
 /*
@@ -895,14 +925,14 @@ static bool Foot_BlockRestartUntilReleased(const FootMessage_t *msg)
         switch (msg->pedalType)
         {
             case 1U:
-                released = Foot_IsPedalReleased(jt_adcvalue, msg->LValue_Left); /* 单踏板必须回到低点附近。 */
+                released = Foot_IsPedalReleased(jt_adcvalue, (uint32_t)msg->LValue_Left + JT_threshold); /* 单踏板必须回到低点附近。 */
                 break;
             case 2U:
-                released = Foot_IsPedalReleased(jtb_adcvalue, msg->LValue_Left); /* 双段踏板停在轻踩区仍不算松开。 */
+                released = Foot_IsPedalReleased(jtb_adcvalue, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)); /* 双段踏板停在轻踩区仍不算松开。 */
                 break;
             case 3U:
-                released = Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left) &&
-                           Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right); /* 双脚踏必须两侧同时完全松开。 */
+                released = Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)) &&
+                           Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetPumpStartThreshold(msg->LValue_Right, msg->MValue_Right)); /* 双脚踏必须两侧同时完全松开。 */
                 break;
             default:
                 break; /* 未识别的踏板保持禁止启动。 */
@@ -944,14 +974,14 @@ static bool Foot_BlockDriverAlarmRun(const FootMessage_t *msg)
         switch (msg->pedalType)
         {
             case 1U:
-                is_released = Foot_IsPedalReleased(jt_adcvalue, msg->LValue_Left); /* 单踏板只检查单路 AD。 */
+                is_released = Foot_IsPedalReleased(jt_adcvalue, (uint32_t)msg->LValue_Left + JT_threshold); /* 单踏板只检查单路 AD。 */
                 break;
             case 2U:
-                is_released = Foot_IsPedalReleased(jtb_adcvalue, msg->LValue_Left); /* 双段踏板只检查共用踏板 AD。 */
+                is_released = Foot_IsPedalReleased(jtb_adcvalue, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)); /* 双段踏板只检查共用踏板 AD。 */
                 break;
             case 3U:
-                is_released = Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left) &&
-                              Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right); /* 双脚踏必须左右都释放，不能由另一侧持续踩住恢复运行。 */
+                is_released = Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)) &&
+                              Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetPumpStartThreshold(msg->LValue_Right, msg->MValue_Right)); /* 双脚踏必须左右都释放，不能由另一侧持续踩住恢复运行。 */
                 break;
             default:
                 break; /* 不认识脚踏类型就无法判断是否松脚，继续禁止启动。 */
@@ -1228,8 +1258,8 @@ static bool Foot_TryStartMotor(uint8_t source, const FootMessage_t *msg)
         if (!stopped || s_foot_stop_waiting)
         {
             bool other_side_released = (msg->pedalType != 3U) ||
-                ((source == FOOT_MOTOR_SOURCE_LEFT) ? Foot_IsPedalReleased(jtd_adcvalue_r, msg->MValue_Right) :
-                                                     Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left)); /* 只有双脚踏需要检查另一侧，单踏板不受未使用的AD值影响。 */
+                ((source == FOOT_MOTOR_SOURCE_LEFT) ? Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetMotorStartThreshold(msg->MValue_Right, msg->HValue_Right)) :
+                                                     Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetMotorStartThreshold(msg->MValue_Left, msg->HValue_Left))); /* 只有双脚踏需要检查另一侧，单踏板不受未使用的AD值影响。 */
             if ((source != s_foot_stop_source) || !other_side_released ||
                 ((uint32_t)(now_ms - s_foot_stop_release_ms) >= FOOT_MOTOR_STOP_WAIT_MS))
             {
@@ -1287,7 +1317,7 @@ static FootControlFlow_t Foot_ProcessSinglePedal(const FootMessage_t *msg)
     {
         adValue = msg->LValue_Left;
     }
-    if ((adValue - msg->LValue_Left) > JT_threshold) /* 比低点高出 20 个 AD 计数以上才算踩下，随后检查启动条件并计算速度。 */
+    if ((adValue - msg->LValue_Left) > JT_threshold) /* 两点脚踏比低点高出 15 个 AD 计数以上才算踩下，随后检查启动条件并计算速度。 */
         {
                 ControlSignalMessage.jtL_control_flag=true;
             /* 单踏板重新确认踩下后清掉松脚去抖计数，防止上一轮释放残留影响本次泵保持运行。 */
@@ -1381,7 +1411,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
 
     adValue=jtb_adcvalue;
     if(adValue<msg->LValue_Left)adValue=msg->LValue_Left;
-    if(adValue-msg->LValue_Left>JT_threshold)// 超过低点启动范围后可以开注水泵，A 泵优先，A 不是注水泵时再选 B。
+    if(adValue > Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)) /* 超过低中行程的 60% 才请求开泵，A 为注水泵时优先使用 A，否则选择 B。 */
     {
         ControlSignalMessage.jtL_control_flag=true;
         //   if(WorkMessage.alarm_flag!=0)
@@ -1455,7 +1485,7 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
              Foot_ClearManualAlarmOnRelease(); /* 双段脚踏完全松开后清除 81 号错模式报警。 */
      }
     if(adValue<msg->MValue_Left)adValue=msg->MValue_Left;
-    if(adValue-msg->MValue_Left>JT_threshold)
+    if(adValue > Foot_GetMotorStartThreshold(msg->MValue_Left, msg->HValue_Left)) /* 超过中高行程的 10% 才申请手柄运行，回到同一阈值即退出电机区。 */
     {
          //手柄运行
            if(WorkMessage.speed_set_work==0U)WorkMessage.speed_set_work=Pubinterface_GetCurrentDefaultMotorSpeed();//当前手柄还未装载速度时，使用 Page4 默认速度替代旧固定 60000
@@ -1466,13 +1496,13 @@ static FootControlFlow_t Foot_ProcessTwoStagePedal(const FootMessage_t *msg)
             return FOOT_CONTROL_FLOW_RETURN_TASK; /* 正常等待保持轻踩注水，故障拒绝仍由原失败入口清理泵请求。 */
         }
         ControlSignalMessage.jtL_control_flag=true; /* 本次通过停稳和启动检查后才提交深踩电机请求。 */
-        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 单路三点脚踏在高值减 30 处达到设定速度，踩到底的小幅 AD 回落不再降低目标速度。 */
+        WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,Foot_GetMotorStartThreshold(msg->MValue_Left,msg->HValue_Left),msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 单路三点从 10% 启动线开始按最小运行速度调速，在高值减 30 处达到设定速度。 */
         WorkMessage.runflag_work=true;//通知SSCdrive电机运行
         Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_LEFT); /* 深踩获准启动手柄后，记住该踏板启动了联动泵，完全松脚时据此停泵。 */
     }
     else
     {
-         Foot_StopMotorAtReleaseBoundary(msg->pedalType); /* 双段踏板退回中点以下即退出电机段，不能等待轻踩泵释放才停止手柄。 */
+         Foot_StopMotorAtReleaseBoundary(msg->pedalType); /* 单路三点回到 10% 启动线及以下即撤销电机请求，泵仍由低中行程 60% 阈值控制。 */
          if(ControlSignalMessage.jtL_control_flag)
             {
                  if(WorkMessage.alarm_value==WORK_ALARM_MOTOR_OVERLOAD||WorkMessage.alarm_value==WORK_ALARM_HANDLE_NOT_CONNECTED)// 退出深踩区后检查报警；当前只清手柄未连接，不清过载。
@@ -1513,7 +1543,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
     {
         adValue = msg->LValue_Left;
     }
-        if ((adValue - msg->LValue_Left) > JT_threshold) /* 左侧超过踩下阈值后才进入轻踩泵和深踩电机流程。 */
+        if (adValue > Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)) /* 左侧超过自己的低中行程 60% 才请求开泵，释放检查也使用此阈值。 */
         {
             ControlSignalMessage.jtL_control_flag=true;
 
@@ -1547,7 +1577,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
             {
                 adValue = msg->MValue_Left;
             }
-          if ((adValue - msg->MValue_Left) > JT_threshold) /* 比中点高出 20 个 AD 计数以上才算深踩，才允许检查电机启动。 */
+          if (adValue > Foot_GetMotorStartThreshold(msg->MValue_Left, msg->HValue_Left)) /* 左侧超过自己的中高行程 10% 才进入手柄启动检查。 */
             {
                 if(WorkMessage.channel_work==CHANNEL_A)
                 {
@@ -1563,7 +1593,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                         return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                     }
                     ControlSignalMessage.jtL_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                    WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏左侧当前通道保留高位死区，并限制最大不超过设定速度。 */
+                    WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,Foot_GetMotorStartThreshold(msg->MValue_Left,msg->HValue_Left),msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 左侧从 10% 启动线开始调速，高值减 30 处满速，目标不超过设定速度。 */
                     WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                     Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_LEFT); /* 记住联动泵由左脚启动，右脚松开不能撤销这次开泵请求。 */
                 }
@@ -1599,7 +1629,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                             }
                             ControlSignalMessage.jtL_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,msg->MValue_Left,msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 左脚控制备用手柄时同样在高值减 30 处满速，避免更换目标通道后必须踩到原高值。 */
+                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue,Foot_GetMotorStartThreshold(msg->MValue_Left,msg->HValue_Left),msg->HValue_Left,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 左脚控制备用通道也从 10% 启动线开始调速，在高值减 30 处满速。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_LEFT); /* 左脚控制 B 通道时仍记为左脚启动，松左脚时据此停联动泵。 */
                         }
@@ -1646,7 +1676,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalLeft(const FootMessage_t *msg)
              {
                  Foot_StopDoublePedalGentlyPump(false); /* 松左脚只释放左侧实际启动的泵，不能按当前泵类型重新猜。 */
              }
-             if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
+             if(Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetPumpStartThreshold(msg->LValue_Right, msg->MValue_Right)))
              {
                  Foot_ClearHandleOrOverloadAlarm(); /* 左右都松开后，即使运行标志早已清掉，也要关闭“手柄未连接”提示。 */
                  Foot_ClearPressureLatchOnRelease(); /* 左右脚都已松开，才清除泵故障后的联动暂停记录。 */
@@ -1675,7 +1705,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
 
     adValue_r=jtd_adcvalue_r;
     if(adValue_r<msg->LValue_Right)adValue_r=msg->LValue_Right;
-    if(adValue_r-msg->LValue_Right>JT_threshold)//右踏板
+    if(adValue_r > Foot_GetPumpStartThreshold(msg->LValue_Right, msg->MValue_Right)) /* 右侧超过自己的低中行程 60% 才请求开泵。 */
     {
         ControlSignalMessage.jtR_control_flag=true;
        if(Foot_EnsureFootControlMode(CHANNEL_B) == false)
@@ -1704,7 +1734,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
 
        Foot_StartDoublePedalGentlyPump(true); /* 右脚按 B 优先规则启动并记录实际泵，使用屏幕设定速度且不进入10秒定时排空。 */
      if(adValue_r<msg->MValue_Right)adValue_r=msg->MValue_Right;
-      if(adValue_r-msg->MValue_Right>JT_threshold)
+      if(adValue_r > Foot_GetMotorStartThreshold(msg->MValue_Right, msg->HValue_Right)) /* 右侧超过自己的中高行程 10% 才进入手柄启动检查。 */
         {
             if(WorkMessage.channel_work==CHANNEL_B)
             {
@@ -1720,7 +1750,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                    return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                }
                ControlSignalMessage.jtR_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 双脚踏右侧当前通道保留高位死区，并限制最大不超过设定速度。 */
+                WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,Foot_GetMotorStartThreshold(msg->MValue_Right,msg->HValue_Right),msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 右侧从 10% 启动线开始调速，高值减 30 处满速，目标不超过设定速度。 */
                  WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                 Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_RIGHT); /* 记住联动泵由右脚启动，左脚松开不能撤销这次开泵请求。 */
             }
@@ -1757,7 +1787,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
                                 return FOOT_CONTROL_FLOW_RETURN_TASK; /* 等待或拒绝时保持电机停止，本轮不写入转速。 */
                             }
                             ControlSignalMessage.jtR_control_flag=true; /* 本侧已通过停稳和启动检查，允许写入本轮运行请求。 */
-                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,msg->MValue_Right,msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 右脚控制备用手柄时同样在高值减 30 处满速，避免 AD 轻微回落后目标速度不足。 */
+                            WorkMessage.speed_work=Foot_BuildTravelMotorSpeed(adValue_r,Foot_GetMotorStartThreshold(msg->MValue_Right,msg->HValue_Right),msg->HValue_Right,FOOT_PEDAL_SPEED_HIGH_MARGIN); /* 右脚控制备用通道也从 10% 启动线开始调速，在高值减 30 处满速。 */
                             WorkMessage.runflag_work=true;//通知SSCdrive电机运行
                             Foot_StartHandleInjectionPumpFollow(FOOT_MOTOR_SOURCE_RIGHT); /* 右脚控制 A 通道时仍记为右脚启动，松右脚时据此停联动泵。 */
                         }
@@ -1805,7 +1835,7 @@ static FootControlFlow_t Foot_ProcessDoublePedalRight(const FootMessage_t *msg)
         {
             Foot_StopDoublePedalGentlyPump(true); /* 松右脚只释放右侧实际启动的泵；A/B 都是注水泵时准确停止 B。 */
         }
-        if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left))
+        if(Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)))
         {
             Foot_ClearHandleOrOverloadAlarm(); /* 左右都松开后，即使运行标志早已清掉，也要关闭“手柄未连接”提示。 */
             Foot_ClearPressureLatchOnRelease(); /* 两侧都松开才清故障联动停机记录，避免另一侧一直踩着就自动重启。 */
@@ -1831,27 +1861,27 @@ static FootControlFlow_t Foot_ProcessDoublePedal(const FootMessage_t *msg)
     }
 
     if((WorkMessage.channel_work != CHANNEL_A) || Foot_DoublePedalIsWaitingRelease(CHANNEL_A) ||
-       Foot_IsPedalReleased(jtd_adcvalue_l, msg->LValue_Left))
+       Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetPumpStartThreshold(msg->LValue_Left, msg->MValue_Left)))
     {
         Foot_StopDoublePedalGentlyPump(false); /* 左脚已松、未选中A或切换后待松脚时，提前撤销左侧轻踩请求，不能被右侧切换提前返回跳过。 */
     }
     if((WorkMessage.channel_work != CHANNEL_B) || Foot_DoublePedalIsWaitingRelease(CHANNEL_B) ||
-       Foot_IsPedalReleased(jtd_adcvalue_r, msg->LValue_Right))
+       Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetPumpStartThreshold(msg->LValue_Right, msg->MValue_Right)))
     {
         Foot_StopDoublePedalGentlyPump(true); /* 右脚松开即撤销右侧轻踩请求，左侧切换等待不能再让原通道注水泵保持运行。 */
     }
 
-    if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left))
+    if(Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetMotorStartThreshold(msg->MValue_Left, msg->HValue_Left)))
     {
         Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_LEFT); /* 左脚已退出电机区时先检查是否由左脚启动，右脚持续运行不受影响。 */
     }
-    if(Foot_IsPedalReleased(jtd_adcvalue_r, msg->MValue_Right))
+    if(Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetMotorStartThreshold(msg->MValue_Right, msg->HValue_Right)))
     {
         Foot_StopDoubleMotorAtReleaseBoundary(FOOT_MOTOR_SOURCE_RIGHT); /* 右脚松开先撤销右侧运行请求，不能等左脚切换分支执行完才处理。 */
     }
 
-    if(Foot_IsPedalReleased(jtd_adcvalue_l, msg->MValue_Left) &&
-       Foot_IsPedalReleased(jtd_adcvalue_r, msg->MValue_Right))
+    if(Foot_IsPedalReleased(jtd_adcvalue_l, Foot_GetMotorStartThreshold(msg->MValue_Left, msg->HValue_Left)) &&
+       Foot_IsPedalReleased(jtd_adcvalue_r, Foot_GetMotorStartThreshold(msg->MValue_Right, msg->HValue_Right)))
     {
         Foot_StopMotorAtReleaseBoundary(msg->pedalType); /* 两侧都退出电机区后才允许下一次深踩启动；可以停在轻踩泵区，不必完全松到底。 */
     }
@@ -1889,9 +1919,9 @@ void FootControlTask(uint32_t event)
         }
         if (ControlArbitration_IsOwner(CONTROL_OWNER_EXTERNAL) && msg.connect_flag && s_foot_runtime_frame_valid &&
             (((msg.pedalType == 1U) && (jt_adcvalue > (uint32_t)msg.LValue_Left + JT_threshold)) ||
-             ((msg.pedalType == 2U) && (jtb_adcvalue > (uint32_t)msg.LValue_Left + JT_threshold)) ||
-             ((msg.pedalType == 3U) && ((jtd_adcvalue_l > (uint32_t)msg.LValue_Left + JT_threshold) ||
-                                     (jtd_adcvalue_r > (uint32_t)msg.LValue_Right + JT_threshold)))))
+             ((msg.pedalType == 2U) && (jtb_adcvalue > Foot_GetPumpStartThreshold(msg.LValue_Left, msg.MValue_Left))) ||
+             ((msg.pedalType == 3U) && ((jtd_adcvalue_l > Foot_GetPumpStartThreshold(msg.LValue_Left, msg.MValue_Left)) ||
+                                     (jtd_adcvalue_r > Foot_GetPumpStartThreshold(msg.LValue_Right, msg.MValue_Right))))))
         {
             UIDP_RequestExternalControlHint(); /* 仅可信在线踏板实际踩下才提示；保持原提前返回，不写电机或泵请求。 */
         }

@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include "FreeRTOS.h" /* 多任务只在短临界区内交换刀具设置，不改变控制门禁。 */
+#include "task.h"
 // #include "datahand.h"
 /* 屏幕调泵速和泵任务使用同一组速度上限，避免屏幕允许设置但驱动无法执行。 */
 #include "pump.h"
@@ -25,6 +27,28 @@ ChannelrecognizeMessage_t ChannelrecognizeMessageB;
 ControlSigleMessage_t ControlSigleMssage;
 ControlSignalMessage_t ControlSignalMessage;
 
+
+/* RFID设置只存在RAM；每条记录的身份与用户设定分开，不能恢复在线资格或保护参数。 */
+#define TOOL_SETTINGS_COUNT 16U /* 每个逻辑通道最多记忆16份完整标签；满后替换最久未使用记录。 */
+typedef struct
+{
+    bool valid; /* true表示该槽已有有效身份和设置，不用数值0判断记录是否存在。 */
+    uint8_t hand_model; /* 基座型号隔离公共接头、PXBA和PXBB的机械使用场景。 */
+    uint8_t age; /* 0最近使用，最大15；仅切换刀具时更新，普通RFID轮询不改变顺序。 */
+    RfidSettingsKey_t key; /* 完整标签内容用于精确比较，不能只按刀具型号或直径匹配。 */
+    uint32_t speed[3]; /* 正转、反转、往复的设定rpm，禁止保存脚踏瞬时速度或反馈转速。 */
+    uint16_t direction; /* 用户最后选择的显示方向，物理方向仍由驱动层换算。 */
+    uint16_t frequency; /* 用户设定的往复频率协议值，不在记忆层换算Hz。 */
+    uint16_t flow; /* 用户设定冷却流量，允许合法的0值；不覆盖标签默认流量字段。 */
+} ToolSettingsEntry_t;
+static ToolSettingsEntry_t s_tool_settings[2][TOOL_SETTINGS_COUNT]; /* A/B各16条，启动初始化清零，拔柄不清历史。 */
+static uint8_t s_tool_settings_slot[2]; /* 0未绑定，1~16为当前已装载刀具槽；不能按最新RFID回包临时取身份。 */
+static uint16_t s_tool_settings_sequence[2]; /* 与通道已装载编号绑定，旧设置不能写到新刀具记录。 */
+static uint8_t s_tool_flow_pending_channel; /* 待应用流量所属手柄；泵未上线或独立运行时保留，0表示无待办。 */
+static uint16_t s_tool_flow_pending_value; /* 待应用冷却设定，不能用排空输出或停机清零反向覆盖。 */
+
+static bool ToolSettings_ReadFlow(uint8_t channel, uint16_t *flow); /* 启动补流量也优先采用已识别刀具的用户设置。 */
+
 /*
  * 函数功能：校验手柄过流时间，越界直接回退500ms，不钳位到较长时间。
  * 输入参数：value为未截断的毫秒值。
@@ -41,8 +65,8 @@ ChannelMemoryMessage_t MemoryMsgA; // A 通道记忆，用于切换通道后恢�
 ChannelMemoryMessage_t MemoryMsgB; // B 通道记忆，字段含义与 A 通道完全一致
 pumpMessage_t pumpMessageA;
 pumpMessage_t pumpMessageB;
-uint32_t paoxueSpeciValue_A[4] = {0U}; /* 保存 A 通道识别到的刀具规格，屏幕刷新时读取。 */
-uint32_t paoxueSpeciValue_B[4] = {0U}; /* 保存 B 通道识别到的刀具规格，与 A 通道分开保存。 */
+uint32_t paoxueSpeciValue_A[5] = {0U}; /* 保存 A 通道识别到的刀具规格，屏幕刷新时读取。 */
+uint32_t paoxueSpeciValue_B[5] = {0U}; /* 保存 B 通道识别到的刀具规格，与 A 通道分开保存。 */
 uint8_t paoxueSpeciValue_F[16] = {0U}; /* 保留的分体刀具扩展数据，不随屏幕页面关闭而清除。 */
 /* 记录是否达到 Page4 速度/频率阈值；不设置全局报警，当前超限蜂鸣发送已停用。 */
 static uint8_t s_speed_threshold_beep_active = 0U;
@@ -555,7 +579,7 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 	uint32_t tool_angle = 0U;
 	bool raw_spec_display = ((WorkMessage.hand_model == COMMON_SOCKET_ONLINES) ||
 							 (((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) &&
-							  (WorkMessage.auto_identify != 0U))); /* 公共接头和自动识别下的 PXBA/PXBB 都按 EPC 原始整数显示规格。 */
+							  (WorkMessage.auto_identify != 0U))); /* 公共接头和自动识别 PXBA/PXBB 的长度保持 RFID 原值；直径格式另从通道缓存读取。 */
 
 	/* 刀具规格必须从当前 A/B 通道自己的扫描缓存读取，避免切换通道后显示另一侧的旧规格。 */
 	if (channel == CHANNEL_A)
@@ -575,7 +599,7 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 	if (raw_spec_display)
 	{
 		tool_length = spec_values[0]; /* EPC 长度缓存就是原始整数值，公共接头和 PXBA/PXBB 自动识别保持同一显示单位。 */
-		tool_diameter = spec_values[1]; /* EPC 直径缓存就是原始整数值，不再做历史单位放大。 */
+		tool_diameter = spec_values[1]; /* EPC 原值单位为 0.1mm，旧 USER 保持乘5后的值；此处不改变任一来源的数值。 */
 		tool_angle = spec_values[2]; /* EPC 角度缓存就是原始整数值，保证标签、心跳和屏幕一致。 */
 	}
 	else
@@ -594,7 +618,7 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 	{
 		tool_length = 0xFFFFU; /* UIDP 长度字段只有 16 位，异常数据钳位后再显示。 */
 	}
-	if (tool_diameter > (raw_spec_display ? 0xFFU : 0xFFFFU)) /* EPC 直径仍是一字节整数，EEPROM 直径保留完整两字节的 0.1mm 数值。 */
+	if (tool_diameter > (raw_spec_display ? 0xFFU : 0xFFFFU)) /* RFID 沿用原一字节显示上限，保留旧 USER 饱和行为；EEPROM 保留完整两字节直径。 */
 	{
 		tool_diameter = raw_spec_display ? 0xFFU : 0xFFFFU; /* 仅限制超出对应来源字段范围的异常值，不再把 EEPROM 的 400 压成 255。 */
 	}
@@ -608,7 +632,7 @@ static bool GetToolSpecForChannel(uint8_t channel, uint8_t *display_value)
 	display_value[2] = (uint8_t)(tool_diameter >> 8); /* 直径高字节随 UI 消息传递，保证 25.5mm 以上的 EEPROM 规格不会丢失。 */
 	display_value[3] = (uint8_t)(tool_diameter & 0xFFU); /* 直径低字节与前一字节合成原始数值，400 对应 01 90。 */
 	display_value[4] = (uint8_t)tool_angle; /* 角度向后移一字节，继续沿用原来的角度显示单位。 */
-	display_value[5] = raw_spec_display ? 1U : 0U; /* 1 表示 EPC 整数直径，0 表示 EEPROM 直径按 0.1mm 显示。 */
+	display_value[5] = (raw_spec_display && (spec_values[4] != 0U)) ? 1U : 0U; /* 仅旧 USER 保留整数显示；EPC 与 EEPROM 按 0.1mm 显示，格式跟随本通道缓存避免重读失败后误换单位。 */
 	return true;
 }
 
@@ -1580,6 +1604,10 @@ void WorkMessageInit(void)
  */
 void ChannelMemoryMessageInit(void)
 {
+    memset(s_tool_settings, 0, sizeof(s_tool_settings)); /* 仅启动初始化清历史，拔柄不调用此清理。 */
+    memset(s_tool_settings_slot, 0, sizeof(s_tool_settings_slot)); /* 上电无已绑定刀具。 */
+    memset(s_tool_settings_sequence, 0, sizeof(s_tool_settings_sequence)); /* 旧识别编号不跨重启。 */
+    s_tool_flow_pending_channel = CHANNEL_NONE; /* 启动时没有待恢复冷却请求。 */
 	memset(&MemoryMsgA, 0, sizeof(MemoryMsgA)); /* 清空 A 通道保存的速度、方向和控制方式等参数。 */
 	MemoryMsgA.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 上电清状态后，往复时间明确初始化为500ms。 */
 	MemoryMsgA.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间独立初始化，不沿用其它通道。 */
@@ -2082,23 +2110,32 @@ void Pubinterface_StopRunningHandleOnUnplug(void)
 }
 
 /*
- * 函数功能：读取指定通道从 EEPROM Page4 解析出的默认注水流量，供手柄上线、脚踏和外控默认启动注水泵共用。
+ * 函数功能：读取指定通道当前默认注水量；RFID未识别时分体回退本体EEPROM、公共接头回退20，供上线、脚踏和外控默认启动共用。
  * 输入参数：channel 通道号，CHANNEL_A 读取 A 通道记忆，CHANNEL_B 读取 B 通道记忆。
  * 返回参数：默认注水流量，单位 mL/min；通道无效时返回 0。
  */
 uint16_t Pubinterface_GetChannelDefaultInjectionFlow(uint8_t channel)
 {
-	if (channel == CHANNEL_A)
-	{
-		return MemoryMsgA.default_injection_flow; /* A 通道返回本通道 Page4 默认流量，避免 A/B 手柄默认流量串用。 */
-	}
-
-	if (channel == CHANNEL_B)
-	{
-		return MemoryMsgB.default_injection_flow; /* B 通道返回本通道 Page4 默认流量，避免 A/B 手柄默认流量串用。 */
-	}
-
-	return 0U; /* 当前没有有效通道时不补注水默认值，避免无手柄时误启动注水泵。 */
+    const ChannelMemoryMessage_t *memory; /* 默认流量只取指定手柄通道，不按泵口混用A/B参数。 */
+    if (channel == CHANNEL_A)
+    {
+        memory = &MemoryMsgA; /* A手柄使用A侧已装载参数和EEPROM备用流量。 */
+    }
+    else if (channel == CHANNEL_B)
+    {
+        memory = &MemoryMsgB; /* B手柄使用独立缓存，切通道后不能沿用A侧流量。 */
+    }
+    else
+    {
+        return 0U; /* 无有效手柄通道时交给原泵默认值保护，不借用任何历史标签。 */
+    }
+    if (((memory->hand_model == COMMON_SOCKET_ONLINES) ||
+         (((memory->hand_model == PXBA_ONLINES) || (memory->hand_model == PXBB_ONLINES)) && (memory->auto_identify != 0U))) &&
+        !Handlescan_IsRfidToolReady(channel)) /* 自动RFID基座尚无有效已装载标签时，禁止把历史标签流量当作当前默认值。 */
+    {
+        return (memory->hand_model == COMMON_SOCKET_ONLINES) ? HANDLE_RFID_BASE_DEFAULT_FLOW : memory->eeprom_profile.default_injection_flow; /* 公共接头用基座20，分体式用已校验Page4备用值，泵层保留原范围保护。 */
+    }
+    return memory->default_injection_flow; /* 已识别标签使用装载值；EPC为0已按基座类型回退，手动和普通EEPROM手柄保持原行为。 */
 }
 
 /*
@@ -2132,14 +2169,15 @@ static uint16_t ClampInjectionStartFlow(uint16_t flow)
 }
 
 /*
- * 函数功能：取得注水泵启动时使用的非零流量，优先使用当前手柄 Page4，Page4 为空或越界时回退 30。
+ * 函数功能：取得注水泵启动时使用的非零流量，优先使用已装载的标签流量，未识别或EPC为0时分体用Page4、公共接头用20，异常备用值回退30。
  * 输入参数：无。
  * 返回参数：可直接写入 pumpMessageA/B.speed_work 的非零注水泵启动流量。
  */
 uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 {
-	uint16_t flow = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 先读当前通道 Page4 默认注水流量，保证有配置时仍以 EEPROM 为准。 */
+	uint16_t flow = Pubinterface_GetCurrentDefaultInjectionFlow(); /* 读取当前手柄有效默认流量，标签与EEPROM优先级和屏幕刷新使用同一选择器。 */
 
+    if (ToolSettings_ReadFlow(WorkMessage.channel_work, &flow)) return flow; /* 有效刀具的最后流量优先，合法0不改为默认非零值。 */
 	return ClampInjectionStartFlow(flow); /* 无效编码回退30，有效流量最多70，避免启动时先写入超限值。 */
 }
 
@@ -2228,14 +2266,273 @@ void Pubinterface_ApplyInjectionPumpDefaultFlow(uint16_t flow)
 	}
 }
 
+
 /*
- * 函数功能：手柄上线或回落选中时把指定通道 Page4 默认注水流量写入注水泵速度。
+ * 函数功能：取得本通道已经装载的刀具设置记录，不授予识别或运行资格。
+ * 输入参数：channel为A/B逻辑通道；调用者在短临界区内访问返回记录。
+ * 返回参数：当前绑定记录；未绑定、手动模式或参数已清除时返回NULL。
+ */
+static ToolSettingsEntry_t *ToolSettings_GetBound(uint8_t channel)
+{
+    ChannelMemoryMessage_t *memory; /* 校验已装载记忆，不读取另一通道或最新射频回包。 */
+    uint8_t slot; /* 保存1起始槽号，先检查范围再换成数组下标。 */
+    if ((channel != CHANNEL_A) && (channel != CHANNEL_B)) return NULL; /* 非A/B不能访问缓存。 */
+    memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB; /* 绑定本通道运行记忆。 */
+    slot = s_tool_settings_slot[channel - CHANNEL_A]; /* 获取本通道当前槽。 */
+    if ((slot == 0U) || (slot > TOOL_SETTINGS_COUNT) || (memory->tool_type == 0U) ||
+        (memory->rfid_result_sequence != s_tool_settings_sequence[channel - CHANNEL_A])) return NULL; /* 清参数或换刀后不沿用旧绑定。 */
+    if ((memory->hand_model != COMMON_SOCKET_ONLINES) &&
+        !(((memory->hand_model == PXBA_ONLINES) || (memory->hand_model == PXBB_ONLINES)) && memory->auto_identify)) return NULL; /* 仅公共接头及分体自动模式参与记忆。 */
+    if (s_tool_settings[channel - CHANNEL_A][slot - 1U].hand_model != memory->hand_model) return NULL; /* 同通道换基座也不能借用原记录。 */
+    return &s_tool_settings[channel - CHANNEL_A][slot - 1U]; /* 只返回已装载身份对应槽。 */
+}
+
+/*
+ * 函数功能：解除当前刀具绑定，保留16条历史，防止拔柄或切手动后污染RFID设置。
+ * 输入参数：channel为A/B逻辑通道。
+ * 返回参数：无。
+ */
+void Pubinterface_UnbindToolSettings(uint8_t channel)
+{
+    if ((channel != CHANNEL_A) && (channel != CHANNEL_B)) return; /* 非法通道不修改任何记录。 */
+    taskENTER_CRITICAL(); /* 与外控保存、识别恢复互斥，只保护内存访问。 */
+    s_tool_settings_slot[channel - CHANNEL_A] = 0U; /* 不删除历史，重新有效识别后可再次命中。 */
+    if (s_tool_flow_pending_channel == channel) s_tool_flow_pending_channel = CHANNEL_NONE; /* 清除旧刀具尚未应用的流量。 */
+    taskEXIT_CRITICAL(); /* 恢复调度，不在临界区发送屏幕或串口消息。 */
+}
+
+/*
+ * 函数功能：保存当前已成功生效的电机设置；仅由用户参数修改入口调用。
+ * 输入参数：无，读取当前通道记忆，不读取实时输出速度。
+ * 返回参数：无；未绑定有效RFID时保持历史不变。
+ */
+void Pubinterface_SaveToolSettings(void)
+{
+    uint8_t channel = WorkMessage.channel_work; /* 固定本次修改所属逻辑通道。 */
+    ToolSettingsEntry_t *entry; /* 指向已经装载的刀具记录。 */
+    ChannelMemoryMessage_t *memory; /* 读取三方向独立设定，不能仅保存当前方向。 */
+    taskENTER_CRITICAL(); /* 防止识别恢复过程中槽与参数不一致。 */
+    entry = ToolSettings_GetBound(channel); /* 查已装载身份，绝不查最新RFID结果。 */
+    memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB; /* 无效通道在entry为空时不会读取。 */
+    if ((entry != NULL) && Handlescan_IsRfidToolReady(channel) &&
+        (WorkMessage.rfid_result_sequence == memory->rfid_result_sequence))
+    {
+        entry->speed[ZZDIR] = memory->zz_speed; /* 保存正转设定rpm，脚踏比例不影响它。 */
+        entry->speed[FZDIR] = memory->fz_speed; /* 保存反转独立记忆。 */
+        entry->speed[OSCDIR] = memory->osc_speed; /* 保存往复独立记忆。 */
+        entry->direction = memory->dir; /* 保存成功选择的显示方向。 */
+        entry->frequency = memory->freq; /* 保存已通过调频入口检查的设定。 */
+    }
+    taskEXIT_CRITICAL(); /* 设置保存结束，不改变RUN或报警状态。 */
+}
+
+/*
+ * 函数功能：按现有冷却联动规则找到手柄使用的在线注水泵。
+ * 输入参数：channel为手柄逻辑通道。
+ * 返回参数：泵A/B通道；无匹配在线注水泵返回CHANNEL_NONE。
+ */
+static uint8_t ToolSettings_GetCoolingPump(uint8_t channel)
+{
+    bool a = (pumpMessageA.type == INJECTWATER) && pumpMessageA.online_flag; /* 只把在线注水泵作为冷却目标。 */
+    bool b = (pumpMessageB.type == INJECTWATER) && pumpMessageB.online_flag; /* 灌注、吸引不属于刀具设置。 */
+    if ((channel != CHANNEL_A) && (channel != CHANNEL_B)) return CHANNEL_NONE; /* 无手柄归属时不选泵。 */
+    if ((pumpMessageA.type == INJECTWATER) && (pumpMessageB.type == INJECTWATER))
+        return ((channel == CHANNEL_A) ? a : b) ? channel : CHANNEL_NONE; /* 双注水按同侧，不因同侧暂离线改到另一侧。 */
+    return a ? CHANNEL_A : (b ? CHANNEL_B : CHANNEL_NONE); /* 单注水由两侧手柄共用。 */
+}
+
+/*
+ * 函数功能：将成功的用户注水调节保存到当前刀具；默认刷新、停机及排空不调用。
+ * 输入参数：pump_channel为本次实际调节的泵A/B。
+ * 返回参数：无；非当前刀具冷却泵不写任何刀具记忆。
+ */
+void Pubinterface_SaveToolCoolingFlow(uint8_t pump_channel)
+{
+    uint8_t channel = WorkMessage.channel_work; /* 当前选中刀具决定流量归属。 */
+    ToolSettingsEntry_t *entry; /* 与电机设置共用已装载槽。 */
+    taskENTER_CRITICAL(); /* 防止换刀事件重绑时保存到错误记录。 */
+    entry = ToolSettings_GetBound(channel); /* 只识别已经装载的标签。 */
+    if ((entry != NULL) && Handlescan_IsRfidToolReady(channel) &&
+        (pump_channel == ToolSettings_GetCoolingPump(channel)) &&
+        (WorkMessage.rfid_result_sequence == s_tool_settings_sequence[channel - CHANNEL_A]))
+    {
+        entry->flow = (pump_channel == CHANNEL_A) ? pumpMessageA.speed_work : pumpMessageB.speed_work; /* 保存用户设定，包括合法零流量。 */
+        s_tool_flow_pending_channel = CHANNEL_NONE; /* 用户新设定优先，取消尚未应用的历史流量。 */
+    }
+    taskEXIT_CRITICAL(); /* 不改泵启停、控制权或排空标志。 */
+}
+
+/*
+ * 函数功能：在泵可用且未被独立运行或排空占用时应用待恢复冷却流量。
+ * 输入参数：无，由按键行为任务周期调用，也可在识别刷新后立即调用。
+ * 返回参数：无；只更新待机/本手柄联动的设定和显示，不建立运行请求。
+ */
+void Pubinterface_ServiceToolCoolingFlow(void)
+{
+    uint8_t channel; /* 待恢复手柄通道。 */
+    uint8_t pump_channel; /* 本次拓扑对应的注水泵通道。 */
+    ToolSettingsEntry_t *entry; /* 成功应用后把限幅结果写回同一刀具，启动补流量也使用合法值。 */
+    pumpMessage_t *pump; /* 仅修改该刀具的冷却泵。 */
+    uint16_t flow; /* 历史流量按泵本次上下限检查后写入。 */
+    taskENTER_CRITICAL(); /* 待办、当前通道和目标泵一次性核对。 */
+    channel = s_tool_flow_pending_channel; /* 捕获尚未应用的恢复请求。 */
+    pump_channel = ToolSettings_GetCoolingPump(channel); /* 无泵时保留待办，泵上线后再处理。 */
+    if ((channel != CHANNEL_NONE) && (channel == WorkMessage.channel_work) && (pump_channel != CHANNEL_NONE))
+    {
+        pump = (pump_channel == CHANNEL_A) ? &pumpMessageA : &pumpMessageB; /* 只绑定当前目标泵。 */
+        if (!pump->timingDrainage_flag && !pump->pedalDrainage_flag &&
+            (!pump->run_flag || ((s_handle_injection_pump_follow_mask & (1U << (pump_channel - CHANNEL_A))) != 0U)))
+        {
+            flow = s_tool_flow_pending_value; /* 0也是用户设定，不能自动替换成默认流量。 */
+            if (flow > PUMP_INJECTWATER_SPEED_MAX) flow = PUMP_INJECTWATER_SPEED_MAX; /* 保留现行冷却上限。 */
+            if ((pump->speed_Max != 0U) && (flow > pump->speed_Max)) flow = pump->speed_Max; /* 当前泵配置可进一步收紧范围。 */
+            if ((flow < pump->speed_Min) && (pump->speed_Min <= PUMP_INJECTWATER_SPEED_MAX) &&
+                ((pump->speed_Max == 0U) || (pump->speed_Min <= pump->speed_Max))) flow = pump->speed_Min; /* 合法配置下限生效，不放大异常范围。 */
+            entry = ToolSettings_GetBound(channel); /* 仅本通道有效刀具才允许更新历史。 */
+            if ((entry != NULL) && Handlescan_IsRfidToolReady(channel) && (entry->flow == s_tool_flow_pending_value))
+                entry->flow = flow; /* 保存泵当前范围内的恢复值，掉线默认回退不能覆盖用户历史。 */
+            pump->speed_work = flow; /* 只恢复设定，不写run_flag或压力控制输出。 */
+            pump->step_value = 0U; /* 下次脚踏档位仍从首档开始。 */
+            s_tool_flow_pending_channel = CHANNEL_NONE; /* 成功后只应用一次，普通周期不覆盖用户调整。 */
+        }
+        else pump_channel = CHANNEL_NONE; /* 独立运行或排空暂不覆盖，也不刷新显示。 */
+    }
+    else pump_channel = CHANNEL_NONE; /* 未选中或无泵时保持待办。 */
+    taskEXIT_CRITICAL(); /* 显示队列调用必须在临界区之外。 */
+    if (pump_channel == CHANNEL_A) Pubinterface_RefreshPumpADisplay(); /* 同步A泵显示到实际设定。 */
+    else if (pump_channel == CHANNEL_B) Pubinterface_RefreshPumpBDisplay(); /* B泵独立刷新。 */
+}
+
+/*
+ * 函数功能：将历史设定限制在本次识别的合法范围，异常范围保持默认值。
+ * 输入参数：value为历史值；minimum/maximum为本次范围；fallback为本次默认值。
+ * 返回参数：范围内的历史值，或本次默认值；合法零设定保留。
+ */
+static uint32_t ToolSettings_Clamp(uint32_t value, uint32_t minimum, uint32_t maximum, uint32_t fallback)
+{
+    if ((maximum == 0U) || (minimum > maximum)) return fallback; /* 不使用缓存修复异常标签能力。 */
+    if (value == 0U) return 0U; /* 用户设定零不因恢复变成非零运行目标。 */
+    if (value < minimum) return minimum; /* 范围收紧后抬到当前合法下限。 */
+    return (value > maximum) ? maximum : value; /* 历史高设定不能突破新上限。 */
+}
+
+/*
+ * 函数功能：默认参数装载后按完整RFID内容恢复本通道设置并绑定当前记录。
+ * 输入参数：channel为A/B；memory为本通道默认参数；recognize为一致的识别快照。
+ * 返回参数：无；无有效身份或手动模式不使用历史，不改变既有识别和运行门禁。
+ */
+static void ToolSettings_Restore(uint8_t channel, ChannelMemoryMessage_t *memory, const ChannelrecognizeMessage_t *recognize)
+{
+    ToolSettingsEntry_t *entries = s_tool_settings[channel - CHANNEL_A]; /* 调用方已经确认合法A/B。 */
+    ToolSettingsEntry_t *entry; /* 最终匹配或新建槽。 */
+    uint8_t slot = TOOL_SETTINGS_COUNT; /* 16表示尚未命中。 */
+    uint8_t victim = 0U; /* 没有空槽时选择最旧记录。 */
+    uint8_t old_age = TOOL_SETTINGS_COUNT; /* 新记录插入时其它记录全部变旧一档。 */
+    uint8_t i; /* 最多遍历16条，不分配堆内存。 */
+    bool hit = false; /* 区分默认首次装载和历史恢复。 */
+    const RfidSettingsKey_t *key = &recognize->rfid_settings_key; /* 身份与默认参数来自同一识别快照。 */
+    if ((memory->tool_type == 0U) || (memory->rfid_result_sequence == 0U) ||
+        !((memory->hand_model == COMMON_SOCKET_ONLINES) ||
+          (((memory->hand_model == PXBA_ONLINES) || (memory->hand_model == PXBB_ONLINES)) && memory->auto_identify))) return; /* 仅对已有有效自动识别参数附加设置记忆。 */
+    if (!(((key->source == RFID_READ_SOURCE_EPC) && (key->length == RFID_PAYLOAD_EPC_LENGTH)) ||
+          ((key->source == RFID_READ_SOURCE_USER) && (key->length == RFID_PAYLOAD_USER_LENGTH)))) return; /* 不完整身份不能误命中记录。 */
+    taskENTER_CRITICAL(); /* 查找、恢复、重绑统一提交，用户写入不能插到中间。 */
+    for (i = 0U; i < TOOL_SETTINGS_COUNT; ++i)
+    {
+        if (entries[i].valid && (entries[i].hand_model == memory->hand_model) &&
+            (entries[i].key.source == key->source) && (entries[i].key.length == key->length) &&
+            (memcmp(entries[i].key.payload, key->payload, key->length) == 0) &&
+            (memcmp(entries[i].key.tag_epc, key->tag_epc, sizeof(key->tag_epc)) == 0))
+        {
+            slot = i; /* 只有完整内容一致才复用设置。 */
+            hit = true; /* 已找到历史刀具，不采用标签默认运行设定。 */
+            break; /* 一通道同一身份只占一槽。 */
+        }
+        if (!entries[i].valid) victim = i; /* 有空槽时优先使用，保持已有历史。 */
+        else if (entries[victim].valid && (entries[i].age > entries[victim].age)) victim = i; /* 无空槽时选择最久未使用记录。 */
+    }
+    if (!hit) slot = victim; /* 首次刀具使用空槽或最旧槽。 */
+    entry = &entries[slot]; /* 后续所有参数只影响此记录。 */
+    if (hit) old_age = entry->age; /* 命中记录移到最近，其余相对顺序不变。 */
+    for (i = 0U; i < TOOL_SETTINGS_COUNT; ++i)
+        if (entries[i].valid && (i != slot) && (entries[i].age < old_age)) ++entries[i].age; /* 有界LRU，不使用会回绕的时间戳。 */
+    if (hit)
+    {
+        memory->zz_speed = ToolSettings_Clamp(entry->speed[ZZDIR], recognize->speed_zzmin, recognize->speed_zzmax, memory->zz_speed); /* 正转按本通道新范围恢复。 */
+        memory->fz_speed = ToolSettings_Clamp(entry->speed[FZDIR], recognize->speed_fzmin, recognize->speed_fzmax, memory->fz_speed); /* 反转不借用正转范围。 */
+        memory->osc_speed = ToolSettings_Clamp(entry->speed[OSCDIR], recognize->speed_oscmin, recognize->speed_oscmax, memory->osc_speed); /* 往复服从本体与标签交集。 */
+        memory->freq = (entry->frequency == 0U) ? memory->freq : (uint16_t)ToolSettings_Clamp(entry->frequency, recognize->freq_min, recognize->freq_max, memory->freq); /* 使用当前频率边界。 */
+        if ((entry->direction <= OSCDIR) &&
+            ((memory->eeprom_profile.direction_mask == 0U) || (((memory->eeprom_profile.direction_mask & ~HANDLE_EEPROM_DIRECTION_BITS) == 0U) && ((memory->eeprom_profile.direction_mask & (1U << entry->direction)) != 0U))) &&
+            ((memory->rfid_direction_mask & (1U << entry->direction)) != 0U) &&
+            !Pubinterface_IsDirLocked(memory->hand_model, memory->raw_tool_type, memory->eeprom_profile.direction_mask) &&
+            ((entry->direction != OSCDIR) || IsOscDirectionAllowed(memory->hand_model, memory->tool_type, memory->raw_tool_type, memory->eeprom_profile.direction_mask)))
+            memory->dir = entry->direction; /* 只恢复当前仍可选的方向，固定方向保持本次识别默认值。 */
+    }
+    else
+    {
+        memset(entry, 0, sizeof(*entry)); /* 淘汰时清旧设置，首次刀具不继承上一条流量。 */
+        entry->key = *key; /* 保存原始身份，后续用户调节不再查询最新RFID回包。 */
+        entry->hand_model = memory->hand_model; /* 同标签在不同基座分别记忆。 */
+        entry->flow = ClampInjectionStartFlow(memory->default_injection_flow); /* 首次冷却从现有默认流量规则开始。 */
+    }
+    entry->speed[ZZDIR] = memory->zz_speed; /* 写回恢复后的合法正转值。 */
+    entry->speed[FZDIR] = memory->fz_speed; /* 写回反转值，避免越界历史反复恢复。 */
+    entry->speed[OSCDIR] = memory->osc_speed; /* 写回往复值，不存临时输出。 */
+    entry->direction = memory->dir; /* 固定或被禁用方向回退结果同样进入记录。 */
+    entry->frequency = memory->freq; /* 更新已校验频率。 */
+    entry->age = 0U; /* 本次已装载的刀具为最近使用。 */
+    entry->valid = true; /* 所有字段就绪后发布有效槽。 */
+    s_tool_settings_sequence[channel - CHANNEL_A] = memory->rfid_result_sequence; /* 绑定本次装载编号。 */
+    s_tool_settings_slot[channel - CHANNEL_A] = slot + 1U; /* 最后发布槽号，保存入口才能写本记录。 */
+    taskEXIT_CRITICAL(); /* 不在此处更新WorkMessage、发屏幕消息或建立运行请求。 */
+}
+
+/*
+ * 函数功能：取得当前有效刀具的记忆流量；无有效绑定时保留原默认回退规则。
+ * 输入参数：channel为手柄通道；flow接收历史设定，包括0。
+ * 返回参数：true表示已取得记忆，false表示调用方使用现有默认值。
+ */
+static bool ToolSettings_ReadFlow(uint8_t channel, uint16_t *flow)
+{
+    ToolSettingsEntry_t *entry; /* 身份必须对应当前装载参数。 */
+    bool found = false; /* 默认不使用历史，不能绕过识别状态。 */
+    taskENTER_CRITICAL(); /* 读取流量与当前槽保持一致。 */
+    entry = ToolSettings_GetBound(channel); /* 不查询或重启RFID。 */
+    if ((entry != NULL) && Handlescan_IsRfidToolReady(channel))
+    {
+        *flow = entry->flow; /* 不用0表示未命中，保存医生的零流量选择。 */
+        found = true; /* 仅说明设置存在，不表示可以启动。 */
+    }
+    taskEXIT_CRITICAL(); /* 返回后再操作泵或屏幕。 */
+    return found; /* 默认与历史流量由调用方按同一规则选择。 */
+}
+
+/*
+ * 函数功能：手柄上线、RFID状态变化或切通道时优先恢复刀具冷却流量；无有效历史时沿用原默认值。
  * 输入参数：channel 本次成为当前选中手柄的通道。
  * 返回参数：无。
  */
 void Pubinterface_ApplyChannelDefaultInjectionFlow(uint8_t channel)
 {
-	Pubinterface_ApplyInjectionPumpDefaultFlow(Pubinterface_GetChannelDefaultInjectionFlow(channel)); /* 只在通道成为当前选中时装载 Page4 默认流量，避免普通运行周期覆盖用户手动调节。 */
+    const ChannelMemoryMessage_t *memory; /* 流量归属指定手柄，而非固定泵口。 */
+    uint16_t flow; /* 默认值与历史值分开，不改RFID默认字段。 */
+    if ((channel != CHANNEL_A) && (channel != CHANNEL_B)) return; /* 无效通道不能改变泵设定。 */
+    memory = (channel == CHANNEL_A) ? &MemoryMsgA : &MemoryMsgB; /* 只读目标通道参数。 */
+    if ((memory->hand_model == COMMON_SOCKET_ONLINES) ||
+        (((memory->hand_model == PXBA_ONLINES) || (memory->hand_model == PXBB_ONLINES)) && memory->auto_identify))
+    {
+        flow = ClampInjectionStartFlow(Pubinterface_GetChannelDefaultInjectionFlow(channel)); /* RFID未就绪仍沿用既有基座回退。 */
+        (void)ToolSettings_ReadFlow(channel, &flow); /* 识别有效时历史流量覆盖默认；未命中保持默认。 */
+        if (channel != WorkMessage.channel_work) return; /* 非选中通道不改当前冷却设定。 */
+        taskENTER_CRITICAL(); /* 发布完整待办，避免周期服务读到新通道旧流量。 */
+        s_tool_flow_pending_value = flow; /* 保留待恢复值，独立泵运行时也不丢失。 */
+        s_tool_flow_pending_channel = channel; /* 标记由本手柄冷却目标处理。 */
+        taskEXIT_CRITICAL(); /* 不持临界区发送显示消息。 */
+        Pubinterface_ServiceToolCoolingFlow(); /* 当前可用就立即恢复，否则现有行为周期稍后重试。 */
+        return; /* 已按刀具选泵，不能再写两路默认流量。 */
+    }
+    Pubinterface_ApplyInjectionPumpDefaultFlow(Pubinterface_GetChannelDefaultInjectionFlow(channel)); /* 普通手柄及手动模式维持原刷新规则。 */
 }
 
 /*
@@ -2259,6 +2556,7 @@ bool Pubinterface_IsHandleVerifyAlarm(uint8_t alarm_value)
  */
 void Pubinterface_LoadChannelMemory(uint8_t channel)
 {
+    uint16_t remembered_flow; /* 通道真正装载后恢复冷却设定，不能只依赖“新标签”刷新标志。 */
 	ChannelMemoryMessage_t *memory = NULL; /* 指向本次要选中通道的保存参数。 */
 
 	if (channel == CHANNEL_A)
@@ -2336,6 +2634,14 @@ void Pubinterface_LoadChannelMemory(uint8_t channel)
     {
         Rfid_ConfirmToolLoaded(channel, WorkMessage.rfid_result_sequence); /* 本次有效RFID参数已进入工作态才解除CRC锁定，旧缓存或手动参数不能解锁。 */
     }
+    if (ToolSettings_ReadFlow(channel, &remembered_flow)) /* 同标签重识别或切回通道也要恢复最后流量。 */
+    {
+        taskENTER_CRITICAL(); /* 当前工作参数已装载，再一次性发布待恢复流量。 */
+        s_tool_flow_pending_value = remembered_flow; /* 不覆盖标签默认字段，合法0也保留。 */
+        s_tool_flow_pending_channel = channel; /* 泵暂时不可用时交由现有行为周期重试。 */
+        taskEXIT_CRITICAL(); /* 刷屏与等待均不在临界区内。 */
+        Pubinterface_ServiceToolCoolingFlow(); /* 不改启停或控制权，只恢复当前对应泵的设定。 */
+    }
 }
 
 /*
@@ -2366,23 +2672,18 @@ bool Pubinterface_ShouldAutoSelectPluggedChannel(uint8_t channel)
 }
 
 /*
- * 函数功能：把识别结果写入对应通道记忆；PX自动识别和公共接头同标签恢复时保留用户转速、频率及合法方向。
+ * 函数功能：把识别结果写入对应通道记忆；公共接头和PX自动模式按完整RFID恢复16条历史中的用户设置。
  * 输入参数：channel 本次插入并认证通过的通道。
  * 返回参数：无。
  */
 void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 {
+    ChannelrecognizeMessage_t recognize_snapshot; /* 一次性取得本次参数与身份，避免快速换刀时混用。 */
 	ChannelrecognizeMessage_t *recognize = NULL; /* 指向扫描层刚刚完成认证的临时识别缓存。 */
 	ChannelMemoryMessage_t *memory = NULL;		  /* 指向要更新的 A/B 通道记忆结构。 */
 	uint8_t keep_auto_identify = 0U;				  /* RFID 二次刷新前保留通道自动识别状态，避免新刀具参数覆盖该模式记忆。 */
     uint8_t keep_drive_type = NOWORK; /* 仅保存本通道原控制模式，未选中通道刷新不能读取WorkMessage中的另一通道模式。 */
     uint8_t keep_foot_manual_lock = 0U; /* 本通道锁存随RFID刷新保留，真实拔柄由MemoryMsg清零结束。 */
-	uint32_t keep_zz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的正转速度，避免标签默认值覆盖屏幕调节结果。 */
-	uint32_t keep_fz_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的反转速度，保证异常掉线恢复后仍按用户设置运行。 */
-	uint32_t keep_osc_speed = 0U;				  /* 同一 EPC 重识别前暂存用户调过的往复速度，避免自动识别重刷回标签默认速度。 */
-	uint16_t keep_freq = 0U;					  /* 同一 EPC 重识别前暂存用户调过的往复频率，确保屏幕显示和实际运行一致。 */
-	uint16_t keep_dir = 0U;					  /* 同一 EPC 重识别前暂存用户最后选择的方向，重识别后仍按该方向选择速度。 */
-	bool keep_rfid_user_runtime = false;		  /* true表示PX自动识别或公共接头同标签恢复，保留已调好的运行参数，不恢复刀具在线资格。 */
 
 	if (channel == CHANNEL_A)
 	{
@@ -2399,26 +2700,17 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 		return;									  /* 非 A/B 通道不写通道记忆，避免破坏当前工作态。 */
 	}
 
+    taskENTER_CRITICAL(); /* 扫描层也以整体快照发布，身份与边界保持同一版本。 */
+    recognize_snapshot = *recognize; /* 拷贝本通道识别结果，不去RFID任务读取后来标签。 */
+    taskEXIT_CRITICAL(); /* 后续参数装载使用本地快照。 */
+    recognize = &recognize_snapshot; /* 本次事件只使用这份一致数据。 */
+    Pubinterface_UnbindToolSettings(channel); /* 先解除旧绑定，重写Memory期间不接受用户缓存写入。 */
 	keep_auto_identify = memory->auto_identify;	  /* 识别缓存只包含刀具/手柄参数，自动识别模式属于通道 UI 记忆，需要单独保留。 */
     if (memory->hand_model == recognize->handle_type) /* 同一手柄的刀具刷新保留选择；新型号不能沿用旧型号的控制模式。 */
     {
         keep_drive_type = memory->drive_type; /* 只读取本通道记忆，不受另一通道当前选中模式影响。 */
         keep_foot_manual_lock = memory->foot_manual_lock; /* A/B各自保存自己的手动选择锁存。 */
     }
-	keep_rfid_user_runtime = (bool)((recognize->rfid_cache_hit != 0U) && /* 仅本通道完整RFID数据再次命中时保留设置，换标签仍装载新默认值。 */
-									(memory->hand_model == recognize->handle_type) && /* 基座型号必须一致，防止上一只手柄的参数进入新手柄。 */
-									(recognize->tool_type != 0U) && /* 新标签必须已经解析出有效刀具，等待识别时不能恢复运行参数。 */
-									(memory->raw_tool_type == recognize->raw_tool_type) && /* 原始刀具型号一致才可恢复，不能只按磨刀或刨刀大类匹配。 */
-									(((memory->auto_identify != 0U) && (memory->tool_type != 0U)) || /* PX系列继续沿用自动识别且已有有效刀具的参数记忆条件。 */
-									 ((memory->hand_model == COMMON_SOCKET_ONLINES) && (memory->raw_tool_type != 0U)))); /* 公共接头独立于PX自动识别开关保留同标签用户设置；射频掉线锁存参数，实际拔柄仍清空这份记忆。 */
-	if (keep_rfid_user_runtime != false)
-	{
-		keep_zz_speed = memory->zz_speed;		  /* 保存用户调过的正转速度，后面 memset 会清空整个通道记忆。 */
-		keep_fz_speed = memory->fz_speed;		  /* 保存用户调过的反转速度，避免同一 EPC 回来后回到标签默认速度。 */
-		keep_osc_speed = memory->osc_speed;		  /* 保存用户调过的往复速度，防止 RFID 短暂掉线造成参数跳变。 */
-		keep_freq = memory->freq;				  /* 保存用户调过的频率，避免重新识别同一刨刀时又改成标签默认值。 */
-		keep_dir = memory->dir;					  /* 保存用户选择的方向，恢复后屏幕高亮和速度选择仍跟随用户操作。 */
-	}
 	if ((recognize->handle_type != 0U) && (recognize->tool_type == 0U) && (Pubinterface_IsSplitToolSpecDisplayModel(recognize->handle_type) == true))
 	{
 		keep_auto_identify = 1U; /* PXBA/PXBB 新插入基座默认打开自动识别，直到用户主动切回手动模式。 */
@@ -2445,36 +2737,7 @@ void Pubinterface_SaveRecognizeToMemory(uint8_t channel)
 	memory->rfid_direction_mask = recognize->rfid_direction_mask; /* 保存本通道RFID方向能力，切换A/B不能串用。 */
 	memory->raw_tool_type = recognize->raw_tool_type;			  /* 保存原始刀具型号，驱动和上位机仍可按旧码继续判断。 */
 	memory->auto_identify = keep_auto_identify;					  /* 恢复自动识别模式记忆，避免 RFID 结果刷新把屏幕选择状态清掉。 */
-	/* 同一 RFID 刀具重新识别时恢复用户运行参数，避免周期刷新把现场调节值重置为标签默认值。 */
-	if (keep_rfid_user_runtime != false)
-	{
-		if (keep_zz_speed != 0U)
-		{
-			memory->zz_speed = keep_zz_speed;					  /* 同一 EPC 恢复时保留用户正转速度，屏幕值和下次启动目标保持一致。 */
-		}
-		if (keep_fz_speed != 0U)
-		{
-			memory->fz_speed = keep_fz_speed;					  /* 同一 EPC 恢复时保留用户反转速度，避免标签默认值覆盖用户调整。 */
-		}
-		if (keep_osc_speed != 0U)
-		{
-			memory->osc_speed = keep_osc_speed;					  /* 同一 EPC 恢复时保留用户往复速度，异常掉线不会造成速度跳回默认。 */
-		}
-		if (keep_freq != 0U)
-		{
-			memory->freq = keep_freq;							  /* 同一 EPC 恢复时保留用户往复频率，屏幕频率和实际运行频率继续一致。 */
-		}
-		if ((keep_dir <= OSCDIR) &&
-            ((memory->eeprom_profile.direction_mask == 0U) || ((memory->eeprom_profile.direction_mask & (1U << keep_dir)) != 0U)) && /* 恢复旧方向前检查本体许可，禁止位不能通过通道记忆绕过。 */
-            ((memory->rfid_direction_mask == 0U) || ((memory->rfid_direction_mask & (1U << keep_dir)) != 0U)) && /* 同标签恢复也必须检查允许方向，不能写回已禁止的记忆值。 */
-            (Pubinterface_IsDirLocked(memory->hand_model, memory->raw_tool_type, memory->eeprom_profile.direction_mask) == false) &&
-			((keep_dir == ZZDIR) ||
-			 (keep_dir == FZDIR) ||
-			 ((keep_dir == OSCDIR) && (IsOscDirectionAllowed(memory->hand_model, memory->tool_type, memory->raw_tool_type, memory->eeprom_profile.direction_mask) == true))))
-		{
-			memory->dir = keep_dir;								  /* 方向仍被当前手柄和刀具支持时才恢复，避免异常方向写回运行状态。 */
-		}
-	}
+    ToolSettings_Restore(channel, memory, recognize); /* 默认能力已装载，按完整标签恢复多刀具设置。 */
 	memory->osc_speed = Pubinterface_ClampMotorSpeed(channel, OSCDIR, memory->osc_speed); /* 同标签重识别也要检查保留速度，不能把旧70000记忆写回新往复范围。 */
 	if (memory->tool_type != 0U)
 	{
@@ -3142,6 +3405,7 @@ void SpeedActive(uint8_t key_value)
 	{
 		WorkMessage.speed_work = WorkMessage.speed_set_work; /* 同步目标转速，是否真正运行仍由 runflag_work 决定。 */
 	}
+    Pubinterface_SaveToolSettings(); /* 成功调节后立即保存设定，换刀不依赖拔出事件补存。 */
 }
 /*
  * 函数功能：处理屏幕或上位机的往复频率加减键，每次按协议频率值调整 5，并限制在当前通道范围内。
@@ -3237,6 +3501,7 @@ void FreqActive(uint8_t key_value)
 	display_value[0] = freq_value; /* UI_FREQ_ID Value[0] 传当前频率值。 */
 	display_value[1] = 1U; /* 1 表示按键后只刷新数值，减少整块重绘造成的视觉闪烁。 */
 	SendUIDSMessage(UI_FREQ_ID, true, display_value); /* 频率按键生效后立即刷新屏幕，避免等待下一次整页刷新。 */
+    Pubinterface_SaveToolSettings(); /* 成功调节后立即保存设定，换刀不依赖拔出事件补存。 */
 }
 /*
  * 函数功能：处理屏幕、手柄或上位机发起的正转、反转、往复方向切换。
@@ -3321,6 +3586,7 @@ void DirActive(uint8_t key_value)
 		// 往复
 		break;
 	}
+    Pubinterface_SaveToolSettings(); /* 方向入口拒绝分支已返回，此处只保存生效的方向和独立速度。 */
 	if ((WorkMessage.channel_work == CHANNEL_A) || (WorkMessage.channel_work == CHANNEL_B))
 	{
 		Pubinterface_RefreshSelectedChannelDisplay(WorkMessage.channel_work); /* 方向切换后同步刷新方向高亮、频率窗口和当前方向速度值。 */

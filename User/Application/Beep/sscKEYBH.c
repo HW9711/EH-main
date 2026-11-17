@@ -338,11 +338,17 @@ void KeyBehaviors()
         DIAG_CHECKPOINT(); /* 每条按键处理完即复制请求，连续切换或启停不会只剩最后状态。 */
 	}
 }
+/*
+ * 函数功能：按现有周期处理按键，再尝试应用因泵离线或独立运行而暂存的刀具冷却流量。
+ * 输入参数：event为任务调度事件，本任务不使用。
+ * 返回参数：无。
+ */
 void KeyBehaviorsTask(uint32_t event)
 {
 	(void)event;
 	
 	KeyBehaviors();
+    Pubinterface_ServiceToolCoolingFlow(); /* 只重试未完成的设定恢复，不产生启停或RFID请求。 */
 
 }
 void SscKeyBehaviorTask_Init(void)

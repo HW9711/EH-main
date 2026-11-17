@@ -29,7 +29,7 @@ typedef struct
     uint8_t model; /* 归一后的RFID型号1~6，供机械转向转换使用。 */
     uint8_t direction; /* 默认显示方向：0正转、1反转、2往复，不是驱动最终方向。 */
     uint8_t direction_mask; /* bit0正转、bit1反转、bit2往复；识别成功后用于限制换向。 */
-    uint16_t diameter; /* 新EPC保留直径原值，老USER按原协议乘5。 */
+    uint16_t diameter; /* EPC直径原值单位为0.1mm；老USER仍按原协议乘5，保持原显示和上报行为。 */
     uint8_t length; /* 刀具长度，沿用各标签原协议。 */
     uint8_t angle; /* 刀具弯曲角度，沿用各标签原协议。 */
     uint32_t min_speed; /* 刀头最低转速，单位rpm；EPC的0值由PX普通刨刀适配500rpm。 */
@@ -40,7 +40,7 @@ typedef struct
     uint16_t speed_step_small; /* 老USER兼容表给出小步进，单位rpm；新版EPC保持0并沿用原步进处理。 */
     uint16_t speed_step_large; /* 老USER兼容表给出大步进，单位rpm；新版EPC保持0并沿用原步进处理。 */
     uint8_t flow; /* 默认注水流量，单位mL/min。 */
-    uint8_t frequency; /* 往复频率指令原值，老USER取B10，新刨刀默认40。 */
+    uint8_t frequency; /* 往复频率指令值；EPC由B9高2位的1~4Hz换成10/20/30/40，旧USER仍直接取B10。 */
 } RfidToolParameters_t;
 
 bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uint8_t length, RfidToolParameters_t *parameters);

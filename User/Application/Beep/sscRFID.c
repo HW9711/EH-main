@@ -1446,7 +1446,7 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
     uint16_t crc16 = 0xFFFFU; /* 老USER使用MODBUS CRC16初值，末尾按高字节在前存储。 */
     uint8_t i; /* 当前参与校验的字节下标。 */
     uint8_t bit; /* 每个字节执行8次CRC移位。 */
-    uint8_t count; /* 新EPC可选方向数量1~3。 */
+    uint8_t count; /* EPC方向模式编码0~3；0和1均只允许默认方向。 */
     uint8_t raw_direction; /* 新EPC默认方向编码，00和01都表示正转。 */
     uint16_t ratio; /* EPC低12位保存倍率x10，转换后使用x100。 */
     const RfidLegacyUserProfile_t *legacy_profile; /* 仅老USER校验通过后选择对应型号的兼容参数。 */
@@ -1465,22 +1465,22 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
         {
             return false; /* 新EPC业务CRC错误，本次请求应继续读取老USER。 */
         }
-        count = (uint8_t)(payload[0] >> 6U); /* B0最高两位决定方向数量。 */
+        count = (uint8_t)(payload[0] >> 6U); /* B0最高两位为方向模式，00/01同步默认方向，10正反，11正反往复。 */
         decoded.model = (uint8_t)((payload[0] >> 3U) & 7U); /* B0中间三位保留型号1~6。 */
         raw_direction = (uint8_t)((payload[0] >> 1U) & 3U); /* B0的bit2~1指定默认方向。 */
         decoded.direction = (raw_direction <= 1U) ? 0U : (uint8_t)(raw_direction - 1U); /* 00/01正转、10反转、11往复。 */
-        if (((payload[0] & 1U) == 0U) || (count == 0U) || (decoded.model == 0U) || (decoded.model > 6U))
+        if (((payload[0] & 1U) == 0U) || (decoded.model == 0U) || (decoded.model > 6U))
         {
-            return false; /* 格式标记、方向数量或刀具型号错误，不兼容旧无CRC EPC。 */
+            return false; /* 格式标记或刀具型号错误，不兼容旧无CRC EPC。 */
         }
-        decoded.direction_mask = (count == 1U) ? (uint8_t)(1U << decoded.direction) : ((count == 2U) ? 3U : 7U); /* 一方向只允许默认方向，两方向为正反，三方向增加往复。 */
+        decoded.direction_mask = (count <= 1U) ? (uint8_t)(1U << decoded.direction) : ((count == 2U) ? 3U : 7U); /* 模式00/01只允许默认方向，10为正反，11增加往复；按协议接受00。 */
         if ((decoded.direction_mask & (1U << decoded.direction)) == 0U)
         {
             return false; /* 两方向标签不能把往复作为默认方向。 */
         }
         if (decoded.model == RFID_TOOL_MODEL_MXYTP)
         {
-            if ((count != 1U) || (decoded.direction != 2U))
+            if ((count > 1U) || (decoded.direction != 2U))
             {
                 return false; /* 机械往复刀具只能显示往复，实际电机正转仍由驱动层转换。 */
             }
@@ -1500,13 +1500,13 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
         {
             decoded.ratio <<= 16U; /* 增速比写入高16位，沿用现有驱动换算约定。 */
         }
-        decoded.diameter = payload[1]; /* 新EPC直径沿用原始编码。 */
+        decoded.diameter = payload[1]; /* EPC直径单位统一为0.1mm，41表示4.1mm；保留原值供显示和心跳使用，不做整数除法。 */
         decoded.max_speed = (uint32_t)payload[6] * 1000U; /* EPC最高转速单位为1000rpm。 */
         decoded.min_speed = (uint32_t)payload[7] * 1000U; /* 最低转速0的PX普通刨刀特例在装载时处理。 */
         decoded.default_speed = (uint32_t)payload[8] * 1000U; /* 默认转速不能被截断到16位。 */
-        decoded.flow = payload[9]; /* 新EPC注水默认流量在B9。 */
+        decoded.flow = (uint8_t)(payload[9] & 0x3FU); /* B9低6位为0~63mL/min，屏蔽高位频率，避免把频率叠加到默认流量和心跳上报。 */
         decoded.current = (uint16_t)payload[11] * 10U; /* 0.1A转换成驱动使用的0.01A；0保留驱动默认阈值语义。 */
-        decoded.frequency = ((decoded.model == RFID_TOOL_MODEL_PLANER) || (decoded.model == RFID_TOOL_MODEL_REVERSE_PLANER)) ? 40U : 0U; /* 电气往复刨刀沿用频率指令40。 */
+        decoded.frequency = (uint8_t)(((payload[9] >> 6U) + 1U) * 10U); /* B9高2位对应1~4Hz，按现有驱动0.1Hz指令换成10/20/30/40；仅电气往复方向实际下发频率。 */
     }
     else if ((source == RFID_READ_SOURCE_USER) && (length == RFID_PAYLOAD_USER_LENGTH))
     {

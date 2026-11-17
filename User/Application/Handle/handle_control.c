@@ -61,6 +61,7 @@ static void Handle_DisableAutoIdentify(uint8_t channel, ChannelMemoryMessage_t *
 		return; /* 没有通道记忆时不能安全修改自动识别状态，避免 A/B 记忆串写。 */
 	}
 
+    Pubinterface_UnbindToolSettings(channel); /* 切手动只解除RFID绑定，历史设置保留到重启。 */
 	WorkMessage.auto_identify = 0U; /* 把当前通道改为手动模式，屏幕不再显示自动识别的等待状态和结果区。 */
 	memory->auto_identify = 0U;	   /* 通道记忆同步进入手动模式，切换通道后不会再次自动恢复 RFID。 */
 	WorkMessage.raw_tool_type = 0U; /* 手动刀具不再使用 RFID 原始型号，避免驱动和上位机继续按旧标签判断。 */
@@ -679,6 +680,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 {
 	uint8_t current_channel_unplugged = 0U; /* 记录拔出的是否为当前选中通道，用于区分停机报警和剩余通道恢复流程。 */
 	uint8_t current_channel_run_interrupted = 0U; /* 记录拔出前是否正在运行；即使驱动先报 87 并清掉运行标志，也要按运行中拔出处理。 */
+	bool refresh_default_flow = false; /* 首次识别、换刀或默认流量变化时重刷泵；同标签重复事件不覆盖手动流量。 */
 	uint8_t channel_was_online = 0U;		   /* 记录插入事件前该通道是否已经在线，用于区分首次接入和重复识别刷新。 */
 	uint8_t close_idle_touch = 0U;			   /* 记录拔出时是否只是打开本机触控窗口、尚未运行；先清屏再关闭窗口，避免关闭消息被一并清掉。 */
 	uint8_t close_verify_alarm = 0U;		   /* 记录扫描任务要求关闭校验报警的消息；等无手柄清屏完成后，再发送关闭 90 号报警图的命令。 */
@@ -693,13 +695,15 @@ void PlugORunPLUGActive(uint8_t key_value)
 		}
 		WorkMessage.Channel_Aonline = true;					   /* A 通道校验通过后才置在线，后续心跳和显示都读取这个标志。 */
 		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* A 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
+		refresh_default_flow = (MemoryMsgA.default_injection_flow != ChannelrecognizeMessageA.default_injection_flow) ||
+            ((ChannelrecognizeMessageA.rfid_result_sequence != 0U) && (MemoryMsgA.rfid_result_sequence != ChannelrecognizeMessageA.rfid_result_sequence) && (ChannelrecognizeMessageA.rfid_cache_hit == 0U)); /* 保存前比较A侧新刀具和流量，捕获基座上线后才到达的RFID结果。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_A);		   /* 扫描结果只先进入 MemoryMsgA，运行中不会直接覆盖 WorkMessage。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_A)) /* 停机且无报警时，新接入 A 才能自动成为当前通道。 */
 		{
 			Pubinterface_LoadChannelMemory(CHANNEL_A);		   /* 非运行状态下最后插入且校验通过的 A 通道成为当前选中通道。 */
-			if (channel_was_online == 0U) /* 仅首次离线转在线时装载默认流量，重复识别不能覆盖用户设置。 */
+			if ((channel_was_online == 0U) || refresh_default_flow) /* 首次上线或新RFID默认参数到达时同步泵，普通同标签重复事件不覆盖手调值。 */
 			{
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A 首次接入并被选中时，才用 A 的 Page4 默认流量初始化注水泵。 */
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_A); /* A选中后按有效标签优先、EEPROM回退的规则更新泵设定和屏幕。 */
 			}
 			Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_A); /* A 自动成为当前通道后，同步刷新参数区和刀具规格。 */
 		}
@@ -714,13 +718,15 @@ void PlugORunPLUGActive(uint8_t key_value)
 		}
 		WorkMessage.Channel_Bonline = true;					   /* B 通道校验通过后才置在线，坏手柄不会进入在线态。 */
 		(void)Pubinterface_ClearHandleNotConnectedAlarm();	   /* B 手柄重新接入后清除运行中拔手柄留下的未连接报警，恢复自动选中条件。 */
+		refresh_default_flow = (MemoryMsgB.default_injection_flow != ChannelrecognizeMessageB.default_injection_flow) ||
+            ((ChannelrecognizeMessageB.rfid_result_sequence != 0U) && (MemoryMsgB.rfid_result_sequence != ChannelrecognizeMessageB.rfid_result_sequence) && (ChannelrecognizeMessageB.rfid_cache_hit == 0U)); /* B侧独立比较新刀具和流量，不能借用A侧识别结果。 */
 		Pubinterface_SaveRecognizeToMemory(CHANNEL_B);		   /* 扫描结果先保存到 MemoryMsgB，运行中插入 B 不直接替换 A 的当前参数。 */
 		if (Pubinterface_ShouldAutoSelectPluggedChannel(CHANNEL_B)) /* 停机且无报警时，新接入 B 才能自动成为当前通道。 */
 		{
 			Pubinterface_LoadChannelMemory(CHANNEL_B);		   /* 非运行状态下最后插入且校验通过的 B 通道成为当前选中通道。 */
-			if (channel_was_online == 0U) /* B 首次上线才装载默认流量，防止重复扫描覆盖手工调节。 */
+			if ((channel_was_online == 0U) || refresh_default_flow) /* B首次上线或新RFID默认参数到达时刷新泵，同标签重复事件保持手调值。 */
 			{
-				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B 首次接入并被选中时，才用 B 的 Page4 默认流量初始化注水泵。 */
+				Pubinterface_ApplyChannelDefaultInjectionFlow(CHANNEL_B); /* B选中后同步当前有效默认流量及泵屏幕，未识别标签时使用本体EEPROM。 */
 			}
 			Pubinterface_RefreshSelectedChannelDisplay(CHANNEL_B); /* B 自动成为当前通道后，同步刷新参数区和刀具规格。 */
 		}
@@ -744,6 +750,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 			Handle_AdvanceIdentityGeneration(CHANNEL_A); /* 先增加插拔计数，读取下一页数据前会停止原 A 请求，再把 A 标为离线。 */
 		}
 		WorkMessage.Channel_Aonline = false;					   /* A 拔出后立刻离线，心跳会报告 A 不可用。 */
+        Pubinterface_UnbindToolSettings(CHANNEL_A); /* 拔柄清当前绑定，已保存的16条刀具设置不随通道记忆清零。 */
 		memset(&MemoryMsgA, 0, sizeof(MemoryMsgA));			   /* A 离线时清空 A 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		MemoryMsgA.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 拔柄后本通道往复保护恢复500ms。 */
 		MemoryMsgA.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间不保留上一只手柄配置。 */
@@ -806,6 +813,7 @@ void PlugORunPLUGActive(uint8_t key_value)
 			Handle_AdvanceIdentityGeneration(CHANNEL_B); /* 增加 B 插拔计数，旧 B 数据任务在下一次检查时停止。 */
 		}
 		WorkMessage.Channel_Bonline = false;					   /* B 拔出后立刻离线，心跳会报告 B 不可用。 */
+        Pubinterface_UnbindToolSettings(CHANNEL_B); /* 拔柄清当前绑定，已保存的16条刀具设置不随通道记忆清零。 */
 		memset(&MemoryMsgB, 0, sizeof(MemoryMsgB));			   /* B 离线时清空 B 通道记忆，避免后续手动切换读到旧 EEPROM 参数。 */
 		MemoryMsgB.eeprom_profile.overcurrent_time22_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 拔柄后本通道往复保护恢复500ms。 */
 		MemoryMsgB.eeprom_profile.overcurrent_time24_ms = HANDLE_OVERCURRENT_TIME_DEFAULT_MS; /* 无霍尔时间不保留上一只手柄配置。 */

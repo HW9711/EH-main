@@ -127,6 +127,7 @@ uint8_t Pump_CycleFlow(uint8_t screen_key)
 	{
 		PUMPActive(screen_key); /* 未到上限时完整复用屏幕步进、限幅和刷新；本次刚到上限仍保留上限值。 */
 	}
+    Pubinterface_SaveToolCoolingFlow((screen_key == SCREENKey_APUMP_Add) ? CHANNEL_A : CHANNEL_B); /* 回绕到0同样是用户设定，保存有效零流量。 */
 	return 1U; /* 普通递增和上限回绕都属于有效操作，调用方均应给一次按键音。 */
 }
 
@@ -493,6 +494,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 		{
 			// 当前不发送队列消息。
 		}
+        Pubinterface_SaveToolCoolingFlow(CHANNEL_A); /* 成功加减后保存刀具冷却设定，不采集泵任务的临时输出。 */
 		Pubinterface_RefreshPumpADisplay(); /* A 泵加减速后同步刷新流量数值和按钮状态。 */
 		break;
 
@@ -560,6 +562,7 @@ static void Pump_HandleSpeedKey(uint8_t key_value)
 		{
 			// 当前不发送队列消息。
 		}
+        Pubinterface_SaveToolCoolingFlow(CHANNEL_B); /* 成功加减后保存刀具冷却设定，不采集泵任务的临时输出。 */
 		Pubinterface_RefreshPumpBDisplay(); /* B 泵加减速后同步刷新流量数值和按钮状态。 */
 		break;
 	default:
@@ -622,6 +625,7 @@ static void Pump_HandleGearKey(uint8_t key_value)
 	{
 		Pubinterface_RefreshPumpBDisplay(); /* 刷新B泵设定和流量进度，不影响A泵。 */
 	}
+    Pubinterface_SaveToolCoolingFlow((key_value == JTkey_left_short) ? CHANNEL_A : CHANNEL_B); /* 脚踏档位也是用户调节，灌注档位不进入刀具记忆。 */
 }
 
 /*

@@ -49,7 +49,7 @@ static uint8_t s_motor_stop_template_valid = 0U; /* 首次组装真实 RUN 帧�
 typedef struct {
   
     uint8_t control_mode; //控制模式[0x01]正转；[0x02]:反转；[0x03]:往复正反转;[0x04]:正向拖动模式；[0x05]:反向拖动模式
-    uint8_t frequency; //往复频率协议值，原协议 20 对应 1Hz、80 对应 4Hz；此处不再乘 2。
+    uint8_t frequency; /* 往复频率指令10/20/30/40对应1/2/3/4Hz；参考驱动先乘2，再以10000/结果毫秒规划半周期，主控不重复乘2。 */
     uint8_t motor_type; //电机选择：0x01：无刷通道1  0x02:无刷通道2 0x03:有刷通道1 0x04 有刷通道2
     uint8_t speed_h; //转速高
     uint8_t speed_l; //转速低

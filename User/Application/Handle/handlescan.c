@@ -23,6 +23,8 @@
 #include "sscRFID.h"
 #include "sscDrive.h" /* 短去抖确认断开后提前停当前手柄电机，缩短旧RUN窗口；不改独立灌注请求。 */
 #include "external_comm_task.h"
+#include "FreeRTOS.h" /* 识别参数与标签身份以短临界区整体发布。 */
+#include "task.h"
 #include "at24cs32.h"
 #include "at24cs32_crc_verify.h"
 
@@ -918,7 +920,7 @@ static RfidReadSource_t Handlescan_ToRfidSource(HandlescanToolSource tool_source
 
 /*
  * 函数功能：装载 RFID 刀具参数；公共接头和分体式新 EPC 刀具按转速范围分档调速，老 USER 保留型号兼容步进。
- * 输入参数：channel 为 A/B 通道；message 为通道识别缓存；spec_values 为屏幕规格缓存；mapped_model 和 raw_type_* 来自 EEPROM 第二页；rfid_result 为 RFID 原始标签结果。
+ * 输入参数：channel 为 A/B 通道；message 为通道识别缓存；spec_values 为至少五项的屏幕规格缓存，末项保存直径显示格式；mapped_model 和 raw_type_* 来自 EEPROM 第二页；rfid_result 为 RFID 原始标签结果。
  * 返回参数：true 表示已写入识别缓存，false 表示 RFID 数据不符合当前来源。
  */
 static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
@@ -929,6 +931,8 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
                                            uint8_t raw_type_minor,
                                            const RfidToolResult_t *rfid_result)
 {
+    ChannelrecognizeMessage_t updated_message; /* 在栈中生成完整识别结果，避免发布半份新刀具参数。 */
+    ChannelrecognizeMessage_t *published_message = message; /* 保留本通道发布地址，末尾统一写回。 */
     const uint8_t *payload; /* 原始标签仅用于最低转速特例。 */
     RfidToolParameters_t decoded; /* 两份协议转换成统一参数，不混用字节位置。 */
     uint8_t tool_model;          /* RFID 标签中的刀具型号或代号结构字段。 */
@@ -969,6 +973,8 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         return false; /* 业务CRC或参数失败，不清空也不部分改写识别缓存。 */
     }
 
+    updated_message = *message; /* 保留本体配置和步进，后续只修改局部快照。 */
+    message = &updated_message; /* 完整构建后才发布，参数与标签身份不会跨刀混合。 */
     keep_speed_zzstep = message->speed_zzstep; /* RFID 结果刷新前先暂存正转步进，避免清识别缓存时丢掉 EEPROM Page6 参数。 */
     keep_speed_fzstep = message->speed_fzstep; /* RFID 结果刷新前先暂存反转步进，保证换刀具头后仍按基座配置调速。 */
     keep_speed_oscstep = message->speed_oscstep; /* RFID 结果刷新前先暂存往复步进，PLANER 刀具切到往复后可继续用新屏调速。 */
@@ -1002,7 +1008,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         min_speed = HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM; /* 保留PX普通刨刀0表示500rpm的已有约定。 */
     }
     default_speed = decoded.default_speed; /* 错误默认速度已被拒绝，不再通过钳位掩盖标签错误。 */
-    default_flow = decoded.flow; /* EPC流量来自B9，USER流量来自B11。 */
+    default_flow = decoded.flow; /* EPC流量仅取B9低6位，旧USER仍取B11，默认注水量不混入频率编码。 */
     direction = decoded.direction; /* 这里是显示方向，机械转向仍由驱动转换。 */
     reduction_ratio = decoded.ratio; /* 老USER按兼容表取190或430，新刀按EPC倍率。 */
     business_tool_type = Handlescan_MapRfidToolType(tool_model); /* 归一为刨刀或磨刀，另保留机械型号。 */
@@ -1012,7 +1018,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->overloadThresholdFor = current_threshold; /* 为正转运行保存本次刀具的保护电流。 */
     message->overloadThresholdRev = current_threshold; /* 为反转运行保存本次刀具的保护电流。 */
     message->overloadThresholdOSC = current_threshold; /* 为往复运行保存本次刀具的保护电流。 */
-    message->freq_default = decoded.frequency; /* USER取B10，新电气往复刀默认40。 */
+    message->freq_default = decoded.frequency; /* EPC取B9高2位换算后的频率指令10~40，旧USER仍取B10；选中通道后用于往复运行。 */
     message->run_direction = direction; /* 默认方向已确认属于允许集合。 */
     message->rfid_result_sequence = rfid_result->sequence; /* 记录本次装载的完整标签编号，通道记忆和工作参数必须同步该编号。 */
     message->rfid_direction_mask = decoded.direction_mask; /* 保存允许方向，后续通道记忆和外控使用相同限制。 */
@@ -1022,7 +1028,11 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     message->length = length; /* 保存 RFID 长度。 */
     message->draw = angle; /* 保存 RFID 弯曲角度。 */
     message->tool_reduction_ratio = reduction_ratio; /* 保存完整 RFID 减速比，供心跳扩展和开口定位逻辑读取。 */
-    message->default_injection_flow = default_flow; /* 保存 RFID 默认注水泵流量。 */
+    message->default_injection_flow = default_flow; /* 先保存RFID解析流量，非零EPC和旧USER均保持原值。 */
+    if ((rfid_result->source == RFID_READ_SOURCE_EPC) && (default_flow == 0U)) /* EPC的0表示不指定流量，不能直接作为泵停机目标。 */
+    {
+        message->default_injection_flow = (mapped_model == COMMON_SOCKET_ONLINES) ? HANDLE_RFID_BASE_DEFAULT_FLOW : message->eeprom_profile.default_injection_flow; /* 公共接头回退原基座20，分体手柄回退本体Page4；公共接头不读取EEPROM流量。 */
+    }
     message->speed_min = min_speed; /* 保存通用最小速度。 */
     message->speed_max = max_speed; /* 保存通用最大速度。 */
     message->speed_zzmin = min_speed; /* 正转下限使用 RFID 下限。 */
@@ -1122,11 +1132,20 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
     //message->run_direction = direction; /* 默认方向来自 RFID 标签。 */
 
     spec_values[0] = (uint32_t)length; /* 分体式和公共接头 EPC 规格按标签原始字节保存，屏幕规格区按 EPC 模式显示。 */
-    spec_values[1] = (uint32_t)diameter; /* EPC 直径不再做历史单位放大，保证标签值和屏幕规格值一致。 */
+    spec_values[1] = (uint32_t)diameter; /* EPC 直径原值以 0.1mm 保存，旧 USER 仍保存原协议乘5的结果。 */
     spec_values[2] = (uint32_t)angle; /* EPC 角度不再做历史单位放大，保持最终协议的单一解释。 */
     spec_values[3] = (uint32_t)business_tool_type; /* 保存业务刀具类型，屏幕掉线/能力判断不再直接使用 RFID 原始代号。 */
+    spec_values[4] = (rfid_result->source == RFID_READ_SOURCE_USER) ? 1U : 0U; /* 旧 USER 使用整数直径，EPC 使用 0.1mm；与成功装载的规格一起保留，不受后续读取失败影响。 */
     message->rfid_cache_hit = rfid_result->cache_hit ? 1U : 0U; /* 标记本次是否为同一 EPC 重识别，后续保存 MemoryMsg 时据此保留用户调节值。 */
 
+    message->rfid_settings_key.source = (uint8_t)rfid_result->source; /* 已通过业务校验的来源参与设置匹配。 */
+    message->rfid_settings_key.length = rfid_result->payload_length; /* 长度已通过解析检查，不按零结尾比较。 */
+    memcpy(message->rfid_settings_key.payload, rfid_result->payload, rfid_result->payload_length); /* 原始完整内容与本次默认参数绑定。 */
+    if (rfid_result->source == RFID_READ_SOURCE_USER)
+        memcpy(message->rfid_settings_key.tag_epc, rfid_result->tag_epc, sizeof(message->rfid_settings_key.tag_epc)); /* 老USER同时保留附带EPC；EPC来源保持memset后的0。 */
+    taskENTER_CRITICAL(); /* 只保护结构体拷贝，不在此处发送消息或访问硬件。 */
+    *published_message = updated_message; /* 一次发布新参数、序号和完整身份，业务任务不会拿到半旧半新结果。 */
+    taskEXIT_CRITICAL(); /* 后续沿原上线事件处理，不增加识别门禁。 */
     return true; /* RFID 刀具头信息已经写入识别缓存。 */
 }
 
@@ -1172,7 +1191,7 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
     message->speed_fzstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
     message->speed_oscstep_large=HANDLESCAN_SPEED_STEP_LARGE_FALLBACK;
     message->tool_reduction_ratio=HANDLESCAN_TOOL_RATIO_UNIT; /* 基座尚未识别刀具时使用 100 表示 1.00 倍直联，等待 Page3/RFID 刷新。 */
-    message->default_injection_flow=20;
+    message->default_injection_flow = HANDLE_RFID_BASE_DEFAULT_FLOW; /* 未装载标签或分体EEPROM前沿用基座默认20，公共接头无标签时继续使用。 */
     message->freq_default=40;
     if (mapped_model == COMMON_SOCKET_ONLINES)
     {
@@ -1189,7 +1208,7 @@ static void Handlescan_PrepareRfidBase(ChannelrecognizeMessage_t *message,
 }
 
 /*
- * 函数功能：连续多轮 RFID 读取超时后标记刀具离线；PXBA/PXBB 和公共接头均静默锁存最后参数，等待有效标签。
+ * 函数功能：连续多轮RFID读取超时后标记刀具离线；PXBA/PXBB回退EEPROM注水量，公共接头回退20，其余参数静默锁存。
  * 输入参数：binding 为目标 A/B 通道资源；mapped_model/raw_type_major/raw_type_minor 为基座型号信息。
  * 返回参数：无。
  */
@@ -1230,8 +1249,13 @@ static void Handlescan_ClearOnlineRfidTool(const HandlescanChannelBinding *bindi
         //SendKeyBehMessage(PLUGunPLUG, plug_key); /* 复用插入事件链刷新 MemoryMsg、屏幕和上位机心跳。 */
     }
     context->rfid_tool_online = 0U; /* 记为已离线，后面的扫描不再重复提示这次掉线。 */
+    if ((WorkMessage.channel_work == binding->channel) &&
+        ((mapped_model == COMMON_SOCKET_ONLINES) || (mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES))) /* 仅当前RFID基座确认掉线后更新泵，不影响另一手柄。 */
+    {
+        Pubinterface_ApplyChannelDefaultInjectionFlow(binding->channel); /* 在线标志已清，分体回退EEPROM、公共接头回退20并同步泵屏幕；其余刀具参数继续锁存。 */
+    }
     Rfid_RecordConfirmedDropout(binding->channel); /* 连续超时次数达到要求后，掉线统计增加一次。 */
-    /* 射频掉线只维护在线状态和统计，锁存的参数继续使用，不触发蜂鸣。 */
+    /* 射频掉线按基座类型回退注水流量，其余锁存参数继续使用，不触发蜂鸣。 */
     if ((context->tool_source != HANDLESCAN_TOOL_SOURCE_EEPROM_PAGE3) &&
         (mapped_model != PXBA_ONLINES) &&
         (mapped_model != PXBB_ONLINES) &&
@@ -1553,7 +1577,11 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
             ((mapped_model == PXBA_ONLINES) || (mapped_model == PXBB_ONLINES) ||
              (mapped_model == COMMON_SOCKET_ONLINES))) /* 三种型号均保留掉线前参数，同序号有效标签只需恢复在线状态。 */
         {
-            context->rfid_tool_online = 1U; /* 已处理过的同一标签恢复在线，不重新装载默认参数或覆盖用户调速值。 */
+            context->rfid_tool_online = 1U; /* 同标签恢复在线，电机用户调速值继续保留；泵默认流量单独恢复。 */
+            if (WorkMessage.channel_work == binding->channel) /* 恢复的非选中通道不能覆盖当前手柄的注水流量。 */
+            {
+                Pubinterface_ApplyChannelDefaultInjectionFlow(binding->channel); /* 只在离线转在线边沿恢复标签默认流量和屏幕，普通重复读取不覆盖手调值。 */
+            }
         }
     }
 
@@ -1575,8 +1603,8 @@ static void Handlescan_ProcessOnlineRfidResult(const HandlescanChannelBinding *b
 
     context->rfid_last_sequence = result.sequence; /* 记录已处理序号。 */
     context->offline_event_required = 1U; /* RFID 在线监测已经请求刷新业务在线态，物理拔出时必须完成对应离线通知。 */
-    (void)SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 复用插入事件链刷新本通道状态；实际拔出由扫描锁存保证最终送达。 */
-    context->rfid_tool_online = 1U; /* 完整新结果把刀具切回在线边沿。 */
+    context->rfid_tool_online = 1U; /* 发布事件前先确认标签在线，避免行为任务抢先刷新泵时误选EEPROM备用流量。 */
+    (void)SendKeyBehMessage(PLUGunPLUG, binding->plug_key); /* 参数和在线状态均已就绪，再通知业务层装载本通道及刷新泵显示。 */
     if (result.cache_hit == false) /* 原始来源、长度或完整数据改变才提示，不能按射频离线到在线边沿蜂鸣。 */
     {
         Handlescan_BeepOnceIfNoAlarm(); /* 新刀具信息装载后单响；相同RFID恢复只沿用记忆，不重复蜂鸣。 */
@@ -1807,7 +1835,7 @@ static uint8_t Handlescan_ParseInitialDirection(const ChannelrecognizeMessage_t 
     return ZZDIR; /* Page4[8]=0x01或异常值按正转处理，保持普通EEPROM手柄安全默认。 */
 }
 /*
- * 函数功能：解析手柄Page4的方向和PX手动电流扩展；异常格式保持禁止运行。
+ * 函数功能：保存手柄Page4默认流量并解析方向和PX手动电流扩展；异常格式保持禁止运行。
  * 输入参数：message为已识别Page2型号的通道缓存；initial_info_buf为通过页校验的Page4。
  * 返回参数：无；旧版标记0保留旧规则，新版有效时发布方向许可及三档电流。
  */
@@ -1817,6 +1845,10 @@ static void Handlescan_UpdateEepromControlProfile(ChannelrecognizeMessage_t *mes
     uint8_t mask; /* 把三档协议值转换为运行态方向位，后续入口统一检查正转、反转和往复。 */
     uint8_t default_direction = initial_info_buf[HANDLESCAN_INITIAL_DIRECTION_OFFSET]; /* Page4默认方向按1/2/3编码。 */
 
+    if (message->handle_type != COMMON_SOCKET_ONLINES) /* 公共接头的Page4只提供控制许可，不装载EEPROM默认流量。 */
+    {
+        message->eeprom_profile.default_injection_flow = Handlescan_BuildDefaultInjectionFlow(Handlescan_ReadUint16BE(initial_info_buf, HANDLESCAN_INITIAL_DEFAULT_FLOW_OFFSET)); /* 分体式独立保存本体流量，RFID换刀后仍可回退；普通EEPROM手柄沿用原值。 */
+    }
     message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 先锁住，所有格式和电流检查完成后才开放方向。 */
     message->eeprom_profile.manual_grind_current_low = 0U; /* 清掉旧低速电流，避免换柄后沿用上一只配置。 */
     message->eeprom_profile.manual_grind_current_high = 0U; /* 清掉旧高速电流，读取失败不能使用残留值。 */
@@ -2078,7 +2110,7 @@ static void Handlescan_LoadPage6SpeedStep(const HandlescanChannelBinding *bindin
 }
 
 /*
- * 函数功能：为公共接头读取手柄本体方向许可，不覆盖尚待RFID提供的刀具速度和电流。
+ * 函数功能：为公共接头读取手柄本体方向许可，不装载EEPROM默认流量，刀具参数等待RFID。
  * 输入参数：binding为已确认身份的通道绑定。
  * 返回参数：无；Page4读取失败时禁止本通道全部方向。
  */
@@ -2087,7 +2119,7 @@ static void Handlescan_LoadRfidBaseControlProfile(const HandlescanChannelBinding
     binding->message->eeprom_profile.direction_mask = HANDLE_EEPROM_PROFILE_INVALID; /* 读取失败不能被误当作旧版无限制。 */
     if (Handlescan_ReadEepromPage(binding, HANDLESCAN_INITIAL_INFO_PAGE_INDEX, binding->context->initial_info_buf) != 0U)
     {
-        Handlescan_UpdateEepromControlProfile(binding->message, binding->context->initial_info_buf); /* 只装载手柄自身许可，RFID仍负责刀具默认参数。 */
+        Handlescan_UpdateEepromControlProfile(binding->message, binding->context->initial_info_buf); /* 只装载公共接头自身控制许可，流量保持基座20，等待有效EPC覆盖。 */
     }
 }
 
@@ -2223,8 +2255,8 @@ static void Handlescan_ReloadSpeedStepMessage(const HandlescanChannelBinding *bi
 
 /*
  * 函数功能：把 EEPROM 刀具规格保存为屏幕使用的数组格式。
- * 输入参数：spec_values 为至少 4 项的输出数组；直径、长度、角度分别以 0.1 mm、0.1 mm、0.1 度为单位；mapped_tool_type 为主控刀具类型。
- * 返回参数：无；数组依次保存长度除以 5、原始直径、原始角度、刀具类型，屏幕显示长度时再乘 5。
+ * 输入参数：spec_values 为至少 5 项的输出数组；直径、长度、角度分别以 0.1 mm、0.1 mm、0.1 度为单位；mapped_tool_type 为主控刀具类型。
+ * 返回参数：无；数组依次保存长度除以 5、原始直径、原始角度、刀具类型和直径格式，屏幕显示长度时再乘 5。
  */
 static void Handlescan_UpdateToolSpecValues(uint32_t *spec_values,
                                             uint16_t diameter_tenth,
@@ -2236,11 +2268,12 @@ static void Handlescan_UpdateToolSpecValues(uint32_t *spec_values,
     spec_values[1] = (uint32_t)diameter_tenth;
     spec_values[2] = (uint32_t)angle_tenth;
     spec_values[3] = (uint32_t)mapped_tool_type;
+    spec_values[4] = 0U; /* EEPROM 直径保持 0.1mm，覆盖本通道此前旧 USER 的整数显示标志。 */
 }
 
 /*
  * 函数功能：清空刀具规格显示数据，手柄拔出后不再显示旧规格。
- * 输入参数：spec_values 为该通道至少 4 项的规格数组。
+ * 输入参数：spec_values 为该通道至少 5 项的规格数组。
  * 返回参数：无。
  */
 static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
@@ -2249,6 +2282,7 @@ static void Handlescan_ClearToolSpecValues(uint32_t *spec_values)
     spec_values[1] = 0U;
     spec_values[2] = 0U;
     spec_values[3] = 0U;
+    spec_values[4] = 0U; /* 清除直径格式，拔柄后的新规格不能继承旧 USER 的整数模式。 */
 }
 
 /*

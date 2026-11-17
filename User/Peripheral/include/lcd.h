@@ -105,13 +105,13 @@ uint8_t LCD_IntegratedCutterData_Update(uint16_t Addr, uint16_t Length, uint16_t
 
 //============================================================================
 // 函数名称: LCD_IntegratedCutterRawData_Update()
-// 功能描述: 公共接头 EPC 刀具参数按原始整数格式更新
+// 功能描述: 旧 USER 刀具参数按原始整数格式更新
 // 输　  入: Addr：数据参数的显示地址
 //           Length：长度原始整数
 //           Diameter：直径原始整数
 //           Angle：角度原始整数
 // 输    出: 1=此前相同规格或本次发送完成，0=发送失败。
-// 函数说明: 用于公共接头及 PXBA/PXBB 的 EPC 规格，直径 0x10 显示为 Φ16mm，保留现行整数单位。
+// 函数说明: 用于PXBA/PXBB 的旧 USER 规格，直径 0x10 显示为 Φ16mm，保留现行整数单位。
 //============================================================================
 uint8_t LCD_IntegratedCutterRawData_Update(uint16_t Addr, uint16_t Length, uint8_t Diameter, uint8_t Angle); /* 返回 1=此前相同规格或本次发送完成，0=发送失败。 */
 
