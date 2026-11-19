@@ -13,7 +13,6 @@
 #define WORK_ALARM_MOTOR_OVERLOAD        4U /* 原电机过载编号，显示 87 号图。 */
 #define WORK_ALARM_MOTOR_OVERLOAD_ALT    5U /* 驱动过流/堵转使用的过载编号，同样可显示 87 号图。 */
 #define WORK_ALARM_FOOT_VALUE_ERROR      6U /* 脚踏存储的校准值错误。 */
-#define WORK_ALARM_UID_ERROR             7U /* 手柄 UID 校验错误。 */
 #define WORK_ALARM_MOTOR_COMM_ERROR      8U /* 历史名称为通信错误；当前驱动过压/欠压也映射到此编号。 */
 #define WORK_ALARM_HALL_ERROR            9U /* 驱动报告霍尔断线或霍尔学习错误。 */
 #define WORK_ALARM_HANDLE_MODEL_ERROR_A  10U /* A 通道手柄参数校验异常。 */
@@ -23,7 +22,7 @@
 #define WORK_ALARM_HANDLE_MODEL_ERROR_B  12U /* B 通道手柄参数校验异常。 */
 #define WORK_ALARM_HANDLE_MODEL_ERROR_AB 14U /* A/B 两通道手柄参数均校验异常。 */
 #define WORK_ALARM_PUMP_PRESSURE_BLOCKED 15U /* 泵压力达到报警条件，显示 89 号图；编号本身不表示停泵动作。 */
-#define WORK_ALARM_HANDLE_UNSUPPORTED    16U /* 当前功能模式不支持该手柄，显示71号图，确认拔出后才解除。 */
+#define WORK_ALARM_HANDLE_UNSUPPORTED    16U /* 当前功能模式不支持该手柄，共用90号识别失败图，确认拔出后才解除。 */
 #define WORK_ALARM_INJECTION_MISSING_SINGLE 17U /* 首次单向启动缺注水泵，72号图，报警保持到控制源松开。 */
 #define WORK_ALARM_INJECTION_MISSING_OSC    18U /* 首次往复启动缺注水泵，73号图，报警保持到控制源松开。 */
 
@@ -33,7 +32,7 @@
 #define WORK_ALARM_HANDLE_IIC_ERROR_AB   21U /* A/B两通道均IIC通信失败，显示75号图。 */
 
 bool WorkAlarm_IsHandleIicError(uint8_t alarm_value); /* 判断75号通信故障系列，保留A/B来源。 */
-bool WorkAlarm_IsHandleEepromError(uint8_t alarm_value); /* 判断75/90号系列，不包含71号不支持手柄。 */
+bool WorkAlarm_IsHandleEepromError(uint8_t alarm_value); /* 判断EEPROM读取或数据校验失败，供手柄校验重试和恢复流程识别报警归属。 */
 
 void WorkAlarm_Set(uint8_t alarm_value); /* 写入报警码并同步报警有效标志。 */
 void WorkAlarm_Clear(void); /* 清除当前工作报警。 */

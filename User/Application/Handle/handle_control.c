@@ -219,8 +219,8 @@ static uint32_t Handle_ClampSpeed(const ChannelrecognizeMessage_t *recognize,
 }
 
 /*
- * 函数功能：分体手柄切到手动模式时，重新读取 EEPROM 运行参数，并同时更新通道保存值和当前使用值。
- * 输入参数：channel 为 A/B 通道；memory 为通道保存参数；tool_type 为手动刀具类型；direction 为默认方向；fallback_speed 为默认速度为 0 时的备用速度。
+ * 函数功能：装载分体手柄的手动参数，按本体方向许可选定默认方向，并同步通道记忆和当前运行参数。
+ * 输入参数：channel 为 A/B 通道；memory 为通道保存参数；tool_type 为手动刀具类型；direction 为优先方向；fallback_speed 为正反转默认速度为 0 时的备用速度。
  * 返回参数：无。
  */
 static void Handle_ApplyManualRuntime(uint8_t channel,
@@ -233,6 +233,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	uint32_t zz_speed = 0U; /* 保存手动正转速度，使用 EEPROM 默认值并检查正转上下限。 */
 	uint32_t fz_speed = 0U; /* 保存手动反转速度，使用 EEPROM 默认值并检查反转上下限。 */
 	uint32_t osc_speed = 0U; /* 保存手动往复速度，使用 EEPROM 默认值并检查往复上下限。 */
+	uint8_t allowed_directions; /* 保存本次重新装载的本体方向许可，供手动默认方向回退。 */
 
 	if ((memory == NULL) || (recognize == NULL)) /* 任一通道对象缺失都会造成参数只更新一半。 */
 	{
@@ -250,13 +251,14 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	recognize->raw_tool_type = 0U; /* 手动模式没有 RFID 原始刀具型号，清掉旧标签码。 */
 	recognize->rfid_direction_mask = 0U; /* 清刀具或转手动模式时同步撤销旧RFID方向限制。 */
 	recognize->rfid_result_sequence = 0U; /* 清刀具后取消已装载的RFID编号，旧参数不能作为新刀具使用。 */
-	if ((tool_type == GRINDH) && (recognize->eeprom_profile.direction_mask != 0U) &&
-        ((recognize->eeprom_profile.direction_mask & (1U << ZZDIR)) == 0U) &&
-        ((recognize->eeprom_profile.direction_mask & (1U << FZDIR)) != 0U))
-    {
-        direction = FZDIR; /* 磨头默认正转被EEPROM禁止但反转允许时选择反转，绝不回退到往复。 */
-    }
-	recognize->run_direction = direction; /* 刨刀保持往复；EEPROM不允许刀具所需方向时由统一门禁禁止运行，不改成另一刀具模式。 */
+	allowed_directions = recognize->eeprom_profile.direction_mask; /* 取Page4本体许可，避免由手动刀具类别缩小方向集合。 */
+	if ((allowed_directions != 0U) &&
+		((allowed_directions & (uint8_t)~HANDLE_EEPROM_DIRECTION_BITS) == 0U) &&
+		((allowed_directions & (1U << direction)) == 0U))
+	{
+		direction = recognize->run_direction; /* 优先方向被本体禁止时，采用已经校验过的Page4默认方向。 */
+	}
+	recognize->run_direction = direction; /* 当前手动方向按本体许可选定，Page4异常仍由驱动方向门禁禁止运行。 */
 	zz_speed = Handle_ClampSpeed(recognize,
 									 ZZDIR,
 									 Handle_GetDirectionDefaultSpeed(recognize, ZZDIR),
@@ -268,7 +270,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	osc_speed = Handle_ClampSpeed(recognize,
 									  OSCDIR,
 									  Handle_GetDirectionDefaultSpeed(recognize, OSCDIR),
-									  fallback_speed); /* 往复速度按手柄 EEPROM 默认值和上下限生成。 */
+									  0U); /* 往复取本体专用速度，配置缺失时保持0，避免用单向备用转速启动。 */
 
 	memory->tool_type = tool_type; /* 通道记忆同步手动刀具能力，切通道后仍保持手动磨/刨选择。 */
 	memory->raw_tool_type = 0U; /* 通道记忆清 RFID 原始型号，避免上位机把手动模式当自动标签显示。 */
@@ -307,7 +309,7 @@ static void Handle_ApplyManualRuntime(uint8_t channel,
 	WorkMessage.current_work = memory->current_work; /* 同步当前工作态的 EEPROM 通用电流；新版手动三档阈值仍由驱动按刀具和设定速度选择。 */
 	WorkMessage.eeprom_profile = memory->eeprom_profile; /* 当前运行态同时切换到本手柄EEPROM许可和手动电流。 */
 	WorkMessage.tool_reduction_ratio = memory->tool_reduction_ratio; /* 当前使用的倍率也改为手柄 EEPROM 参数，后续发电机速度时按此换算。 */
-	WorkMessage.freq_work = memory->freq; /* 更新当前往复频率，下一次手动启动刨刀时使用此值。 */
+	WorkMessage.freq_work = memory->freq; /* 更新当前往复频率，手动磨头和刨刀进入往复时均使用本体频率。 */
 	WorkMessage.dir_work = memory->dir; /* 更新当前手动方向，显示速度和下一次启动速度都按这个方向选择。 */
 	if (direction == FZDIR) /* 当前选择反转时，屏幕和启动速度取反转记忆。 */
 	{
@@ -402,8 +404,8 @@ void PlanerGridH(uint8_t key_value)
 								  memory,
 								  GRINDH,
 								  ZZDIR,
-								  60000U); /* 手动磨头默认正转；倍率和速度上下限取自手柄 EEPROM，默认速度为 0 时先用 60000，再检查手柄上下限。 */
-		tool_changed = true; /* 磨头键已更新当前通道记忆，后续需要关闭频率和开口定位并重绘速度。 */
+								  60000U); /* 手动磨头优先正转，单向默认速度为0时用60000并按本体上下限检查。 */
+		tool_changed = true; /* 磨头键已更新当前通道记忆，随后按实际方向刷新频率、速度和刀具入口。 */
 		// 磨头
 		break;
 	}

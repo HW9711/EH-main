@@ -183,45 +183,45 @@ static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
 	switch (driver_error)
 	{
 		case MOTOR_UART_DRIVER_ERR_PHASELOSS:
-			return 84U; /* 缺相 Err=14 始终使用 84 号“缺相保护”图片，不受内部调试宏影响。 */
+			return 84U; /* 缺相 Err=14 始终使用 84 号“手柄启动故障”图片，不受内部调试宏影响。 */
 
 		case MOTOR_UART_DRIVER_ERR_RUNSTALL:
-			return 87U; /* 运行堵转 Err=5 始终使用 87 号“电机过载/刀具卡住”公用图片。 */
+			return 87U; /* 运行堵转 Err=5 始终使用 87 号“手柄运行时异常”公用图片。 */
 
 		case MOTOR_UART_DRIVER_ERR_OC1:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 87U; /* 原92号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原92号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 #else
 			return 87U; /* 生产模式下过流与堵转共用 87 号过载图片。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_NOHALL:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 87U; /* 原93号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原93号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 #else
 			return 86U; /* 生产模式下霍尔断线与学习错误共用 86 号 HALL 图片。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_SDAHALL:
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
-			return 87U; /* 原94号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原94号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 #else
 			return 86U; /* 生产模式下霍尔学习错误与断线共用 86 号 HALL 图片。 */
 #endif
 
 #if (MOTOR_ALARM_DETAIL_ENABLE == 1U)
 		case MOTOR_UART_DRIVER_ERR_ENOC:
-			return 87U; /* 原91号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原91号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 		case MOTOR_UART_DRIVER_ERR_START:
-			return 87U; /* 原95号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原95号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 		case MOTOR_UART_DRIVER_ERR_OV:
-			return 87U; /* 原96号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原96号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 		case MOTOR_UART_DRIVER_ERR_TEMP:
-			return 87U; /* 原97号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原97号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 		case MOTOR_UART_DRIVER_ERR_POSDRAG:
-			return 87U; /* 原98号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原98号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 		case MOTOR_UART_DRIVER_ERR_OVR:
-			return 87U; /* 原99号细分图片统一显示“电机过载，请检查刀具是否卡死”，原始故障和保护保持不变。 */
+			return 87U; /* 原99号细分图片统一显示87号“手柄运行时异常”图，按原始Err执行保护。 */
 #endif
 
 		case MOTOR_UART_DRIVER_ERR_STOP_TIMEOUT: /* 屏幕没有对应图片时保留蜂鸣和报警码，不能显示刀具卡死。 */
@@ -231,7 +231,7 @@ static uint8_t MotorUart_MapDriverErrorToPicture(uint8_t driver_error)
 		case MOTOR_UART_DRIVER_ERR_SAVE:
 		case MOTOR_UART_DRIVER_ERR_HANDSHAKE:
 		default:
-			return MOTOR_ALARM_PICTURE_NONE; /* 未配置图片的错误仍执行安全保护，但不再借用 84 号缺相图片。 */
+			return MOTOR_ALARM_PICTURE_NONE; /* 未配置图片的错误仍执行安全保护，但避免显示误导性的启动故障图。 */
 	}
 }
 

@@ -13,7 +13,7 @@
 #include "pump.h" /* 注水泵进度条与流量调节共用最大流量，避免70已到上限却仍显示部分进度。 */
 #include "screen_address.h"
 #include "sscBEEP.h"
-#include "handlescan.h" /* 71号不支持手柄提示必须跟随插入锁存，队列清空或普通关窗不能提前移除。 */
+#include "handlescan.h" /* 不支持手柄共用90号图，提示持续时间仍由插入锁存决定。 */
 #include "motoruartdata.h"
 #include "external_comm_task.h" /* 报警图片发给屏幕后同步给外控，临时提示也能在上位机显示。 */
 
@@ -36,6 +36,7 @@ static uint8_t s_uidp_alarm_value = WORK_ALARM_NONE; /* 当前报警区的逻辑
 static uint8_t s_uidp_verify_alarm_retry_pending = 0U; /* 校验提示写屏未成功时置1，显示任务直接重试，不依赖消息队列。 */
 static uint32_t s_uidp_verify_alarm_retry_tick = 0U; /* 最近一次校验提示写屏时间，控制失败后的重试间隔。 */
 #define UIDP_VERIFY_ALARM_RETRY_MS 100U /* 校验提示显示或关闭失败后至少间隔100ms重试，避免占满屏幕串口。 */
+#define UIDP_ALARM_PICTURE_HANDLE_IDENTIFICATION 90U /* 手柄型号不支持和EEPROM数据校验失败共用的屏幕图号。 */
 static UIDPMessage_t s_uidp_tool_spec_retry = {0}; /* 保存最近一次规格显示请求；enable_flag 为显隐，Value[0..5] 为长度、直径、角度和来源格式。 */
 static uint8_t s_uidp_tool_spec_retry_pending = 0U; /* 规格正文或显示长度发送失败时置 1，成功后清 0；新规格或隐藏请求会替换待重试内容。 */
 static uint32_t s_uidp_tool_spec_retry_tick = 0U; /* 记录最近一次规格发送尝试结束时的 HAL 毫秒计数，防止故障时连续占用串口。 */
@@ -882,7 +883,7 @@ static void UIDP_ServiceHandleVerifyAlarm(void)
 {
     uint8_t alarm = Handlescan_GetVerifyAlarmForDisplay(); /* 持续报警和运行中临时提示统一读取当前状态，不采用队列中的旧报警码。 */
     uint8_t displayed_verify = (uint8_t)WorkAlarm_IsHandleEepromError(s_uidp_alarm_value); /* 只维护75/90号归属，不关闭其它报警。 */
-    uint16_t picture = WorkAlarm_IsHandleIicError(alarm) ? 75U : 90U; /* 通信失败选75，数据校验失败选90，关闭时下方另选隐藏值。 */
+    uint16_t picture = WorkAlarm_IsHandleIicError(alarm) ? 75U : UIDP_ALARM_PICTURE_HANDLE_IDENTIFICATION; /* 通信失败显示75，数据校验失败显示共用识别失败图，关闭时另写隐藏值。 */
     if (Handlescan_HasUnsupportedHandle() || ((WorkMessage.alarm_flag != false) && (alarm == WORK_ALARM_NONE)))
     {
         return; /* 不支持手柄及其它持续故障优先，旧校验提示不能覆盖或关闭它们。 */
@@ -918,7 +919,7 @@ static void UIDP_ServiceHandleVerifyAlarm(void)
 }
 
 /*
- * 函数功能：刷新报警并同步外控，校验提示跟随实际状态；保持71/72/73号提示，系统故障优先。
+ * 函数功能：刷新报警并同步外控，校验提示跟随实际状态；保持不支持手柄和72/73号缺注水提示，系统故障优先。
  * 输入参数：enable_flag表示显示或关窗；arm_value为持续故障或临时提示的逻辑码；picture_value为图片覆盖值，0按逻辑码选图，0xFF隐藏图片。
  * 返回参数：无。
  */
@@ -929,13 +930,13 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	{
 		enable_flag = true; /* 不支持手柄未拔出时，普通关窗请求也必须保持提示。 */
 		arm_value = WORK_ALARM_HANDLE_UNSUPPORTED; /* 同步逻辑报警码，防止外控仍显示上一次校验错误。 */
-		picture_value = 0U; /* 强制按专用逻辑码选71号图片，不沿用上一条报警的覆盖图号。 */
+		picture_value = 0U; /* 让不支持手柄按自身逻辑码选共用90号图，避免沿用旧故障图片。 */
 	}
 	else if ((arm_value == WORK_ALARM_HANDLE_UNSUPPORTED) &&
 		(!Handlescan_HasUnsupportedHandle() ||
 		 (WorkMessage.alarm_flag && !Pubinterface_IsHandleVerifyAlarm(WorkMessage.alarm_value))))
 	{
-		return; /* 已拔出的旧消息不能重新弹窗；驱动等系统故障已接管时也不能被迟到的71号消息覆盖。 */
+		return; /* 丢弃已拔出手柄或被系统故障接管后的旧消息，防止重新打开识别失败提示。 */
 	}
 	if (!enable_flag && !WorkMessage.alarm_flag &&
 		(Pubinterface_GetMotorStartAlarm() != WORK_ALARM_NONE))
@@ -965,7 +966,7 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 	  {
 		LCD_Disappear_Picture(UIDP_LCD_VP_ALARM_TIP); /* 该驱动错误没有对应图片时清除旧图，但停机、蜂鸣和外控报警继续有效。 */
 		ExternalComm_ReportScreenAlarm(arm_value, MOTOR_ALARM_PICTURE_NONE); /* 上位机保留逻辑故障并明确没有图片，不能继续显示上一次故障的名称。 */
-		return; /* 图片处理已经完成，不能再按逻辑报警码误落到 84 号缺相图片。 */
+		return; /* 图片处理已经完成，不能再按逻辑报警码误落到 84 号启动故障图。 */
 	  }
 	  if(picture_value != 0U)
 	  {
@@ -1001,10 +1002,6 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,87U);//兼容旧过载报警码，同样显示 EX8 87 号过载图
 		ExternalComm_ReportScreenAlarm(arm_value, 87U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
-		case WORK_ALARM_UID_ERROR:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,85U);//UID错误
-		ExternalComm_ReportScreenAlarm(arm_value, 85U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
-		break;
 		case WORK_ALARM_HALL_ERROR:
 		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,86U);//HALL 值错误使用 EX8 86 号报警图
 		ExternalComm_ReportScreenAlarm(arm_value, 86U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
@@ -1014,8 +1011,8 @@ void UIAIARMDP(bool enable_flag,uint8_t arm_value,uint8_t picture_value)
 		ExternalComm_ReportScreenAlarm(arm_value, 89U); /* 将本次实际显示的图片通知外控，主控临时提示也按相同文字上传。 */
 		break;
 		case WORK_ALARM_HANDLE_UNSUPPORTED:
-		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,71U); /* 屏幕71号资源明确提示“不支持该手柄”。 */
-		ExternalComm_ReportScreenAlarm(arm_value, 71U); /* 外控同步16号逻辑报警及实际显示图片。 */
+		LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP, UIDP_ALARM_PICTURE_HANDLE_IDENTIFICATION); /* 型号不支持时显示共用识别失败图，保持拔出后解除的原锁存条件。 */
+		ExternalComm_ReportScreenAlarm(arm_value, UIDP_ALARM_PICTURE_HANDLE_IDENTIFICATION); /* 外控同步90号图和16号逻辑报警，便于区分型号拒绝与校验失败。 */
 		break;
         case WORK_ALARM_EXTERNAL_SELECTED:
         LCD_Show_Picture(UIDP_LCD_VP_ALARM_TIP,88U); /* 提示当前为外部控制模式，请使用外部控制启动。 */
@@ -1298,7 +1295,7 @@ static void UIDP_ServiceStartupTransition(void)
  */
 void UIDISPLAYBehavior()
 {
-	static uint8_t unsupported_displayed = 0U; /* 记录周期维护是否显示过71号，最后拔出后负责可靠关窗。 */
+	static uint8_t unsupported_displayed = 0U; /* 记录90号图是否由型号拒绝占用，最后一只拒绝手柄拔出后负责关窗。 */
 	static uint8_t unsupported_refresh_ticks = 0U; /* 每20个10ms周期补刷一次，防止队列复位丢失提示且不每周期占用串口。 */
 	if (s_uidp_startup_phase == 0U)
 	{
@@ -1381,7 +1378,7 @@ void UIDISPLAYBehavior()
 	{
 		if (unsupported_refresh_ticks == 0U)
 		{
-			UIAIARMDP(true, WORK_ALARM_HANDLE_UNSUPPORTED, 0U); /* 直接由显示任务补刷，队列满或复位也不能永久丢掉71号提示。 */
+			UIAIARMDP(true, WORK_ALARM_HANDLE_UNSUPPORTED, 0U); /* 显示任务补刷型号拒绝对应的90号图，队列满或复位后可恢复提示。 */
 			unsupported_refresh_ticks = 20U; /* 正常每200ms补刷，控制持续报警的串口占用。 */
 		}
 		--unsupported_refresh_ticks; /* 仅在提示持续有效时累计下一次补刷等待。 */
@@ -1393,7 +1390,7 @@ void UIDISPLAYBehavior()
 		{
 			UIAIARMDP(false, WORK_ALARM_NONE, 0U); /* 最后一只拒绝手柄已拔出且无其它故障，可靠关闭旧窗口。 */
 		}
-		unsupported_displayed = 0U; /* 其它故障接管时不强制关窗，后续恢复可重新显示71号。 */
+		unsupported_displayed = 0U; /* 释放当前显示归属，系统故障恢复后可按手柄锁存状态重新显示共用图。 */
 		unsupported_refresh_ticks = 0U; /* 下次进入拒绝状态立即补刷，不继承旧间隔。 */
 	}
 	UIDP_ServiceExternalControlHint(); /* 88号独立计时与关窗，不改变持续报警和外控输出。 */

@@ -69,11 +69,11 @@ bool WorkAlarm_IsHandleIicError(uint8_t alarm_value)
 /*
  * 函数功能：识别EEPROM通信或数据校验报警，使75/90共用恢复及写屏重试流程。
  * 输入参数：alarm_value为主控内部报警码。
- * 返回参数：true表示75/90号报警，false表示其它报警，尤其不包含71号。
+ * 返回参数：true表示EEPROM读取或数据校验失败，false表示其它逻辑报警。
  */
 bool WorkAlarm_IsHandleEepromError(uint8_t alarm_value)
 {
-    return (WorkAlarm_IsHandleIicError(alarm_value) || /* 通信失败进入相同恢复流程，但图片仍为75。 */
+    return (WorkAlarm_IsHandleIicError(alarm_value) || /* EEPROM通信失败使用75号图，与数据校验失败共用恢复流程。 */
             (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_A) || /* A通道数据校验失败显示90。 */
             (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_B) || /* B通道数据校验失败显示90。 */
             (alarm_value == WORK_ALARM_HANDLE_MODEL_ERROR_AB)); /* 双路数据校验失败显示90。 */

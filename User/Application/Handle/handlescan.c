@@ -559,11 +559,11 @@ uint8_t Handlescan_GetVerifyAlarmForDisplay(void)
 {
     if (WorkMessage.alarm_flag != false) /* 持续报警优先，临时校验提示不能覆盖驱动等真实故障。 */
     {
-        if (WorkAlarm_IsHandleEepromError(WorkMessage.alarm_value)) /* 75与90都由实际故障状态驱动，71仍走独立显示。 */
+        if (WorkAlarm_IsHandleEepromError(WorkMessage.alarm_value)) /* 只返回EEPROM故障归属，共用90号图的型号拒绝由插入锁存维护。 */
         {
             return WorkMessage.alarm_value; /* 另一通道仍校验失败时沿用合并后的实际报警归属。 */
         }
-        return WORK_ALARM_NONE; /* 其它故障和71号不支持手柄由各自显示流程维护。 */
+        return WORK_ALARM_NONE; /* 型号拒绝和其它故障由各自的显示条件维护，校验提示让出报警区。 */
     }
     return (s_transient_screen_alarm_ticks != 0U) ? s_transient_screen_alarm_value : WORK_ALARM_NONE; /* 运行中另一侧的临时校验提示仅在原3秒窗口内有效。 */
 }
@@ -2454,7 +2454,7 @@ static uint8_t Handlescan_CombineHandleAlarm(uint8_t channel_alarm, uint8_t peer
 {
     if ((channel_alarm == WORK_ALARM_HANDLE_UNSUPPORTED) || (peer_alarm == WORK_ALARM_HANDLE_UNSUPPORTED))
     {
-        return WORK_ALARM_HANDLE_UNSUPPORTED; /* 任一侧不受支持时保留71号提示，不能合并成普通校验异常图。 */
+        return WORK_ALARM_HANDLE_UNSUPPORTED; /* 型号拒绝仍优先保留自身逻辑码，共用90号图时也须确认拔出后才解除。 */
     }
     if (WorkAlarm_IsHandleIicError(channel_alarm) || WorkAlarm_IsHandleIicError(peer_alarm)) /* 先分故障类别，禁止把双路通信故障合并成90号。 */
     {
