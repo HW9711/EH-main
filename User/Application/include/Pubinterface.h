@@ -504,15 +504,19 @@ void Pubinterface_RefreshPumpAButtonDisplay(void); /* A 泵刚启动时先刷新
 void Pubinterface_RefreshPumpBButtonDisplay(void); /* B 泵刚启动时先刷新按钮，等输出设置值更新后再刷新档位环，避免闪出零档图。 */
 void Pubinterface_RefreshPumpADisplay(void); /* 刷新 A 泵数值和启停按钮，屏幕操作和上位机操作共用。 */
 void Pubinterface_RefreshPumpBDisplay(void); /* 刷新 B 泵数值和启停按钮，屏幕操作和上位机操作共用。 */
-uint32_t Pubinterface_ClampMotorSpeed(uint8_t channel, uint8_t direction, uint32_t speed); /* 按本通道有效往复范围限制PX电气往复，零速保持停止。 */
+bool Pubinterface_GetLoadedEpcSpeedRange(uint8_t channel, uint16_t sequence, uint8_t direction, uint32_t *minimum, uint32_t *maximum); /* 只取与指定装载序号一致的EPC方向范围，参数未同步时返回停止范围。 */
+uint32_t Pubinterface_ClampMotorSpeed(uint8_t channel, uint8_t direction, uint32_t speed); /* 限制EPC各方向及原有PX电气往复目标，零速保持停止。 */
 uint32_t Pubinterface_GetCurrentDefaultMotorSpeed(void); /* 读取当前通道、当前方向在MemoryMsg中保存的速度，单位rpm；调速后保存值会更新，不一定仍是出厂默认值。 */
 void Pubinterface_SetHandleInjectionPumpRun(bool enable); /* 随手柄启动或停止注水冷却泵，只释放本次联动接管的泵。 */
+void Pubinterface_ReleaseHandleInjectionPumpToPedal(void); /* 正常松脚时撤销手柄联动，并把仍运行的左泵交给本周期有效的轻踩请求。 */
 bool Pubinterface_CheckInjectionPumpForRun(uint8_t source); /* 本次插柄首次启动检查缺泵；首次拒绝后须真实松开，后续启动不再提示。 */
 void Pubinterface_ReleaseInjectionPumpStart(uint8_t source, uint8_t channel); /* 真实松开/明确停止完成首次确认；channel为NONE时匹配该来源当前报警。 */
 void Pubinterface_CancelInjectionPumpStart(uint8_t source, uint8_t channel); /* 异常撤销报警而不完成确认；source或channel为NONE时匹配任意来源或通道。 */
 bool Pubinterface_CheckRfidForRun(uint8_t source); /* CRC启动检查；第一次失败即禁启动，真实松开前恢复也不自动起机。 */
 bool Pubinterface_IsRfidRunBlocked(uint8_t channel); /* 最终驱动检查故障及未松开的旧启动动作。 */
 uint8_t Pubinterface_GetMotorStartAlarm(void); /* 供屏幕与蜂鸣任务读取持续缺泵提示，首次释放后返回NONE。 */
+#define HANDLE_INJECTION_FOLLOW_PUMP_A 0x01U /* 位0表示左泵 A 正由手柄冷却联动接管，脚踏仅登记轻踩而不抢占输出。 */
+#define HANDLE_INJECTION_FOLLOW_PUMP_B 0x02U /* 位1表示右泵 B 正由手柄冷却联动接管，停止联动时据此释放 B 泵。 */
 uint8_t Pubinterface_GetHandleInjectionPumpFollowMask(void); /* 查询哪些泵正由手柄冷却联动接管，脚踏据此只停止自己联动的泵。 */
 void Pubinterface_HandlePumpPressureBlocked(uint8_t pump_channel); /* A/B泵压力提示只蜂鸣三声并显示89号弹窗3秒；灌注同一轮一次，不撤销运行请求。 */
 void Pubinterface_HandlePumpPressureSensorFault(uint8_t pump_channel); /* A/B泵压力检测失效仅蜂鸣三声并显示74号图窗2秒，不改变运行请求。 */

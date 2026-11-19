@@ -28,9 +28,7 @@
  * 按系数乘100填写：114U表示除以1.14，110U表示除以1.10，100U表示不修正；数值越大，下发阈值越低。 */
 #define MOTOR_DRIVE_SCREEN_B_BRUSHED_CURRENT_DIVISOR_X100 114U /* 屏幕B有刷电流校准系数，使用整数百分数避免浮点运算。 */
 #define MOTOR_DRIVE_PX_MANUAL_CURRENT_SPLIT_RPM 30000U /* PXBA/PXBB手动磨头按屏幕设定转速分档，等于此值使用高速电流。 */
-#define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* 每个速度单位为 10rpm：3000rpm 发 300；修改会改变所有手柄的下发转速。 */
-#define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* 速度字段最多 65535（16 位）；这是协议容量，不是手柄允许的工作转速。 */
-#define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 协议最多表示 655350rpm，仅防止数值溢出；实际工作上限由手柄参数限制。 */
+#define MOTOR_DRIVE_PX_OSC_START_MIN_RPM 700U /* PX电气往复原有刀具端起转要求，供补偿和最终范围校验共用。 */
 #define MOTOR_DRIVE_SPEED_UP_SHIFT 16U /* WorkMessage.tool_reduction_ratio 高 16 位表示增速比。 */
 #define MOTOR_DRIVE_REDUCTION_MASK 0xFFFFU /* WorkMessage.tool_reduction_ratio 低 16 位表示减速比。 */
 #define MOTOR_DRIVE_DISPLAY_SPEED_INVALID 0xFFFFFFFFUL /* 速度显示缓存的无效值，用于强制下一次运行刷新屏幕速度。 */
@@ -352,6 +350,51 @@ static uint32_t MotorDrive_ApplyToolReductionRatio(uint32_t display_speed)
     }
 
     return motor_speed;                                       /* 返回本次启动帧希望电机达到的实际 rpm，组帧前还要按协议 /10。 */
+}
+
+/*
+ * 函数功能：用EPC刀具方向的有效范围复核低速补偿、倍率换算和量化后的驱动速度。
+ * 输入参数：command为已换算的10rpm驱动字段；ratio为当前装载的x100倍率；minimum/maximum为刀具端rpm。
+ * 返回参数：可安全表示的非零速度字段，越界或无法表示时返回0。
+ */
+static uint16_t MotorDrive_CheckEpcCommandSpeed(uint16_t command, uint32_t ratio, uint32_t minimum, uint32_t maximum)
+{
+    uint32_t reduction = ratio & MOTOR_DRIVE_REDUCTION_MASK; /* 低16位为减速倍率，电机端上限随减速倍率放大。 */
+    uint32_t speed_up = ratio >> MOTOR_DRIVE_SPEED_UP_SHIFT; /* 高16位为增速倍率，电机端上限随增速倍率降低。 */
+    uint32_t motor_numerator = 1U; /* 直联时电机与刀具同步，比较式的分子为1。 */
+    uint32_t word_denominator = MOTOR_DRIVE_CMD_SPEED_UNIT_RPM; /* 把协议10rpm量化合并到比较式的分母。 */
+    uint32_t final_command = command; /* 用32位保存可能加一的指令，超过16位时直接进入停止。 */
+    uint64_t encoded_min; /* 最低刀具速度乘以分子，保留倍率小数供比较。 */
+    uint64_t encoded_speed; /* 驱动字段乘以分母，不用浮点还原刀具速度。 */
+
+    if ((command == 0U) || (maximum == 0U) || (minimum > maximum) ||
+        ((reduction > MOTOR_DRIVE_RATIO_X100_UNIT) && (speed_up > MOTOR_DRIVE_RATIO_X100_UNIT)))
+    {
+        return 0U; /* 零速、无有效区间或相冲突的倍率都不能继续形成运行帧。 */
+    }
+    if (reduction > MOTOR_DRIVE_RATIO_X100_UNIT)
+    {
+        motor_numerator = reduction; /* 减速侧比较刀具转速乘实际减速倍率后的电机速度。 */
+        word_denominator *= MOTOR_DRIVE_RATIO_X100_UNIT; /* 乘100抵消传动比放大。 */
+    }
+    else if (speed_up > MOTOR_DRIVE_RATIO_X100_UNIT)
+    {
+        motor_numerator = MOTOR_DRIVE_RATIO_X100_UNIT; /* 增速侧电机速度为刀具转速除实际倍率。 */
+        word_denominator *= speed_up; /* 保留倍率x100与帧速度单位，避免过早向下舍入。 */
+    }
+    encoded_min = (uint64_t)minimum * motor_numerator; /* 精确比较标签下限和驱动帧反推的刀具速度。 */
+    encoded_speed = (uint64_t)final_command * word_denominator; /* 先按现有向下取整的结果检查。 */
+    if (encoded_speed < encoded_min)
+    {
+        ++final_command; /* 刀具原目标已限幅；只对向下量化越过下限的情况补一个10rpm档位。 */
+        encoded_speed += word_denominator; /* 加档后仍需核对上限，固定转速无可用档位时停机。 */
+    }
+    if ((final_command > MOTOR_DRIVE_CMD_SPEED_MAX) || (encoded_speed < encoded_min) ||
+        (encoded_speed > (uint64_t)maximum * motor_numerator))
+    {
+        return 0U; /* 启动补偿或量化不能把送往驱动的目标留在标签许可区间外。 */
+    }
+    return (uint16_t)final_command; /* 当前字段合法，按驱动原格式发送。 */
 }
 
 /*
@@ -712,7 +755,7 @@ static uint16_t MotorDrive_GetConfiguredCurrent(void)
 }
 
 /*
- * 函数功能：根据当前 WorkMessage 运行态组帧，对屏幕B通道有刷保护电流校准后，向 UART1 下发启动或停止命令。
+ * 函数功能：根据当前WorkMessage组帧，校验EPC最终速度并校准B通道有刷保护电流，向UART1下发启动或停止命令。
  * 输入参数：无。
  * 返回参数：无。
  */
@@ -730,7 +773,8 @@ void MOTORRUN(void)
     uint16_t command_current_value=0U; /* 保存本帧保护电流，单位0.01A；通道校准仅影响发送值，不回写手柄设定。 */
     uint8_t requested_run_state=0U; /* 先处理脚踏停止要求，再保存最终的原始启停请求，供本周期发送和调试使用。 */
     uint8_t motor_output_run_state=0U; /* 只有原始RUN且原始速度非零时置1，实际UART1才允许发送启动帧。 */
-    uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度或协议速度为 0 时置 1，表示本周期改发停止帧。 */
+    uint8_t zero_speed_blocked=0U; /* 要求启动但原始速度无效或协议速度越界时置1，本周期改发停止帧。 */
+    bool px_electrical_osc = false; /* 只给实际电气往复叠加700rpm起转要求，机械往复不使用该门槛。 */
     uint8_t handle_output_allowed = MotorDrive_IsHandleOutputAllowed() ? 1U : 0U; /* A/B共用各自扫描层的短去抖结果，单次候选电平不再阻断本周期RUN。 */
     if (Pubinterface_IsRfidRunBlocked(WorkMessage.channel_work))
     {
@@ -784,7 +828,7 @@ void MOTORRUN(void)
         motor_source_speed=WorkMessage.speed_work; /* 脚踏带行程霍尔，speed_work 已由脚踏任务按踩踏比例实时换算。 */
         display_speed_value=MotorDrive_QuantizeFootDisplaySpeed(WorkMessage.speed_work); /* 屏幕只显示 100rpm 整数倍；电机仍使用上方未量化的完整速度。 */
     }
-    motor_source_speed=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, motor_source_speed); /* 最终出口按本通道电气往复范围限速；配置无效会得到0并沿下方STOP路径处理。 */
+    motor_source_speed=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, motor_source_speed); /* EPC及原有PX往复按本方向范围限速，范围无效则保持停止。 */
     display_speed_value=Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, display_speed_value); /* 显示使用同一限幅结果，不把已截断的超限请求显示成实际运行速度。 */
     requested_run_state=(WorkMessage.runflag_work!=false)?1U:0U; /* 在任何倍率和低速补偿前冻结本周期原始启停请求。 */
     if((requested_run_state!=0U) &&
@@ -796,11 +840,12 @@ void MOTORRUN(void)
     {
         motor_output_run_state=1U; /* 只有RUN和非零原始速度同时成立，才允许进行机械倍率与启动补偿。 */
         ssc_speed_value=motor_source_speed; /* 单独保存实际输出目标，不改屏幕设定、脚踏显示和原始速度记录。 */
-        if(((WorkMessage.hand_model==PXBA_ONLINES)||(WorkMessage.hand_model==PXBB_ONLINES)) &&
-           (MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify)==OSCDIR) &&
-           (ssc_speed_value<700U))
+        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify); /* 先确定实际电机方向，机械往复等方向转换继续沿用原规则。 */
+        px_electrical_osc = ((WorkMessage.hand_model == PXBA_ONLINES) || (WorkMessage.hand_model == PXBB_ONLINES)) &&
+                            (effective_dir_work == OSCDIR); /* 只有PX电气往复执行原起转补偿。 */
+        if (px_electrical_osc && (ssc_speed_value < MOTOR_DRIVE_PX_OSC_START_MIN_RPM))
         {
-            ssc_speed_value=700U; /* 分体手柄电气往复的非零目标最低按刀具端700rpm运行；零速已由上方门禁排除。 */
+            ssc_speed_value = MOTOR_DRIVE_PX_OSC_START_MIN_RPM; /* 保留非零运行的原起转要求，随后复核标签上限。 */
         }
         ssc_speed_value=MotorDrive_ApplyToolReductionRatio(ssc_speed_value); /* 最低运行速度先按刀具端处理，再沿用原减速比和驱动协议换算。 */
     }
@@ -830,11 +875,23 @@ void MOTORRUN(void)
 
     if(motor_output_run_state!=0U) /* 原始速度与机械换算都完成后，再检查驱动协议最终可表达值。 */
     {
-        command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* GE2433字段按rpm/10量化，最终字段为0时仍属于零速命令。 */
+        uint32_t epc_minimum; /* 当前工作序号对应方向的刀具下限，用于复核量化后的最小转速。 */
+        uint32_t epc_maximum; /* 当前工作序号对应方向的刀具上限，用于拦截补偿引起的越界。 */
+        command_speed_value=MotorDrive_BuildCommandSpeed(ssc_speed_value); /* 按GE2433的10rpm单位生成候选字段。 */
+        if (Pubinterface_GetLoadedEpcSpeedRange(WorkMessage.channel_work, WorkMessage.rfid_result_sequence,
+                                                (uint8_t)WorkMessage.dir_work, &epc_minimum, &epc_maximum))
+        {
+            if (px_electrical_osc && (epc_minimum < MOTOR_DRIVE_PX_OSC_START_MIN_RPM))
+            {
+                epc_minimum = MOTOR_DRIVE_PX_OSC_START_MIN_RPM; /* EPC往复上限若低于原起转要求，最终范围为空并保持停止。 */
+            }
+            command_speed_value = MotorDrive_CheckEpcCommandSpeed(command_speed_value, WorkMessage.tool_reduction_ratio,
+                                                                  epc_minimum, epc_maximum); /* 只允许当前EPC范围内的非零速度进入实际出帧。 */
+        }
         if(command_speed_value==0U)
         {
-            motor_output_run_state=0U; /* 禁止用RUN状态发送byte4~5全零帧，统一转入下方周期STOP分支。 */
-            zero_speed_blocked=1U; /* source_speed_rpm仍保留原值，可区分原始零速和倍率/协议量化归零。 */
+            motor_output_run_state=0U; /* 编码归零或EPC最终速度越界时转入周期STOP分支。 */
+            zero_speed_blocked=1U; /* 保留原目标便于区分主动停机和速度校验阻断。 */
         }
     }
    
@@ -855,7 +912,6 @@ void MOTORRUN(void)
      LCD_Show_2byte_Number(0x9473,0xffE0);
         }
         //msg的数据填充
-        effective_dir_work=MotorDrive_BuildActualDirection(WorkMessage.hand_model, (uint8_t)WorkMessage.dir_work, WorkMessage.raw_tool_type, WorkMessage.auto_identify); /* 先保留原有 RFID 刀具方向规则；手动选刀使用屏幕方向，下一步统一补偿分体手柄的驱动方向。 */
         if((WorkMessage.hand_model==PXBA_ONLINES) || (WorkMessage.hand_model==PXBB_ONLINES)) /* 分体手柄的驱动方向相反，刀具规则换算完成后统一补偿。 */
         {
             if(effective_dir_work==ZZDIR) /* 刀具规则要求电机正转时，驱动板需要接收反转命令。 */

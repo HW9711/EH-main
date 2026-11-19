@@ -7,6 +7,7 @@
 #include "kernel_scheduler.h"
 #include "queue.h"
 #include "sscBEEP.h"
+#include "sscDRIVE.h" /* 标签转速装载前核对驱动帧可表示范围，避免运行时才被截到零或上限。 */
 #include "delay.h"
 #include "uart3.h"
 #include "uart9.h"
@@ -62,6 +63,11 @@
 #define RFID_EPC_VERIFY_ATTEMPTS        2U    /* USER成功后按普通模式补读EPC两次；全部失败才发布暂存USER。 */
 #define RFID_EPC_CRC_RETRY_MS           100U /* 完整EPC回包CRC8错误后等待100ms再发命令，用户确认的快速重试间隔。 */
 #define RFID_EPC_CRC_FAIL_MAX           3U /* 首次及两次重试共三次CRC错误，参数错误与超时不计数。 */
+#define RFID_EPC_REDUCTION_FINE_X10    200U /* EPC倍率原值200表示20.0倍减速，从该值起使用低速刀具单位。 */
+#define RFID_EPC_SPEED_UP_FAST_X10      30U /* EPC倍率原值30表示3.0倍增速，从该值起使用高速刀具单位。 */
+#define RFID_EPC_SPEED_UNIT_FINE_RPM   100U /* 大减速比标签的B6/B7/B8每单位为100rpm，保留低速刀具的设置精度。 */
+#define RFID_EPC_SPEED_UNIT_STD_RPM   1000U /* 其余合法倍率的B6/B7/B8沿用每单位1000rpm。 */
+#define RFID_EPC_SPEED_UNIT_FAST_RPM  2000U /* 大增速比标签的B6/B7/B8每单位为2000rpm，扩大高速刀具可编码范围。 */
 #define RFID_EPC_CRC_RECOVER_MS         1000U /* 一轮失败结束后约1秒再识别；分体保留参数，其它基座继续保持原CRC启动限制。 */
 #define RFID_RESPONSE_WAIT_TICKS        1U    /* 每条命令至少等待一个100ms周期，收包检查完成后才决定是否重试。 */
 #define RFID_RESPONSE_MAX_WAIT_TICKS    2U    /* 分片或无效数据最多延长到200ms；持续噪声不能无限延长单条命令。 */
@@ -1436,7 +1442,7 @@ static bool Rfid_EpcCrcMatches(const uint8_t *payload)
 }
 
 /*
- * 函数功能：校验EPC或USER的业务CRC、型号和方向并转换参数；速度检查仅用于EPC，PXY老USER直接取标签速度。
+ * 函数功能：校验EPC或USER的业务字段；EPC按倍率分档解出刀具转速并校验驱动容量，老USER沿用原单位和校验规则。
  * 输入参数：source为EPC或USER；payload分别至少包含12或16字节；length为实际长度；parameters为输出。
  * 返回参数：true表示全部校验通过；false表示不能用于运行，输出保持全零。
  */
@@ -1461,6 +1467,12 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
     }
     if ((source == RFID_READ_SOURCE_EPC) && (length == RFID_PAYLOAD_EPC_LENGTH))
     {
+        uint32_t speed_unit = RFID_EPC_SPEED_UNIT_STD_RPM; /* 未跨过新倍率门槛时使用原有刀具转速单位。 */
+        uint32_t motor_numerator; /* 刀具转速乘以此分子，随后除以分母得到电机转速。 */
+        uint32_t motor_denominator; /* 保留传动比的小数，校验驱动容量前不先取整。 */
+        uint32_t motor_word_scale; /* 用同一比例表示驱动帧一个10rpm档位，供精确比较。 */
+        uint64_t scaled_min; /* 刀具最低速度乘电机侧比例分子，量化前保留小数。 */
+        uint64_t scaled_max; /* 刀具最高速度乘电机侧比例分子，防止乘法溢出。 */
         if (!Rfid_EpcCrcMatches(payload)) /* 单独检查CRC，77只针对这个失败原因，下面原有字段检查保持不变。 */
         {
             return false; /* 新EPC业务CRC错误，本次请求应继续读取老USER。 */
@@ -1499,11 +1511,44 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
         if ((payload[4] & 0xF0U) == 0xF0U)
         {
             decoded.ratio <<= 16U; /* 增速比写入高16位，沿用现有驱动换算约定。 */
+            motor_numerator = 10U; /* 增速机构的电机转速是刀具转速除以标签倍率，分子10抵消倍率放大。 */
+            motor_denominator = ratio; /* 原倍率含一位小数，保留到驱动容量比较结束。 */
+            if (ratio >= RFID_EPC_SPEED_UP_FAST_X10)
+            {
+                speed_unit = RFID_EPC_SPEED_UNIT_FAST_RPM; /* 3.0倍及以上的增速刀具统一按2000rpm解码。 */
+            }
+        }
+        else
+        {
+            motor_numerator = ratio; /* 减速机构的电机转速是刀具转速乘标签倍率。 */
+            motor_denominator = 10U; /* 标签倍率以0.1为单位，分母10还原实际倍率。 */
+            if (ratio >= RFID_EPC_REDUCTION_FINE_X10)
+            {
+                speed_unit = RFID_EPC_SPEED_UNIT_FINE_RPM; /* 20.0倍及以上的减速刀具统一按100rpm解码。 */
+            }
         }
         decoded.diameter = payload[1]; /* EPC直径单位统一为0.1mm，41表示4.1mm；保留原值供显示和心跳使用，不做整数除法。 */
-        decoded.max_speed = (uint32_t)payload[6] * 1000U; /* EPC最高转速单位为1000rpm。 */
-        decoded.min_speed = (uint32_t)payload[7] * 1000U; /* 最低转速0的PX普通刨刀特例在装载时处理。 */
-        decoded.default_speed = (uint32_t)payload[8] * 1000U; /* 默认转速不能被截断到16位。 */
+        decoded.max_speed = (uint32_t)payload[6] * speed_unit; /* B6最高转速按所选单位转换为刀具端rpm。 */
+        decoded.min_speed = (uint32_t)payload[7] * speed_unit; /* B7最低转速使用同一单位，PX普通刨刀的零值在装载时处理。 */
+        decoded.default_speed = (uint32_t)payload[8] * speed_unit; /* B8默认刀具转速保留32位，高速标签不会发生16位回绕。 */
+        if ((decoded.default_speed == 0U) || (decoded.min_speed > decoded.default_speed) ||
+            (decoded.default_speed > decoded.max_speed)) /* 非零默认值同时保证最高值非零，三项相等允许固定转速。 */
+        {
+            return false; /* 次序或默认速度非法时整张EPC拒绝，不能用限幅掩盖错误标签。 */
+        }
+        motor_word_scale = MOTOR_DRIVE_CMD_SPEED_UNIT_RPM * motor_denominator; /* 倍率分母和10rpm字段单位合并，后续不提前舍入。 */
+        scaled_min = (uint64_t)decoded.min_speed * motor_numerator; /* 转到和驱动档位一致的比较尺度。 */
+        scaled_max = (uint64_t)decoded.max_speed * motor_numerator; /* 使用宽整数保留标签最高转速的完整乘积。 */
+        if ((scaled_max > (uint64_t)MOTOR_DRIVE_RPM_MAX * motor_denominator) ||
+            ((uint64_t)decoded.default_speed * motor_numerator < motor_word_scale) ||
+            ((scaled_min != 0U) && (scaled_min < motor_word_scale)))
+        {
+            return false; /* 最高超出驱动字段或非零默认/最低量化成停车指令时拒绝EPC。 */
+        }
+        if (scaled_min > (scaled_max - scaled_max % motor_word_scale))
+        {
+            return false; /* 最高允许档位仍低于下限，固定或极窄的速度区间无法形成合法运行指令。 */
+        }
         decoded.flow = (uint8_t)(payload[9] & 0x3FU); /* B9低6位为0~63mL/min，屏蔽高位频率，避免把频率叠加到默认流量和心跳上报。 */
         decoded.current = (uint16_t)payload[11] * 10U; /* 0.1A转换成驱动使用的0.01A；0保留驱动默认阈值语义。 */
         decoded.frequency = (uint8_t)(((payload[9] >> 6U) + 1U) * 10U); /* B9高2位对应1~4Hz，按现有驱动0.1Hz指令换成10/20/30/40；仅电气往复方向实际下发频率。 */
@@ -1552,16 +1597,6 @@ bool Rfid_DecodeToolPayload(RfidReadSource_t source, const uint8_t *payload, uin
     else
     {
         return false; /* 数据来源和长度不匹配，不尝试猜测格式。 */
-    }
-    if ((source == RFID_READ_SOURCE_EPC) &&
-        ((decoded.max_speed == 0U) || (decoded.default_speed == 0U) || (decoded.min_speed > decoded.default_speed) || (decoded.default_speed > decoded.max_speed))) /* 仅EPC校验速度范围；PXYTP/PXYTM的USER不因速度值拒绝识别。 */
-    {
-        return false; /* EPC非法速度组合仍拒绝，不把错误默认值钳位后继续运行。 */
-    }
-    if ((source == RFID_READ_SOURCE_EPC) && ((decoded.ratio & 0xFFFFU) > 100U) &&
-        (((uint64_t)decoded.max_speed * (decoded.ratio & 0xFFFFU)) > (655350ULL * 100ULL)))
-    {
-        return false; /* EPC最高转速乘减速比超出驱动字段时仍拒绝；USER解析按要求不执行速度检查。 */
     }
     decoded.length = payload[2]; /* 两份协议均在B2保存长度。 */
     decoded.angle = payload[3]; /* 两份协议均在B3保存弯曲角度。 */

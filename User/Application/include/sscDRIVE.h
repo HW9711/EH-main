@@ -2,6 +2,10 @@
 #include "stm32f4xx_hal.h"
 #include <stdbool.h>
 
+#define MOTOR_DRIVE_CMD_SPEED_UNIT_RPM 10U /* 驱动帧一个速度单位表示10rpm，RFID校验与实际组帧共用此单位。 */
+#define MOTOR_DRIVE_CMD_SPEED_MAX 0xFFFFU /* GE2433速度字段的16位容量，实际手柄工作上限由产品参数决定。 */
+#define MOTOR_DRIVE_RPM_MAX (MOTOR_DRIVE_CMD_SPEED_MAX * MOTOR_DRIVE_CMD_SPEED_UNIT_RPM) /* 电机侧协议最大可表示转速655350rpm，用于拒绝会饱和的EPC速度。 */
+
 /* 以下是旧版按型号设置的保护电流，当前工程没有引用；修改它们不会改变实际保护电流。
  * 当前发送值来自 WorkMessage.current_work，单位 0.01A；手柄参数通常由 EEPROM Page4[21..22] 提供。
  * 型号后缀仅保留旧命名，不能据此修改当前手柄的减速比或电流设置。

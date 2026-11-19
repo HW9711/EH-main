@@ -1006,8 +1006,12 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
         (tool_model == RFID_TOOL_MODEL_PLANER) && (payload[7] == 0U))
     {
         min_speed = HANDLESCAN_RFID_PLANER_ZERO_MIN_SPEED_RPM; /* 保留PX普通刨刀0表示500rpm的已有约定。 */
+        if (decoded.default_speed < min_speed)
+        {
+            return false; /* 新单位可解出不足500rpm的默认值，套用PX下限后无效时不发布本次刀具。 */
+        }
     }
-    default_speed = decoded.default_speed; /* 错误默认速度已被拒绝，不再通过钳位掩盖标签错误。 */
+    default_speed = decoded.default_speed; /* 默认转速已满足标签顺序和本体最低转速特例，再供各方向装载。 */
     default_flow = decoded.flow; /* EPC流量仅取B9低6位，旧USER仍取B11，默认注水量不混入频率编码。 */
     direction = decoded.direction; /* 这里是显示方向，机械转向仍由驱动转换。 */
     reduction_ratio = decoded.ratio; /* 老USER按兼容表取190或430，新刀按EPC倍率。 */
@@ -1082,7 +1086,7 @@ static bool Handlescan_ApplyRfidToolResult(uint8_t channel,
               (mapped_model == PXBB_ONLINES)) &&
              (max_speed > min_speed)) /* 三类基座的新 EPC 刀具共用分档；老 USER 已在上方处理，手动模式不进入 RFID 装载。 */
     {
-        speed_range = max_speed - min_speed; /* 合法 RFID 范围先求差值；EPC 速度单位换算后最大差值为 255000rpm，不会溢出 32 位。 */
+        speed_range = max_speed - min_speed; /* 正差已检查；EPC新单位最大为2000rpm，255级速度差仍在32位范围内。 */
         if (speed_range >= 70000U)
         {
             common_speed_step_large = 10000U; /* 速度范围达到 7 万及以上时，大步进固定为 10000rpm。 */

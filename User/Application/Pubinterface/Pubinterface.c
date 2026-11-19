@@ -89,10 +89,6 @@ static uint8_t s_pump_transient_alarm_active = 0U;
 /* 本次泵弹窗开始时间，保持指定毫秒数后关闭79号或89号图。 */
 static uint32_t s_pump_transient_alarm_tick = 0U;
 static uint32_t s_pump_transient_alarm_duration = ALARM_PRESSURE_MS; /* 本次泵弹窗保持毫秒数：压力按原设置，定位失败为3000ms。 */
-/* 冷却泵记录的 bit0：1 表示 A 泵由手柄联动启动；停手柄时据此停 A 泵，不是可调参数。 */
-#define HANDLE_INJECTION_FOLLOW_PUMP_A 0x01U
-/* 冷却泵记录的 bit1：1 表示 B 泵由手柄联动启动；可与 A 泵标志组合，不是可调参数。 */
-#define HANDLE_INJECTION_FOLLOW_PUMP_B 0x02U
 /* 记录手柄冷却跟随实际启动过哪些注水泵，避免停止手柄时误停非跟随来源的泵。 */
 static uint8_t s_handle_injection_pump_follow_mask = 0U;
 /* bit0/bit1分别禁止A/B故障泵继续联动；松开或新启动时清零，仅限制泵，不限制手柄。 */
@@ -1815,11 +1811,11 @@ bool Pubinterface_IsPressureBlockStopLatched(void)
 }
 
 /*
- * 函数功能：按当前通道请求注水泵联动；泵未就绪或故障时仅跳过该泵，手柄继续运行。
- * 输入参数：enable 为 true 表示手柄已经进入运行态，需要在冷却出口识别为注水泵时启动冷却；false 表示手柄已经停止，需要同步关闭联动泵。
+ * 函数功能：更新手柄冷却联动；泵未就绪时跳过该泵，正常松脚时可把左泵连续交给有效的轻踩请求。
+ * 输入参数：enable 为 true 请求手柄冷却；keep_left_pump 为 true 表示撤销联动时左泵仍有双脚踏轻踩请求。
  * 返回参数：无。
  */
-void Pubinterface_SetHandleInjectionPumpRun(bool enable)
+static void Pubinterface_UpdateHandleInjectionPumpRun(bool enable, bool keep_left_pump)
 {
 	bool a_is_injection = (pumpMessageA.type == INJECTWATER); /* 判断 A 是否为注水泵；吸引泵和灌注泵不用于手柄冷却。 */
 	bool b_is_injection = (pumpMessageB.type == INJECTWATER); /* 判断 B 是否为注水泵；只有 B 能供水时，两侧手柄都由 B 冷却。 */
@@ -1883,9 +1879,15 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 	}
 	else if ((s_handle_injection_pump_follow_mask & HANDLE_INJECTION_FOLLOW_PUMP_A) != 0U)
 	{
-		pumpMessageA.run_flag = false;			 /* 当前手柄不再需要 A 冷却时，只关闭本函数曾启动过的 A 跟随输出。 */
-		pumpMessageA.timingDrainage_flag = false; /* 同步退出 A 排空状态，保持手柄冷却和脚踏排空互斥。 */
-		pumpMessageA.pedalDrainage_flag = false; /* 停止 A 手柄冷却时同步清除脚踏临时排空状态。 */
+		bool pedal_drainage = keep_left_pump && a_is_injection && pumpMessageA.run_flag &&
+			(PumpBehavior_DriverCanRun(PUMP_BEHAVIOR_CHANNEL_A) != 0U); /* 仅把已在运行且驱动仍就绪的左泵交给轻踩，不能借交接重新启动故障泵。 */
+
+		if (!pedal_drainage)
+		{
+			pumpMessageA.run_flag = false; /* 没有可接续的轻踩请求时，关闭本次手柄联动的左泵。 */
+		}
+		pumpMessageA.timingDrainage_flag = false; /* 左泵结束联动后仍不进入屏幕定时排空。 */
+		pumpMessageA.pedalDrainage_flag = pedal_drainage; /* 轻踩接续时保留原运行请求，只把左泵来源切为踏板排空。 */
 		pumpMessageA.timingDrainage_times = 0U;   /* A 排空计数清零，避免下一轮排空继承旧计数。 */
 		s_handle_injection_pump_follow_mask &= (uint8_t)(~HANDLE_INJECTION_FOLLOW_PUMP_A); /* 清掉 A 跟随占用标记，后续停止手柄不再重复改写 A 泵。 */
 	}
@@ -1913,6 +1915,26 @@ void Pubinterface_SetHandleInjectionPumpRun(bool enable)
 		s_handle_injection_pump_follow_mask &= (uint8_t)(~HANDLE_INJECTION_FOLLOW_PUMP_B); /* 清掉 B 跟随占用标记，后续停止手柄不再重复改写 B 泵。 */
 	}
 
+}
+
+/*
+ * 函数功能：按现有规则启动或停止手柄冷却联动。
+ * 输入参数：enable 为 true 请求冷却泵运行，为 false 撤销公共接口记录的联动。
+ * 返回参数：无。
+ */
+void Pubinterface_SetHandleInjectionPumpRun(bool enable)
+{
+	Pubinterface_UpdateHandleInjectionPumpRun(enable, false); /* 普通联动启停沿用原规则，只有双脚踏正常松脚才可接续左泵。 */
+}
+
+/*
+ * 函数功能：撤销手柄联动，把仍运行的左注水泵交给已确认的双脚踏轻踩请求。
+ * 输入参数：无，调用前须确认本周期确实存在有效的轻踩请求。
+ * 返回参数：无。
+ */
+void Pubinterface_ReleaseHandleInjectionPumpToPedal(void)
+{
+	Pubinterface_UpdateHandleInjectionPumpRun(false, true); /* 联动掩码正常清除，左泵满足交接条件时保持原运行请求。 */
 }
 
 /*
@@ -2182,29 +2204,82 @@ uint16_t Pubinterface_GetInjectionPumpStartFlow(void)
 }
 
 /*
- * 函数功能：限制本通道PX电气往复目标速度，统一拦住旧记忆、外控直接设置和最终驱动出口的越界请求。
+ * 函数功能：按已装载的标签序号查找对应EPC的方向速度范围，换刀同步期间保持停止。
+ * 输入参数：channel为A/B通道，sequence为当前使用的识别序号，direction为业务方向；minimum和maximum接收刀具端rpm，不能为空。
+ * 返回参数：true表示采用输出范围，0/0表示当前不能运行；false表示无RFID装载或有效来源为旧USER，应按原规则处理。
+ */
+bool Pubinterface_GetLoadedEpcSpeedRange(uint8_t channel, uint16_t sequence, uint8_t direction, uint32_t *minimum, uint32_t *maximum)
+{
+    const ChannelrecognizeMessage_t *recognize; /* 只选当前逻辑通道的识别快照，避免读取另一侧或RFID新回包。 */
+    if (sequence == 0U) return false; /* 非RFID工作参数不使用EPC速度范围。 */
+    *minimum = 0U; /* 识别序号不一致或方向无效时给出停止范围。 */
+    *maximum = 0U; /* 上限为0时，下发路径不能从另一把刀的默认转速补出非零指令。 */
+    if (channel == CHANNEL_A) recognize = &ChannelrecognizeMessageA; /* A只读自己的已发布参数。 */
+    else if (channel == CHANNEL_B) recognize = &ChannelrecognizeMessageB; /* B只读自己的已发布参数。 */
+    else return true; /* 存在装载序号却没有合法通道时保持停止。 */
+
+    if (recognize->rfid_result_sequence != sequence) return true; /* 新刀范围不能与上一把刀的速度和倍率混用。 */
+    if (recognize->rfid_settings_key.source == RFID_READ_SOURCE_USER) return false; /* 同一份有效老USER维持原有速度策略。 */
+    if (recognize->rfid_settings_key.source != RFID_READ_SOURCE_EPC) return true; /* 已装载序号缺少有效来源时保持停止。 */
+
+    if (direction == ZZDIR)
+    {
+        *minimum = recognize->speed_zzmin; /* 正转选正转下限，供当前请求限幅。 */
+        *maximum = recognize->speed_zzmax; /* 正转上限也用于检查倍率和补偿后的驱动速度。 */
+    }
+    else if (direction == FZDIR)
+    {
+        *minimum = recognize->speed_fzmin; /* 反转使用本方向范围，不借用正转下限。 */
+        *maximum = recognize->speed_fzmax; /* 反转使用本方向已装载的上限。 */
+    }
+    else if (direction == OSCDIR)
+    {
+        *minimum = recognize->speed_oscmin; /* PX电气往复为标签与本体范围交集，机械往复仍用标签。 */
+        *maximum = recognize->speed_oscmax; /* 交集无效时上限为0，禁止生成非零帧。 */
+    }
+    return true; /* 调用方按返回的上下限检查本次请求。 */
+}
+
+/*
+ * 函数功能：限制本通道EPC各方向及原有PX电气往复的目标速度。
  * 输入参数：channel为A/B通道；direction为运行方向；speed为刀具端目标rpm，0仍表示停止。
- * 返回参数：范围内目标速度；往复配置无效时返回0；其它手柄、单向和MXYTP机械往复保留原值。
+ * 返回参数：范围内目标速度；范围无效时返回0；无适用限速时保留原值。
  */
 uint32_t Pubinterface_ClampMotorSpeed(uint8_t channel, uint8_t direction, uint32_t speed)
 {
-    const ChannelrecognizeMessage_t *recognize; /* 仅使用本通道已经装载并校验的上下限，不增加运行时EEPROM访问。 */
-    if (direction != OSCDIR || speed == 0U) return speed; /* 单向保持原行为；零速不能被最小速度抬升为运行。 */
-    if (channel == CHANNEL_A) recognize = &ChannelrecognizeMessageA; /* A只按A的EEPROM与RFID交集限速。 */
-    else if (channel == CHANNEL_B) recognize = &ChannelrecognizeMessageB; /* B独立读取B的速度范围，避免跨通道套用。 */
-    else return 0U; /* 无有效通道时不能为电气往复生成非零输出。 */
-    if (((recognize->handle_type != PXBA_ONLINES) && (recognize->handle_type != PXBB_ONLINES)) ||
-        (recognize->raw_tool_type == RFID_TOOL_MODEL_MXYTP))
+    const ChannelrecognizeMessage_t *recognize; /* 原有PX电气往复校验仍读取本通道的本体范围。 */
+    uint16_t sequence; /* 用目标通道的实际装载序号，切通道或恢复记忆时不借用当前工作通道。 */
+    uint32_t minimum; /* 当前方向有效下限，统一用于手调、脚踏和外控。 */
+    uint32_t maximum; /* 当前方向有效上限，0表示被限制的方向不能运行。 */
+    if (speed == 0U) return speed; /* 零速必须保持停止，不受下限补偿。 */
+    if (channel == CHANNEL_A)
     {
-        return speed; /* 仅收紧PX电气往复，机械往复仍按标签和原有倍率运行。 */
+        recognize = &ChannelrecognizeMessageA; /* A只读取A的识别快照。 */
+        sequence = MemoryMsgA.rfid_result_sequence; /* A用自己的装载序号核对EPC范围。 */
     }
-    if ((recognize->speed_oscmin == 0U) || (recognize->speed_oscmax < recognize->speed_oscmin))
+    else if (channel == CHANNEL_B)
     {
-        return 0U; /* 专用字段无效或RFID范围没有交集时保持停止，不回退Page4上限。 */
+        recognize = &ChannelrecognizeMessageB; /* B只读取B的识别快照。 */
+        sequence = MemoryMsgB.rfid_result_sequence; /* B用自己的装载序号核对EPC范围。 */
     }
-    if (speed < recognize->speed_oscmin) return recognize->speed_oscmin; /* 低于本次有效下限时抬至下限。 */
-    if (speed > recognize->speed_oscmax) return recognize->speed_oscmax; /* 旧记忆或外控超过上限时钳回合法值。 */
-    return speed; /* 已在有效范围内，不改变正常调速和脚踏比例值。 */
+    else return (direction == OSCDIR) ? 0U : speed; /* 无效通道仍按原有往复规则返回。 */
+
+    if (!Pubinterface_GetLoadedEpcSpeedRange(channel, sequence, direction, &minimum, &maximum))
+    {
+        if ((direction != OSCDIR) ||
+            ((recognize->handle_type != PXBA_ONLINES) && (recognize->handle_type != PXBB_ONLINES)) ||
+            (recognize->raw_tool_type == RFID_TOOL_MODEL_MXYTP))
+        {
+            return speed; /* 无EPC时只保留原有PX电气往复限速，其余输入维持原值。 */
+        }
+        minimum = recognize->speed_oscmin; /* 原有PX电气往复继续使用本通道专用范围。 */
+        maximum = recognize->speed_oscmax; /* 电气往复专用范围无效时保持停止。 */
+        if (minimum == 0U) return 0U; /* 原有往复配置要求有效非零下限。 */
+    }
+    if ((maximum == 0U) || (maximum < minimum)) return 0U; /* 范围无效时不沿用旧速度或补出非零值。 */
+    if (speed < minimum) return minimum; /* 非零目标低于下限时使用最小合法目标。 */
+    if (speed > maximum) return maximum; /* 防止旧记忆、脚踏或外控请求越过本方向上限。 */
+    return speed; /* 目标合法时保留原值和精度。 */
 }
 
 /*

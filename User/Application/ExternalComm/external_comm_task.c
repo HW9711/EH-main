@@ -1987,10 +1987,18 @@ static void ExternalComm_ApplySetting(const ExternalCommFrame_t *frame)
     switch (frame->area_code)
     {
         case 0x01U:
-            value = (uint16_t)Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, value); /* PX电气往复直接设置也要限幅，后面的屏幕、通道记忆和ACK均使用最终合法速度。 */
-            /* 设置当前手柄速度。 */
-            ExternalComm_SaveCurrentSpeed(value);
+        {
+            uint32_t bounded_speed = Pubinterface_ClampMotorSpeed(WorkMessage.channel_work, (uint8_t)WorkMessage.dir_work, value); /* 先用完整rpm应用EPC或PX往复范围，不能边限幅边截断。 */
+            if (bounded_speed > UINT16_MAX)
+            {
+                ExternalComm_SendFailAck(EXTERNAL_COMM_ACK_RUN_SET_FAILED, frame->area_code,
+                                         EXTERNAL_COMM_REASON_NOT_SUPPORT); /* 本方向的最小可用速度超出旧外控字段时拒绝设置，避免写回绕值。 */
+                return; /* 保留屏幕和通道记忆，失败后不再发送成功ACK。 */
+            }
+            value = (uint16_t)bounded_speed; /* 通过字段宽度检查的速度可同时用于工作态和返回帧。 */
+            ExternalComm_SaveCurrentSpeed(value); /* 只保存本通道已限幅的结果。 */
             break;
+        }
         case 0x02U:
             /* 设置当前手柄往复频率。 */
             ExternalComm_SaveCurrentFreq(value);
@@ -3932,6 +3940,17 @@ static void ExternalComm_HeartbeatAppendBE16(uint8_t *info_area, uint16_t *info_
 }
 
 /*
+ * 函数功能：把主控保留的完整手柄rpm写入旧心跳的16位速度字段，超范围时按最大值上报。
+ * 输入参数：info_area/info_len为心跳组帧位置，speed为换算好的32位rpm。
+ * 返回参数：无。
+ */
+static void ExternalComm_HeartbeatAppendSpeed(uint8_t *info_area, uint16_t *info_len, uint32_t speed)
+{
+    uint16_t encoded_speed = (speed > UINT16_MAX) ? UINT16_MAX : (uint16_t)speed; /* 大于65535rpm的速度不能截断成看似正常的低速。 */
+    ExternalComm_HeartbeatAppendBE16(info_area, info_len, encoded_speed); /* 仅限制旧线上字段，保持主控实际速度和心跳布局。 */
+}
+
+/*
  * 函数功能：按大端格式向心跳 InforArea 追加 32 位字段。
  * 输入参数：info_area 为心跳数据缓存，info_len 为当前已写入字节数，value 为需要追加的 32 位值。
  * 返回参数：无。
@@ -4351,9 +4370,9 @@ static uint8_t ExternalComm_HeartbeatToolDirection(uint16_t dir)
 /*
  * 函数功能：按当前通道记忆方向取本通道默认/设定速度。
  * 输入参数：memory 指向 A/B 通道记忆。
- * 返回参数：当前方向对应的速度值，无法判断时返回 0。
+ * 返回参数：当前方向对应的完整32位rpm，无法判断时返回0。
  */
-static uint16_t ExternalComm_ToolDefaultSpeed(const ChannelMemoryMessage_t *memory)
+static uint32_t ExternalComm_ToolDefaultSpeed(const ChannelMemoryMessage_t *memory)
 {
     /* 通道记忆为空时不能读取速度，返回 0 表示无有效默认速度。 */
     if (memory == NULL)
@@ -4386,9 +4405,9 @@ static uint16_t ExternalComm_ToolDefaultSpeed(const ChannelMemoryMessage_t *memo
 /*
  * 函数功能：按扫描层 RFID/EEPROM 识别缓存方向取默认速度。
  * 输入参数：recognize 为 A/B 通道扫描识别缓存。
- * 返回参数：当前方向对应的默认速度，无法判断时返回 0。
+ * 返回参数：当前方向对应的完整32位默认rpm，无法判断时返回0。
  */
-static uint16_t ExternalComm_HeartbeatDefaultSpeed(const ChannelrecognizeMessage_t *recognize)
+static uint32_t ExternalComm_HeartbeatDefaultSpeed(const ChannelrecognizeMessage_t *recognize)
 {
     /* 识别缓存为空时不能读取速度，返回 0 表示无有效默认速度。 */
     if (recognize == NULL)
@@ -4519,9 +4538,6 @@ static void ExternalComm_AppendRfidToolBlock(uint8_t *info_area,
     uint8_t diameter; /* 心跳 block byte3，刀具直径来自 RFID 标签。 */
     uint16_t length; /* 心跳 block byte4~5，刀具长度按大端上报。 */
     uint8_t angle; /* 心跳 block byte6，刀具角度来自 RFID 标签。 */
-    uint16_t default_speed; /* 心跳 block byte7~8，默认速度和 handlescan 正式解析保持同单位。 */
-    uint16_t min_speed; /* 心跳 block byte9~10，速度下限。 */
-    uint16_t max_speed; /* 心跳 block byte11~12，速度上限。 */
     uint16_t default_flow; /* 心跳 block byte13~14，默认注水流量。 */
     uint8_t direction; /* 心跳 block byte15，默认方向/能力。 */
     uint32_t reduction_ratio; /* 心跳 block byte16~19，完整减速比。 */
@@ -4541,9 +4557,6 @@ static void ExternalComm_AppendRfidToolBlock(uint8_t *info_area,
     length = decoded.length; /* 两种协议均已转换为刀具长度。 */
     angle = decoded.angle; /* 两种协议均已转换为弯曲角度。 */
     reduction_ratio = decoded.ratio; /* 老刀明确上报200或430，单位x100。 */
-    max_speed = (decoded.max_speed > 65535U) ? 65535U : (uint16_t)decoded.max_speed; /* 旧心跳字段只有16位，超范围饱和。 */
-    min_speed = (decoded.min_speed > 65535U) ? 65535U : (uint16_t)decoded.min_speed; /* 运行参数仍保留32位rpm。 */
-    default_speed = (decoded.default_speed > 65535U) ? 65535U : (uint16_t)decoded.default_speed; /* 心跳不通过低16位截断制造错误速度。 */
     default_flow = decoded.flow; /* 使用与主控一致的默认注水量。 */
     direction = (uint8_t)(decoded.direction + 1U); /* 心跳仍用1正转、2反转、3往复，不改变外控编码。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, channel); /* block byte0：通道号，1 为 A，2 为 B。 */
@@ -4552,9 +4565,9 @@ static void ExternalComm_AppendRfidToolBlock(uint8_t *info_area,
     ExternalComm_HeartbeatAppendU8(info_area, info_len, diameter); /* block byte3：RFID 直径。 */
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, length); /* block byte4~5：RFID 长度。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, angle); /* block byte6：RFID 角度。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_speed); /* block byte7~8：默认速度。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, min_speed); /* block byte9~10：速度下限。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, max_speed); /* block byte11~12：速度上限。 */
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, decoded.default_speed); /* block byte7~8：以原单位上报标签默认速度，超16位时饱和。 */
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, decoded.min_speed); /* block byte9~10：下限使用同一写入规则，避免回绕。 */
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, decoded.max_speed); /* block byte11~12：保留主控完整上限，只约束旧字段容量。 */
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_flow); /* block byte13~14：默认注水流量。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, direction); /* block byte15：方向字段。 */
     ExternalComm_HeartbeatAppendDWordBE(info_area, info_len, reduction_ratio); /* block byte16~19：完整减速比。 */
@@ -4573,7 +4586,7 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
 {
     uint8_t handle_model; /* 保存本块使用的基座型号，用于生成刀具来源字段。 */
     uint8_t tool_type; /* 保存本块上报的刀具型号；RFID来源保留EPC byte0，EEPROM来源保持原业务类型。 */
-    uint16_t default_speed; /* 保存本块上报的默认速度，优先来自 MemoryMsg，必要时来自扫描缓存。 */
+    uint32_t default_speed; /* 转速保留完整rpm至组帧，优先使用通道记忆，必要时使用识别默认值。 */
     uint16_t default_flow; /* 保存本块上报的默认注水流量，避免 MemoryMsg 未刷新时显示 0。 */
     uint8_t direction; /* 保存本块上报的默认方向字段。 */
     uint32_t reduction_ratio; /* 保存本块上报的完整减速比。 */
@@ -4621,12 +4634,9 @@ static void ExternalComm_AppendToolBlock(uint8_t *info_area,
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->length);
     /* block byte6：刀具角度。 */
     ExternalComm_HeartbeatAppendU8(info_area, info_len, recognize->draw);
-    /* block byte7~8：当前方向对应速度记忆，便于上位机看到该通道速度参数。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_speed);
-    /* block byte9~10：识别出的速度下限。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->speed_min);
-    /* block byte11~12：识别出的速度上限。 */
-    ExternalComm_HeartbeatAppendBE16(info_area, info_len, recognize->speed_max);
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, default_speed); /* block byte7~8：当前方向速度记忆，超过旧字段容量时饱和。 */
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, recognize->speed_min); /* block byte9~10：下限使用完整识别值组帧。 */
+    ExternalComm_HeartbeatAppendSpeed(info_area, info_len, recognize->speed_max); /* block byte11~12：上限使用完整识别值组帧，避免截断成低速。 */
     /* block byte13~14：默认注水流量，跟随通道记忆，避免 A/B 串用。 */
     ExternalComm_HeartbeatAppendBE16(info_area, info_len, default_flow);
     /* block byte15：当前方向能力/默认方向。 */
@@ -4979,8 +4989,7 @@ static void ExternalComm_SendHeartbeat(void)
     /* 当前手柄运行中时，按协议继续追加当前通道工作速度和工作电流。 */
     if (run_status == EXTERNAL_COMM_STATUS_RUNNING)
     {
-        /* 当前手柄转速指令，单位 rpm，2 字节高字节在前；不是驱动实测转速。 */
-        ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.speed_work);
+        ExternalComm_HeartbeatAppendSpeed(heartbeat_info, &heartbeat_len, WorkMessage.speed_work); /* 当前刀具端目标rpm，旧2字节字段超过65535时饱和。 */
         /* 驱动板反馈实时电流，单位 0.01A，2 字节大端；current_work 保留为下发给驱动板的保护电流阈值。 */
         ExternalComm_HeartbeatAppendBE16(heartbeat_info, &heartbeat_len, WorkMessage.driver_current_x100);
     }
